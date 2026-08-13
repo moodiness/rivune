@@ -63,12 +63,13 @@ final class PlaybackV20ContractsTests: XCTestCase {
         _ = try await client.series(id: titleId, language: "fr-FR", mappingProvider: .tvdb, episodeOrder: "42")
         _ = try await client.playbackMarkers(imdbId: "tt1234567", season: 2, episode: 3)
         let addonId = UUID(uuidString: "44444444-4444-4444-8444-444444444444")!
-        _ = try await client.playbackSources(
+        let sourceList = try await client.playbackSources(
             mediaType: "series",
             addonId: addonId,
             resourceId: "resource",
             capabilities: PlaybackCapabilities(streamingProtocols: ["hls"], containers: ["mp4"])
         )
+        XCTAssertEqual(sourceList.sources.first?.mode, .external)
 
         let requests = transport.apiRequests()
         XCTAssertEqual(query(requests[0])["episodeOrder"], "42")
@@ -121,6 +122,22 @@ final class PlaybackV20ContractsTests: XCTestCase {
         XCTAssertEqual(((watchedBody["items"] as? [[String: Any]])?.first?["expectedVersion"] as? NSNumber)?.int64Value, 7)
         let markBody = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(requests[5].httpBody)) as? [String: Any])
         XCTAssertEqual((markBody["expectedVersion"] as? NSNumber)?.int64Value, 8)
+    }
+
+    func testExternalPlaybackTargetIsOptionalAndEncodesOnlyWhenTrue() async throws {
+        let transport = V20RecordingTransport()
+        let client = try makeClient(transport: transport)
+        _ = try await client.preparePlayback(sourceRef: "opaque-source-reference")
+        _ = try await client.preparePlayback(sourceRef: "opaque-source-reference", externalPlayer: true)
+        _ = try await client.resolvePlayback(sourceRef: "opaque-source-reference", externalPlayer: true)
+
+        let requests = transport.apiRequests()
+        let defaultBody = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(requests[0].httpBody)) as? [String: Any])
+        let prepareBody = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(requests[1].httpBody)) as? [String: Any])
+        let resolveBody = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(requests[2].httpBody)) as? [String: Any])
+        XCTAssertNil(defaultBody["externalPlayer"])
+        XCTAssertEqual(prepareBody["externalPlayer"] as? Bool, true)
+        XCTAssertEqual(resolveBody["externalPlayer"] as? Bool, true)
     }
 
     private var progressJSON: Data {
@@ -186,7 +203,13 @@ private final class V20RecordingTransport: HTTPTransport, @unchecked Sendable {
             return response(request, body: Data("{\"markers\":[]}".utf8))
         }
         if path.hasSuffix("/playback/sources") {
-            return response(request, body: Data("{\"sources\":[],\"providerErrors\":[]}".utf8))
+            return response(request, body: Data("{\"sources\":[{\"id\":\"stream-1\",\"sourceRef\":\"opaque-source-reference\",\"addonId\":\"44444444-4444-4444-8444-444444444444\",\"manifestId\":\"manifest\",\"streamIndex\":0,\"name\":\"External\",\"protocol\":\"external\",\"mode\":\"external\",\"expiresAt\":\"2099-01-01T00:00:00Z\"}],\"providerErrors\":[]}".utf8))
+        }
+        if path.hasSuffix("/playback/prepare") {
+            return response(request, body: Data("{\"sourceRef\":\"opaque-source-reference\",\"mode\":\"direct\",\"protocol\":\"http\",\"subtitleCount\":0,\"expiresAt\":\"2099-01-01T00:00:00Z\"}".utf8))
+        }
+        if path.hasSuffix("/playback/resolve") {
+            return response(request, status: 201, body: Data("{\"id\":\"44444444-4444-4444-8444-444444444444\",\"selectedSourceId\":\"stream-1\",\"sources\":[],\"subtitles\":[],\"providerErrors\":[],\"expiresAt\":\"2099-01-01T00:00:00Z\"}".utf8))
         }
         if path.hasSuffix("/progress/batch") {
             return response(request, body: Data("{\"items\":[{\"titleId\":\"11111111-1111-4111-8111-111111111111\",\"progress\":null}]}".utf8))

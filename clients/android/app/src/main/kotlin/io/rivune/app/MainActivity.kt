@@ -32,6 +32,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        viewModel.refreshExternalPlaybackSupport()
+    }
+
     override fun onDestroy() {
         val terminal = isFinishing
         if (terminal) {

@@ -92,6 +92,7 @@ private data class PlaybackSourcesRequest(
 private data class PlaybackPrepareRequest(
     val sourceRef: String,
     val startSeconds: Int? = null,
+    val externalPlayer: Boolean = false,
 )
 
 @Serializable
@@ -101,6 +102,7 @@ private data class PlaybackResolveRequest(
     val preferredAudioTrack: Int? = null,
     val preferredSubtitleId: String? = null,
     val startSeconds: Int? = null,
+    val externalPlayer: Boolean = false,
 )
 
 class RivuneApiClient(
@@ -622,10 +624,14 @@ class RivuneApiClient(
         authenticated = true,
     )
 
-    suspend fun preparePlayback(sourceRef: String, startSeconds: Int? = null): PlaybackPreparation = request(
+    suspend fun preparePlayback(
+        sourceRef: String,
+        startSeconds: Int? = null,
+        externalPlayer: Boolean = false,
+    ): PlaybackPreparation = request(
         path = "playback/prepare",
         method = "POST",
-        body = requestJson.encodeToString(PlaybackPrepareRequest(sourceRef, startSeconds)),
+        body = requestJson.encodeToString(PlaybackPrepareRequest(sourceRef, startSeconds, externalPlayer)),
         authenticated = true,
         client = mediaPreparationHttpClient,
     )
@@ -636,10 +642,11 @@ class RivuneApiClient(
         preferredAudioTrack: Int? = null,
         preferredSubtitleId: String? = null,
         startSeconds: Int? = null,
+        externalPlayer: Boolean = false,
     ): PlaybackSession = request(
         path = "playback/resolve",
         method = "POST",
-        body = requestJson.encodeToString(PlaybackResolveRequest(sourceRef, titleId, preferredAudioTrack, preferredSubtitleId, startSeconds)),
+        body = requestJson.encodeToString(PlaybackResolveRequest(sourceRef, titleId, preferredAudioTrack, preferredSubtitleId, startSeconds, externalPlayer)),
         authenticated = true,
         client = mediaPreparationHttpClient,
     )

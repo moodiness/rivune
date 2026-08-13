@@ -113,9 +113,12 @@ data class PlayerPresentation(
     val title: String,
     val mediaUrl: String,
     val protocol: String,
+    val container: String?,
     val startPositionMs: Long,
+    val durationSeconds: Int,
     val expectedProgressVersion: Long,
     val subtitles: List<PlayerSubtitlePresentation> = emptyList(),
+    val externalPlayer: ExternalPlayerApp? = null,
 )
 data class ProfilePreferencesState(
     val settings: SettingsValues? = null,

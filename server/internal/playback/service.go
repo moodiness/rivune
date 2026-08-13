@@ -63,6 +63,7 @@ type Service struct {
 	probes                    *mediaProbeCache
 	preparations              *playbackPreparationCache
 	targetSigningKey          [32]byte
+	targetCapabilityKey       [32]byte
 	hlsResetMu                sync.RWMutex
 	hlsMu                     sync.Mutex
 	hlsStorageMu              sync.Mutex
@@ -123,13 +124,17 @@ func NewService(pool *pgxpool.Pool, addons ResourceFetcher, processor MediaProce
 	if _, err := rand.Read(targetSigningKey[:]); err != nil {
 		return nil, fmt.Errorf("create HLS target signing key: %w", err)
 	}
+	var targetCapabilityKey [32]byte
+	if _, err := rand.Read(targetCapabilityKey[:]); err != nil {
+		return nil, fmt.Errorf("create HLS target capability key: %w", err)
+	}
 	now := func() time.Time { return time.Now().UTC() }
 	service := &Service{
 		pool: pool, addons: addons, client: &http.Client{Transport: transport, CheckRedirect: playbackRedirectPolicy}, processor: processor,
 		directStreamGlobalLimit: maximumDirectStreamsGlobal, directStreamOwnerLimit: maximumDirectStreamsPerOwner,
 		directStreamIdleTimeout: directStreamReadIdleTimeout,
 		introDBClient:           &http.Client{Transport: transport.Clone(), Timeout: 8 * time.Second}, introDBBaseURL: introDBDefaultBaseURL,
-		now: now, mediaOptions: options, hlsJobs: make(map[string]*hlsJob), targetSigningKey: targetSigningKey,
+		now: now, mediaOptions: options, hlsJobs: make(map[string]*hlsJob), targetSigningKey: targetSigningKey, targetCapabilityKey: targetCapabilityKey,
 		deliveryChildren: newDeliveryChildBudget(maximumDeliveryChildrenGlobal, maximumDeliveryChildrenPerProfile),
 		references:       newSourceReferenceStore(now), probes: newMediaProbeCache(now), preparations: newPlaybackPreparationCache(now),
 	}
@@ -291,7 +296,7 @@ func (service *Service) sources(ctx context.Context, principal auth.Principal, i
 		options = append(options, SourceOption{
 			ID: source.ID, SourceRef: reference.ID, AddonID: source.AddonID, ManifestID: source.ManifestID, AddonName: source.AddonName,
 			StreamIndex: source.StreamIndex, Name: name, Description: description, Filename: filename,
-			Protocol: source.Protocol, Container: source.Container, ExpiresAt: reference.ExpiresAt, ReportedHeight: sourceResolutionHint(source), StableIdentity: stableSourceIdentity(source),
+			Protocol: source.Protocol, Mode: source.Mode, Container: source.Container, ExpiresAt: reference.ExpiresAt, ReportedHeight: sourceResolutionHint(source), StableIdentity: stableSourceIdentity(source),
 		})
 		if pin {
 			pinnedIdentifiers = append(pinnedIdentifiers, reference.ID)
@@ -348,7 +353,7 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 		return Preparation{}, err
 	}
 	maximumHeight := effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
-	policy := playbackPolicy{allowTranscoding: allowTranscoding, maximumHeight: maximumHeight, bitrateKbps: bitrate}
+	policy := playbackPolicy{allowTranscoding: allowTranscoding, maximumHeight: maximumHeight, bitrateKbps: bitrate, externalPlayer: input.ExternalPlayer}
 	prepared, err := service.preparedPlayback(ctx, principal, reference, policy)
 	if err != nil {
 		if err == ErrTranscodingDisabled {
@@ -363,23 +368,26 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 		assets[len(assets)-1].StartSeconds = input.StartSeconds
 		assets[len(assets)-1].HLSSegmentContainer = normalizedHLSSegmentContainer(reference.Capabilities.HLSSegmentContainer)
 	}
-	capabilities := service.playbackCapabilities(reference.Capabilities, maximumHeight, bitrate)
-	preferences := ResolveInput{
-		Capabilities: capabilities, AllowTranscoding: allowTranscoding, MaximumHeight: input.MaximumHeight,
-		PreferredAudioLanguage:          reference.PreferredAudioLanguage,
-		PreferredSubtitleLanguage:       reference.PreferredSubtitleLanguage,
-		PreferredForcedSubtitleLanguage: reference.PreferredForcedSubtitleLanguage,
-	}
-	if err := applyPlaybackPreferences(sources, assets, preferences); err != nil {
-		if err == ErrTranscodingDisabled {
-			service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
-		}
-		return Preparation{}, err
-	}
 	source := sources[0]
-	if assetIndex := storedAssetIndex(assets, source.ID); assetIndex >= 0 {
-		if err := service.prewarmHLS(ctx, prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID), source, &assets[assetIndex]); err != nil {
+	if !input.ExternalPlayer {
+		capabilities := service.playbackCapabilities(reference.Capabilities, maximumHeight, bitrate)
+		preferences := ResolveInput{
+			Capabilities: capabilities, AllowTranscoding: allowTranscoding, MaximumHeight: input.MaximumHeight,
+			PreferredAudioLanguage:          reference.PreferredAudioLanguage,
+			PreferredSubtitleLanguage:       reference.PreferredSubtitleLanguage,
+			PreferredForcedSubtitleLanguage: reference.PreferredForcedSubtitleLanguage,
+		}
+		if err := applyPlaybackPreferences(sources, assets, preferences); err != nil {
+			if err == ErrTranscodingDisabled {
+				service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
+			}
 			return Preparation{}, err
+		}
+		source = sources[0]
+		if assetIndex := storedAssetIndex(assets, source.ID); assetIndex >= 0 {
+			if err := service.prewarmHLS(ctx, prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID), source, &assets[assetIndex]); err != nil {
+				return Preparation{}, err
+			}
 		}
 	}
 	result := Preparation{
@@ -428,7 +436,7 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, i
 		return Session{}, fmt.Errorf("commit active playback profile authorization: %w", err)
 	}
 	maximumHeight := effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
-	policy := playbackPolicy{allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight, bitrateKbps: bitrate}
+	policy := playbackPolicy{allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight, bitrateKbps: bitrate, externalPlayer: input.ExternalPlayer}
 	prewarmSessionID := prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID)
 	prepared, preparedHandoff := service.preparations.consumeResolveHandoff(prewarmSessionID, reference, policy, input.StartSeconds)
 	if preparedHandoff {
@@ -442,7 +450,7 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, i
 		}
 		reference = refreshedReference
 		maximumHeight = effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
-		policy = playbackPolicy{allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight, bitrateKbps: bitrate}
+		policy = playbackPolicy{allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight, bitrateKbps: bitrate, externalPlayer: input.ExternalPlayer}
 		if reference.TransportRevision != preparedTransportRevision {
 			service.stopHLSSession(prewarmSessionID)
 			prepared, err = service.preparedPlayback(ctx, principal, reference, policy)
@@ -456,7 +464,7 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, i
 			return Session{}, err
 		}
 		maximumHeight = effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
-		policy = playbackPolicy{allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight, bitrateKbps: bitrate}
+		policy = playbackPolicy{allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight, bitrateKbps: bitrate, externalPlayer: input.ExternalPlayer}
 		prepared, err = service.preparedPlayback(ctx, principal, reference, policy)
 		if err != nil {
 			if err == ErrTranscodingDisabled {
@@ -472,15 +480,20 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, i
 		streamAssets[len(streamAssets)-1].StartSeconds = input.StartSeconds
 		streamAssets[len(streamAssets)-1].HLSSegmentContainer = normalizedHLSSegmentContainer(reference.Capabilities.HLSSegmentContainer)
 	}
-	input.Capabilities = service.playbackCapabilities(reference.Capabilities, maximumHeight, bitrate)
-	input.PreferredAudioLanguage = reference.PreferredAudioLanguage
-	input.PreferredSubtitleLanguage = reference.PreferredSubtitleLanguage
-	input.PreferredForcedSubtitleLanguage = reference.PreferredForcedSubtitleLanguage
-	if err := applyPlaybackPreferences(sources, streamAssets, input); err != nil {
-		if err == ErrTranscodingDisabled {
-			service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
+	if !input.ExternalPlayer {
+		input.Capabilities = service.playbackCapabilities(reference.Capabilities, maximumHeight, bitrate)
+		input.PreferredAudioLanguage = reference.PreferredAudioLanguage
+		input.PreferredSubtitleLanguage = reference.PreferredSubtitleLanguage
+		input.PreferredForcedSubtitleLanguage = reference.PreferredForcedSubtitleLanguage
+		if err := applyPlaybackPreferences(sources, streamAssets, input); err != nil {
+			if err == ErrTranscodingDisabled {
+				service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
+			}
+			return Session{}, err
 		}
-		return Session{}, err
+	} else {
+		input.PreferredSubtitleLanguage = reference.PreferredSubtitleLanguage
+		input.PreferredForcedSubtitleLanguage = reference.PreferredForcedSubtitleLanguage
 	}
 	subtitles := append([]Subtitle{}, prepared.subtitles...)
 	if err := applySubtitlePreference(subtitles, input.PreferredSubtitleID, input.PreferredForcedSubtitleLanguage, input.PreferredSubtitleLanguage); err != nil {
@@ -491,11 +504,13 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, i
 		subtitleAssets[index] = cloneStoredAsset(prepared.subtitleAssets[index])
 		subtitleAssets[index].StartSeconds = input.StartSeconds
 	}
-	if err := applySubtitleDecision(sources, streamAssets, subtitles, subtitleAssets, input.Capabilities, input.AllowTranscoding); err != nil {
-		if err == ErrTranscodingDisabled {
-			service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
+	if !input.ExternalPlayer {
+		if err := applySubtitleDecision(sources, streamAssets, subtitles, subtitleAssets, input.Capabilities, input.AllowTranscoding); err != nil {
+			if err == ErrTranscodingDisabled {
+				service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
+			}
+			return Session{}, err
 		}
-		return Session{}, err
 	}
 	assets := append(streamAssets, subtitleAssets...)
 	session, err := service.createSession(ctx, principal, reference, input.TitleID, sources, subtitles, assets, prepared.addonIDs, prepared.providerErrors, deliveryHandle)
@@ -772,7 +787,7 @@ func (service *Service) createSessionWithLimits(ctx context.Context, principal a
 	}
 	for index := range subtitles {
 		if subtitles[index].Delivery != "burn" {
-			subtitles[index].URL = assetURL(sessionID, subtitles[index].ID, token, "", "")
+			subtitles[index].URL = assetURL(sessionID, subtitles[index].ID, token, "")
 		}
 	}
 	result := Session{
@@ -817,8 +832,8 @@ func sessionSourceMediaTimeline(source Source, assets []storedAsset) string {
 }
 
 func sessionSourceURL(source Source, assets []storedAsset, sessionID, token string) string {
-	if source.URL == "" || source.Mode == "external" {
-		return source.URL
+	if source.URL == "" {
+		return ""
 	}
 	if source.Protocol == "hls" && (source.Mode == processingRemux || source.Mode == processingTranscodeAudio || source.Mode == processingTranscode) {
 		startSeconds := float64(0)
@@ -827,7 +842,7 @@ func sessionSourceURL(source Source, assets []storedAsset, sessionID, token stri
 		}
 		return hlsAssetURLAt(sessionID, source.ID, token, "index.m3u8", startSeconds)
 	}
-	return assetURL(sessionID, source.ID, token, "", "")
+	return assetURL(sessionID, source.ID, token, "")
 }
 
 func (service *Service) Stop(ctx context.Context, principal auth.Principal, sessionID string) error {
@@ -1278,14 +1293,7 @@ func normalizeStreams(batch addon.ResourceBatch, capabilities Capabilities) ([]S
 				source.YTID = ytID
 				source.Protocol = "youtube"
 				source.Compatible = supports(capabilities.StreamingProtocols, source.Protocol)
-			case validMediaURL(externalURL) && len(capabilities.ExternalPlayers) > 0:
-				source.Mode = "external"
-				source.URL = externalURL
-				source.Protocol = protocolFor(externalURL)
-				source.Container = containerFor(externalURL)
-				source.Compatible = true
-				assets = append(assets, storedAsset{ID: id, Kind: "stream", URL: externalURL, Headers: headers, HLSSegmentContainer: normalizedHLSSegmentContainer(capabilities.HLSSegmentContainer)})
-			case infoHash != "" && len(infoHash) <= 128 && len(capabilities.ExternalPlayers) > 0:
+			case validBTIH(infoHash) && (supports(capabilities.ExternalPlayers, "system") || supports(capabilities.ExternalPlayers, "android_magnet")):
 				source.Mode = "external"
 				source.InfoHash = infoHash
 				source.Protocol = "external"
@@ -1300,11 +1308,12 @@ func normalizeStreams(batch addon.ResourceBatch, capabilities Capabilities) ([]S
 	return sources, assets, nil
 }
 
-func normalizeSubtitles(batch addon.ResourceBatch) ([]Subtitle, []storedAsset, error) {
+func normalizeSubtitles(batch addon.ResourceBatch, preserveOriginalValues ...bool) ([]Subtitle, []storedAsset, error) {
 	type decodedResponse struct {
 		result   addon.ResourceResult
 		response addon.ProviderSubtitleResponse
 	}
+	preserveOriginal := len(preserveOriginalValues) > 0 && preserveOriginalValues[0]
 	if len(batch.Results) > maximumAggregateProviderSubtitles {
 		return nil, nil, fmt.Errorf("%w: subtitle provider responses exceed %d items", addon.ErrInvalidResponse, maximumAggregateProviderSubtitles)
 	}
@@ -1332,11 +1341,14 @@ func normalizeSubtitles(batch addon.ResourceBatch) ([]Subtitle, []storedAsset, e
 			parsedURL, _ := url.Parse(subtitle.URL)
 			extension := strings.ToLower(pathExtension(parsedURL.Path))
 			kind := "subtitle"
-			if extension == ".srt" || extension == ".ass" || extension == ".ssa" {
+			clientExtension := clientSubtitleExtension(extension)
+			if preserveOriginal {
+				clientExtension = originalSubtitleExtension(extension)
+			} else if extension == ".srt" || extension == ".ass" || extension == ".ssa" {
 				kind = assetKindConvertedSubtitle
-				extension = ".vtt"
+				clientExtension = ".vtt"
 			}
-			id := fmt.Sprintf("subtitle-%d%s", len(subtitles)+1, clientSubtitleExtension(extension))
+			id := fmt.Sprintf("subtitle-%d%s", len(subtitles)+1, clientExtension)
 			subtitles = append(subtitles, Subtitle{
 				ID: id, AddonID: decodedResult.result.AddonID, ManifestID: decodedResult.result.ManifestID,
 				Language: strings.TrimSpace(subtitle.Language), URL: subtitle.URL,
@@ -1351,6 +1363,15 @@ func normalizeSubtitles(batch addon.ResourceBatch) ([]Subtitle, []storedAsset, e
 func clientSubtitleExtension(extension string) string {
 	switch extension {
 	case ".vtt", ".webvtt", ".ttml", ".dfxp", ".xml":
+		return extension
+	default:
+		return ""
+	}
+}
+
+func originalSubtitleExtension(extension string) string {
+	switch extension {
+	case ".srt", ".ass", ".ssa", ".vtt", ".webvtt", ".ttml", ".dfxp", ".xml":
 		return extension
 	default:
 		return ""
@@ -1475,6 +1496,25 @@ func validYouTubeID(value string) bool {
 	}
 	for _, character := range value {
 		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '-' || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validBTIH(value string) bool {
+	if len(value) != 40 && len(value) != 32 {
+		return false
+	}
+	for _, character := range value {
+		if len(value) == 40 {
+			if (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f') || (character >= 'A' && character <= 'F') {
+				continue
+			}
+			return false
+		}
+		if (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z') || (character >= '2' && character <= '7') {
 			continue
 		}
 		return false
