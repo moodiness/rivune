@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Rivune.Api29" parent="Theme.Rivune.Api27">
+        <item name="android:enforceNavigationBarContrast">false</item>
+    </style>
+
+    <style name="Theme.Rivune" parent="Theme.Rivune.Api29" />
+</resources>

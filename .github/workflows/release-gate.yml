@@ -142,7 +142,7 @@ jobs:
         run: swift test --disable-swift-testing --package-path clients/apple
 
   android-client:
-    name: Kotlin API client
+    name: Android client
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -155,11 +155,11 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4
       - name: Install Android platform
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
-      - name: Test and build Android library
-        run: bash clients/android/gradlew -p clients/android --no-daemon :rivune-api:testDebugUnitTest :rivune-api:assembleRelease
+      - name: Test and build Android client
+        run: bash clients/android/gradlew -p clients/android --no-daemon :rivune-api:testDebugUnitTest :rivune-api:assembleRelease :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
 
   windows-client:
     name: Windows API client

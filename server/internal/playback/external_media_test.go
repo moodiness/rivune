@@ -201,6 +201,38 @@ func TestExternalMediaDirectMP4ProbeAndRangeBytePath(t *testing.T) {
 	}
 }
 
+func TestExternalMediaHTTPGatewayProducesPlayableHLS(t *testing.T) {
+	fixture := newExternalMediaFixture(t)
+	contents, err := os.ReadFile(fixture.video)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		http.ServeContent(response, request, "movie.mkv", time.Unix(0, 0), bytes.NewReader(contents))
+	}))
+	defer origin.Close()
+	fixture.processor.egressProxy = func(ctx context.Context, asset storedAsset) (*ffmpegEgressProxy, error) {
+		return startFFmpegEgressProxyWithDialAndSource(ctx, mappedPublicDial(origin.Listener.Addr().String()), asset)
+	}
+	directory := t.TempDir()
+	asset := storedAsset{
+		ID: "http-remux", Kind: processingRemux, URL: publicTestURL(origin.URL) + "/movie.mkv",
+		Container: "mkv", HLSSegmentContainer: "ts",
+	}
+	if err := fixture.processor.ProcessHLS(externalMediaTestContext(t), asset, directory); err != nil {
+		t.Fatalf("process HTTP media through guarded gateway: %v", err)
+	}
+	playlistPath := filepath.Join(directory, "index.m3u8")
+	playlist, err := os.ReadFile(playlistPath)
+	if err != nil || !bytes.Contains(playlist, []byte("#EXTM3U")) || !bytes.Contains(playlist, []byte("#EXTINF")) {
+		t.Fatalf("guarded HTTP HLS playlist: err=%v playlist=%s", err, playlist)
+	}
+	probe := probeExternalMedia(t, fixture, playlistPath)
+	if len(probe.Streams) < 2 {
+		t.Fatalf("guarded HTTP HLS streams = %+v", probe.Streams)
+	}
+}
+
 func TestExternalMediaHLSRemuxAndVideoTranscodeProducePlayableChildren(t *testing.T) {
 	fixture := newExternalMediaFixture(t)
 	for _, test := range []struct {

@@ -408,7 +408,7 @@ func videoEncoderProbeArguments(encoder videoEncoder, codec, quality string, ton
 		arguments = append(arguments, encoder.hardwareDecodeArguments(asset)...)
 		arguments = append(arguments, "-f", "hevc", "-i", "pipe:0", "-vf", encoder.hybridToneMapFilter(asset))
 	} else {
-		arguments = append(arguments, "-f", "lavfi", "-i", "color=c=black:s=64x64:r=1")
+		arguments = append(arguments, "-f", "lavfi", "-i", "color=c=black:s=256x256:r=1")
 		if filter := encoder.filter(toneMap); filter != "" {
 			arguments = append(arguments, "-vf", filter)
 		}
@@ -747,7 +747,14 @@ func (encoder videoEncoder) codecArguments(codec, quality string, threads int, m
 		} else if quality == "quality" {
 			preset = "p6"
 		}
-		return []string{"-c:v", encoderName, "-profile:v", profile, "-preset", preset, "-tune", "ll", "-rc", "vbr", "-spatial_aq", "1", "-zerolatency", "1"}, nil
+		arguments := make([]string, 0, 14)
+		arguments = append(arguments, "-c:v", encoderName)
+		// FFmpeg's AV1 NVENC wrapper exposes only the Main profile and does not
+		// accept the profile option on every supported FFmpeg release.
+		if codec != "av1" {
+			arguments = append(arguments, "-profile:v", profile)
+		}
+		return append(arguments, "-preset", preset, "-tune", "ll", "-rc", "vbr", "-spatial_aq", "1", "-zerolatency", "1"), nil
 	case videoEncoderAMF:
 		encoderName = codec + "_amf"
 		return []string{"-c:v", encoderName, "-profile:v", profile, "-quality", quality}, nil

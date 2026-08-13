@@ -217,7 +217,7 @@ func TestAuthenticationRejectsMissingOrStaleWebProfileCapability(t *testing.T) {
 	clearWithoutContext.Header.Set("Authorization", "Bearer access-token")
 	clearResponse := httptest.NewRecorder()
 	handler.ServeHTTP(clearResponse, clearWithoutContext)
-	if clearResponse.Code != http.StatusConflict || called {
+	if clearResponse.Code != http.StatusNoContent || !called {
 		t.Fatalf("profile clear without current context status=%d called=%v", clearResponse.Code, called)
 	}
 

@@ -921,10 +921,6 @@ func (service *Service) prewarmHLS(ctx context.Context, prewarmSessionID string,
 	if err != nil {
 		return err
 	}
-	if err := waitForMediaFile(ctx, job, filepath.Join(job.directory, "index.m3u8")); err != nil {
-		service.stopHLSJob(hlsJobKey(prewarmSessionID, generation))
-		return err
-	}
 	service.touchHLSJob(hlsJobKey(prewarmSessionID, generation), job)
 	return nil
 }
@@ -940,7 +936,12 @@ func (service *Service) startSessionHLS(ctx context.Context, prewarmSessionID, s
 		}
 		asset := assets[assetIndex]
 		asset.StartSeconds = hlsGenerationStart(asset, asset.StartSeconds)
-		if service.adoptHLSJob(prewarmSessionID, sessionID, asset) {
+		if job := service.adoptHLSJob(prewarmSessionID, sessionID, asset); job != nil {
+			if err := waitForMediaFile(ctx, job, filepath.Join(job.directory, "index.m3u8")); err != nil {
+				service.stopHLSJob(hlsJobKey(sessionID, asset))
+				return err
+			}
+			service.touchHLSJob(hlsJobKey(sessionID, asset), job)
 			return nil
 		}
 		processor, ok := service.processor.(HLSProcessor)
@@ -973,7 +974,7 @@ func (service *Service) startSessionHLS(ctx context.Context, prewarmSessionID, s
 	return nil
 }
 
-func (service *Service) adoptHLSJob(fromSessionID, toSessionID string, asset storedAsset) bool {
+func (service *Service) adoptHLSJob(fromSessionID, toSessionID string, asset storedAsset) *hlsJob {
 	service.hlsResetMu.RLock()
 	defer service.hlsResetMu.RUnlock()
 	fromKey := hlsJobKey(fromSessionID, asset)
@@ -982,7 +983,7 @@ func (service *Service) adoptHLSJob(fromSessionID, toSessionID string, asset sto
 	defer service.hlsMu.Unlock()
 	job := service.hlsJobs[fromKey]
 	if job == nil || job.fingerprint != hlsAssetFingerprint(asset) || !hlsJobReusable(job) || service.hlsJobs[toKey] != nil {
-		return false
+		return nil
 	}
 	if binding := job.bindings[fromKey]; binding != nil {
 		if binding.timer != nil {
@@ -999,7 +1000,7 @@ func (service *Service) adoptHLSJob(fromSessionID, toSessionID string, asset sto
 	job.prewarming = false
 	job.lastAccessed = service.currentTime()
 	job.mu.Unlock()
-	return true
+	return job
 }
 
 func (service *Service) stopOtherHLSGenerations(ctx context.Context, prefix, keep string) error {
@@ -1061,8 +1062,12 @@ func (service *Service) runHLSJob(ctx context.Context, job *hlsJob, asset stored
 	if job.err == nil && err != nil && !errors.Is(err, context.Canceled) {
 		job.err = err
 	}
+	failed := job.err != nil
 	job.mu.Unlock()
 	close(job.done)
+	if failed {
+		service.discardFailedPrewarmBindings(job)
+	}
 	service.hlsMu.Lock()
 	service.hlsStorageMonitorWorkers--
 	lastWriter := service.hlsStorageMonitorWorkers == 0
@@ -1075,6 +1080,31 @@ func (service *Service) runHLSJob(ctx context.Context, job *hlsJob, asset stored
 	service.hlsMu.Unlock()
 	if lastWriter {
 		service.reclaimHLSStorageIfIdle()
+	}
+}
+
+func (service *Service) discardFailedPrewarmBindings(job *hlsJob) {
+	service.hlsMu.Lock()
+	for key, binding := range job.bindings {
+		if binding == nil || !binding.prewarming || service.hlsJobs[key] != job {
+			continue
+		}
+		if binding.timer != nil {
+			binding.timer.Stop()
+		}
+		delete(job.bindings, key)
+		delete(service.hlsJobs, key)
+	}
+	lastBinding := true
+	for _, registered := range service.hlsJobs {
+		if registered == job {
+			lastBinding = false
+			break
+		}
+	}
+	service.hlsMu.Unlock()
+	if lastBinding {
+		service.stopDetachedHLSJobWhenIdle(job)
 	}
 }
 

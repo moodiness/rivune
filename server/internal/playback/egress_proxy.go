@@ -24,11 +24,12 @@ import (
 )
 
 const (
-	ffmpegEgressHeaderTimeout = 5 * time.Second
-	ffmpegEgressDialTimeout   = 10 * time.Second
-	ffmpegEgressMaxConcurrent = 32
-	ffmpegEgressMaxRedirects  = 10
-	ffmpegEgressMaxTargets    = 20_000
+	ffmpegEgressHeaderTimeout   = 5 * time.Second
+	ffmpegEgressDialTimeout     = 10 * time.Second
+	ffmpegEgressMaxConcurrent   = 32
+	ffmpegEgressReadIdleTimeout = 10 * time.Second
+	ffmpegEgressMaxRedirects    = 10
+	ffmpegEgressMaxTargets      = 20_000
 )
 
 type egressDialContext func(context.Context, string, string) (net.Conn, error)
@@ -95,12 +96,13 @@ func (connection *boundedProxyConnection) Close() error {
 }
 
 type ffmpegEgressProxy struct {
-	listener  net.Listener
-	server    *http.Server
-	transport *http.Transport
-	cancel    context.CancelFunc
-	done      chan struct{}
-	slots     chan struct{}
+	listener        net.Listener
+	server          *http.Server
+	transport       *http.Transport
+	readIdleTimeout time.Duration
+	cancel          context.CancelFunc
+	done            chan struct{}
+	slots           chan struct{}
 
 	sourceOrigin  mediaOrigin
 	sourceHeaders http.Header
@@ -124,6 +126,10 @@ func startFFmpegEgressProxyWithDial(ctx context.Context, dial egressDialContext)
 }
 
 func startFFmpegEgressProxyWithDialAndSource(ctx context.Context, dial egressDialContext, asset storedAsset) (*ffmpegEgressProxy, error) {
+	return startFFmpegEgressProxyWithReadIdleTimeout(ctx, dial, asset, ffmpegEgressReadIdleTimeout)
+}
+
+func startFFmpegEgressProxyWithReadIdleTimeout(ctx context.Context, dial egressDialContext, asset storedAsset, readIdleTimeout time.Duration) (*ffmpegEgressProxy, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -141,13 +147,14 @@ func startFFmpegEgressProxyWithDialAndSource(ctx context.Context, dial egressDia
 	listener := newBoundedProxyListener(rawListener, ffmpegEgressMaxConcurrent)
 	proxyContext, cancel := context.WithCancel(ctx)
 	proxy := &ffmpegEgressProxy{
-		listener:    listener,
-		cancel:      cancel,
-		done:        make(chan struct{}),
-		slots:       make(chan struct{}, ffmpegEgressMaxConcurrent),
-		signingKey:  signingKey,
-		targets:     make(map[string]*url.URL),
-		connections: make(map[net.Conn]struct{}),
+		listener:        listener,
+		cancel:          cancel,
+		done:            make(chan struct{}),
+		slots:           make(chan struct{}, ffmpegEgressMaxConcurrent),
+		readIdleTimeout: readIdleTimeout,
+		signingKey:      signingKey,
+		targets:         make(map[string]*url.URL),
+		connections:     make(map[net.Conn]struct{}),
 	}
 	boundedDial := func(ctx context.Context, network, address string) (net.Conn, error) {
 		dialContext, dialCancel := context.WithTimeout(ctx, ffmpegEgressDialTimeout)
@@ -351,7 +358,9 @@ func (proxy *ffmpegEgressProxy) serveTarget(response http.ResponseWriter, incomi
 	copyAssetHeaders(response.Header(), upstream.Header, true)
 	response.WriteHeader(upstream.StatusCode)
 	if incoming.Method == http.MethodGet {
-		_, _ = io.Copy(response, reader)
+		if _, err := io.Copy(response, reader); err != nil {
+			panic(http.ErrAbortHandler)
+		}
 	}
 }
 
@@ -444,8 +453,10 @@ func validateGuardedPlaylistReferences(body []byte, base *url.URL) error {
 func (proxy *ffmpegEgressProxy) fetchTarget(ctx context.Context, method string, incoming http.Header, target *url.URL) (*http.Response, error) {
 	current := target
 	for redirects := 0; ; redirects++ {
-		request, err := http.NewRequestWithContext(ctx, method, current.String(), nil)
+		requestContext, cancel := context.WithCancel(ctx)
+		request, err := http.NewRequestWithContext(requestContext, method, current.String(), nil)
 		if err != nil {
+			cancel()
 			return nil, err
 		}
 		for _, name := range []string{"Range", "If-Range", "If-None-Match", "If-Modified-Since"} {
@@ -459,13 +470,16 @@ func (proxy *ffmpegEgressProxy) fetchTarget(ctx context.Context, method string, 
 		requestwork.BeginOutbound(ctx, started)
 		upstream, err := proxy.transport.RoundTrip(request)
 		if err != nil {
+			cancel()
 			requestwork.EndOutbound(ctx, requestwork.Now(), 0)
 			return nil, err
 		}
 		if upstream.Body == nil {
+			cancel()
 			requestwork.EndOutbound(ctx, requestwork.Now(), 0)
 		} else {
-			upstream.Body = requestwork.ObserveBody(ctx, upstream.Body)
+			observed := requestwork.ObserveBody(ctx, upstream.Body)
+			upstream.Body = newReadIdleBody(ctx, observed, cancel, func() {}, proxy.readIdleTimeout)
 		}
 		if !isHTTPRedirect(upstream.StatusCode) {
 			upstream.Request = request

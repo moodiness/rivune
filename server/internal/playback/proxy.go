@@ -68,7 +68,7 @@ func (admission *directStreamAdmission) acquire(owner string, globalLimit, owner
 	}, nil
 }
 
-type directStreamBody struct {
+type readIdleBody struct {
 	body         io.ReadCloser
 	cancel       context.CancelFunc
 	release      func()
@@ -80,10 +80,12 @@ type directStreamBody struct {
 	finishOnce   sync.Once
 	closeOnce    sync.Once
 	closeErr     error
+	errMu        sync.Mutex
+	readErr      error
 }
 
-func newDirectStreamBody(parent context.Context, body io.ReadCloser, cancel context.CancelFunc, release func(), idleTimeout time.Duration) io.ReadCloser {
-	stream := &directStreamBody{
+func newReadIdleBody(parent context.Context, body io.ReadCloser, cancel context.CancelFunc, release func(), idleTimeout time.Duration) io.ReadCloser {
+	stream := &readIdleBody{
 		body: body, cancel: cancel, release: release, idleTimeout: idleTimeout,
 		parentDone: parent.Done(), readStarted: make(chan struct{}), readProgress: make(chan struct{}), done: make(chan struct{}),
 	}
@@ -91,11 +93,11 @@ func newDirectStreamBody(parent context.Context, body io.ReadCloser, cancel cont
 	return stream
 }
 
-func (stream *directStreamBody) Read(destination []byte) (int, error) {
+func (stream *readIdleBody) Read(destination []byte) (int, error) {
 	select {
 	case stream.readStarted <- struct{}{}:
 	case <-stream.done:
-		return 0, io.ErrClosedPipe
+		return 0, stream.terminalReadError()
 	}
 	read, err := stream.body.Read(destination)
 	if read > 0 {
@@ -105,20 +107,23 @@ func (stream *directStreamBody) Read(destination []byte) (int, error) {
 		}
 	}
 	if err != nil {
+		stream.errMu.Lock()
+		stream.readErr = err
+		stream.errMu.Unlock()
 		stream.finish()
 	}
 	return read, err
 }
 
-func (stream *directStreamBody) Close() error {
+func (stream *readIdleBody) Close() error {
 	err := stream.closeBody()
 	stream.finish()
 	return err
 }
 
-func (stream *directStreamBody) watch() {
+func (stream *readIdleBody) watch() {
 	timer := time.NewTimer(stream.idleTimeout)
-	stopDirectStreamTimer(timer)
+	stopReadIdleTimer(timer)
 	defer timer.Stop()
 	armed := false
 	for {
@@ -135,7 +140,7 @@ func (stream *directStreamBody) watch() {
 			}
 		case <-stream.readProgress:
 			if armed {
-				stopDirectStreamTimer(timer)
+				stopReadIdleTimer(timer)
 				armed = false
 			}
 		case <-timer.C:
@@ -151,7 +156,7 @@ func (stream *directStreamBody) watch() {
 	}
 }
 
-func stopDirectStreamTimer(timer *time.Timer) {
+func stopReadIdleTimer(timer *time.Timer) {
 	if !timer.Stop() {
 		select {
 		case <-timer.C:
@@ -160,18 +165,27 @@ func stopDirectStreamTimer(timer *time.Timer) {
 	}
 }
 
-func (stream *directStreamBody) expire() {
+func (stream *readIdleBody) expire() {
 	stream.cancel()
 	_ = stream.closeBody()
 	stream.finish()
 }
 
-func (stream *directStreamBody) closeBody() error {
+func (stream *readIdleBody) closeBody() error {
 	stream.closeOnce.Do(func() { stream.closeErr = stream.body.Close() })
 	return stream.closeErr
 }
 
-func (stream *directStreamBody) finish() {
+func (stream *readIdleBody) terminalReadError() error {
+	stream.errMu.Lock()
+	err := stream.readErr
+	stream.errMu.Unlock()
+	if err != nil {
+		return err
+	}
+	return io.ErrClosedPipe
+}
+func (stream *readIdleBody) finish() {
 	stream.finishOnce.Do(func() {
 		close(stream.done)
 		stream.cancel()
@@ -388,7 +402,7 @@ func (service *Service) fetchAdmittedAsset(ctx context.Context, incoming *http.R
 	if idleTimeout <= 0 {
 		idleTimeout = directStreamReadIdleTimeout
 	}
-	response.Body = newDirectStreamBody(ctx, response.Body, cancel, release, idleTimeout)
+	response.Body = newReadIdleBody(ctx, response.Body, cancel, release, idleTimeout)
 	return response, nil
 }
 

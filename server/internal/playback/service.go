@@ -396,6 +396,9 @@ func (service *Service) Prepare(ctx context.Context, principal auth.Principal, i
 		service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
 		return Preparation{}, err
 	}
+	service.preparations.markResolveHandoff(
+		prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID), reference, policy, input.StartSeconds,
+	)
 	return result, nil
 }
 
@@ -424,18 +427,43 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, i
 	if err := tx.Commit(ctx); err != nil {
 		return Session{}, fmt.Errorf("commit active playback profile authorization: %w", err)
 	}
-	reference, err = service.refreshSourceReference(ctx, principal, reference)
-	if err != nil {
-		return Session{}, err
-	}
 	maximumHeight := effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
 	policy := playbackPolicy{allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight, bitrateKbps: bitrate}
-	prepared, err := service.preparedPlayback(ctx, principal, reference, policy)
-	if err != nil {
-		if err == ErrTranscodingDisabled {
-			service.stopHLSSession(prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID))
+	prewarmSessionID := prewarmHLSSession(principal.SessionID, *principal.ActiveProfileID)
+	prepared, preparedHandoff := service.preparations.consumeResolveHandoff(prewarmSessionID, reference, policy, input.StartSeconds)
+	if preparedHandoff {
+		preparedTransportRevision := reference.TransportRevision
+		preparedReference := reference
+		refreshedReference, refreshErr := service.refreshSourceReference(ctx, principal, reference)
+		if refreshErr != nil {
+			service.preparations.evict(preparedReference, policy)
+			service.stopHLSSession(prewarmSessionID)
+			return Session{}, refreshErr
 		}
-		return Session{}, err
+		reference = refreshedReference
+		maximumHeight = effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
+		policy = playbackPolicy{allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight, bitrateKbps: bitrate}
+		if reference.TransportRevision != preparedTransportRevision {
+			service.stopHLSSession(prewarmSessionID)
+			prepared, err = service.preparedPlayback(ctx, principal, reference, policy)
+			if err != nil {
+				return Session{}, err
+			}
+		}
+	} else {
+		reference, err = service.refreshSourceReference(ctx, principal, reference)
+		if err != nil {
+			return Session{}, err
+		}
+		maximumHeight = effectivePlaybackMaximumHeight(reference.Capabilities.MaximumHeight, input.MaximumHeight)
+		policy = playbackPolicy{allowTranscoding: input.AllowTranscoding, maximumHeight: maximumHeight, bitrateKbps: bitrate}
+		prepared, err = service.preparedPlayback(ctx, principal, reference, policy)
+		if err != nil {
+			if err == ErrTranscodingDisabled {
+				service.stopHLSSession(prewarmSessionID)
+			}
+			return Session{}, err
+		}
 	}
 	sources := []Source{cloneSource(prepared.source)}
 	streamAssets := make([]storedAsset, 0, 1)
@@ -454,7 +482,7 @@ func (service *Service) resolve(ctx context.Context, principal auth.Principal, i
 		}
 		return Session{}, err
 	}
-	subtitles := append([]Subtitle(nil), prepared.subtitles...)
+	subtitles := append([]Subtitle{}, prepared.subtitles...)
 	if err := applySubtitlePreference(subtitles, input.PreferredSubtitleID, input.PreferredForcedSubtitleLanguage, input.PreferredSubtitleLanguage); err != nil {
 		return Session{}, err
 	}
@@ -750,7 +778,7 @@ func (service *Service) createSessionWithLimits(ctx context.Context, principal a
 	result := Session{
 		ID: sessionID, SelectedSourceID: firstCompatibleSource(sources), SelectedAudioTrack: selectedAudioTrack(sources, assets),
 		SelectedSubtitleID: selectedSubtitle(subtitles), Sources: sources, Subtitles: subtitles,
-		ProviderErrors: providerErrors, ExpiresAt: expiresAt,
+		ProviderErrors: append([]ProviderFailure{}, providerErrors...), ExpiresAt: expiresAt,
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Session{}, fmt.Errorf("commit playback session: %w", err)
@@ -1301,12 +1329,14 @@ func normalizeSubtitles(batch addon.ResourceBatch) ([]Subtitle, []storedAsset, e
 			if !validMediaURL(subtitle.URL) {
 				continue
 			}
-			id := fmt.Sprintf("subtitle-%d", len(subtitles)+1)
+			parsedURL, _ := url.Parse(subtitle.URL)
+			extension := strings.ToLower(pathExtension(parsedURL.Path))
 			kind := "subtitle"
-			extension := strings.ToLower(pathExtension(subtitle.URL))
 			if extension == ".srt" || extension == ".ass" || extension == ".ssa" {
 				kind = assetKindConvertedSubtitle
+				extension = ".vtt"
 			}
+			id := fmt.Sprintf("subtitle-%d%s", len(subtitles)+1, clientSubtitleExtension(extension))
 			subtitles = append(subtitles, Subtitle{
 				ID: id, AddonID: decodedResult.result.AddonID, ManifestID: decodedResult.result.ManifestID,
 				Language: strings.TrimSpace(subtitle.Language), URL: subtitle.URL,
@@ -1316,6 +1346,15 @@ func normalizeSubtitles(batch addon.ResourceBatch) ([]Subtitle, []storedAsset, e
 		}
 	}
 	return subtitles, assets, nil
+}
+
+func clientSubtitleExtension(extension string) string {
+	switch extension {
+	case ".vtt", ".webvtt", ".ttml", ".dfxp", ".xml":
+		return extension
+	default:
+		return ""
+	}
 }
 
 func requestHeaders(hints addon.ProviderStreamBehaviorHints) map[string]string {

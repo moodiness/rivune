@@ -377,6 +377,130 @@ func TestResolveRefreshesSelectedProviderTransportAndFailsClosedWhenItDisappears
 	}
 }
 
+func TestPrepareResolveHandoffRefreshesRotatingTransportAndIsSingleUse(t *testing.T) {
+	now := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	profileID := "profile-id"
+	grantExpiresAt := now.Add(time.Hour)
+	principal := auth.Principal{
+		Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
+		SessionID: "auth-session-id", UserID: "user-id", DeviceID: "device-id",
+		ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt,
+	}
+	streamBatch := func(rawURL string) addon.ResourceBatch {
+		return addon.ResourceBatch{Results: []addon.ResourceResult{{
+			AddonID: "addon-id", ManifestID: "manifest-id",
+			Payload: []byte(fmt.Sprintf(`{"streams":[{"name":"Stable source","url":%q,"behaviorHints":{"filename":"stable-source.mp4"}}]}`, rawURL)),
+		}}}
+	}
+	fetcher := &preparationResourceFetcher{streamResponse: func(call int32) (addon.ResourceBatch, error) {
+		return streamBatch(fmt.Sprintf("https://media.example/movie.mp4?token=%d", call)), nil
+	}}
+	processor := &countingProbeProcessor{inspection: MediaInspection{
+		Container: "mp4", VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264", Width: 1280, Height: 720}},
+		AudioTracks: []MediaTrack{{Index: 1, Type: "audio", Codec: "aac", Channels: 2}},
+	}}
+	service := &Service{
+		addons: fetcher, processor: processor, now: func() time.Time { return now },
+		references: newSourceReferenceStore(func() time.Time { return now }),
+		probes:     newMediaProbeCache(func() time.Time { return now }), preparations: newPlaybackPreparationCache(func() time.Time { return now }),
+		hlsJobs: make(map[string]*hlsJob),
+		profileTxFactory: func(context.Context, auth.Principal) (playbackProfileTransaction, error) {
+			return &playbackTransactionStub{
+				query: func(string, ...any) (pgx.Rows, error) { return emptyPlaybackRows{}, nil },
+				row:   playbackSessionIDRow{id: "playback-session-id"},
+			}, nil
+		},
+	}
+	listed, err := service.Sources(context.Background(), principal, SourcesInput{
+		MediaType: "movie", ResourceID: "resource-id",
+		Capabilities: Capabilities{StreamingProtocols: []string{"http"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"}},
+	})
+	if err != nil || len(listed.Sources) != 1 {
+		t.Fatalf("list source: sources=%d err=%v", len(listed.Sources), err)
+	}
+	referenceID := listed.Sources[0].SourceRef
+	if _, err := service.Prepare(context.Background(), principal, PrepareInput{SourceRef: referenceID, AllowTranscoding: true}); err != nil {
+		t.Fatalf("prepare rotating source: %v", err)
+	}
+	preparedReference, err := service.references.get(referenceID, principal)
+	if err != nil || preparedReference.Asset == nil {
+		t.Fatalf("prepared reference: asset=%+v err=%v", preparedReference.Asset, err)
+	}
+	preparedURL := preparedReference.Asset.URL
+	streamCallsAfterPrepare := fetcher.streamCalls.Load()
+	if _, err := service.Resolve(context.Background(), principal, ResolveInput{SourceRef: referenceID, AllowTranscoding: true}); err != nil {
+		t.Fatalf("resolve prepared rotating source: %v", err)
+	}
+	resolvedReference, err := service.references.get(referenceID, principal)
+	if err != nil || resolvedReference.Asset == nil {
+		t.Fatalf("resolved reference: asset=%+v err=%v", resolvedReference.Asset, err)
+	}
+	if fetcher.streamCalls.Load() != streamCallsAfterPrepare+1 || resolvedReference.TransportRevision == preparedReference.TransportRevision || resolvedReference.Asset.URL == preparedURL {
+		t.Fatalf("handoff retained stale transport: calls=%d want=%d revision=%d previous=%d url=%q previous=%q", fetcher.streamCalls.Load(), streamCallsAfterPrepare+1, resolvedReference.TransportRevision, preparedReference.TransportRevision, resolvedReference.Asset.URL, preparedURL)
+	}
+
+	_, _ = service.Resolve(context.Background(), principal, ResolveInput{SourceRef: referenceID, AllowTranscoding: true})
+	if fetcher.streamCalls.Load() != streamCallsAfterPrepare+2 {
+		t.Fatalf("consumed handoff suppressed later refresh: calls=%d want=%d", fetcher.streamCalls.Load(), streamCallsAfterPrepare+2)
+	}
+}
+
+func TestPrepareResolveHandoffRevalidatesSourceBeforeSession(t *testing.T) {
+	now := time.Date(2026, time.August, 13, 13, 0, 0, 0, time.UTC)
+	profileID := "profile-id"
+	grantExpiresAt := now.Add(time.Hour)
+	principal := auth.Principal{
+		SessionID: "auth-session-id", UserID: "user-id", DeviceID: "device-id",
+		ActiveProfileID: &profileID, ProfileGrantExpiresAt: &grantExpiresAt,
+	}
+	revoked := false
+	fetcher := &preparationResourceFetcher{
+		streamResponse: func(int32) (addon.ResourceBatch, error) {
+			return addon.ResourceBatch{Results: []addon.ResourceResult{{
+				AddonID: "addon-id", ManifestID: "manifest-id",
+				Payload: []byte(`{"streams":[{"url":"https://media.example/movie.mp4"}]}`),
+			}}}, nil
+		},
+		sourceValidation: func(string) error {
+			if revoked {
+				return addon.ErrNotFound
+			}
+			return nil
+		},
+	}
+	processor := &countingProbeProcessor{inspection: MediaInspection{
+		Container: "mp4", VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264"}},
+		AudioTracks: []MediaTrack{{Index: 1, Type: "audio", Codec: "aac"}},
+	}}
+	service := &Service{
+		addons: fetcher, processor: processor, now: func() time.Time { return now },
+		references: newSourceReferenceStore(func() time.Time { return now }),
+		probes:     newMediaProbeCache(func() time.Time { return now }), preparations: newPlaybackPreparationCache(func() time.Time { return now }),
+		hlsJobs: make(map[string]*hlsJob), profileTxFactory: testPlaybackProfileTxFactory,
+	}
+	listed, err := service.Sources(context.Background(), principal, SourcesInput{
+		MediaType: "movie", ResourceID: "resource-id",
+		Capabilities: Capabilities{StreamingProtocols: []string{"http"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"}},
+	})
+	if err != nil || len(listed.Sources) != 1 {
+		t.Fatalf("list source: sources=%d err=%v", len(listed.Sources), err)
+	}
+	referenceID := listed.Sources[0].SourceRef
+	if _, err := service.Prepare(context.Background(), principal, PrepareInput{SourceRef: referenceID}); err != nil {
+		t.Fatalf("prepare source: %v", err)
+	}
+	streamCallsAfterPrepare := fetcher.streamCalls.Load()
+	revoked = true
+	if _, err := service.Resolve(context.Background(), principal, ResolveInput{SourceRef: referenceID}); err != ErrSourceReferenceExpired {
+		t.Fatalf("revoked handoff resolve error = %v, want opaque expiry", err)
+	}
+	if fetcher.streamCalls.Load() != streamCallsAfterPrepare {
+		t.Fatalf("revoked handoff reached provider fetch: calls=%d want=%d", fetcher.streamCalls.Load(), streamCallsAfterPrepare)
+	}
+	if len(service.preparations.entries) != 0 || len(service.preparations.handoffs) != 0 {
+		t.Fatalf("revoked handoff retained preparation: entries=%d handoffs=%d", len(service.preparations.entries), len(service.preparations.handoffs))
+	}
+}
 func TestConcurrentRefreshCASCannotEvictOrCacheOverNewerTransport(t *testing.T) {
 	now := time.Date(2026, time.August, 10, 14, 0, 0, 0, time.UTC)
 	profileID := "profile-id"
@@ -747,7 +871,13 @@ func TestPrepareAllowsPlaybackWithoutAddonProvenance(t *testing.T) {
 	service := &Service{
 		addons: fetcher, now: func() time.Time { return now }, references: references,
 		probes: newMediaProbeCache(func() time.Time { return now }), preparations: newPlaybackPreparationCache(func() time.Time { return now }),
-		hlsJobs: make(map[string]*hlsJob), profileTxFactory: testPlaybackProfileTxFactory,
+		hlsJobs: make(map[string]*hlsJob),
+		profileTxFactory: func(context.Context, auth.Principal) (playbackProfileTransaction, error) {
+			return &playbackTransactionStub{
+				query: func(string, ...any) (pgx.Rows, error) { return emptyPlaybackRows{}, nil },
+				row:   playbackSessionIDRow{id: "local-playback-session"},
+			}, nil
+		},
 	}
 	prepared, err := service.Prepare(context.Background(), principal, PrepareInput{SourceRef: reference.ID})
 	if err != nil {
@@ -755,6 +885,13 @@ func TestPrepareAllowsPlaybackWithoutAddonProvenance(t *testing.T) {
 	}
 	if prepared.Mode != "youtube" || fetcher.streamCalls.Load() != 0 || len(fetcher.validationBatches) != 1 || len(fetcher.validationBatches[0]) != 0 {
 		t.Fatalf("local preparation refetched provider or changed validation: preparation=%+v streamCalls=%d batches=%#v", prepared, fetcher.streamCalls.Load(), fetcher.validationBatches)
+	}
+	resolved, err := service.Resolve(context.Background(), principal, ResolveInput{SourceRef: reference.ID})
+	if err != nil {
+		t.Fatalf("resolve prepared local playback: %v", err)
+	}
+	if resolved.ID != "local-playback-session" || fetcher.streamCalls.Load() != 0 || fetcher.validationCalls.Load() != 1 {
+		t.Fatalf("local resolve changed provenance behavior: session=%+v streamCalls=%d validations=%d", resolved, fetcher.streamCalls.Load(), fetcher.validationCalls.Load())
 	}
 }
 
@@ -940,6 +1077,33 @@ func TestSourceReferenceIsSessionBoundClonedAndExpired(t *testing.T) {
 		t.Fatalf("expired reference remained usable: err=%v entries=%d", err, len(store.entries))
 	}
 }
+func TestNormalizeSubtitlesPublishesClientFormatInOpaqueAssetID(t *testing.T) {
+	batch := addon.ResourceBatch{Results: []addon.ResourceResult{{
+		AddonID: "addon-id", ManifestID: "manifest-id",
+		Payload: []byte(`{"subtitles":[
+			{"id":"srt","url":"https://media.example/subtitle.srt?token=opaque","lang":"en"},
+			{"id":"ttml","url":"https://media.example/subtitle.ttml","lang":"fr"},
+			{"id":"unknown","url":"https://media.example/subtitle","lang":"de"}
+		]}`),
+	}}}
+
+	subtitles, assets, err := normalizeSubtitles(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantIDs := []string{"subtitle-1.vtt", "subtitle-2.ttml", "subtitle-3"}
+	if len(subtitles) != len(wantIDs) || len(assets) != len(wantIDs) {
+		t.Fatalf("normalized subtitles=%d assets=%d", len(subtitles), len(assets))
+	}
+	for index, wantID := range wantIDs {
+		if subtitles[index].ID != wantID || assets[index].ID != wantID {
+			t.Fatalf("subtitle %d IDs = %q/%q, want %q", index, subtitles[index].ID, assets[index].ID, wantID)
+		}
+	}
+	if assets[0].Kind != assetKindConvertedSubtitle || assets[1].Kind == assetKindConvertedSubtitle {
+		t.Fatalf("subtitle conversion kinds = %q/%q", assets[0].Kind, assets[1].Kind)
+	}
+}
 
 func TestPreparedPlaybackClonePreservesAndIsolatesProviderData(t *testing.T) {
 	trackIndex := 7
@@ -1004,6 +1168,59 @@ func TestCloneCapabilitiesIsolatesAdditiveModeAndContainerProfileSlices(t *testi
 	}
 	if cloned.HLSSegmentContainer != "mp4" || cloned.MaximumVideoBitrateKbps != 8000 || cloned.MaximumAudioChannels != 2 || cloned.MaximumHeight != 1080 || cloned.TranscodeVideoBitrateKbps != 12000 {
 		t.Fatalf("capability clone lost additive limits: %+v", cloned)
+	}
+}
+
+func TestPlaybackPreparationHandoffIsExactAndSingleUse(t *testing.T) {
+	now := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	cache := newPlaybackPreparationCache(func() time.Time { return now })
+	policy := playbackPolicy{allowTranscoding: true, maximumHeight: 1080, bitrateKbps: 8000}
+	reference := sourceReference{
+		ID: "source-reference", SelectionRevision: 3, TransportRevision: 2, ExpiresAt: now.Add(time.Hour),
+	}
+	cacheKey := playbackPreparationCacheKey(reference.ID, reference.TransportRevision, policy)
+	cache.entries[cacheKey] = playbackPreparationEntry{
+		playback: preparedPlayback{source: Source{ID: "stream-id"}}, expiresAt: reference.ExpiresAt,
+	}
+	if !cache.markResolveHandoff("prewarm-owner", reference, policy, 90) {
+		t.Fatal("exact cached preparation was not marked for handoff")
+	}
+	if _, ok := cache.consumeResolveHandoff("prewarm-owner", reference, policy, 91); ok {
+		t.Fatal("mismatched start consumed preparation handoff")
+	}
+	if !cache.markResolveHandoff("prewarm-owner", reference, policy, 90) {
+		t.Fatal("exact cached preparation was not remarked before policy check")
+	}
+	changedPolicy := policy
+	changedPolicy.maximumHeight = 720
+	if _, ok := cache.consumeResolveHandoff("prewarm-owner", reference, changedPolicy, 90); ok {
+		t.Fatal("mismatched policy consumed preparation handoff")
+	}
+	if !cache.markResolveHandoff("prewarm-owner", reference, policy, 90) {
+		t.Fatal("exact cached preparation was not remarked before revision check")
+	}
+	changedRevision := reference
+	changedRevision.SelectionRevision++
+	if _, ok := cache.consumeResolveHandoff("prewarm-owner", changedRevision, policy, 90); ok {
+		t.Fatal("mismatched selection revision consumed preparation handoff")
+	}
+	if !cache.markResolveHandoff("prewarm-owner", reference, policy, 90) {
+		t.Fatal("exact cached preparation was not remarked for handoff")
+	}
+	playback, ok := cache.consumeResolveHandoff("prewarm-owner", reference, policy, 90)
+	if !ok || playback.source.ID != "stream-id" {
+		t.Fatalf("exact preparation handoff = %+v, ok=%v", playback, ok)
+	}
+	if _, ok := cache.consumeResolveHandoff("prewarm-owner", reference, policy, 90); ok {
+		t.Fatal("preparation handoff was consumed twice")
+	}
+
+	if !cache.markResolveHandoff("prewarm-owner", reference, policy, 90) {
+		t.Fatal("exact cached preparation was not marked before expiry")
+	}
+	now = now.Add(playbackPreparationHandoffTTL)
+	if _, ok := cache.consumeResolveHandoff("prewarm-owner", reference, policy, 90); ok {
+		t.Fatal("expired preparation handoff was consumed")
 	}
 }
 

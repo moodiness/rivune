@@ -1392,3 +1392,256 @@ public struct ContinueWatchingItem: Codable, Sendable, Equatable, Identifiable {
 public struct ContinueWatchingPage: Codable, Sendable, Equatable {
     public let items: [ContinueWatchingItem]
 }
+
+public enum JSONValue: Codable, Sendable, Equatable {
+    case boolean(Bool)
+    case signedInteger(Int64)
+    case unsignedInteger(UInt64)
+    case floatingPoint(Double)
+    case string(String)
+    case array([JSONValue])
+    case object([String: JSONValue])
+    case null
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() { self = .null }
+        else if let value = try? container.decode(Bool.self) { self = .boolean(value) }
+        else if let value = try? container.decode(Int64.self) { self = .signedInteger(value) }
+        else if let value = try? container.decode(UInt64.self) { self = .unsignedInteger(value) }
+        else if let value = try? container.decode(Double.self) { self = .floatingPoint(value) }
+        else if let value = try? container.decode(String.self) { self = .string(value) }
+        else if let value = try? container.decode([JSONValue].self) { self = .array(value) }
+        else if let value = try? container.decode([String: JSONValue].self) { self = .object(value) }
+        else { throw DecodingError.typeMismatch(JSONValue.self, .init(codingPath: decoder.codingPath, debugDescription: "Unsupported JSON value")) }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .boolean(let value): try container.encode(value)
+        case .signedInteger(let value): try container.encode(value)
+        case .unsignedInteger(let value): try container.encode(value)
+        case .floatingPoint(let value): try container.encode(value)
+        case .string(let value): try container.encode(value)
+        case .array(let value): try container.encode(value)
+        case .object(let value): try container.encode(value)
+        case .null: try container.encodeNil()
+        }
+    }
+}
+
+public enum CollectionViewMode: String, Codable, Sendable, Equatable { case tabbedGrid = "tabbed_grid", rows, followLayout = "follow_layout" }
+public enum CollectionTileShape: String, Codable, Sendable, Equatable { case poster, landscape, square }
+public enum CollectionSourceView: String, Codable, Sendable, Equatable { case merged, categories, folders }
+public enum CollectionSourceKind: String, Codable, Sendable, Equatable { case addonCatalog = "addon_catalog", tmdb, trakt, mdblist }
+
+public struct CollectionList: Codable, Sendable, Equatable { public let collections: [Collection] }
+public struct Collection: Codable, Sendable, Equatable, Identifiable {
+    public let id: UUID
+    public let title: String
+    public let backdropImageUrl: String?
+    public let heroEnabled: Bool
+    public let pinToTop: Bool
+    public let focusGlowEnabled: Bool
+    public let viewMode: CollectionViewMode
+    public let folderCoverShape: CollectionTileShape
+    public let folders: [CollectionFolder]
+    public let profileIds: [UUID]
+    public let categoryIds: [UUID]
+    public let position: Int
+    public let version: Int
+    public let createdAt: String
+    public let updatedAt: String
+}
+
+public struct CollectionFolder: Codable, Sendable, Equatable, Identifiable {
+    public let id: UUID?
+    public let title: String
+    public let tileShape: CollectionTileShape
+    public let sourceView: CollectionSourceView?
+    public let coverImageUrl: String?
+    public let coverEmoji: String?
+    public let titleLogoUrl: String?
+    public let heroBackdropUrl: String?
+    public let heroVideoUrl: String?
+    public let focusGifUrl: String?
+    public let focusGifEnabled: Bool
+    public let hideTitle: Bool
+    public let sources: [CollectionSource]
+}
+
+public struct CollectionSource: Codable, Sendable, Equatable, Identifiable {
+    public let id: UUID?
+    public let kind: CollectionSourceKind
+    public let title: String
+    public let addonCatalog: CollectionAddonCatalogSource?
+    public let tmdb: CollectionTMDBSource?
+    public let trakt: CollectionTraktSource?
+    public let mdblist: CollectionMDBListSource?
+}
+
+public struct CollectionAddonCatalogSource: Codable, Sendable, Equatable {
+    public let addonId: UUID
+    public let manifestId: String?
+    public let type: String
+    public let catalogId: String
+    public let extra: [CollectionExtraValue]?
+}
+public struct CollectionExtraValue: Codable, Sendable, Equatable { public let name: String; public let value: String }
+public enum CollectionTMDBSourceType: String, Codable, Sendable, Equatable { case list, company, network, collection, person, director, discover }
+public enum CollectionTMDBMediaType: String, Codable, Sendable, Equatable { case movie, series, both }
+public enum CollectionTMDBSort: String, Codable, Sendable, Equatable {
+    case original
+    case popularityDescending = "popularity.desc"
+    case voteAverageDescending = "vote_average.desc"
+    case voteCountDescending = "vote_count.desc"
+    case releaseDateDescending = "release_date.desc"
+    case firstAirDateDescending = "first_air_date.desc"
+}
+public struct CollectionTMDBSource: Codable, Sendable, Equatable {
+    public let sourceType: CollectionTMDBSourceType
+    public let tmdbId: Int64?
+    public let mediaType: CollectionTMDBMediaType
+    public let sort: CollectionTMDBSort
+    public let filters: CollectionTMDBFilters
+}
+public struct CollectionTMDBFilters: Codable, Sendable, Equatable {
+    public let genres: [Int64]?
+    public let releaseDateFrom: String?
+    public let releaseDateTo: String?
+    public let voteAverageMin: Double?
+    public let voteAverageMax: Double?
+    public let voteCountMin: Int?
+    public let originalLanguage: String?
+    public let originCountry: String?
+    public let keywords: [Int64]?
+    public let companies: [Int64]?
+    public let networks: [Int64]?
+    public let year: Int?
+    public let watchRegion: String?
+    public let watchProviders: [Int64]?
+}
+public enum CollectionTraktMediaType: String, Codable, Sendable, Equatable { case movie, series }
+public enum CollectionTraktSort: String, Codable, Sendable, Equatable { case rank, added, title, released, runtime, popularity, percentage, votes }
+public enum CollectionSortOrder: String, Codable, Sendable, Equatable { case asc, desc }
+public struct CollectionTraktSource: Codable, Sendable, Equatable { public let listId: Int64; public let mediaType: CollectionTraktMediaType; public let sortBy: CollectionTraktSort; public let sortHow: CollectionSortOrder }
+public enum CollectionMDBListSort: String, Codable, Sendable, Equatable {
+    case added, budget, imdbpopular, imdbrating, imdbvotes
+    case lastAirDate = "last_air_date"
+    case letterrating, lettervotes, metacritic, myanimelist, random, rank, released, releasedigital, revenue, rogerebert, rtaudience, rtomatoes, runtime, score
+    case scoreAverage = "score_average"
+    case sortTitle = "sort_title"
+    case title, tmdbpopular, usort
+}
+public struct CollectionMDBListSource: Codable, Sendable, Equatable { public let listId: Int64; public let mediaType: CollectionTraktMediaType; public let sort: CollectionMDBListSort; public let order: CollectionSortOrder }
+
+public struct ResolvedCollectionFolder: Codable, Sendable, Equatable {
+    public let collectionId: UUID
+    public let folder: CollectionFolder
+    public let sourcePosterUrls: [String: String]?
+    public let items: [CollectionItem]
+    public let page: Int
+    public let hasMore: Bool
+    public let errors: [CollectionSourceFailure]
+}
+public struct CollectionItem: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let mediaType: String
+    public let title: String
+    public let posterUrl: String?
+    public let backgroundUrl: String?
+    public let logoUrl: String?
+    public let description: String?
+    public let releaseInfo: String?
+    public let released: String?
+    public let voteAverage: Double?
+    public let voteCount: Int?
+    public let popularity: Double?
+    public let externalIds: [String: String]
+    public let sources: [CollectionSourceReference]
+    public let raw: JSONValue?
+}
+public struct CollectionSourceReference: Codable, Sendable, Equatable, Identifiable { public let id: UUID; public let kind: CollectionSourceKind; public let title: String; public let addonId: UUID?; public let manifestId: String?; public let catalogId: String? }
+public enum CollectionSourceFailureCode: String, Codable, Sendable, Equatable {
+    case providerUnavailable = "collection_provider_unavailable"
+    case addonNotFound = "collection_addon_not_found"
+    case sourceUnsupported = "collection_source_unsupported"
+    case sourceTimeout = "collection_source_timeout"
+    case sourceFailed = "collection_source_failed"
+}
+public struct CollectionSourceFailure: Codable, Sendable, Equatable { public let sourceId: UUID; public let kind: CollectionSourceKind; public let code: CollectionSourceFailureCode; public let message: String }
+
+public struct StremioExtraProperty: Codable, Sendable, Equatable { public let name: String; public let isRequired: Bool?; public let `default`: String?; public let options: [String]?; public let optionsLimit: Int? }
+public struct StremioManifestCatalog: Codable, Sendable, Equatable, Identifiable { public let type: String; public let id: String; public let name: String?; public let genres: [String]?; public let extra: [StremioExtraProperty]?; public let extraRequired: [String]?; public let extraSupported: [String]? }
+public struct AddonCatalogDescriptorList: Codable, Sendable, Equatable { public let catalogs: [AddonCatalogDescriptor] }
+public struct AddonCatalogDescriptor: Codable, Sendable, Equatable { public let addonId: UUID; public let addonName: String?; public let addonLogoUrl: String?; public let manifestId: String; public let position: Int; public let catalog: StremioManifestCatalog; public let addonCatalog: Bool; public let searchable: Bool }
+public struct AddonCachePolicy: Codable, Sendable, Equatable { public let maxAgeSeconds: Int64?; public let staleWhileRevalidateSeconds: Int64?; public let staleIfErrorSeconds: Int64? }
+public struct AddonExtraValue: Codable, Sendable, Equatable { public let name: String; public let value: String; public init(name: String, value: String) { self.name = name; self.value = value } }
+public struct AddonResourceResult: Codable, Sendable, Equatable { public let addonId: UUID; public let manifestId: String; public let resource: String; public let type: String; public let id: String; public let payload: [String: JSONValue]; public let cache: AddonCachePolicy; public let extra: [AddonExtraValue]? }
+public struct AddonResourceFailure: Codable, Sendable, Equatable { public let addonId: UUID; public let manifestId: String; public let code: String; public let message: String }
+public struct AddonResourceBatch: Codable, Sendable, Equatable { public let results: [AddonResourceResult]; public let errors: [AddonResourceFailure] }
+
+public enum TitleMediaType: String, Codable, Sendable, Equatable { case movie, series, tv }
+public struct TitleResolveInput: Codable, Sendable, Equatable {
+    public let mediaType: TitleMediaType
+    public let provider: String
+    public let externalId: String?
+    public let resourceId: String
+    public let title: String
+    public let posterUrl: String?
+    public let backgroundUrl: String?
+    public let releaseInfo: String?
+    public let released: String?
+    public let sourceAddonId: UUID?
+    public let sourceCatalogId: String?
+    public let sourceName: String?
+    public let country: String?
+    public let language: String?
+    public let category: String?
+    public init(mediaType: TitleMediaType, provider: String, externalId: String? = nil, resourceId: String, title: String, posterUrl: String? = nil, backgroundUrl: String? = nil, releaseInfo: String? = nil, released: String? = nil, sourceAddonId: UUID? = nil, sourceCatalogId: String? = nil, sourceName: String? = nil, country: String? = nil, language: String? = nil, category: String? = nil) {
+        self.mediaType = mediaType; self.provider = provider; self.externalId = externalId; self.resourceId = resourceId; self.title = title; self.posterUrl = posterUrl; self.backgroundUrl = backgroundUrl; self.releaseInfo = releaseInfo; self.released = released; self.sourceAddonId = sourceAddonId; self.sourceCatalogId = sourceCatalogId; self.sourceName = sourceName; self.country = country; self.language = language; self.category = category
+    }
+}
+public struct TitleReference: Codable, Sendable, Equatable, Identifiable {
+    public var id: UUID { titleId }
+    public let titleId: UUID
+    public let mediaType: TitleMediaType
+    public let provider: String
+    public let externalId: String
+    public let resourceId: String
+    public let title: String
+    public let posterUrl: String?
+    public let backgroundUrl: String?
+    public let releaseInfo: String?
+    public let sourceAddonId: UUID?
+    public let sourceCatalogId: String?
+    public let sourceName: String?
+    public let country: String?
+    public let language: String?
+    public let category: String?
+}
+
+public struct CustomSeriesResolveInput: Codable, Sendable, Equatable { public let sourceAddonId: UUID; public let sourceType: String; public let series: CustomSeriesSnapshot; public let videos: [CustomVideoSnapshot]; public init(sourceAddonId: UUID, sourceType: String, series: CustomSeriesSnapshot, videos: [CustomVideoSnapshot]) { self.sourceAddonId = sourceAddonId; self.sourceType = sourceType; self.series = series; self.videos = videos } }
+public struct CustomSeriesSnapshot: Codable, Sendable, Equatable { public let resourceId: String; public let title: String; public let posterUrl: String?; public let backgroundUrl: String?; public let releaseInfo: String?; public init(resourceId: String, title: String, posterUrl: String? = nil, backgroundUrl: String? = nil, releaseInfo: String? = nil) { self.resourceId = resourceId; self.title = title; self.posterUrl = posterUrl; self.backgroundUrl = backgroundUrl; self.releaseInfo = releaseInfo } }
+public struct CustomVideoSnapshot: Codable, Sendable, Equatable {
+    public let resourceId: String; public let title: String?; public let seasonNumber: Int; public let episodeNumber: Int; public let thumbnailUrl: String?; public let backgroundUrl: String?; public let releaseInfo: String?; public let released: String?
+    public init(resourceId: String, title: String? = nil, seasonNumber: Int, episodeNumber: Int, thumbnailUrl: String? = nil, backgroundUrl: String? = nil, releaseInfo: String? = nil, released: String? = nil) { self.resourceId = resourceId; self.title = title; self.seasonNumber = seasonNumber; self.episodeNumber = episodeNumber; self.thumbnailUrl = thumbnailUrl; self.backgroundUrl = backgroundUrl; self.releaseInfo = releaseInfo; self.released = released }
+}
+public struct CustomSeriesResolveResult: Codable, Sendable, Equatable { public let series: CustomSeriesReference; public let seasons: [CustomSeasonReference]; public let videos: [CustomVideoReference] }
+public struct CustomSeriesReference: Codable, Sendable, Equatable { public let titleId: UUID; public let resourceId: String }
+public struct CustomSeasonReference: Codable, Sendable, Equatable { public let titleId: UUID; public let seasonNumber: Int }
+public struct CustomVideoReference: Codable, Sendable, Equatable { public let titleId: UUID; public let resourceId: String; public let seasonTitleId: UUID; public let seasonNumber: Int; public let episodeNumber: Int }
+
+public struct LibraryItem: Codable, Sendable, Equatable, Identifiable {
+    public var id: UUID { titleId }
+    public let titleId: UUID; public let mediaType: TitleMediaType; public let provider: String?; public let externalId: String?; public let resourceId: String?; public let title: String?; public let posterUrl: String?; public let backgroundUrl: String?; public let releaseInfo: String?; public let sourceAddonId: UUID?; public let sourceCatalogId: String?; public let sourceName: String?; public let country: String?; public let language: String?; public let category: String?; public let available: Bool; public let addedAt: String; public let updatedAt: String
+}
+public struct LibraryPage: Codable, Sendable, Equatable { public let items: [LibraryItem]; public let page: Int; public let totalPages: Int; public let totalResults: Int }
+public struct TVLibraryIdentity: Codable, Sendable, Equatable { public let sourceAddonId: UUID; public let resourceId: String; public init(sourceAddonId: UUID, resourceId: String) { self.sourceAddonId = sourceAddonId; self.resourceId = resourceId } }
+public struct TVLibraryMembershipRequest: Codable, Sendable, Equatable { public let identities: [TVLibraryIdentity]; public init(identities: [TVLibraryIdentity]) { self.identities = identities } }
+public struct TVLibraryMembership: Codable, Sendable, Equatable { public let sourceAddonId: UUID; public let resourceId: String; public let titleId: UUID }
+public struct TVLibraryMembershipResult: Codable, Sendable, Equatable { public let items: [TVLibraryMembership] }
+
+public struct SessionNotificationList: Codable, Sendable, Equatable { public let notifications: [SessionNotification] }
+public struct SessionNotification: Codable, Sendable, Equatable, Identifiable { public let id: String; public let message: String; public let senderUsername: String; public let createdAt: String }

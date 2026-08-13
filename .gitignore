@@ -20,6 +20,7 @@ web/test-results/
 
 # Native client build output
 clients/android/.gradle/
+clients/android/.kotlin/
 clients/android/**/build/
 clients/apple/.build/
 clients/windows/**/bin/

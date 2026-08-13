@@ -1114,6 +1114,30 @@ func (*failingHLSProcessor) Probe(context.Context, storedAsset) (MediaInspection
 	return MediaInspection{}, nil
 }
 
+type gatedFailingHLSProcessor struct {
+	started chan struct{}
+	release chan struct{}
+	err     error
+}
+
+func (processor *gatedFailingHLSProcessor) ProcessHLS(ctx context.Context, _ storedAsset, _ string) error {
+	close(processor.started)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-processor.release:
+		return processor.err
+	}
+}
+
+func (*gatedFailingHLSProcessor) ConvertSubtitle(context.Context, storedAsset, io.Writer) error {
+	return nil
+}
+
+func (*gatedFailingHLSProcessor) Probe(context.Context, storedAsset) (MediaInspection, error) {
+	return MediaInspection{}, nil
+}
+
 type sharedFixtureHLSProcessor struct {
 	mu          sync.Mutex
 	starts      int
@@ -1487,6 +1511,67 @@ func TestFFmpegProcessorRejectsConcurrentWorkAtCapacity(t *testing.T) {
 		t.Fatalf("expected capacity error, got %v", err)
 	}
 }
+func TestFailedPrewarmCleansBindingAndWorkspaceWithoutResolve(t *testing.T) {
+	processor := &gatedFailingHLSProcessor{
+		started: make(chan struct{}), release: make(chan struct{}), err: errors.New("source failed"),
+	}
+	service := &Service{
+		processor:    processor,
+		mediaOptions: MediaOptions{TempDirectory: t.TempDir(), MaxStorageBytes: 1 << 20, IdleTTL: time.Hour},
+		hlsJobs:      make(map[string]*hlsJob),
+	}
+	asset := storedAsset{ID: "stream", Kind: processingTranscode, URL: "https://media.example/movie.mkv"}
+	prewarmID := prewarmHLSSession("auth-session", "profile")
+	if err := service.prewarmHLS(context.Background(), prewarmID, Source{Protocol: "hls", Mode: processingTranscode}, &asset); err != nil {
+		t.Fatalf("start prewarm: %v", err)
+	}
+	select {
+	case <-processor.started:
+	case <-time.After(time.Second):
+		t.Fatal("prewarm processor did not start")
+	}
+	close(processor.release)
+	waitForEmptyHLSWorkspace(t, service)
+}
+
+func TestPrewarmHLSReturnsWhileGenerationStarts(t *testing.T) {
+	release := make(chan struct{})
+	processor := &blockingSeekableFixtureHLSProcessor{
+		starts: make(chan float64, 1), releases: map[int]chan struct{}{0: release},
+	}
+	service := &Service{
+		processor:    processor,
+		mediaOptions: MediaOptions{TempDirectory: t.TempDir(), MaxStorageBytes: 1024 * 1024, IdleTTL: time.Minute},
+		hlsJobs:      make(map[string]*hlsJob),
+	}
+	prewarmID := prewarmHLSSession("auth-session", "profile")
+	defer service.stopHLSSession(prewarmID)
+	asset := storedAsset{ID: "stream", Kind: processingTranscode, URL: "https://media.example/movie.mkv"}
+	result := make(chan error, 1)
+	go func() {
+		result <- service.prewarmHLS(context.Background(), prewarmID, Source{Protocol: "hls", Mode: processingTranscode}, &asset)
+	}()
+	select {
+	case start := <-processor.starts:
+		if start != 0 {
+			t.Fatalf("prewarm generation start = %v", start)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("prewarm generation did not start")
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("start asynchronous prewarm: %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		close(release)
+		<-result
+		t.Fatal("prewarm waited for the first HLS playlist")
+	}
+	close(release)
+}
+
 func TestPrewarmReplacesPreviousAssetForDevice(t *testing.T) {
 	first := &blockingHLSProcessor{ready: make(chan struct{}), stopped: make(chan struct{})}
 	service := &Service{
@@ -1941,12 +2026,67 @@ func TestHLSStorageReclaimCancelsActiveWritersAndDefersCleanupForReaders(t *test
 	}
 }
 
+func TestStartSessionHLSWaitsForAdoptedPrewarmAndCleansFailure(t *testing.T) {
+	processErr := errors.New("prewarm source failed")
+	processor := &gatedFailingHLSProcessor{
+		started: make(chan struct{}), release: make(chan struct{}), err: processErr,
+	}
+	service := &Service{
+		processor:    processor,
+		mediaOptions: MediaOptions{TempDirectory: t.TempDir(), MaxStorageBytes: 1 << 20, IdleTTL: time.Hour},
+		hlsJobs:      make(map[string]*hlsJob),
+	}
+	asset := storedAsset{ID: "asset", Kind: processingTranscode, URL: "https://media.example/movie.mkv"}
+	source := Source{ID: asset.ID, Compatible: true, Protocol: "hls", Mode: processingTranscode}
+	prewarmSession := prewarmHLSSession("auth", "profile")
+	if err := service.prewarmHLS(context.Background(), prewarmSession, source, &asset); err != nil {
+		t.Fatalf("start prewarm: %v", err)
+	}
+	select {
+	case <-processor.started:
+	case <-time.After(time.Second):
+		t.Fatal("prewarm processor did not start")
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- service.startSessionHLS(context.Background(), prewarmSession, "session", []Source{source}, []storedAsset{asset})
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		service.hlsMu.Lock()
+		adopted := service.hlsJobs[hlsJobKey("session", asset)] != nil && service.hlsJobs[hlsJobKey(prewarmSession, asset)] == nil
+		service.hlsMu.Unlock()
+		if adopted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("prewarm job was not adopted")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(processor.release)
+	select {
+	case err := <-result:
+		if !errors.Is(err, processErr) {
+			t.Fatalf("adopted prewarm error = %v, want %v", err, processErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session start did not observe adopted prewarm failure")
+	}
+	service.hlsMu.Lock()
+	jobs := len(service.hlsJobs)
+	service.hlsMu.Unlock()
+	if jobs != 0 {
+		t.Fatalf("failed adopted prewarm retained %d job bindings", jobs)
+	}
+}
 func TestStartSessionHLSPrioritizesPlaybackOverNonAdoptablePrewarm(t *testing.T) {
 	processor := &capacityHLSProcessor{slot: make(chan struct{}, 1)}
 	service := &Service{
 		processor:    processor,
 		mediaOptions: MediaOptions{TempDirectory: t.TempDir(), MaxStorageBytes: 1 << 20, IdleTTL: time.Hour},
-		hlsJobs:      make(map[string]*hlsJob),
+
+		hlsJobs: make(map[string]*hlsJob),
 	}
 	prewarmSession := prewarmHLSSession("auth", "profile")
 	prewarmAsset := storedAsset{ID: "asset", Kind: processingTranscode, URL: "https://media.example/prewarm.mkv"}
@@ -1995,7 +2135,7 @@ func TestAdoptHLSJobRequiresExactFingerprint(t *testing.T) {
 			service.hlsJobs[hlsJobKey(from, base)] = job
 			divergent := cloneStoredAsset(base)
 			test.mutate(&divergent)
-			if service.adoptHLSJob(from, "session", divergent) {
+			if service.adoptHLSJob(from, "session", divergent) != nil {
 				t.Fatal("divergent HLS asset was adopted")
 			}
 			service.stopHLSSession(from)
@@ -2006,7 +2146,7 @@ func TestAdoptHLSJobRequiresExactFingerprint(t *testing.T) {
 	job := &hlsJob{fingerprint: hlsAssetFingerprint(base), sessionID: "prewarm", prewarming: true, cancel: func() {}, done: make(chan struct{})}
 	close(job.done)
 	service.hlsJobs[hlsJobKey("prewarm", base)] = job
-	if !service.adoptHLSJob("prewarm", "session", cloneStoredAsset(base)) {
+	if service.adoptHLSJob("prewarm", "session", cloneStoredAsset(base)) == nil {
 		t.Fatal("exact HLS asset fingerprint was not adopted")
 	}
 	if job.prewarming || job.sessionID != "session" || service.hlsJobs[hlsJobKey("session", base)] != job {
@@ -2412,7 +2552,7 @@ func TestPrewarmHLSAdoptionIsOneToOneUnderConcurrency(t *testing.T) {
 		go func() {
 			defer wait.Done()
 			<-start
-			results <- service.adoptHLSJob(prewarm, sessionID, cloneStoredAsset(asset))
+			results <- service.adoptHLSJob(prewarm, sessionID, cloneStoredAsset(asset)) != nil
 		}()
 	}
 	close(start)
@@ -2457,7 +2597,7 @@ func TestPrewarmAdoptionMovesOnlyItsSharedBinding(t *testing.T) {
 	if shared != job {
 		t.Fatal("identical prewarms did not share a worker")
 	}
-	if !service.adoptHLSJob(firstPrewarm, "session", cloneStoredAsset(asset)) {
+	if service.adoptHLSJob(firstPrewarm, "session", cloneStoredAsset(asset)) == nil {
 		t.Fatal("first shared prewarm binding was not adopted")
 	}
 	if service.hlsJobs[hlsJobKey(firstPrewarm, asset)] != nil || service.hlsJobs[hlsJobKey("session", asset)] != job ||

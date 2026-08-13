@@ -24,6 +24,7 @@ import kotlinx.serialization.json.Json
 data class StoredCredentials(
     val issuer: String,
     val tokens: TokenPair,
+    val profileContext: String? = null,
 )
 
 interface CredentialStore {

@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "rivune-android-clients"
 include(":rivune-api")
+include(":app")

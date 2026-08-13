@@ -10,7 +10,7 @@ final class CredentialSecurityTests: XCTestCase {
         let serverA = URL(string: "https://server-a.test")!
         let serverB = URL(string: "https://server-b.test")!
         let store = IssuerScopedCredentialStore()
-        try await store.save(fixtureToken(), for: serverA)
+        try await store.save(StoredCredentials(tokens: fixtureToken(), profileContext: nil), for: serverA)
 
         let clientA = try RivuneAPIClient(
             serverURL: serverA,
@@ -131,7 +131,7 @@ final class CredentialSecurityTests: XCTestCase {
             category: original.category
         )
         let store = IssuerScopedCredentialStore()
-        try await store.save(original, for: server)
+        try await store.save(StoredCredentials(tokens: original, profileContext: nil), for: server)
         let transport = ControlledAuthTransport(
             tokens: refreshed,
             delayedPaths: ["/api/v1/auth/refresh"]
@@ -160,7 +160,7 @@ final class CredentialSecurityTests: XCTestCase {
         let accountA = fixtureToken()
         let accountB = fixtureToken(accessToken: "server-b-access", refreshToken: "server-b-refresh")
         let store = IssuerScopedCredentialStore()
-        try await store.save(accountA, for: server)
+        try await store.save(StoredCredentials(tokens: accountA, profileContext: nil), for: server)
         let transport = GenerationReplayTransport(loginTokens: accountB)
         let client = try RivuneAPIClient(serverURL: server, transport: transport, credentialStore: store)
         let restored = try await client.restoreSession()
@@ -214,7 +214,7 @@ final class CredentialSecurityTests: XCTestCase {
         XCTAssertEqual(loginTransport.recordedRequests().map(\.url?.path), ["/.well-known/rivune"])
 
         let authenticatedStore = IssuerScopedCredentialStore()
-        try await authenticatedStore.save(fixtureToken(), for: server)
+        try await authenticatedStore.save(StoredCredentials(tokens: fixtureToken(), profileContext: nil), for: server)
         let authenticatedTransport = CredentialSecurityTransport()
         let authenticatedClient = try RivuneAPIClient(
             serverURL: server,
@@ -258,7 +258,7 @@ final class CredentialSecurityTests: XCTestCase {
         let server = URL(string: "https://logout-failure.test")!
         let tokens = fixtureToken()
         let store = IssuerScopedCredentialStore()
-        try await store.save(tokens, for: server)
+        try await store.save(StoredCredentials(tokens: tokens, profileContext: nil), for: server)
         let transport = ControlledAuthTransport(tokens: tokens, logoutStatus: 500)
         let client = try RivuneAPIClient(serverURL: server, transport: transport, credentialStore: store)
         let restored = try await client.restoreSession()
@@ -607,13 +607,13 @@ final class CredentialSecurityTests: XCTestCase {
 }
 
 private actor IssuerScopedCredentialStore: CredentialStore {
-    private var credentialsByIssuer: [String: TokenPair] = [:]
+    private var credentialsByIssuer: [String: StoredCredentials] = [:]
 
-    func load(for issuer: URL) async throws -> TokenPair? {
+    func load(for issuer: URL) async throws -> StoredCredentials? {
         credentialsByIssuer[issuer.absoluteString]
     }
 
-    func save(_ credentials: TokenPair, for issuer: URL) async throws {
+    func save(_ credentials: StoredCredentials, for issuer: URL) async throws {
         credentialsByIssuer[issuer.absoluteString] = credentials
     }
 

@@ -413,6 +413,46 @@ func TestFFmpegEgressGatewayBoundsRegisteredTargetsAcrossPlaylists(t *testing.T)
 	}
 }
 
+func TestFFmpegEgressGatewayCancelsSilentUpstreamBody(t *testing.T) {
+	requestCanceled := make(chan struct{})
+	origin := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "video/mp4")
+		response.WriteHeader(http.StatusOK)
+		response.(http.Flusher).Flush()
+		<-request.Context().Done()
+		close(requestCanceled)
+	}))
+	defer origin.Close()
+
+	proxy, err := startFFmpegEgressProxyWithReadIdleTimeout(
+		context.Background(), mappedPublicDial(origin.Listener.Addr().String()),
+		storedAsset{URL: publicTestURL(origin.URL) + "/video.mp4"}, 25*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	startedAt := time.Now()
+	response, streamErr := client.Get(proxy.InputURL())
+	if response != nil {
+		_, streamErr = io.ReadAll(response.Body)
+		_ = response.Body.Close()
+	}
+	if streamErr == nil {
+		t.Fatal("silent upstream body completed without an error")
+	}
+	if elapsed := time.Since(startedAt); elapsed >= 250*time.Millisecond {
+		t.Fatalf("silent upstream body canceled after %s", elapsed)
+	}
+	select {
+	case <-requestCanceled:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("silent upstream request context was not canceled")
+	}
+}
+
 func TestFFmpegAndFFprobeReceiveOnlyLifecycleBoundGatewayURL(t *testing.T) {
 	t.Setenv("RIVUNE_FFMPEG_HELPER_MODE", "probe")
 	tests := []struct {
@@ -435,6 +475,7 @@ func TestFFmpegAndFFprobeReceiveOnlyLifecycleBoundGatewayURL(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			asset := storedAsset{URL: "http://1.1.1.1/provider-secret/video.mp4", Headers: map[string]string{"Authorization": "Bearer secret"}}
 			processor := testFFmpegProcessor()
+
 			processor.egressProxy = func(ctx context.Context, source storedAsset) (*ffmpegEgressProxy, error) {
 				return startFFmpegEgressProxyWithDialAndSource(ctx, mappedPublicDial("127.0.0.1:1"), source)
 			}
@@ -478,6 +519,47 @@ func TestFFmpegAndFFprobeReceiveOnlyLifecycleBoundGatewayURL(t *testing.T) {
 	}
 }
 
+func TestRealFFprobeStopsAfterSilentUpstreamBody(t *testing.T) {
+	ffprobePath, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("FFprobe executable is not installed")
+	}
+	requestCanceled := make(chan struct{}, 1)
+	origin := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "video/mp4")
+		response.Header().Set("Content-Length", "1024")
+		response.WriteHeader(http.StatusOK)
+		response.(http.Flusher).Flush()
+		<-request.Context().Done()
+		select {
+		case requestCanceled <- struct{}{}:
+		default:
+		}
+	}))
+	defer origin.Close()
+	processor := &FFmpegProcessor{
+		ffprobePath: ffprobePath,
+		probeSlots:  make(chan struct{}, 1),
+		egressProxy: func(ctx context.Context, asset storedAsset) (*ffmpegEgressProxy, error) {
+			return startFFmpegEgressProxyWithReadIdleTimeout(
+				ctx, mappedPublicDial(origin.Listener.Addr().String()), asset, 25*time.Millisecond,
+			)
+		},
+	}
+	startedAt := time.Now()
+	_, probeErr := processor.Probe(context.Background(), storedAsset{URL: publicTestURL(origin.URL) + "/video.mp4", Container: "mp4"})
+	if probeErr == nil {
+		t.Fatal("FFprobe accepted a silent upstream body")
+	}
+	if elapsed := time.Since(startedAt); elapsed >= time.Second {
+		t.Fatalf("FFprobe stopped after %s", elapsed)
+	}
+	select {
+	case <-requestCanceled:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("FFprobe silent upstream request was not canceled")
+	}
+}
 func TestRealFFprobeCannotDialExplicitNestedTCP(t *testing.T) {
 	ffprobePath, err := exec.LookPath("ffprobe")
 	if err != nil {

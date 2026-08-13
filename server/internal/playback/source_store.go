@@ -394,9 +394,9 @@ func cloneStoredAsset(asset storedAsset) storedAsset {
 }
 
 func cloneMediaInspection(inspection MediaInspection) MediaInspection {
-	inspection.VideoTracks = append([]MediaTrack(nil), inspection.VideoTracks...)
-	inspection.AudioTracks = append([]MediaTrack(nil), inspection.AudioTracks...)
-	inspection.SubtitleTracks = append([]MediaTrack(nil), inspection.SubtitleTracks...)
+	inspection.VideoTracks = append([]MediaTrack{}, inspection.VideoTracks...)
+	inspection.AudioTracks = append([]MediaTrack{}, inspection.AudioTracks...)
+	inspection.SubtitleTracks = append([]MediaTrack{}, inspection.SubtitleTracks...)
 	return inspection
 }
 

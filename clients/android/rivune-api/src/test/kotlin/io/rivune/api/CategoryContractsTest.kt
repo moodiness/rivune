@@ -181,7 +181,7 @@ class CategoryContractsTest {
         ))
         server.start()
         try {
-            val serverUrl = server.url("/").toString()
+            val serverUrl = server.loopbackUrl("/").toString()
             val client = RivuneApiClient(serverUrl, StubCredentialStore(serverUrl, fixtureToken()))
             val category = client.updateCategory(
                 categoryId,

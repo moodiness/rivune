@@ -234,6 +234,30 @@ func TestCodecArgumentsCoverBackendsCodecsAndQuality(t *testing.T) {
 	}
 }
 
+func TestNVENCAV1OmitsUnsupportedProfileOption(t *testing.T) {
+	encoder := videoEncoder{kind: videoEncoderNVENC, encodeCodecs: map[string]bool{"av1": true}}
+	arguments, err := encoder.codecArguments("av1", "balanced", 4, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(arguments, " ")
+	if !strings.Contains(joined, "-c:v av1_nvenc") || strings.Contains(joined, "-profile:v") {
+		t.Fatalf("AV1 NVENC arguments must rely on its only supported profile: %v", arguments)
+	}
+}
+
+func TestVideoEncoderProbeUsesPortableNVENCFrameDimensions(t *testing.T) {
+	encoder := videoEncoder{kind: videoEncoderNVENC}.withEncodeCodec("h264")
+	arguments, _, err := videoEncoderProbeArguments(encoder, "h264", "balanced", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(arguments, " ")
+	if !strings.Contains(joined, "color=c=black:s=256x256:r=1") {
+		t.Fatalf("encoder probe dimensions are below modern NVENC minimums: %v", arguments)
+	}
+}
+
 func TestFunctionalCapabilityInventoryAndDefensiveCopies(t *testing.T) {
 	var encodeProbes, decodeProbes []string
 	encoder := detectVideoEncoderCapabilities(videoEncoder{kind: videoEncoderQSV}, func(_ videoEncoder, codec string, _ bool) error {
