@@ -35,7 +35,7 @@ class ApiV20ContractsTest {
         server.enqueue(discoveryResponse(setupCompleted = true, demoAvailable = false))
         server.enqueue(jsonResponse(seriesFixture()))
         server.enqueue(jsonResponse("""{"markers":[{"type":"intro","startSeconds":12.25,"endSeconds":91.75,"confidence":0.9,"submissionCount":8}]}"""))
-        server.enqueue(jsonResponse("""{"sources":[],"providerErrors":[]}"""))
+        server.enqueue(jsonResponse("""{"sources":[{"id":"stream-1","sourceRef":"opaque-source-reference","addonId":"33333333-3333-4333-8333-333333333333","manifestId":"manifest","streamIndex":0,"name":"External","protocol":"external","mode":"external","expiresAt":"2099-01-01T00:00:00Z"}],"providerErrors":[]}"""))
         server.start()
         try {
             val serverUrl = server.loopbackUrl("/").toString()
@@ -46,12 +46,13 @@ class ApiV20ContractsTest {
 
             client.series(seriesId, language = "fr-FR", mappingProvider = SeriesMappingProvider.TVDB, episodeOrder = "84")
             val markers = client.playbackMarkers("tt1234567", season = 2, episode = 3)
-            client.playbackSources(
+            val sources = client.playbackSources(
                 mediaType = "episode",
                 resourceId = "resource:episode",
                 capabilities = PlaybackCapabilities(listOf("hls"), listOf("mp4")),
                 addonId = addonId,
             )
+            assertEquals(PlaybackMode.EXTERNAL, sources.sources.single().mode)
 
             val discoveryRequest = server.takeRequest()
             assertEquals("/.well-known/rivune", discoveryRequest.path)
@@ -153,6 +154,35 @@ class ApiV20ContractsTest {
             assertEquals("DELETE" to "/api/v1/titles/$titleId/watched?expectedVersion=10", server.takeRequest().let { it.method to it.path })
             assertEquals("GET" to "/api/v1/continue-watching?limit=25", server.takeRequest().let { it.method to it.path })
             assertEquals("DELETE" to "/api/v1/continue-watching/$titleId", server.takeRequest().let { it.method to it.path })
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun externalPlaybackTargetIsOptionalAndEncodesOnlyWhenTrue() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(discoveryResponse())
+        repeat(2) {
+            server.enqueue(jsonResponse("""{"sourceRef":"opaque-source-reference","mode":"direct","protocol":"http","subtitleCount":0,"expiresAt":"2099-01-01T00:00:00Z"}"""))
+        }
+        server.enqueue(jsonResponse("""{"id":"44444444-4444-4444-8444-444444444444","selectedSourceId":"stream-1","sources":[],"subtitles":[],"providerErrors":[],"expiresAt":"2099-01-01T00:00:00Z"}"""))
+        server.start()
+        try {
+            val serverUrl = server.loopbackUrl("/").toString()
+            val client = RivuneApiClient(serverUrl, V20CredentialStore(serverUrl, tokenPair()))
+            client.discover()
+            client.preparePlayback("opaque-source-reference")
+            client.preparePlayback("opaque-source-reference", externalPlayer = true)
+            client.resolvePlayback("opaque-source-reference", externalPlayer = true)
+
+            server.takeRequest()
+            val defaultBody = json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+            val externalPrepareBody = json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+            val externalResolveBody = json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+            assertEquals(false, defaultBody.containsKey("externalPlayer"))
+            assertEquals(true, externalPrepareBody.getValue("externalPlayer").jsonPrimitive.content.toBoolean())
+            assertEquals(true, externalResolveBody.getValue("externalPlayer").jsonPrimitive.content.toBoolean())
         } finally {
             server.shutdown()
         }

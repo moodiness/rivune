@@ -553,13 +553,13 @@ data class PlaybackCapabilities(
     val videoCodecs: List<String>? = null,
     val audioCodecs: List<String>? = null,
     val hdrFormats: List<String>? = null,
-    val externalPlayers: List<String>? = null,
     val processingModes: List<PlaybackProcessingMode>? = null,
     val maximumHeight: Int? = null,
     val maximumVideoBitrateKbps: Int? = null,
     val maximumAudioChannels: Int? = null,
     val subtitleModes: List<PlaybackSubtitleMode>? = null,
     val mediaProfiles: List<PlaybackMediaProfile>? = null,
+    val externalPlayers: List<String>? = null,
 )
 
 @Serializable
@@ -582,6 +582,7 @@ data class PlaybackSourceOption(
     val description: String? = null,
     val filename: String? = null,
     val protocol: String,
+    val mode: PlaybackMode? = null,
     val container: String? = null,
     val expiresAt: String,
 )

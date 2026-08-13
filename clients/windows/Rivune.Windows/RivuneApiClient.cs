@@ -615,14 +615,15 @@ public sealed class RivuneApiClient : IDisposable
     public Task<PlaybackPreparation> PreparePlaybackAsync(
         string sourceRef,
         int? startSeconds = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool externalPlayer = false)
     {
         ArgumentException.ThrowIfNullOrEmpty(sourceRef);
         return RequestJsonAsync<PlaybackPreparation>(
             HttpMethod.Post,
             ["playback", "prepare"],
             null,
-            new PlaybackPrepareRequest(sourceRef, startSeconds),
+            new PlaybackPrepareRequest(sourceRef, startSeconds, externalPlayer ? true : null),
             true,
             cancellationToken);
     }
@@ -633,14 +634,15 @@ public sealed class RivuneApiClient : IDisposable
         int? preferredAudioTrack = null,
         string? preferredSubtitleId = null,
         int? startSeconds = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool externalPlayer = false)
     {
         ArgumentException.ThrowIfNullOrEmpty(sourceRef);
         return RequestJsonAsync<PlaybackSession>(
             HttpMethod.Post,
             ["playback", "resolve"],
             null,
-            new PlaybackResolveRequest(sourceRef, titleId, preferredAudioTrack, preferredSubtitleId, startSeconds),
+            new PlaybackResolveRequest(sourceRef, titleId, preferredAudioTrack, preferredSubtitleId, startSeconds, externalPlayer ? true : null),
             true,
             cancellationToken);
     }
@@ -1559,12 +1561,13 @@ public sealed class RivuneApiClient : IDisposable
         Guid? AddonId,
         string ResourceId,
         PlaybackCapabilities Capabilities);
-    private sealed record PlaybackPrepareRequest(string SourceRef, int? StartSeconds);
+    private sealed record PlaybackPrepareRequest(string SourceRef, int? StartSeconds, bool? ExternalPlayer);
     private sealed record PlaybackResolveRequest(
         string SourceRef,
         string? TitleId,
         int? PreferredAudioTrack,
         string? PreferredSubtitleId,
-        int? StartSeconds);
+        int? StartSeconds,
+        bool? ExternalPlayer);
     private sealed record ErrorEnvelope(ServerError Error);
 }

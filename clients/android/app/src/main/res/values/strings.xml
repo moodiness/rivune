@@ -155,6 +155,10 @@
     <string name="viewer_resume_progress">Resume at %1$d min · %2$d min total</string>
     <string name="viewer_minutes">%1$d min</string>
     <string name="viewer_choose_source">Choose a source</string>
+    <string name="viewer_choose_player">Choose a player</string>
+    <string name="viewer_player_rivune">Rivune player</string>
+    <string name="viewer_player_rivune_body">Play inside Rivune.</string>
+    <string name="viewer_player_external_body">Open in this installed app.</string>
     <string name="viewer_sources_partial">Some playback sources are unavailable. Available sources are shown.</string>
     <string name="viewer_sources_empty_title">No source is available</string>
     <string name="viewer_sources_empty_body">Try again later or choose another title.</string>
@@ -171,6 +175,8 @@
     <string name="player_close">Close player</string>
     <string name="player_preparing">Preparing video</string>
     <string name="player_buffering">Buffering video</string>
+    <string name="player_external_opening">Opening %1$s…</string>
+    <string name="player_external_waiting">Return to Rivune when playback ends.</string>
     <string name="pin_title">Enter profile PIN</string>
     <string name="pin_body">Unlock %1$s to continue.</string>
     <string name="pin_label">PIN</string>

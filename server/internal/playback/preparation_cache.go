@@ -30,6 +30,7 @@ type playbackPolicy struct {
 	allowTranscoding bool
 	maximumHeight    int
 	bitrateKbps      int
+	externalPlayer   bool
 }
 
 type playbackPreparationEntry struct {
@@ -110,7 +111,7 @@ func (cache *playbackPreparationCache) evictRevision(referenceID string, revisio
 }
 
 func playbackPreparationCacheKey(referenceID string, revision uint64, policy playbackPolicy) string {
-	return referenceID + "|" + strconv.FormatUint(revision, 10) + "|" + strconv.FormatBool(policy.allowTranscoding) + "|" + strconv.Itoa(policy.maximumHeight) + "|" + strconv.Itoa(policy.bitrateKbps)
+	return referenceID + "|" + strconv.FormatUint(revision, 10) + "|" + strconv.FormatBool(policy.allowTranscoding) + "|" + strconv.Itoa(policy.maximumHeight) + "|" + strconv.Itoa(policy.bitrateKbps) + "|" + strconv.FormatBool(policy.externalPlayer)
 }
 
 func (cache *playbackPreparationCache) markResolveHandoff(owner string, reference sourceReference, policy playbackPolicy, startSeconds float64) bool {
@@ -221,7 +222,9 @@ func (service *Service) buildPreparedPlayback(ctx context.Context, principal aut
 		policy = policies[0]
 	}
 	capabilities := service.playbackCapabilities(reference.Capabilities, policy.maximumHeight, policy.bitrateKbps)
-
+	if policy.externalPlayer {
+		capabilities.SubtitleModes = []string{"external"}
+	}
 	type subtitleResult struct {
 		batch addon.ResourceBatch
 		err   error
@@ -241,10 +244,14 @@ func (service *Service) buildPreparedPlayback(ctx context.Context, principal aut
 	if reference.Asset != nil {
 		assets = append(assets, cloneStoredAsset(*reference.Asset))
 	}
-	if err := service.decidePlaybackSource(ctx, sources, assets, capabilities, policy.allowTranscoding); err != nil {
+	if policy.externalPlayer {
+		sources[0].Compatible = true
+		sources[0].Media = nil
+		sources[0].Decision = nil
+	} else if err := service.decidePlaybackSource(ctx, sources, assets, capabilities, policy.allowTranscoding); err != nil {
 		return preparedPlayback{}, err
 	}
-	if sources[0].Media != nil {
+	if !policy.externalPlayer && sources[0].Media != nil {
 		if assetIndex := storedAssetIndex(assets, sources[0].ID); assetIndex >= 0 {
 			assets[assetIndex].DurationSeconds = sources[0].Media.DurationSeconds
 		}
@@ -262,7 +269,7 @@ func (service *Service) buildPreparedPlayback(ctx context.Context, principal aut
 	if subtitlesChannel != nil {
 		subtitleResources := <-subtitlesChannel
 		if subtitleResources.err == nil {
-			normalizedSubtitles, normalizedAssets, normalizationErr := normalizeSubtitles(subtitleResources.batch)
+			normalizedSubtitles, normalizedAssets, normalizationErr := normalizeSubtitles(subtitleResources.batch, policy.externalPlayer)
 			if normalizationErr == nil {
 				subtitles = normalizedSubtitles
 				subtitleAssets = normalizedAssets
@@ -270,9 +277,11 @@ func (service *Service) buildPreparedPlayback(ctx context.Context, principal aut
 			providerErrors = append(providerErrors, providerFailures(subtitleResources.batch.Errors)...)
 		}
 	}
-	embedded, embeddedAssets := embeddedSubtitles(sources, assets, capabilities)
-	subtitles = append(subtitles, embedded...)
-	subtitleAssets = append(subtitleAssets, embeddedAssets...)
+	if !policy.externalPlayer {
+		embedded, embeddedAssets := embeddedSubtitles(sources, assets, capabilities)
+		subtitles = append(subtitles, embedded...)
+		subtitleAssets = append(subtitleAssets, embeddedAssets...)
+	}
 
 	var asset *storedAsset
 	if len(assets) > 0 {

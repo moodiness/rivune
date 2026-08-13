@@ -1144,8 +1144,56 @@ func TestPreparationCacheIdentityIncludesTransportRevisionAndPolicy(t *testing.T
 	disabled := playbackPreparationCacheKey("source-reference", 1, playbackPolicy{allowTranscoding: false, maximumHeight: 1080})
 	lowerResolution := playbackPreparationCacheKey("source-reference", 1, playbackPolicy{allowTranscoding: true, maximumHeight: 720})
 	newerRevision := playbackPreparationCacheKey("source-reference", 2, playbackPolicy{allowTranscoding: true, maximumHeight: 1080})
-	if allowed == disabled || allowed == lowerResolution || allowed == newerRevision || disabled == lowerResolution {
-		t.Fatalf("revision/policy-sensitive cache identities collided: allowed=%q disabled=%q lower=%q newer=%q", allowed, disabled, lowerResolution, newerRevision)
+	external := playbackPreparationCacheKey("source-reference", 1, playbackPolicy{allowTranscoding: true, maximumHeight: 1080, externalPlayer: true})
+	if allowed == disabled || allowed == lowerResolution || allowed == newerRevision || allowed == external || disabled == lowerResolution {
+		t.Fatalf("revision/policy-sensitive cache identities collided: allowed=%q disabled=%q lower=%q newer=%q external=%q", allowed, disabled, lowerResolution, newerRevision, external)
+	}
+}
+
+func TestExternalPlaybackPreparationPreservesOriginalWithoutMediaProcessing(t *testing.T) {
+	now := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	fetcher := &preparationResourceFetcher{subtitleBatch: addon.ResourceBatch{Results: []addon.ResourceResult{{
+		AddonID: "subtitle-addon", ManifestID: "subtitle-manifest",
+		Payload: []byte(`{"subtitles":[{"url":"https://subtitles.example/movie.srt","lang":"fr"}]}`),
+	}}}}
+	processor := &countingProbeProcessor{inspection: MediaInspection{Container: "mp4"}}
+	service := &Service{addons: fetcher, processor: processor, now: func() time.Time { return now }}
+	reference := sourceReference{
+		AddonMediaType: "movie", ResourceID: "tt1234567", ExpiresAt: now.Add(time.Hour),
+		Source: Source{ID: "stream-1", AddonID: "addon-id", ManifestID: "manifest-id", Mode: "direct", URL: "https://media.example/movie.mkv", Protocol: "http", Container: "mkv"},
+		Asset:  &storedAsset{ID: "stream-1", Kind: "stream", URL: "https://media.example/movie.mkv", Container: "mkv"},
+	}
+
+	prepared, err := service.buildPreparedPlayback(context.Background(), auth.Principal{}, reference, playbackPolicy{externalPlayer: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processor.calls.Load() != 0 || prepared.source.Mode != "direct" || !prepared.source.Compatible || prepared.source.Media != nil || prepared.source.Decision != nil {
+		t.Fatalf("external preparation modified or inspected source: probes=%d source=%+v", processor.calls.Load(), prepared.source)
+	}
+	if len(prepared.subtitles) != 1 || prepared.subtitles[0].ID != "subtitle-1.srt" || len(prepared.subtitleAssets) != 1 || prepared.subtitleAssets[0].Kind != "subtitle" {
+		t.Fatalf("external subtitles were converted or dropped: subtitles=%+v assets=%+v", prepared.subtitles, prepared.subtitleAssets)
+	}
+}
+
+func TestPlaybackRequestJSONOmitsFalseExternalPlayerAndEncodesTrue(t *testing.T) {
+	for name, value := range map[string]any{
+		"prepare false": PrepareInput{SourceRef: "opaque-source-reference"},
+		"resolve false": ResolveInput{SourceRef: "opaque-source-reference"},
+	} {
+		encoded, err := json.Marshal(value)
+		if err != nil || strings.Contains(string(encoded), "externalPlayer") {
+			t.Fatalf("%s encoded externalPlayer: json=%s err=%v", name, encoded, err)
+		}
+	}
+	for name, value := range map[string]any{
+		"prepare true": PrepareInput{SourceRef: "opaque-source-reference", ExternalPlayer: true},
+		"resolve true": ResolveInput{SourceRef: "opaque-source-reference", ExternalPlayer: true},
+	} {
+		encoded, err := json.Marshal(value)
+		if err != nil || !strings.Contains(string(encoded), `"externalPlayer":true`) {
+			t.Fatalf("%s omitted externalPlayer: json=%s err=%v", name, encoded, err)
+		}
 	}
 }
 

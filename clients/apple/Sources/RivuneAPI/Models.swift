@@ -971,6 +971,7 @@ public struct PlaybackSourceOption: Codable, Sendable, Equatable, Identifiable {
     public let description: String?
     public let filename: String?
     public let `protocol`: String
+    public let mode: PlaybackMode?
     public let container: String?
     public let expiresAt: String
 }

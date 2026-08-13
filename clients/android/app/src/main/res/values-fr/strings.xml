@@ -155,6 +155,10 @@
     <string name="viewer_resume_progress">Reprendre à %1$d min · %2$d min au total</string>
     <string name="viewer_minutes">%1$d min</string>
     <string name="viewer_choose_source">Choisir une source</string>
+    <string name="viewer_choose_player">Choisir un lecteur</string>
+    <string name="viewer_player_rivune">Lecteur Rivune</string>
+    <string name="viewer_player_rivune_body">Lire directement dans Rivune.</string>
+    <string name="viewer_player_external_body">Ouvrir dans cette application installée.</string>
     <string name="viewer_sources_partial">Certaines sources de lecture sont indisponibles. Les sources disponibles sont affichées.</string>
     <string name="viewer_sources_empty_title">Aucune source disponible</string>
     <string name="viewer_sources_empty_body">Réessayez plus tard ou choisissez un autre titre.</string>
@@ -171,6 +175,8 @@
     <string name="player_close">Fermer le lecteur</string>
     <string name="player_preparing">Préparation de la vidéo</string>
     <string name="player_buffering">Chargement de la vidéo</string>
+    <string name="player_external_opening">Ouverture de %1$s…</string>
+    <string name="player_external_waiting">Revenez dans Rivune à la fin de la lecture.</string>
     <string name="pin_title">Saisissez le PIN du profil</string>
     <string name="pin_body">Déverrouillez %1$s pour continuer.</string>
     <string name="pin_label">PIN</string>

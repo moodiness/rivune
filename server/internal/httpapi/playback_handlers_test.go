@@ -77,7 +77,7 @@ func (fake *fakePlaybackService) PurgeActivity(context.Context, auth.Principal) 
 	return playback.PurgeResult{}, fake.purgeActivityErr
 }
 
-func (fake *fakePlaybackService) ProxyAsset(w http.ResponseWriter, r *http.Request, _ string, _ string, _ string, _ string, _ string) error {
+func (fake *fakePlaybackService) ProxyAsset(w http.ResponseWriter, r *http.Request, _ string, _ string, _ string, _ string) error {
 	fake.proxyCalls++
 	if fake.proxy != nil {
 		return fake.proxy(w, r)
@@ -88,7 +88,7 @@ func (fake *fakePlaybackService) ProxyAsset(w http.ResponseWriter, r *http.Reque
 func TestPlaybackSourcesReturnsOpaqueReferences(t *testing.T) {
 	expiresAt := time.Now().UTC().Add(time.Hour)
 	service := &fakePlaybackService{sources: playback.SourceList{Sources: []playback.SourceOption{{
-		ID: "stream-1", SourceRef: "opaque-source-reference", Name: "Source", Protocol: "http", ExpiresAt: expiresAt,
+		ID: "stream-1", SourceRef: "opaque-source-reference", Name: "Source", Protocol: "external", Mode: "external", ExpiresAt: expiresAt,
 	}}}}
 	api := testAPI(&fakeInstanceService{})
 	api.auth = &fakeAuthService{principal: auth.Principal{SessionID: "session-id", UserID: "user-id"}}
@@ -105,7 +105,7 @@ func TestPlaybackSourcesReturnsOpaqueReferences(t *testing.T) {
 
 	api.Handler().ServeHTTP(response, request)
 
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"sourceRef":"opaque-source-reference"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"sourceRef":"opaque-source-reference"`) || !strings.Contains(response.Body.String(), `"mode":"external"`) {
 		t.Fatalf("unexpected sources response: status=%d body=%s", response.Code, response.Body.String())
 	}
 	if service.sourcesInput.AddonID != "11111111-1111-4111-8111-111111111111" ||
@@ -125,14 +125,14 @@ func TestPreparePlaybackUsesOpaqueReference(t *testing.T) {
 	api := testAPI(&fakeInstanceService{})
 	api.auth = &fakeAuthService{principal: auth.Principal{SessionID: "session-id", UserID: "user-id"}}
 	api.playback = service
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/prepare", stringsReader(`{"sourceRef":"opaque-source-reference"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/prepare", stringsReader(`{"sourceRef":"opaque-source-reference","externalPlayer":true}`))
 	request.Header.Set("Authorization", "Bearer access-token")
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(response, request)
 
-	if response.Code != http.StatusOK || service.prepareInput.SourceRef != "opaque-source-reference" || !strings.Contains(response.Body.String(), `"mode":"remux"`) {
+	if response.Code != http.StatusOK || service.prepareInput.SourceRef != "opaque-source-reference" || !service.prepareInput.ExternalPlayer || !strings.Contains(response.Body.String(), `"mode":"remux"`) {
 		t.Fatalf("unexpected preparation response: status=%d input=%+v body=%s", response.Code, service.prepareInput, response.Body.String())
 	}
 }
@@ -168,7 +168,8 @@ func TestResolvePlaybackCreatesSessionFromOpaqueReference(t *testing.T) {
 	api.playback = service
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/resolve", stringsReader(`{
 		"sourceRef":"opaque-source-reference",
-		"titleId":"11111111-1111-4111-8111-111111111111"
+		"titleId":"11111111-1111-4111-8111-111111111111",
+		"externalPlayer":true
 	}`))
 	request.Header.Set("Authorization", "Bearer access-token")
 	request.Header.Set("Content-Type", "application/json")
@@ -179,7 +180,7 @@ func TestResolvePlaybackCreatesSessionFromOpaqueReference(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("expected status 201, got %d: %s", response.Code, response.Body.String())
 	}
-	if service.resolveInput.SourceRef != "opaque-source-reference" || service.resolveInput.TitleID == "" {
+	if service.resolveInput.SourceRef != "opaque-source-reference" || service.resolveInput.TitleID == "" || !service.resolveInput.ExternalPlayer {
 		t.Fatalf("unexpected playback input: %+v", service.resolveInput)
 	}
 }

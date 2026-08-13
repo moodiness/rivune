@@ -97,6 +97,7 @@ type SourceOption struct {
 	Description    string    `json:"description,omitempty"`
 	Filename       string    `json:"filename,omitempty"`
 	Protocol       string    `json:"protocol"`
+	Mode           string    `json:"mode,omitempty"`
 	Container      string    `json:"container,omitempty"`
 	ExpiresAt      time.Time `json:"expiresAt"`
 	ReportedHeight int       `json:"-"`
@@ -115,6 +116,7 @@ type SourceList struct {
 type PrepareInput struct {
 	SourceRef        string  `json:"sourceRef"`
 	StartSeconds     float64 `json:"startSeconds,omitempty"`
+	ExternalPlayer   bool    `json:"externalPlayer,omitempty"`
 	AllowTranscoding bool    `json:"-"`
 	MaximumHeight    int     `json:"-"`
 }
@@ -136,6 +138,7 @@ type ResolveInput struct {
 	PreferredAudioTrack             *int         `json:"preferredAudioTrack,omitempty"`
 	PreferredSubtitleID             string       `json:"preferredSubtitleId,omitempty"`
 	StartSeconds                    float64      `json:"startSeconds,omitempty"`
+	ExternalPlayer                  bool         `json:"externalPlayer,omitempty"`
 	PreferredAudioLanguage          string       `json:"-"`
 	PreferredSubtitleLanguage       string       `json:"-"`
 	PreferredForcedSubtitleLanguage string       `json:"-"`

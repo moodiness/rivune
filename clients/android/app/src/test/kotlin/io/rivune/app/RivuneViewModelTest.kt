@@ -658,6 +658,172 @@ class RivuneViewModelTest {
     }
 
     @Test
+    fun externalPlayerHandoffHandlesCompletionAndLifecycleCleanup() = runTest(dispatcher) {
+        val viewerProfile = profile(hasPin = false)
+        val titleId = UUID.fromString("88888888-8888-4888-8888-888888888888")
+        val playbackId = UUID.fromString("99999999-9999-4999-8999-999999999999")
+        val addonId = UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        val externalPlayer = ExternalPlayerApp(
+            packageName = "org.example.player",
+            label = "Example Player",
+            videoMimeTypes = setOf("video/*"),
+            supportsMagnet = false,
+        )
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(viewerProfile, active = true),
+            collections = listOf(collection()),
+        )
+        gateway.resolvedTitle = io.rivune.api.TitleReference(
+            titleId,
+            io.rivune.api.TitleMediaType.MOVIE,
+            "imdb",
+            "tt1234567",
+            "tt1234567",
+            "Film",
+        )
+        gateway.movieResult = io.rivune.api.Movie(
+            titleId,
+            io.rivune.api.MediaType.MOVIE,
+            "Film",
+            "Film",
+            "en",
+            "Overview",
+            "2026-08-12",
+            genres = emptyList(),
+            cast = emptyList(),
+            voteAverage = 8.0,
+            voteCount = 10,
+            externalIds = mapOf("imdb" to "tt1234567"),
+        )
+        gateway.progress = io.rivune.api.PlaybackProgress(
+            titleId,
+            io.rivune.api.PlaybackProgressMediaType.MOVIE,
+            120,
+            3_600,
+            false,
+            3,
+            "2026-08-12T00:00:00Z",
+            "2026-08-12T00:00:00Z",
+        )
+        val source = io.rivune.api.PlaybackSourceOption(
+            "source",
+            "ref",
+            addonId,
+            manifestId = "addon",
+            streamIndex = 0,
+            name = "Direct",
+            protocol = "http",
+            mode = io.rivune.api.PlaybackMode.DIRECT,
+            expiresAt = "2099-01-01T00:00:00Z",
+        )
+        gateway.sourceList = io.rivune.api.PlaybackSourceList(listOf(source), emptyList())
+        gateway.preparation = io.rivune.api.PlaybackPreparation(
+            "ref",
+            io.rivune.api.PlaybackMode.DIRECT,
+            "http",
+            subtitleCount = 0,
+            expiresAt = "2099-01-01T00:00:00Z",
+        )
+        gateway.playbackSession = io.rivune.api.PlaybackSession(
+            playbackId,
+            "source",
+            sources = listOf(
+                io.rivune.api.PlaybackSource(
+                    "source",
+                    addonId,
+                    "addon",
+                    mode = io.rivune.api.PlaybackMode.DIRECT,
+                    url = "https://media.example.com/stream.m3u8",
+                    protocol = "hls",
+                    container = "ts",
+                    compatible = true,
+                    media = io.rivune.api.PlaybackMediaInspection(durationSeconds = 3_600.0),
+                ),
+            ),
+            subtitles = emptyList(),
+            providerErrors = emptyList(),
+            expiresAt = "2099-01-01T00:00:00Z",
+        )
+        val support = ExternalPlaybackSupport(
+            listOf(
+                externalPlayer,
+                ExternalPlayerApp("org.example.torrent", "Torrent", emptySet(), supportsMagnet = true),
+            ),
+        )
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway, externalPlaybackSupport = support)
+        advanceUntilIdle()
+
+        viewModel.openMedia(MediaTarget("tt1234567", "movie", "Film"))
+        advanceUntilIdle()
+        viewModel.playMedia()
+        advanceUntilIdle()
+
+        assertEquals(listOf(EXTERNAL_VIDEO_CAPABILITY, EXTERNAL_MAGNET_CAPABILITY), gateway.lastPlaybackCapabilities?.externalPlayers)
+        assertEquals(listOf("org.example.player", "org.example.torrent"), viewModel.state.value.externalPlayers.map { it.packageName })
+        assertNotNull(viewModel.state.value.viewer.sourcePicker)
+        assertNull(viewModel.state.value.viewer.player)
+
+        viewModel.choosePlaybackSource(source, externalPlayer)
+        advanceUntilIdle()
+
+        assertTrue(gateway.preparedForExternalPlayer)
+        assertTrue(gateway.resolvedForExternalPlayer)
+        assertEquals(externalPlayer, viewModel.state.value.viewer.player?.externalPlayer)
+        assertEquals("ts", viewModel.state.value.viewer.player?.container)
+        assertEquals(3_600, viewModel.state.value.viewer.player?.durationSeconds)
+
+        viewModel.externalPlaybackFinished(ExternalPlaybackResult(null, null, completed = true))
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.viewer.player)
+        assertEquals(3_600, gateway.progressUpdates.single().positionSeconds)
+        assertEquals(3_600, gateway.progressUpdates.single().durationSeconds)
+        assertTrue(gateway.progressUpdates.single().completed)
+        assertEquals(playbackId, gateway.stoppedPlayback)
+        assertEquals(3_600, viewModel.state.value.viewer.detail?.progress?.positionSeconds)
+        assertTrue(viewModel.state.value.viewer.detail?.progress?.completed == true)
+
+        val firstPlayback = requireNotNull(gateway.playbackSession)
+        val unknownDurationPlaybackId = UUID.fromString("77777777-7777-4777-8777-777777777777")
+        gateway.progress = null
+        gateway.playbackSession = firstPlayback.copy(
+            id = unknownDurationPlaybackId,
+            sources = firstPlayback.sources.map { it.copy(media = null) },
+        )
+        viewModel.openMedia(MediaTarget("tt1234567", "movie", "Film"))
+        advanceUntilIdle()
+        viewModel.playMedia()
+        advanceUntilIdle()
+        viewModel.choosePlaybackSource(source, externalPlayer)
+        advanceUntilIdle()
+        assertEquals(0, viewModel.state.value.viewer.player?.durationSeconds)
+
+        viewModel.externalPlaybackFinished(ExternalPlaybackResult(null, null, completed = true))
+        advanceUntilIdle()
+
+        assertEquals(listOf(titleId to 0L), gateway.watchedRequests)
+        assertEquals(unknownDurationPlaybackId, gateway.stoppedPlayback)
+        assertTrue(viewModel.state.value.viewer.detail?.progress?.completed == true)
+
+        val lifecyclePlaybackId = UUID.fromString("66666666-6666-4666-8666-666666666666")
+        gateway.playbackSession = firstPlayback.copy(id = lifecyclePlaybackId)
+        viewModel.openMedia(MediaTarget("tt1234567", "movie", "Film"))
+        advanceUntilIdle()
+        viewModel.playMedia()
+        advanceUntilIdle()
+        viewModel.choosePlaybackSource(source, externalPlayer)
+        advanceUntilIdle()
+
+        viewModel.externalPlaybackFinished(null)
+        viewModel.viewModelScope.cancel()
+        advanceUntilIdle()
+
+        assertEquals(lifecyclePlaybackId, gateway.stoppedPlayback)
+        assertEquals(3, gateway.stopPlaybackCalls)
+    }
+
+    @Test
     fun invalidResolvedPlaybackSessionIsStoppedAndKeepsSourcePicker() = runTest(dispatcher) {
         val viewerProfile = profile(hasPin = false)
         val targetId = UUID.fromString("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
@@ -774,8 +940,15 @@ class RivuneViewModelTest {
         store: FakeServerStore,
         gateway: FakeGateway,
         isTv: Boolean = false,
-    ) = RivuneViewModel(store, RivuneGatewayFactory { gateway }, isTv, "Test device", CoroutineScope(dispatcher))
-        .also(viewModels::add)
+        externalPlaybackSupport: ExternalPlaybackSupport = ExternalPlaybackSupport(),
+    ) = RivuneViewModel(
+        store,
+        RivuneGatewayFactory { gateway },
+        isTv,
+        "Test device",
+        CoroutineScope(dispatcher),
+        externalPlaybackSupportProvider = { externalPlaybackSupport },
+    ).also(viewModels::add)
 }
 
 private class FakeServerStore(initial: String? = null) : ServerAddressStore {
@@ -817,6 +990,9 @@ private class FakeGateway(
     var progress: io.rivune.api.PlaybackProgress? = null
     var sourceList: io.rivune.api.PlaybackSourceList? = null
     val playbackEvents = mutableListOf<String>()
+    var lastPlaybackCapabilities: io.rivune.api.PlaybackCapabilities? = null
+    var preparedForExternalPlayer = false
+    var resolvedForExternalPlayer = false
     var preparation: io.rivune.api.PlaybackPreparation? = null
     var playbackSession: io.rivune.api.PlaybackSession? = null
     var calendarEvents = emptyList<io.rivune.api.CalendarEvent>()
@@ -828,6 +1004,7 @@ private class FakeGateway(
     var progressByTitle = mutableMapOf<UUID, io.rivune.api.PlaybackProgress>()
     val watchedBatchRequests = mutableListOf<List<io.rivune.api.SetWatchedBatchItem>>()
     var watchedBatchFailureAtRequest: Int? = null
+    val watchedRequests = mutableListOf<Pair<UUID, Long>>()
     var seasonDelayMillis: Long = 0
     var profileAvatars = emptyMap<UUID, ByteArray>()
     var effectiveSettingsResult = io.rivune.api.EffectiveSettings(
@@ -909,7 +1086,26 @@ private class FakeGateway(
             },
         )
     }
-    override suspend fun markTitleWatched(titleId: UUID, expectedVersion: Long) = requireNotNull(progress).copy(completed = true, version = expectedVersion + 1)
+    override suspend fun markTitleWatched(titleId: UUID, expectedVersion: Long): io.rivune.api.PlaybackProgress {
+        watchedRequests += titleId to expectedVersion
+        val current = progressByTitle[titleId] ?: progress?.takeIf { it.titleId == titleId }
+        val updated = (current ?: io.rivune.api.PlaybackProgress(
+            titleId = titleId,
+            mediaType = io.rivune.api.PlaybackProgressMediaType.MOVIE,
+            positionSeconds = 0,
+            durationSeconds = 0,
+            completed = false,
+            version = 0,
+            lastWatchedAt = "2026-08-12T00:00:00Z",
+            updatedAt = "2026-08-12T00:00:00Z",
+        )).copy(
+            positionSeconds = current?.durationSeconds ?: 0,
+            completed = true,
+            version = expectedVersion + 1,
+        )
+        progressByTitle[titleId] = updated
+        return updated
+    }
     override suspend fun markTitleUnwatched(titleId: UUID, expectedVersion: Long) = requireNotNull(progress).copy(completed = false, version = expectedVersion + 1)
     override suspend fun effectiveProfileSettings(id: UUID) = effectiveSettingsResult
     override suspend fun updateProfileSettings(
@@ -928,9 +1124,18 @@ private class FakeGateway(
         effectiveSettingsResult = effectiveSettingsResult.copy(settings = updated)
         return io.rivune.api.SettingsLayer(1, updated)
     }
-    override suspend fun playbackSources(mediaType: String, resourceId: String, capabilities: io.rivune.api.PlaybackCapabilities, addonId: UUID?) = requireNotNull(sourceList)
-    override suspend fun preparePlayback(sourceRef: String, startSeconds: Int?) = requireNotNull(preparation)
-    override suspend fun resolvePlayback(sourceRef: String, titleId: String?, startSeconds: Int?) = requireNotNull(playbackSession)
+    override suspend fun playbackSources(mediaType: String, resourceId: String, capabilities: io.rivune.api.PlaybackCapabilities, addonId: UUID?): io.rivune.api.PlaybackSourceList {
+        lastPlaybackCapabilities = capabilities
+        return requireNotNull(sourceList)
+    }
+    override suspend fun preparePlayback(sourceRef: String, startSeconds: Int?, externalPlayer: Boolean): io.rivune.api.PlaybackPreparation {
+        preparedForExternalPlayer = externalPlayer
+        return requireNotNull(preparation)
+    }
+    override suspend fun resolvePlayback(sourceRef: String, titleId: String?, startSeconds: Int?, externalPlayer: Boolean): io.rivune.api.PlaybackSession {
+        resolvedForExternalPlayer = externalPlayer
+        return requireNotNull(playbackSession)
+    }
     override suspend fun stopPlayback(sessionId: UUID) {
         stoppedPlayback = sessionId
         stopPlaybackCalls += 1

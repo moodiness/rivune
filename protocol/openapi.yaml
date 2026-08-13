@@ -3399,7 +3399,7 @@ paths:
     post:
       summary: Create a playback session from an opaque source reference
       operationId: resolvePlayback
-      description: Reuses the cached preparation for a session-bound source reference and creates a short-lived playback session. It does not refetch stream resources. Web media URLs and private headers remain server-side; mode=external returns the authorized provider handoff URL for the selected external player.
+      description: Refreshes the session-bound source reference, reuses a compatible cached preparation when available, and creates a short-lived playback session. Provider media URLs and private headers remain server-side; clients receive revocable same-server asset URLs for HTTP(S) sources.
       security:
         - bearerAuth: []
       requestBody:
@@ -3524,17 +3524,12 @@ paths:
           type: string
           minLength: 1
           maxLength: 64
-      - name: target
+      - name: child
         in: query
-        description: Server-generated signed HLS child resource URL. Clients follow this value but must not construct it.
+        description: Server-generated opaque capability for a nested HLS resource. Clients follow this value but must not inspect or construct it.
         schema:
           type: string
-          format: uri
-      - name: signature
-        in: query
-        description: Server-generated HMAC for target.
-        schema:
-          type: string
+          maxLength: 12288
     get:
       summary: Stream a playback asset
       operationId: streamPlaybackAsset
@@ -8685,6 +8680,9 @@ components:
         preferredSubtitleId:
           type: string
           maxLength: 128
+        externalPlayer:
+          description: When true, preserve the original source for handoff to an installed player without server media conversion.
+          type: boolean
         startSeconds:
           description: Whole-second playback offset applied to processed media.
           type: integer
@@ -8736,6 +8734,8 @@ components:
           type: string
         protocol:
           type: string
+        mode:
+          $ref: "#/components/schemas/PlaybackMode"
         container:
           type: string
         expiresAt:
@@ -8755,6 +8755,12 @@ components:
           type: integer
           minimum: 0
           maximum: 604800
+        externalPlayer:
+          description: When true, preserve the original source for handoff to an installed player without server media conversion.
+          type: boolean
+    PlaybackMode:
+      type: string
+      enum: [direct, remux, transcode_audio, transcode, youtube, external]
     PlaybackPreparation:
       type: object
       additionalProperties: false
@@ -8765,8 +8771,7 @@ components:
           minLength: 16
           maxLength: 128
         mode:
-          type: string
-          enum: [direct, remux, transcode_audio, transcode, youtube, external]
+          $ref: "#/components/schemas/PlaybackMode"
         protocol:
           type: string
         decision:
@@ -8914,6 +8919,7 @@ components:
             minLength: 1
             maxLength: 64
         externalPlayers:
+          description: External handoff transports supported by the client. `android_intent` announces an installed HTTP(S) media handler; `system` and `android_magnet` accept valid BitTorrent info hashes. Package names stay local to the client.
           type: array
           maxItems: 32
           uniqueItems: true
@@ -8986,6 +8992,7 @@ components:
         expiresAt:
           type: string
           format: date-time
+          description: Initial expiration. Successful asset requests extend an active session while its authorization and profile grant remain valid; idle sessions still expire.
     PlaybackActivity:
       type: object
       additionalProperties: false
@@ -9302,7 +9309,7 @@ components:
           $ref: "#/components/schemas/PlaybackDecision"
         url:
           type: string
-          description: Same-server playback asset URL containing a short-lived opaque token, except mode=external where this is the authorized provider handoff URL.
+          description: Same-server playback asset URL containing a short-lived opaque token. Provider URLs and private request headers remain server-side.
         ytId:
           type: string
         infoHash:
