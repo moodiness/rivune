@@ -544,7 +544,7 @@ func TestNormalizeStreamsTreatsProxiedWebReadyContainerAsCompatible(t *testing.T
 	}
 }
 
-func TestNormalizeStreamsProxiesMediaExternalURLAndKeepsWebHandoffExternal(t *testing.T) {
+func TestNormalizeStreamsProxiesMediaExternalURLAndDropsWebHandoff(t *testing.T) {
 	batch := addon.ResourceBatch{Results: []addon.ResourceResult{{
 		AddonID: "addon-id", ManifestID: "manifest-id",
 		Payload: []byte(`{"streams":[
@@ -559,14 +559,47 @@ func TestNormalizeStreamsProxiesMediaExternalURLAndKeepsWebHandoffExternal(t *te
 	if err != nil {
 		t.Fatalf("normalize streams: %v", err)
 	}
-	if len(sources) != 2 || sources[0].Name != "Downloadable MKV" || sources[0].Mode != "direct" || !sources[0].Compatible || sources[0].Container != "mkv" {
+	if len(sources) != 1 || sources[0].Name != "Downloadable MKV" || sources[0].Mode != "direct" || !sources[0].Compatible || sources[0].Container != "mkv" {
 		t.Fatalf("media external URL was not promoted to native playback: %+v", sources)
 	}
-	if sources[1].Name != "Provider page" || sources[1].Mode != "external" || !sources[1].Compatible || sources[1].Container != "" {
-		t.Fatalf("web handoff did not remain external: %+v", sources)
-	}
-	if len(assets) != 2 || assets[0].URL != "https://media.example/movie.mkv" || assets[0].Container != "mkv" {
+	if len(assets) != 1 || assets[0].URL != "https://media.example/movie.mkv" || assets[0].Container != "mkv" {
 		t.Fatalf("promoted media asset was not retained for the playback proxy: %+v", assets)
+	}
+}
+
+func TestNormalizeStreamsIntersectsExternalHandoffTransport(t *testing.T) {
+	batch := addon.ResourceBatch{Results: []addon.ResourceResult{{
+		AddonID: "addon-id", ManifestID: "manifest-id",
+		Payload: []byte(`{"streams":[{"name":"Intent","externalUrl":"https://provider.example/watch"},{"name":"Intent Media","externalUrl":"https://provider.example/movie.mkv"},{"name":"Magnet","infoHash":"0123456789abcdef0123456789abcdef01234567"},{"name":"Invalid Magnet","infoHash":"0123456789abcdef"}]}`),
+	}}}
+	tests := []struct {
+		name    string
+		players []string
+		want    map[string]string
+	}{
+		{name: "legacy", players: []string{"system"}, want: map[string]string{"Intent Media": "direct", "Magnet": "external"}},
+		{name: "android intent", players: []string{"android_intent"}, want: map[string]string{"Intent Media": "direct"}},
+		{name: "android magnet", players: []string{"android_magnet"}, want: map[string]string{"Intent Media": "direct", "Magnet": "external"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sources, _, err := normalizeStreams(batch, Capabilities{ExternalPlayers: test.players})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := make(map[string]string, len(sources))
+			for index := range sources {
+				got[sources[index].Name] = sources[index].Mode
+			}
+			if len(got) != len(test.want) {
+				t.Fatalf("sources = %+v, want %+v", got, test.want)
+			}
+			for name, mode := range test.want {
+				if got[name] != mode {
+					t.Fatalf("sources = %+v, want %+v", got, test.want)
+				}
+			}
+		})
 	}
 }
 
@@ -731,6 +764,36 @@ func TestTargetSignatureUsesOpaqueServerKey(t *testing.T) {
 	}
 	if service.validTargetSignature("session-2", assetID, target, signature) {
 		t.Fatal("target signature was reusable across playback sessions")
+	}
+}
+
+func TestTargetCapabilityConcealsAndBindsProviderURL(t *testing.T) {
+	var capabilityKey [32]byte
+	copy(capabilityKey[:], "server-only-capability-key")
+	service := Service{targetCapabilityKey: capabilityKey}
+	const target = "https://provider.example/private/segment.ts?provider_token=secret"
+
+	capability, err := service.sealTargetCapability("session-1", "stream-1", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(capability, "provider") || strings.Contains(capability, "secret") {
+		t.Fatalf("target capability exposed provider URL: %s", capability)
+	}
+	opened, err := service.openTargetCapability("session-1", "stream-1", capability)
+	if err != nil || opened != target {
+		t.Fatalf("opened target = %q, err = %v", opened, err)
+	}
+	if _, err := service.openTargetCapability("session-2", "stream-1", capability); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("cross-session capability error = %v", err)
+	}
+	if _, err := service.openTargetCapability("session-1", "stream-2", capability); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("cross-asset capability error = %v", err)
+	}
+
+	childURL := assetURL("session-1", "stream-1", "playback-token", capability)
+	if strings.Contains(childURL, "provider.example") || strings.Contains(childURL, "provider_token") || strings.Contains(childURL, "target=") || strings.Contains(childURL, "signature=") {
+		t.Fatalf("child URL exposed provider state: %s", childURL)
 	}
 }
 
@@ -1257,13 +1320,15 @@ func TestCompactMediaProfileListsPreserveContainerAndAudioMembership(t *testing.
 	}
 }
 
-func TestSessionSourceURLPreservesAuthorizedExternalHandoff(t *testing.T) {
-	const externalURL = "https://external.example/watch?token=opaque"
-	if got := sessionSourceURL(Source{ID: "external-1", Mode: "external", URL: externalURL}, nil, "session-id", "session-token"); got != externalURL {
-		t.Fatalf("external player URL was rewritten through the media proxy: %q", got)
-	}
-	if got := sessionSourceURL(Source{ID: "direct-1", Mode: "direct", URL: "https://media.example/movie.mp4"}, nil, "session-id", "session-token"); got == "https://media.example/movie.mp4" || !strings.HasPrefix(got, "/api/v1/playback/sessions/") {
-		t.Fatalf("web media URL was not protected by the session proxy: %q", got)
+func TestSessionSourceURLProxiesExternalAndDirectMediaTargets(t *testing.T) {
+	for name, source := range map[string]Source{
+		"external handoff": {ID: "external-1", Mode: "external", URL: "https://external.example/watch?token=opaque"},
+		"direct media":     {ID: "direct-1", Mode: "direct", URL: "https://media.example/movie.mp4", Compatible: true},
+	} {
+		got := sessionSourceURL(source, nil, "session-id", "session-token")
+		if got == source.URL || !strings.HasPrefix(got, "/api/v1/playback/sessions/") {
+			t.Fatalf("%s URL was not protected by the session proxy: %q", name, got)
+		}
 	}
 }
 

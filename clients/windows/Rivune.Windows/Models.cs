@@ -569,6 +569,7 @@ public sealed record PlaybackSourceOption
     public string? Description { get; init; }
     public string? Filename { get; init; }
     public required string Protocol { get; init; }
+    public PlaybackMode? Mode { get; init; }
     public string? Container { get; init; }
     public required string ExpiresAt { get; init; }
 }

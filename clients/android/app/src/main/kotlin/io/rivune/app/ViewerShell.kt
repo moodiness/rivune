@@ -141,13 +141,23 @@ internal fun ViewerShell(
     when {
         viewer.player != null -> {
             BackHandler(onBack = viewModel::closePlayer)
-            RivunePlayerScreen(
-                presentation = viewer.player,
-                isTv = state.isTv,
-                onProgress = viewModel::reportPlayerProgress,
-                onClose = viewModel::closePlayer,
-                onPlaybackError = viewModel::playerFailed,
-            )
+            if (viewer.player.externalPlayer == null) {
+                RivunePlayerScreen(
+                    presentation = viewer.player,
+                    isTv = state.isTv,
+                    onProgress = viewModel::reportPlayerProgress,
+                    onClose = viewModel::closePlayer,
+                    onPlaybackError = viewModel::playerFailed,
+                )
+            } else {
+                RivuneExternalPlayerScreen(
+                    presentation = viewer.player,
+                    isTv = state.isTv,
+                    onResult = viewModel::externalPlaybackFinished,
+                    onClose = viewModel::closePlayer,
+                    onLaunchFailure = viewModel::playerFailed,
+                )
+            }
         }
         viewer.preferences != null -> {
             BackHandler(onBack = viewModel::closeProfilePreferences)
@@ -173,6 +183,7 @@ internal fun ViewerShell(
                 onPlay = { viewModel.playMedia() },
                 onToggleLibrary = viewModel::toggleLibrary,
                 onToggleWatched = viewModel::toggleWatched,
+                externalPlayers = state.externalPlayers,
                 onChooseSource = viewModel::choosePlaybackSource,
                 onDismissSources = viewModel::dismissSourcePicker,
                 onRetry = viewModel::refreshViewer,
@@ -1213,7 +1224,8 @@ private fun DetailScreen(
     onPlay: () -> Unit,
     onToggleLibrary: () -> Unit,
     onToggleWatched: () -> Unit,
-    onChooseSource: (PlaybackSourceOption) -> Unit,
+    externalPlayers: List<ExternalPlayerApp>,
+    onChooseSource: (PlaybackSourceOption, ExternalPlayerApp?) -> Unit,
     onDismissSources: () -> Unit,
     onRetry: () -> Unit,
 ) {
@@ -1354,6 +1366,7 @@ private fun DetailScreen(
         SourcePickerDialog(
             picker = picker,
             isTv = isTv,
+            externalPlayers = externalPlayers,
             loading = state.loading == ViewerLoading.SOURCES || state.loading == ViewerLoading.PLAYER,
             failure = state.inlineFailure,
             onDismiss = onDismissSources,
@@ -1454,13 +1467,21 @@ private fun DetailSummary(
 private fun SourcePickerDialog(
     picker: SourcePickerState,
     isTv: Boolean,
+    externalPlayers: List<ExternalPlayerApp>,
     loading: Boolean,
     failure: UiFailure?,
     onDismiss: () -> Unit,
     onRetry: () -> Unit,
-    onChoose: (PlaybackSourceOption) -> Unit,
+    onChoose: (PlaybackSourceOption, ExternalPlayerApp?) -> Unit,
 ) {
     val firstSourceFocus = remember { FocusRequester() }
+    var targetSource by remember(picker.options) { mutableStateOf<PlaybackSourceOption?>(null) }
+    val targetPlayers = remember(targetSource, externalPlayers) {
+        targetSource?.let { source ->
+            ExternalPlaybackSupport(externalPlayers)
+                .playersFor(source.mode, source.protocol, source.container)
+        }.orEmpty()
+    }
     LaunchedEffect(isTv, picker.options.firstOrNull()?.id) {
         if (isTv && picker.options.isNotEmpty()) firstSourceFocus.requestFocus()
     }
@@ -1515,7 +1536,11 @@ private fun SourcePickerDialog(
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(RivuneSpacing.xs)) {
                         items(picker.options, key = { it.id }) { option ->
                             RivuneFocusSurface(
-                                onClick = { onChoose(option) },
+                                onClick = {
+                                    val players = ExternalPlaybackSupport(externalPlayers)
+                                        .playersFor(option.mode, option.protocol, option.container)
+                                    if (players.isEmpty()) onChoose(option, null) else targetSource = option
+                                },
                                 isTv = isTv,
                                 enabled = !loading,
                                 modifier = Modifier
@@ -1545,6 +1570,116 @@ private fun SourcePickerDialog(
                     }
                 }
             }
+        }
+    }
+    targetSource?.let { source ->
+        PlaybackTargetDialog(
+            source = source,
+            players = targetPlayers,
+            isTv = isTv,
+            onDismiss = { targetSource = null },
+            onChoose = { player ->
+                targetSource = null
+                onChoose(source, player)
+            },
+        )
+    }
+}
+
+@Composable
+private fun PlaybackTargetDialog(
+    source: PlaybackSourceOption,
+    players: List<ExternalPlayerApp>,
+    isTv: Boolean,
+    onDismiss: () -> Unit,
+    onChoose: (ExternalPlayerApp?) -> Unit,
+) {
+    val firstTargetFocus = remember { FocusRequester() }
+    LaunchedEffect(isTv, source.id, players.size) {
+        if (isTv && (source.mode != io.rivune.api.PlaybackMode.EXTERNAL || players.isNotEmpty())) {
+            firstTargetFocus.requestFocus()
+        }
+    }
+    BackHandler(onBack = onDismiss)
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth(if (isTv) 0.58f else 0.88f)
+                .widthIn(max = RivuneDimensions.contentMax),
+            shape = RivuneShapes.large,
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = RivuneElevation.overlay,
+        ) {
+            Column(
+                modifier = Modifier.padding(if (isTv) RivuneSpacing.xxl else RivuneSpacing.lg),
+                verticalArrangement = Arrangement.spacedBy(RivuneSpacing.xs),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            stringResource(R.string.viewer_choose_player),
+                            modifier = Modifier.semantics { heading() },
+                            style = MaterialTheme.typography.headlineMedium,
+                        )
+                        Text(
+                            source.name,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    RivuneTextButton(label = stringResource(R.string.pin_cancel), onClick = onDismiss, isTv = isTv)
+                }
+                Spacer(Modifier.height(RivuneSpacing.sm))
+                if (source.mode != io.rivune.api.PlaybackMode.EXTERNAL) {
+                    PlaybackTargetRow(
+                        label = stringResource(R.string.viewer_player_rivune),
+                        supporting = stringResource(R.string.viewer_player_rivune_body),
+                        isTv = isTv,
+                        onClick = { onChoose(null) },
+                        modifier = Modifier.focusRequester(firstTargetFocus),
+                    )
+                }
+                players.forEachIndexed { index, player ->
+                    PlaybackTargetRow(
+                        label = player.label,
+                        supporting = stringResource(R.string.viewer_player_external_body),
+                        isTv = isTv,
+                        onClick = { onChoose(player) },
+                        modifier = if (source.mode == io.rivune.api.PlaybackMode.EXTERNAL && index == 0) {
+                            Modifier.focusRequester(firstTargetFocus)
+                        } else {
+                            Modifier
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlaybackTargetRow(
+    label: String,
+    supporting: String,
+    isTv: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    RivuneFocusSurface(
+        onClick = onClick,
+        isTv = isTv,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(RivuneSpacing.md)) {
+            Text(label, style = MaterialTheme.typography.titleMedium)
+            Text(
+                supporting,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+            )
         }
     }
 }

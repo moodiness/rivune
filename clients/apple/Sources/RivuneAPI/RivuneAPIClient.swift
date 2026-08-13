@@ -356,6 +356,7 @@ private struct PlaybackSourcesRequest: Encodable {
 private struct PlaybackPrepareRequest: Encodable {
     let sourceRef: String
     let startSeconds: Int?
+    let externalPlayer: Bool?
 }
 private struct PlaybackResolveRequest: Encodable {
     let sourceRef: String
@@ -363,6 +364,7 @@ private struct PlaybackResolveRequest: Encodable {
     let preferredAudioTrack: Int?
     let preferredSubtitleId: String?
     let startSeconds: Int?
+    let externalPlayer: Bool?
 }
 
 private struct RefreshOperation {
@@ -745,8 +747,8 @@ public actor RivuneAPIClient {
         )
     }
 
-    public func preparePlayback(sourceRef: String, startSeconds: Int? = nil) async throws -> PlaybackPreparation {
-        try await request("playback/prepare", method: "POST", body: PlaybackPrepareRequest(sourceRef: sourceRef, startSeconds: startSeconds), authenticated: true)
+    public func preparePlayback(sourceRef: String, startSeconds: Int? = nil, externalPlayer: Bool = false) async throws -> PlaybackPreparation {
+        try await request("playback/prepare", method: "POST", body: PlaybackPrepareRequest(sourceRef: sourceRef, startSeconds: startSeconds, externalPlayer: externalPlayer ? true : nil), authenticated: true)
     }
 
     public func resolvePlayback(
@@ -754,7 +756,8 @@ public actor RivuneAPIClient {
         titleId: String? = nil,
         preferredAudioTrack: Int? = nil,
         preferredSubtitleId: String? = nil,
-        startSeconds: Int? = nil
+        startSeconds: Int? = nil,
+        externalPlayer: Bool = false
     ) async throws -> PlaybackSession {
         try await request(
             "playback/resolve",
@@ -764,7 +767,8 @@ public actor RivuneAPIClient {
                 titleId: titleId,
                 preferredAudioTrack: preferredAudioTrack,
                 preferredSubtitleId: preferredSubtitleId,
-                startSeconds: startSeconds
+                startSeconds: startSeconds,
+                externalPlayer: externalPlayer ? true : nil
             ),
             authenticated: true
         )

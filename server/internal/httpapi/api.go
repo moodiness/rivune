@@ -229,7 +229,7 @@ type playbackService interface {
 	Activity(context.Context, auth.Principal) (playback.Activity, error)
 	StopActivitySession(context.Context, auth.Principal, string) error
 	PurgeActivity(context.Context, auth.Principal) (playback.PurgeResult, error)
-	ProxyAsset(http.ResponseWriter, *http.Request, string, string, string, string, string) error
+	ProxyAsset(http.ResponseWriter, *http.Request, string, string, string, string) error
 }
 
 type operationsService interface {

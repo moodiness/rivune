@@ -71,7 +71,8 @@ public sealed class PlaybackProgressContractsTests
 
         await client.GetSeriesAsync(TitleId, SeriesMappingProvider.Tvdb, "fr", "9876543210", cancellationToken);
         await client.GetPlaybackMarkersAsync("tt1234567", 2, 9, cancellationToken);
-        await client.GetPlaybackSourcesAsync("movie", "resource/1", capabilities, AddonId, cancellationToken);
+        var sourceList = await client.GetPlaybackSourcesAsync("movie", "resource/1", capabilities, AddonId, cancellationToken);
+        Assert.Equal(PlaybackMode.External, Assert.Single(sourceList.Sources).Mode.GetValueOrDefault());
         await client.GetPlaybackProgressAsync(TitleId, cancellationToken);
         await client.GetPlaybackProgressBatchAsync([TitleId], cancellationToken);
         await client.UpdatePlaybackProgressAsync(
@@ -172,6 +173,26 @@ public sealed class PlaybackProgressContractsTests
                 JsonOptions));
     }
 
+    [Fact]
+    public async Task ExternalPlaybackTargetIsOptionalAndEncodesOnlyWhenTrue()
+    {
+        var handler = new ContractHandler();
+        using var client = CreateClient(handler);
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        await client.PreparePlaybackAsync("opaque-source-reference", cancellationToken: cancellationToken);
+        await client.PreparePlaybackAsync("opaque-source-reference", cancellationToken: cancellationToken, externalPlayer: true);
+        await client.ResolvePlaybackAsync("opaque-source-reference", cancellationToken: cancellationToken, externalPlayer: true);
+
+        var requests = handler.Requests.Where(item => item.Path is "/api/v1/playback/prepare" or "/api/v1/playback/resolve").ToArray();
+        using var defaultBody = JsonDocument.Parse(requests[0].Body!);
+        using var prepareBody = JsonDocument.Parse(requests[1].Body!);
+        using var resolveBody = JsonDocument.Parse(requests[2].Body!);
+        Assert.False(defaultBody.RootElement.TryGetProperty("externalPlayer", out _));
+        Assert.True(prepareBody.RootElement.GetProperty("externalPlayer").GetBoolean());
+        Assert.True(resolveBody.RootElement.GetProperty("externalPlayer").GetBoolean());
+    }
+
     private static CapturedRequest AssertRequest(
         ContractHandler handler,
         HttpMethod method,
@@ -217,7 +238,9 @@ public sealed class PlaybackProgressContractsTests
             {
                 "/api/v1/metadata/series/11111111-1111-4111-8111-111111111111" => JsonResponse("""{"id":"11111111-1111-4111-8111-111111111111","mediaType":"series","name":"Series","originalName":"Series","originalLanguage":"en","overview":"","genres":[],"cast":[],"voteAverage":0,"voteCount":0,"seasons":[],"aliases":[],"episodeOrders":[],"selectedEpisodeOrderId":"9876543210","mappingProvider":"tvdb","externalIds":{}}"""),
                 "/api/v1/playback/markers" => JsonResponse("""{"markers":[{"type":"intro","startSeconds":1.5,"endSeconds":2.5,"confidence":1,"submissionCount":1}]}"""),
-                "/api/v1/playback/sources" => JsonResponse("""{"sources":[],"providerErrors":[]}"""),
+                "/api/v1/playback/sources" => JsonResponse("""{"sources":[{"id":"stream-1","sourceRef":"opaque-source-reference","addonId":"22222222-2222-4222-8222-222222222222","manifestId":"manifest","streamIndex":0,"name":"External","protocol":"external","mode":"external","expiresAt":"2099-01-01T00:00:00Z"}],"providerErrors":[]}"""),
+                "/api/v1/playback/prepare" => JsonResponse("""{"sourceRef":"opaque-source-reference","mode":"direct","protocol":"http","subtitleCount":0,"expiresAt":"2099-01-01T00:00:00Z"}"""),
+                "/api/v1/playback/resolve" => JsonResponse("""{"id":"44444444-4444-4444-8444-444444444444","selectedSourceId":"stream-1","sources":[],"subtitles":[],"providerErrors":[],"expiresAt":"2099-01-01T00:00:00Z"}"""),
                 "/api/v1/progress/batch" => JsonResponse("""{"items":[{"titleId":"11111111-1111-4111-8111-111111111111","progress":null}]}"""),
                 "/api/v1/titles/watched/batch" => JsonResponse($$"""{"items":[{"titleId":"{{TitleId:D}}","progress":{{ProgressJson(5)}}}]}"""),
                 "/api/v1/continue-watching" => JsonResponse("""{"items":[]}"""),

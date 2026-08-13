@@ -4,7 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -35,6 +38,7 @@ const (
 	maximumDirectStreamsPerOwner  = 4
 	maximumDirectStreamsPerHost   = 16
 	directStreamReadIdleTimeout   = 45 * time.Second
+	maximumTargetCapabilityLength = 12 * 1024
 )
 
 type directStreamAdmission struct {
@@ -198,7 +202,8 @@ var playlistURIAttribute = regexp.MustCompile(`[,:][ \t]*[A-Z0-9-]*URI="([^"]+)"
 const maximumPlaybackStartSeconds = 7 * 24 * 60 * 60
 const proxyAssetSessionSQL = `
 	UPDATE playback_sessions playback
-	SET last_seen_at = now()
+	SET last_seen_at = now(),
+		expires_at = GREATEST(playback.expires_at, now() + $4::interval)
 	FROM auth_sessions session
 	WHERE playback.id::text = $1
 	  AND playback.token_hash = $2
@@ -223,7 +228,17 @@ func processedMediaStart(raw string) (float64, error) {
 	return float64(seconds), nil
 }
 
-func (service *Service) ProxyAsset(w http.ResponseWriter, r *http.Request, sessionID, assetID, token, target, signature string) error {
+func (service *Service) ProxyAsset(w http.ResponseWriter, r *http.Request, sessionID, assetID, token, child string) error {
+	target := ""
+	signature := ""
+	if child != "" {
+		resolved, err := service.openTargetCapability(sessionID, assetID, child)
+		if err != nil {
+			return ErrSessionNotFound
+		}
+		target = resolved
+		signature = service.signTarget(sessionID, assetID, target)
+	}
 	return service.proxyAsset(w, r, sessionID, assetID, token, target, signature, nil)
 }
 
@@ -234,7 +249,7 @@ func (service *Service) proxyAsset(w http.ResponseWriter, r *http.Request, sessi
 	digest := sha256.Sum256([]byte(token))
 	var encodedAssets []byte
 	err := service.pool.QueryRow(r.Context(), proxyAssetSessionSQL,
-		sessionID, digest[:], intervalLiteral(playbackSessionIdleTTL),
+		sessionID, digest[:], intervalLiteral(playbackSessionIdleTTL), intervalLiteral(sessionTTL),
 	).Scan(&encodedAssets)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrSessionNotFound
@@ -294,7 +309,12 @@ func (service *Service) proxyAsset(w http.ResponseWriter, r *http.Request, sessi
 		rewritten, err := rewritePlaylistWithPolicy(body, response.Request.URL, buildChildURL != nil, func(resolved string) string {
 			signed := service.signTarget(sessionID, assetID, resolved)
 			if buildChildURL == nil {
-				return assetURL(sessionID, assetID, token, resolved, signed)
+				child, sealErr := service.sealTargetCapability(sessionID, assetID, resolved)
+				if sealErr != nil {
+					childErr = sealErr
+					return ""
+				}
+				return assetURL(sessionID, assetID, token, child)
 			}
 			if childErr != nil {
 				return ""
@@ -721,6 +741,56 @@ func resolvePlaylistReference(base *url.URL, reference string) (string, bool) {
 	return resolved.String(), true
 }
 
+func (service *Service) sealTargetCapability(sessionID, assetID, target string) (string, error) {
+	if service.targetCapabilityKey == ([32]byte{}) || !validMediaURL(target) {
+		return "", ErrSessionNotFound
+	}
+	block, err := aes.NewCipher(service.targetCapabilityKey[:])
+	if err != nil {
+		return "", err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	sealed := make([]byte, aead.NonceSize(), aead.NonceSize()+len(target)+aead.Overhead())
+	if _, err := rand.Read(sealed); err != nil {
+		return "", err
+	}
+	sealed = aead.Seal(sealed, sealed, []byte(target), targetCapabilityAAD(sessionID, assetID))
+	return base64.RawURLEncoding.EncodeToString(sealed), nil
+}
+
+func (service *Service) openTargetCapability(sessionID, assetID, capability string) (string, error) {
+	if service.targetCapabilityKey == ([32]byte{}) || len(capability) == 0 || len(capability) > maximumTargetCapabilityLength {
+		return "", ErrSessionNotFound
+	}
+	sealed, err := base64.RawURLEncoding.DecodeString(capability)
+	if err != nil {
+		return "", ErrSessionNotFound
+	}
+	block, err := aes.NewCipher(service.targetCapabilityKey[:])
+	if err != nil {
+		return "", err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil || len(sealed) < aead.NonceSize()+aead.Overhead() {
+		return "", ErrSessionNotFound
+	}
+	plain, err := aead.Open(nil, sealed[:aead.NonceSize()], sealed[aead.NonceSize():], targetCapabilityAAD(sessionID, assetID))
+	if err != nil || !validMediaURL(string(plain)) {
+		return "", ErrSessionNotFound
+	}
+	return string(plain), nil
+}
+
+func targetCapabilityAAD(sessionID, assetID string) []byte {
+	value := make([]byte, 0, len(sessionID)+len(assetID)+1)
+	value = append(value, sessionID...)
+	value = append(value, 0)
+	return append(value, assetID...)
+}
+
 func (service *Service) signTarget(sessionID, assetID, target string) string {
 	mac := hmac.New(sha256.New, service.targetSigningKey[:])
 	writeTargetSignaturePayload(mac, sessionID, assetID, target)
@@ -745,11 +815,10 @@ func writeTargetSignaturePayload(destination io.Writer, sessionID, assetID, targ
 	_, _ = io.WriteString(destination, target)
 }
 
-func assetURL(sessionID, assetID, token, target, signature string) string {
+func assetURL(sessionID, assetID, token, child string) string {
 	values := url.Values{"token": []string{token}}
-	if target != "" {
-		values.Set("target", target)
-		values.Set("signature", signature)
+	if child != "" {
+		values.Set("child", child)
 	}
 	return "/api/v1/playback/sessions/" + url.PathEscape(sessionID) + "/assets/" + url.PathEscape(assetID) + "?" + values.Encode()
 }

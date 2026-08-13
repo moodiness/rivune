@@ -214,7 +214,7 @@ func (a *API) playbackAsset(w http.ResponseWriter, r *http.Request) {
 	}
 	err := a.playback.ProxyAsset(
 		w, r, r.PathValue("sessionId"), r.PathValue("assetId"),
-		r.URL.Query().Get("token"), r.URL.Query().Get("target"), r.URL.Query().Get("signature"),
+		r.URL.Query().Get("token"), r.URL.Query().Get("child"),
 	)
 	if err != nil && responseCommitted(w) {
 		a.logger.Error("proxy playback asset failed after response committed", "error", netguard.SanitizeURLError(err))

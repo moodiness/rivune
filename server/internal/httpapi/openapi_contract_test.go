@@ -589,7 +589,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 				Sources: []playback.SourceOption{{
 					ID: "source-1", SourceRef: "opaque-contract-source", AddonID: contractAddonID,
 					ManifestID: "org.rivune.contract", AddonName: "Contract Add-on", StreamIndex: 0, Name: "Contract source",
-					Protocol: "hls", Container: "mpegts", ExpiresAt: expiresAt,
+					Protocol: "hls", Mode: "direct", Container: "mpegts", ExpiresAt: expiresAt,
 				}},
 				ProviderErrors: []playback.ProviderFailure{},
 			},
@@ -642,13 +642,13 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		sourcesResponse := serveContractRequest(t, api, sources, http.StatusOK)
 		validateContractResponse(t, document, "/playback/sources", nil, sources, sourcesResponse)
 
-		prepareBody := `{"sourceRef":"opaque-contract-source","startSeconds":604800}`
+		prepareBody := `{"sourceRef":"opaque-contract-source","startSeconds":604800,"externalPlayer":true}`
 		prepare := authenticatedContractRequest(http.MethodPost, "/api/v1/playback/prepare", bytes.NewBufferString(prepareBody))
 		prepare.Header.Set("Content-Type", "application/json")
 		prepareResponse := serveContractRequest(t, api, prepare, http.StatusOK)
 		validateContractResponse(t, document, "/playback/prepare", nil, prepare, prepareResponse)
 
-		resolveBody := `{"sourceRef":"opaque-contract-source","titleId":"` + contractTitleID + `","preferredAudioTrack":2,"preferredSubtitleId":"subtitle-1","startSeconds":0}`
+		resolveBody := `{"sourceRef":"opaque-contract-source","titleId":"` + contractTitleID + `","preferredAudioTrack":2,"preferredSubtitleId":"subtitle-1","startSeconds":0,"externalPlayer":true}`
 		resolve := authenticatedContractRequest(http.MethodPost, "/api/v1/playback/resolve", bytes.NewBufferString(resolveBody))
 		resolve.Header.Set("Content-Type", "application/json")
 		resolveResponse := serveContractRequest(t, api, resolve, http.StatusCreated)
