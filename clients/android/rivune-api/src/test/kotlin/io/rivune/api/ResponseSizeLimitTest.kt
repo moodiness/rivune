@@ -4,6 +4,7 @@ import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotEquals
 import kotlinx.coroutines.runBlocking
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -30,12 +31,47 @@ class ResponseSizeLimitTest {
         )
         server.start()
         try {
-            val discovery = RivuneApiClient(server.url("/").toString(), ResponseLimitCredentialStore()).discover()
+            val discovery = RivuneApiClient(server.loopbackUrl("/").toString(), ResponseLimitCredentialStore()).discover()
 
             assertEquals("Rivune", discovery.name)
         } finally {
             server.shutdown()
         }
+    }
+
+    @Test
+    fun responseBodyIsReadOffCallerThread() = runBlocking {
+        val callerThread = Thread.currentThread()
+        lateinit var bodyReadThread: Thread
+        val source = object : ForwardingSource(Buffer().writeUtf8(DISCOVERY_JSON)) {
+            override fun read(sink: Buffer, byteCount: Long): Long {
+                bodyReadThread = Thread.currentThread()
+                return super.read(sink, byteCount)
+            }
+        }.buffer()
+        val httpClient = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(object : ResponseBody() {
+                        override fun contentType() = JSON_MEDIA_TYPE
+                        override fun contentLength() = -1L
+                        override fun source(): BufferedSource = source
+                    })
+                    .build()
+            }
+            .build()
+
+        RivuneApiClient(
+            "http://127.0.0.1/",
+            ResponseLimitCredentialStore(),
+            httpClient,
+        ).discover()
+
+        assertNotEquals(callerThread, bodyReadThread)
     }
 
     @Test
@@ -61,7 +97,7 @@ class ResponseSizeLimitTest {
         )
         server.start()
         try {
-            val client = RivuneApiClient(server.url("/").toString(), ResponseLimitCredentialStore())
+            val client = RivuneApiClient(server.loopbackUrl("/").toString(), ResponseLimitCredentialStore())
 
             assertFailsWith<RivuneApiException.ResponseTooLarge> { client.discover() }
             Unit

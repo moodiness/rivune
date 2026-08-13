@@ -154,8 +154,8 @@ final class PlaybackV20ContractsTests: XCTestCase {
 
 private struct V20CredentialStore: CredentialStore {
     let token: TokenPair
-    func load(for issuer: URL) async throws -> TokenPair? { token }
-    func save(_ credentials: TokenPair, for issuer: URL) async throws {}
+    func load(for issuer: URL) async throws -> StoredCredentials? { StoredCredentials(tokens: token, profileContext: nil) }
+    func save(_ credentials: StoredCredentials, for issuer: URL) async throws {}
     func clear(for issuer: URL) async throws {}
 }
 

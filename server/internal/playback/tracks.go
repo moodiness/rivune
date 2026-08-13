@@ -189,6 +189,9 @@ func embeddedSubtitles(sources []Source, assets []storedAsset, capabilityValues 
 			}
 			trackIndex := track.Index
 			id := "embedded-subtitle-" + strconv.Itoa(track.Index)
+			if delivery == "external" {
+				id += ".vtt"
+			}
 			subtitles = append(subtitles, Subtitle{
 				ID: id, AddonID: source.AddonID, ManifestID: source.ManifestID,
 				Language: track.Language, Forced: track.Forced, Delivery: delivery,

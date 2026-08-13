@@ -11,6 +11,20 @@ import (
 	"github.com/moodiness/rivune/server/internal/auth"
 )
 
+func TestPlaybackClonesPreserveEmptyJSONArrays(t *testing.T) {
+	cloned := cloneMediaInspection(MediaInspection{
+		VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264"}},
+		AudioTracks: []MediaTrack{{Index: 1, Type: "audio", Codec: "aac"}},
+	})
+	if cloned.VideoTracks == nil || cloned.AudioTracks == nil || cloned.SubtitleTracks == nil {
+		t.Fatalf("cloned media tracks must remain JSON arrays: %+v", cloned)
+	}
+	prepared := clonePreparedPlayback(preparedPlayback{})
+	if prepared.subtitles == nil || prepared.providerErrors == nil {
+		t.Fatalf("cloned playback lists must remain JSON arrays: %+v", prepared)
+	}
+}
+
 func TestSourceReferenceStoreOwnerChurnNeverEvictsForeignReferences(t *testing.T) {
 	now := time.Date(2026, time.August, 7, 12, 0, 0, 0, time.UTC)
 	store := newSourceReferenceStore(func() time.Time { return now })

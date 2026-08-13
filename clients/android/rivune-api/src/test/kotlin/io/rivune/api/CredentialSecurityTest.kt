@@ -20,9 +20,9 @@ class CredentialSecurityTest {
         try {
             destinationServer.enqueue(discoveryResponse())
             destinationServer.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody("{}"))
-            val issuer = issuerServer.url("/").toString()
+            val issuer = issuerServer.loopbackUrl("/").toString()
             val store = LeakyCredentialStore(StoredCredentials(issuer, tokenPair()))
-            val client = RivuneApiClient(destinationServer.url("/").toString(), store)
+            val client = RivuneApiClient(destinationServer.loopbackUrl("/").toString(), store)
 
             assertFailsWith<RivuneApiException.NotAuthenticated> { client.currentAccount() }
 
@@ -43,9 +43,9 @@ class CredentialSecurityTest {
         try {
             destinationServer.enqueue(discoveryResponse())
             destinationServer.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody("{}"))
-            val issuer = issuerServer.url("/").toString()
+            val issuer = issuerServer.loopbackUrl("/").toString()
             val store = LeakyCredentialStore(StoredCredentials(issuer, tokenPair()))
-            val client = RivuneApiClient(destinationServer.url("/").toString(), store)
+            val client = RivuneApiClient(destinationServer.loopbackUrl("/").toString(), store)
 
             assertFailsWith<RivuneApiException.NotAuthenticated> { client.refreshSession() }
 
@@ -57,9 +57,11 @@ class CredentialSecurityTest {
     }
 
     @Test
-    fun remoteHttpServerIsRejected() {
-        assertFailsWith<RivuneApiException.InvalidServerUrl> {
-            RivuneApiClient("http://192.0.2.10", LeakyCredentialStore(null))
+    fun remoteAndUnsupportedLoopbackHttpServersAreRejected() {
+        listOf("http://192.0.2.10", "http://127.0.0.2", "http://[::1]").forEach { serverUrl ->
+            assertFailsWith<RivuneApiException.InvalidServerUrl> {
+                RivuneApiClient(serverUrl, LeakyCredentialStore(null))
+            }
         }
     }
 
@@ -76,7 +78,7 @@ class CredentialSecurityTest {
         )
         server.start()
         try {
-            val client = RivuneApiClient(server.url("/").toString(), LeakyCredentialStore(null))
+            val client = RivuneApiClient(server.loopbackUrl("/").toString(), LeakyCredentialStore(null))
 
             client.login("alice", "password", LoginDevice(name = "Test phone", platform = "android"))
 
@@ -95,7 +97,7 @@ class CredentialSecurityTest {
         server.enqueue(discoveryResponse(apiBaseUrl = "http://127.0.0.2/api/v1"))
         server.start()
         try {
-            val client = RivuneApiClient(server.url("/").toString(), LeakyCredentialStore(null))
+            val client = RivuneApiClient(server.loopbackUrl("/").toString(), LeakyCredentialStore(null))
 
             assertFailsWith<RivuneApiException.InvalidServerUrl> { client.discover() }
             Unit
@@ -111,7 +113,7 @@ class CredentialSecurityTest {
             server.start()
             try {
                 server.enqueue(discoveryResponse())
-                server.enqueue(redirectResponse(status, server.url("/redirect-target").toString()))
+                server.enqueue(redirectResponse(status, server.loopbackUrl("/redirect-target").toString()))
                 server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody("{}"))
                 var interceptorCalls = 0
                 val injectedClient = OkHttpClient.Builder()
@@ -122,7 +124,7 @@ class CredentialSecurityTest {
                         chain.proceed(chain.request())
                     }
                     .build()
-                val issuer = server.url("/").toString()
+                val issuer = server.loopbackUrl("/").toString()
                 val client = RivuneApiClient(
                     issuer,
                     LeakyCredentialStore(StoredCredentials(issuer, tokenPair())),
@@ -158,9 +160,9 @@ class CredentialSecurityTest {
             destinationServer.start()
             try {
                 sourceServer.enqueue(discoveryResponse())
-                sourceServer.enqueue(redirectResponse(status, destinationServer.url("/redirect-target").toString()))
+                sourceServer.enqueue(redirectResponse(status, destinationServer.loopbackUrl("/redirect-target").toString()))
                 destinationServer.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody("{}"))
-                val issuer = sourceServer.url("/").toString()
+                val issuer = sourceServer.loopbackUrl("/").toString()
                 val client = RivuneApiClient(
                     issuer,
                     LeakyCredentialStore(StoredCredentials(issuer, tokenPair())),

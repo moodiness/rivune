@@ -143,7 +143,7 @@ func profileContextExemptRequest(r *http.Request) bool {
 		return true
 	}
 	if path == "/api/v1/profiles/selection" {
-		return r.Method == http.MethodPost
+		return r.Method == http.MethodPost || r.Method == http.MethodDelete
 	}
 	if r.Method == http.MethodGet && (path == "/api/v1/profiles" ||
 		strings.HasSuffix(path, "/avatar") && strings.HasPrefix(path, "/api/v1/profiles/")) {

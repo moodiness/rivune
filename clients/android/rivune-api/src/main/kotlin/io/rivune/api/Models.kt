@@ -4,11 +4,17 @@ import java.util.UUID
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.descriptors.PrimitiveKind
 import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
 import kotlinx.serialization.descriptors.SerialDescriptor
 import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.JsonObject
 
 object RivuneProtocol {
     const val VERSION: Int = 20
@@ -313,6 +319,18 @@ data class SettingsValues(
     val allowTranscoding: Boolean? = null,
     val transcoding: String? = null,
     val maximumCastMembers: Int? = null,
+    val maximumResolution: String? = null,
+    val preferDirectPlay: Boolean? = null,
+    val audioLanguage: String? = null,
+    val subtitleLanguage: String? = null,
+)
+
+data class ProfileSettingsUpdate(
+    val maximumResolution: PatchField<String> = PatchField.Omitted,
+    val preferDirectPlay: PatchField<Boolean> = PatchField.Omitted,
+    val audioLanguage: PatchField<String> = PatchField.Omitted,
+    val subtitleLanguage: PatchField<String> = PatchField.Omitted,
+    val transcoding: PatchField<String> = PatchField.Omitted,
 )
 
 @Serializable
@@ -343,6 +361,32 @@ enum class MediaType {
     @SerialName("season") SEASON,
     @SerialName("episode") EPISODE,
 }
+
+@Serializable
+enum class CalendarEventMediaType {
+    @SerialName("movie") MOVIE,
+    @SerialName("episode") EPISODE,
+}
+
+@Serializable
+data class CalendarEventList(val events: List<CalendarEvent>)
+
+@Serializable
+data class CalendarEvent(
+    val id: String,
+    @Serializable(with = UUIDSerializer::class) val titleId: UUID,
+    val mediaType: CalendarEventMediaType,
+    val title: String,
+    val releaseDate: String,
+    val posterUrl: String? = null,
+    val resourceId: String? = null,
+    val resourceProvider: String? = null,
+    val seriesTitle: String? = null,
+    @Serializable(with = UUIDSerializer::class) val seriesId: UUID? = null,
+    @Serializable(with = UUIDSerializer::class) val seasonId: UUID? = null,
+    val seasonNumber: Int? = null,
+    val episodeNumber: Int? = null,
+)
 
 @Serializable
 enum class SeriesMappingProvider {
@@ -520,8 +564,10 @@ data class PlaybackCapabilities(
 
 @Serializable
 data class PlaybackSourceList(
-    val sources: List<PlaybackSourceOption>,
-    val providerErrors: List<PlaybackProviderError>,
+    @Serializable(with = PlaybackSourceOptionListSerializer::class)
+    val sources: List<PlaybackSourceOption> = emptyList(),
+    @Serializable(with = PlaybackProviderErrorListSerializer::class)
+    val providerErrors: List<PlaybackProviderError> = emptyList(),
 )
 
 @Serializable
@@ -610,9 +656,12 @@ data class PlaybackSession(
     val selectedSourceId: String,
     val selectedAudioTrack: Int? = null,
     val selectedSubtitleId: String? = null,
-    val sources: List<PlaybackSource>,
-    val subtitles: List<PlaybackSubtitle>,
-    val providerErrors: List<PlaybackProviderError>,
+    @Serializable(with = PlaybackSourceListSerializer::class)
+    val sources: List<PlaybackSource> = emptyList(),
+    @Serializable(with = PlaybackSubtitleListSerializer::class)
+    val subtitles: List<PlaybackSubtitle> = emptyList(),
+    @Serializable(with = PlaybackProviderErrorListSerializer::class)
+    val providerErrors: List<PlaybackProviderError> = emptyList(),
     val expiresAt: String,
 )
 
@@ -641,9 +690,12 @@ data class PlaybackMediaInspection(
     val container: String? = null,
     val durationSeconds: Double? = null,
     val hdrFormat: String? = null,
-    val videoTracks: List<PlaybackMediaTrack>,
-    val audioTracks: List<PlaybackMediaTrack>,
-    val subtitleTracks: List<PlaybackMediaTrack>,
+    @Serializable(with = PlaybackMediaTrackListSerializer::class)
+    val videoTracks: List<PlaybackMediaTrack> = emptyList(),
+    @Serializable(with = PlaybackMediaTrackListSerializer::class)
+    val audioTracks: List<PlaybackMediaTrack> = emptyList(),
+    @Serializable(with = PlaybackMediaTrackListSerializer::class)
+    val subtitleTracks: List<PlaybackMediaTrack> = emptyList(),
 )
 
 @Serializable
@@ -692,6 +744,7 @@ data class PlaybackMediaTrack(
     val channels: Int? = null,
 )
 
+
 @Serializable
 data class PlaybackSubtitle(
     val id: String,
@@ -711,6 +764,25 @@ data class PlaybackProviderError(
     val code: String,
     val message: String,
 )
+
+internal abstract class NullAsEmptyListSerializer<Element>(elementSerializer: KSerializer<Element>) : KSerializer<List<Element>> {
+    private val delegate = ListSerializer(elementSerializer)
+    override val descriptor: SerialDescriptor = delegate.descriptor
+
+    override fun serialize(encoder: Encoder, value: List<Element>) = delegate.serialize(encoder, value)
+
+    override fun deserialize(decoder: Decoder): List<Element> {
+        if (decoder !is JsonDecoder) return delegate.deserialize(decoder)
+        val element = decoder.decodeJsonElement()
+        return if (element is JsonNull) emptyList() else decoder.json.decodeFromJsonElement(delegate, element)
+    }
+}
+
+internal object PlaybackMediaTrackListSerializer : NullAsEmptyListSerializer<PlaybackMediaTrack>(PlaybackMediaTrack.serializer())
+internal object PlaybackSourceOptionListSerializer : NullAsEmptyListSerializer<PlaybackSourceOption>(PlaybackSourceOption.serializer())
+internal object PlaybackSourceListSerializer : NullAsEmptyListSerializer<PlaybackSource>(PlaybackSource.serializer())
+internal object PlaybackSubtitleListSerializer : NullAsEmptyListSerializer<PlaybackSubtitle>(PlaybackSubtitle.serializer())
+internal object PlaybackProviderErrorListSerializer : NullAsEmptyListSerializer<PlaybackProviderError>(PlaybackProviderError.serializer())
 
 @Serializable
 enum class PlaybackMarkerType {
@@ -996,3 +1068,516 @@ data class ContinueWatchingItem(
 
 @Serializable
 data class ContinueWatchingPage(val items: List<ContinueWatchingItem>)
+
+@Serializable
+data class CollectionList(val collections: List<Collection>)
+
+@Serializable
+enum class CollectionViewMode {
+    @SerialName("tabbed_grid") TABBED_GRID,
+    @SerialName("rows") ROWS,
+    @SerialName("follow_layout") FOLLOW_LAYOUT,
+}
+
+@Serializable
+enum class CollectionTileShape {
+    @SerialName("poster") POSTER,
+    @SerialName("landscape") LANDSCAPE,
+    @SerialName("square") SQUARE,
+}
+
+@Serializable
+enum class CollectionSourceView {
+    @SerialName("merged") MERGED,
+    @SerialName("categories") CATEGORIES,
+    @SerialName("folders") FOLDERS,
+}
+
+@Serializable
+enum class CollectionSourceKind {
+    @SerialName("addon_catalog") ADDON_CATALOG,
+    @SerialName("tmdb") TMDB,
+    @SerialName("trakt") TRAKT,
+    @SerialName("mdblist") MDBLIST,
+}
+
+@Serializable
+data class Collection(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val title: String,
+    val backdropImageUrl: String? = null,
+    val heroEnabled: Boolean,
+    val pinToTop: Boolean,
+    val focusGlowEnabled: Boolean,
+    val viewMode: CollectionViewMode,
+    val folderCoverShape: CollectionTileShape,
+    val folders: List<CollectionFolder>,
+    val profileIds: List<@Serializable(with = UUIDSerializer::class) UUID>,
+    val categoryIds: List<@Serializable(with = UUIDSerializer::class) UUID>,
+    val position: Int,
+    val version: Int,
+    val createdAt: String,
+    val updatedAt: String,
+)
+
+@Serializable
+data class CollectionFolder(
+    @Serializable(with = UUIDSerializer::class) val id: UUID? = null,
+    val title: String,
+    val tileShape: CollectionTileShape,
+    val sourceView: CollectionSourceView? = null,
+    val coverImageUrl: String? = null,
+    val coverEmoji: String? = null,
+    val titleLogoUrl: String? = null,
+    val heroBackdropUrl: String? = null,
+    val heroVideoUrl: String? = null,
+    val focusGifUrl: String? = null,
+    val focusGifEnabled: Boolean,
+    val hideTitle: Boolean,
+    val sources: List<CollectionSource>,
+)
+
+@Serializable
+data class CollectionSource(
+    @Serializable(with = UUIDSerializer::class) val id: UUID? = null,
+    val kind: CollectionSourceKind,
+    val title: String,
+    val addonCatalog: CollectionAddonCatalogSource? = null,
+    val tmdb: CollectionTMDBSource? = null,
+    val trakt: CollectionTraktSource? = null,
+    val mdblist: CollectionMDBListSource? = null,
+)
+
+@Serializable
+data class CollectionAddonCatalogSource(
+    @Serializable(with = UUIDSerializer::class) val addonId: UUID,
+    val manifestId: String? = null,
+    val type: String,
+    val catalogId: String,
+    val extra: List<CollectionExtraValue>? = null,
+)
+
+@Serializable
+data class CollectionExtraValue(val name: String, val value: String)
+
+@Serializable
+enum class CollectionTMDBSourceType {
+    @SerialName("list") LIST,
+    @SerialName("company") COMPANY,
+    @SerialName("network") NETWORK,
+    @SerialName("collection") COLLECTION,
+    @SerialName("person") PERSON,
+    @SerialName("director") DIRECTOR,
+    @SerialName("discover") DISCOVER,
+}
+
+@Serializable
+enum class CollectionTMDBMediaType {
+    @SerialName("movie") MOVIE,
+    @SerialName("series") SERIES,
+    @SerialName("both") BOTH,
+}
+
+@Serializable
+enum class CollectionTMDBSort {
+    @SerialName("original") ORIGINAL,
+    @SerialName("popularity.desc") POPULARITY_DESC,
+    @SerialName("vote_average.desc") VOTE_AVERAGE_DESC,
+    @SerialName("vote_count.desc") VOTE_COUNT_DESC,
+    @SerialName("release_date.desc") RELEASE_DATE_DESC,
+    @SerialName("first_air_date.desc") FIRST_AIR_DATE_DESC,
+}
+
+@Serializable
+data class CollectionTMDBSource(
+    val sourceType: CollectionTMDBSourceType,
+    val tmdbId: Long? = null,
+    val mediaType: CollectionTMDBMediaType,
+    val sort: CollectionTMDBSort,
+    val filters: CollectionTMDBFilters,
+)
+
+@Serializable
+data class CollectionTMDBFilters(
+    val genres: List<Long>? = null,
+    val releaseDateFrom: String? = null,
+    val releaseDateTo: String? = null,
+    val voteAverageMin: Double? = null,
+    val voteAverageMax: Double? = null,
+    val voteCountMin: Int? = null,
+    val originalLanguage: String? = null,
+    val originCountry: String? = null,
+    val keywords: List<Long>? = null,
+    val companies: List<Long>? = null,
+    val networks: List<Long>? = null,
+    val year: Int? = null,
+    val watchRegion: String? = null,
+    val watchProviders: List<Long>? = null,
+)
+
+@Serializable
+enum class CollectionTraktMediaType {
+    @SerialName("movie") MOVIE,
+    @SerialName("series") SERIES,
+}
+
+@Serializable
+enum class CollectionTraktSortBy {
+    @SerialName("rank") RANK,
+    @SerialName("added") ADDED,
+    @SerialName("title") TITLE,
+    @SerialName("released") RELEASED,
+    @SerialName("runtime") RUNTIME,
+    @SerialName("popularity") POPULARITY,
+    @SerialName("percentage") PERCENTAGE,
+    @SerialName("votes") VOTES,
+}
+
+@Serializable
+enum class CollectionSortOrder {
+    @SerialName("asc") ASC,
+    @SerialName("desc") DESC,
+}
+
+@Serializable
+data class CollectionTraktSource(
+    val listId: Long,
+    val mediaType: CollectionTraktMediaType,
+    val sortBy: CollectionTraktSortBy,
+    val sortHow: CollectionSortOrder,
+)
+
+@Serializable
+enum class CollectionMDBListMediaType {
+    @SerialName("movie") MOVIE,
+    @SerialName("series") SERIES,
+}
+
+@Serializable
+enum class CollectionMDBListSort {
+    @SerialName("added") ADDED,
+    @SerialName("budget") BUDGET,
+    @SerialName("imdbpopular") IMDBPOPULAR,
+    @SerialName("imdbrating") IMDBRATING,
+    @SerialName("imdbvotes") IMDBVOTES,
+    @SerialName("last_air_date") LAST_AIR_DATE,
+    @SerialName("letterrating") LETTERRATING,
+    @SerialName("lettervotes") LETTERVOTES,
+    @SerialName("metacritic") METACRITIC,
+    @SerialName("myanimelist") MYANIMELIST,
+    @SerialName("random") RANDOM,
+    @SerialName("rank") RANK,
+    @SerialName("released") RELEASED,
+    @SerialName("releasedigital") RELEASEDIGITAL,
+    @SerialName("revenue") REVENUE,
+    @SerialName("rogerebert") ROGEREBERT,
+    @SerialName("rtaudience") RTAUDIENCE,
+    @SerialName("rtomatoes") RTOMATOES,
+    @SerialName("runtime") RUNTIME,
+    @SerialName("score") SCORE,
+    @SerialName("score_average") SCORE_AVERAGE,
+    @SerialName("sort_title") SORT_TITLE,
+    @SerialName("title") TITLE,
+    @SerialName("tmdbpopular") TMDBPOPULAR,
+    @SerialName("usort") USORT,
+}
+
+@Serializable
+data class CollectionMDBListSource(
+    val listId: Long,
+    val mediaType: CollectionMDBListMediaType,
+    val sort: CollectionMDBListSort,
+    val order: CollectionSortOrder,
+)
+
+@Serializable
+data class ResolvedCollectionFolder(
+    @Serializable(with = UUIDSerializer::class) val collectionId: UUID,
+    val folder: CollectionFolder,
+    val sourcePosterUrls: Map<String, String>? = null,
+    val items: List<CollectionItem>,
+    val page: Int,
+    val hasMore: Boolean,
+    val errors: List<CollectionSourceFailure>,
+)
+
+@Serializable
+data class CollectionItem(
+    val id: String,
+    val mediaType: String,
+    val title: String,
+    val posterUrl: String? = null,
+    val backgroundUrl: String? = null,
+    val logoUrl: String? = null,
+    val description: String? = null,
+    val releaseInfo: String? = null,
+    val released: String? = null,
+    val voteAverage: Double? = null,
+    val voteCount: Int? = null,
+    val popularity: Double? = null,
+    val externalIds: Map<String, String>,
+    val sources: List<CollectionSourceReference>,
+    val raw: JsonElement? = null,
+)
+
+@Serializable
+data class CollectionSourceReference(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val kind: CollectionSourceKind,
+    val title: String,
+    @Serializable(with = UUIDSerializer::class) val addonId: UUID? = null,
+    val manifestId: String? = null,
+    val catalogId: String? = null,
+)
+
+@Serializable
+enum class CollectionSourceFailureCode {
+    @SerialName("collection_provider_unavailable") COLLECTION_PROVIDER_UNAVAILABLE,
+    @SerialName("collection_addon_not_found") COLLECTION_ADDON_NOT_FOUND,
+    @SerialName("collection_source_unsupported") COLLECTION_SOURCE_UNSUPPORTED,
+    @SerialName("collection_source_timeout") COLLECTION_SOURCE_TIMEOUT,
+    @SerialName("collection_source_failed") COLLECTION_SOURCE_FAILED,
+}
+
+@Serializable
+data class CollectionSourceFailure(
+    @Serializable(with = UUIDSerializer::class) val sourceId: UUID,
+    val kind: CollectionSourceKind,
+    val code: CollectionSourceFailureCode,
+    val message: String,
+)
+
+@Serializable
+data class StremioExtraProperty(
+    val name: String,
+    val isRequired: Boolean? = null,
+    val default: String? = null,
+    val options: List<String>? = null,
+    val optionsLimit: Int? = null,
+)
+
+@Serializable
+data class StremioManifestCatalog(
+    val type: String,
+    val id: String,
+    val name: String? = null,
+    val genres: List<String>? = null,
+    val extra: List<StremioExtraProperty>? = null,
+    val extraRequired: List<String>? = null,
+    val extraSupported: List<String>? = null,
+)
+
+@Serializable
+data class AddonCatalogDescriptorList(val catalogs: List<AddonCatalogDescriptor>)
+
+@Serializable
+data class AddonCatalogDescriptor(
+    @Serializable(with = UUIDSerializer::class) val addonId: UUID,
+    val addonName: String? = null,
+    val addonLogoUrl: String? = null,
+    val manifestId: String,
+    val position: Int,
+    val catalog: StremioManifestCatalog,
+    val addonCatalog: Boolean,
+    val searchable: Boolean,
+)
+
+@Serializable
+data class AddonCachePolicy(
+    val maxAgeSeconds: Long? = null,
+    val staleWhileRevalidateSeconds: Long? = null,
+    val staleIfErrorSeconds: Long? = null,
+)
+
+@Serializable
+data class AddonExtraValue(val name: String, val value: String)
+
+@Serializable
+data class AddonResourceResult(
+    @Serializable(with = UUIDSerializer::class) val addonId: UUID,
+    val manifestId: String,
+    val resource: String,
+    val type: String,
+    val id: String,
+    val payload: JsonObject,
+    val cache: AddonCachePolicy,
+    val extra: List<AddonExtraValue>? = null,
+)
+
+@Serializable
+data class AddonResourceFailure(
+    @Serializable(with = UUIDSerializer::class) val addonId: UUID,
+    val manifestId: String,
+    val code: String,
+    val message: String,
+)
+
+@Serializable
+data class AddonResourceBatch(
+    val results: List<AddonResourceResult>,
+    val errors: List<AddonResourceFailure>,
+)
+
+@Serializable
+enum class TitleMediaType {
+    @SerialName("movie") MOVIE,
+    @SerialName("series") SERIES,
+    @SerialName("tv") TV;
+
+    val wireValue: String get() = name.lowercase()
+}
+
+@Serializable
+data class TitleResolveInput(
+    val mediaType: TitleMediaType,
+    val provider: String,
+    val externalId: String? = null,
+    val resourceId: String,
+    val title: String,
+    val posterUrl: String? = null,
+    val backgroundUrl: String? = null,
+    val releaseInfo: String? = null,
+    val released: String? = null,
+    @Serializable(with = UUIDSerializer::class) val sourceAddonId: UUID? = null,
+    val sourceCatalogId: String? = null,
+    val sourceName: String? = null,
+    val country: String? = null,
+    val language: String? = null,
+    val category: String? = null,
+)
+
+@Serializable
+data class TitleReference(
+    @Serializable(with = UUIDSerializer::class) val titleId: UUID,
+    val mediaType: TitleMediaType,
+    val provider: String,
+    val externalId: String,
+    val resourceId: String,
+    val title: String,
+    val posterUrl: String? = null,
+    val backgroundUrl: String? = null,
+    val releaseInfo: String? = null,
+    @Serializable(with = UUIDSerializer::class) val sourceAddonId: UUID? = null,
+    val sourceCatalogId: String? = null,
+    val sourceName: String? = null,
+    val country: String? = null,
+    val language: String? = null,
+    val category: String? = null,
+)
+
+@Serializable
+data class CustomSeriesResolveInput(
+    @Serializable(with = UUIDSerializer::class) val sourceAddonId: UUID,
+    val sourceType: String,
+    val series: CustomSeriesSnapshot,
+    val videos: List<CustomVideoSnapshot>,
+)
+
+@Serializable
+data class CustomSeriesSnapshot(
+    val resourceId: String,
+    val title: String,
+    val posterUrl: String? = null,
+    val backgroundUrl: String? = null,
+    val releaseInfo: String? = null,
+)
+
+@Serializable
+data class CustomVideoSnapshot(
+    val resourceId: String,
+    val title: String? = null,
+    val seasonNumber: Int,
+    val episodeNumber: Int,
+    val thumbnailUrl: String? = null,
+    val backgroundUrl: String? = null,
+    val releaseInfo: String? = null,
+    val released: String? = null,
+)
+
+@Serializable
+data class CustomSeriesResolveResult(
+    val series: CustomSeriesReference,
+    val seasons: List<CustomSeasonReference>,
+    val videos: List<CustomVideoReference>,
+)
+
+@Serializable
+data class CustomSeriesReference(
+    @Serializable(with = UUIDSerializer::class) val titleId: UUID,
+    val resourceId: String,
+)
+
+@Serializable
+data class CustomSeasonReference(
+    @Serializable(with = UUIDSerializer::class) val titleId: UUID,
+    val seasonNumber: Int,
+)
+
+@Serializable
+data class CustomVideoReference(
+    @Serializable(with = UUIDSerializer::class) val titleId: UUID,
+    val resourceId: String,
+    @Serializable(with = UUIDSerializer::class) val seasonTitleId: UUID,
+    val seasonNumber: Int,
+    val episodeNumber: Int,
+)
+
+@Serializable
+data class LibraryItem(
+    @Serializable(with = UUIDSerializer::class) val titleId: UUID,
+    val mediaType: TitleMediaType,
+    val provider: String? = null,
+    val externalId: String? = null,
+    val resourceId: String? = null,
+    val title: String? = null,
+    val posterUrl: String? = null,
+    val backgroundUrl: String? = null,
+    val releaseInfo: String? = null,
+    @Serializable(with = UUIDSerializer::class) val sourceAddonId: UUID? = null,
+    val sourceCatalogId: String? = null,
+    val sourceName: String? = null,
+    val country: String? = null,
+    val language: String? = null,
+    val category: String? = null,
+    val available: Boolean,
+    val addedAt: String,
+    val updatedAt: String,
+)
+
+@Serializable
+data class LibraryPage(
+    val items: List<LibraryItem>,
+    val page: Int,
+    val totalPages: Int,
+    val totalResults: Int,
+)
+
+@Serializable
+data class TVLibraryIdentity(
+    @Serializable(with = UUIDSerializer::class) val sourceAddonId: UUID,
+    val resourceId: String,
+)
+
+@Serializable
+data class TVLibraryMembershipRequest(val identities: List<TVLibraryIdentity>)
+
+@Serializable
+data class TVLibraryMembership(
+    @Serializable(with = UUIDSerializer::class) val sourceAddonId: UUID,
+    val resourceId: String,
+    @Serializable(with = UUIDSerializer::class) val titleId: UUID,
+)
+
+@Serializable
+data class TVLibraryMembershipResult(val items: List<TVLibraryMembership>)
+
+@Serializable
+data class SessionNotificationList(val notifications: List<SessionNotification>)
+
+@Serializable
+data class SessionNotification(
+    val id: String,
+    val message: String,
+    val senderUsername: String,
+    val createdAt: String,
+)

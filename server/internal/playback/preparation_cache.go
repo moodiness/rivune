@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	playbackPreparationTimeout  = 30 * time.Second
-	maximumPlaybackPreparations = 512
+	playbackPreparationTimeout    = 30 * time.Second
+	maximumPlaybackPreparations   = 512
+	playbackPreparationHandoffTTL = 30 * time.Second
 )
 
 type preparedPlayback struct {
@@ -36,6 +37,13 @@ type playbackPreparationEntry struct {
 	expiresAt time.Time
 }
 
+type playbackPreparationHandoff struct {
+	cacheKey          string
+	selectionRevision uint64
+	startKey          string
+	expiresAt         time.Time
+}
+
 type playbackPreparationCall struct {
 	done     chan struct{}
 	playback preparedPlayback
@@ -46,13 +54,15 @@ type playbackPreparationCache struct {
 	mu         sync.Mutex
 	entries    map[string]playbackPreparationEntry
 	inFlight   map[string]*playbackPreparationCall
+	handoffs   map[string]playbackPreparationHandoff
 	generation uint64
 	now        func() time.Time
 }
 
 func newPlaybackPreparationCache(now func() time.Time) *playbackPreparationCache {
 	return &playbackPreparationCache{
-		entries: make(map[string]playbackPreparationEntry), inFlight: make(map[string]*playbackPreparationCall), now: now,
+		entries: make(map[string]playbackPreparationEntry), inFlight: make(map[string]*playbackPreparationCall),
+		handoffs: make(map[string]playbackPreparationHandoff), now: now,
 	}
 }
 
@@ -61,6 +71,7 @@ func (cache *playbackPreparationCache) clear() {
 	cache.generation++
 	clear(cache.entries)
 	cache.inFlight = make(map[string]*playbackPreparationCall)
+	clear(cache.handoffs)
 	cache.mu.Unlock()
 }
 
@@ -69,6 +80,11 @@ func (cache *playbackPreparationCache) evict(reference sourceReference, policy p
 	cache.mu.Lock()
 	delete(cache.entries, cacheKey)
 	delete(cache.inFlight, cacheKey)
+	for owner, handoff := range cache.handoffs {
+		if handoff.cacheKey == cacheKey {
+			delete(cache.handoffs, owner)
+		}
+	}
 	cache.mu.Unlock()
 }
 
@@ -85,11 +101,58 @@ func (cache *playbackPreparationCache) evictRevision(referenceID string, revisio
 			delete(cache.inFlight, key)
 		}
 	}
+	for owner, handoff := range cache.handoffs {
+		if strings.HasPrefix(handoff.cacheKey, prefix) {
+			delete(cache.handoffs, owner)
+		}
+	}
 	cache.mu.Unlock()
 }
 
 func playbackPreparationCacheKey(referenceID string, revision uint64, policy playbackPolicy) string {
 	return referenceID + "|" + strconv.FormatUint(revision, 10) + "|" + strconv.FormatBool(policy.allowTranscoding) + "|" + strconv.Itoa(policy.maximumHeight) + "|" + strconv.Itoa(policy.bitrateKbps)
+}
+
+func (cache *playbackPreparationCache) markResolveHandoff(owner string, reference sourceReference, policy playbackPolicy, startSeconds float64) bool {
+	cacheKey := playbackPreparationCacheKey(reference.ID, reference.TransportRevision, policy)
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	cache.removeExpiredLocked()
+	entry, exists := cache.entries[cacheKey]
+	if !exists {
+		delete(cache.handoffs, owner)
+		return false
+	}
+	expiresAt := cache.now().Add(playbackPreparationHandoffTTL)
+	if entry.expiresAt.Before(expiresAt) {
+		expiresAt = entry.expiresAt
+	}
+	cache.handoffs[owner] = playbackPreparationHandoff{
+		cacheKey: cacheKey, selectionRevision: reference.SelectionRevision,
+		startKey: hlsStartKey(startSeconds), expiresAt: expiresAt,
+	}
+	return true
+}
+
+func (cache *playbackPreparationCache) consumeResolveHandoff(owner string, reference sourceReference, policy playbackPolicy, startSeconds float64) (preparedPlayback, bool) {
+	cacheKey := playbackPreparationCacheKey(reference.ID, reference.TransportRevision, policy)
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	cache.removeExpiredLocked()
+	handoff, exists := cache.handoffs[owner]
+	if !exists {
+		return preparedPlayback{}, false
+	}
+	delete(cache.handoffs, owner)
+	if !handoff.expiresAt.After(cache.now()) || handoff.cacheKey != cacheKey ||
+		handoff.selectionRevision != reference.SelectionRevision || handoff.startKey != hlsStartKey(startSeconds) {
+		return preparedPlayback{}, false
+	}
+	entry, exists := cache.entries[cacheKey]
+	if !exists {
+		return preparedPlayback{}, false
+	}
+	return clonePreparedPlayback(entry.playback), true
 }
 
 func (service *Service) preparedPlayback(ctx context.Context, principal auth.Principal, reference sourceReference, policies ...playbackPolicy) (preparedPlayback, error) {
@@ -229,6 +292,11 @@ func (cache *playbackPreparationCache) removeExpiredLocked() {
 			delete(cache.entries, identifier)
 		}
 	}
+	for owner, handoff := range cache.handoffs {
+		if !handoff.expiresAt.After(now) {
+			delete(cache.handoffs, owner)
+		}
+	}
 }
 
 func (cache *playbackPreparationCache) removeEarliestLocked() {
@@ -240,8 +308,14 @@ func (cache *playbackPreparationCache) removeEarliestLocked() {
 			earliest = entry.expiresAt
 		}
 	}
-	if earliestKey != "" {
-		delete(cache.entries, earliestKey)
+	if earliestKey == "" {
+		return
+	}
+	delete(cache.entries, earliestKey)
+	for owner, handoff := range cache.handoffs {
+		if handoff.cacheKey == earliestKey {
+			delete(cache.handoffs, owner)
+		}
 	}
 }
 
@@ -251,14 +325,14 @@ func clonePreparedPlayback(playback preparedPlayback) preparedPlayback {
 		asset := cloneStoredAsset(*playback.asset)
 		playback.asset = &asset
 	}
-	playback.subtitles = append([]Subtitle(nil), playback.subtitles...)
+	playback.subtitles = append([]Subtitle{}, playback.subtitles...)
 	subtitleAssets := playback.subtitleAssets
 	playback.subtitleAssets = make([]storedAsset, len(subtitleAssets))
 	for index := range subtitleAssets {
 		playback.subtitleAssets[index] = cloneStoredAsset(subtitleAssets[index])
 	}
-	playback.providerErrors = append([]ProviderFailure(nil), playback.providerErrors...)
-	playback.addonIDs = append([]string(nil), playback.addonIDs...)
+	playback.providerErrors = append([]ProviderFailure{}, playback.providerErrors...)
+	playback.addonIDs = append([]string{}, playback.addonIDs...)
 	return playback
 }
 

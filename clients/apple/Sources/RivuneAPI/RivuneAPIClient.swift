@@ -371,6 +371,12 @@ private struct RefreshOperation {
     let task: Task<TokenPair, Error>
 }
 
+private struct PendingProfileContextPersistence {
+    let authenticationGeneration: UInt64
+    let selectionGeneration: UInt64
+    let value: String?
+}
+
 private struct HTTPResult {
     let data: Data
     let response: HTTPURLResponse
@@ -388,6 +394,10 @@ public actor RivuneAPIClient {
     private var authenticationGeneration: UInt64 = 0
     private var refreshOperation: RefreshOperation?
     private var pendingAuthenticationCancellations: [UUID: @Sendable () -> Void] = [:]
+    private var profileContext: String?
+    private var profileSelectionGeneration: UInt64 = 0
+    private var profileSelectionMutationInFlight = false
+    private var pendingProfileContextPersistence: PendingProfileContextPersistence?
 
     public init(
         serverURL: URL,
@@ -470,8 +480,10 @@ public actor RivuneAPIClient {
     public func logout() async throws {
         authenticationGeneration += 1
         let generation = authenticationGeneration
-        let capturedCredentials = credentials
+        let capturedCredentials = credentials.map { StoredCredentials(tokens: $0, profileContext: profileContext) }
         credentials = nil
+        profileContext = nil
+        profileSelectionGeneration += 1
         loadedCredentials = true
         refreshOperation?.task.cancel()
         refreshOperation = nil
@@ -487,7 +499,7 @@ public actor RivuneAPIClient {
         )
 
         var remoteError: Error?
-        if let accessToken = cleanup.credentials?.accessToken {
+        if let accessToken = cleanup.credentials?.tokens.accessToken {
             do {
                 _ = try await requestData(
                     "auth/logout",
@@ -612,11 +624,58 @@ public actor RivuneAPIClient {
     }
 
     public func selectProfile(id: UUID, pin: String? = nil) async throws -> ProfileSelection {
-        try await request("profiles/\(id.uuidString.lowercased())/select", method: "POST", body: SelectProfileRequest(pin: pin), authenticated: true)
+        guard !profileSelectionMutationInFlight else { throw CancellationError() }
+        profileSelectionMutationInFlight = true
+        defer { profileSelectionMutationInFlight = false }
+        let generation = authenticationGeneration
+        profileSelectionGeneration += 1
+        let selectionGeneration = profileSelectionGeneration
+        let selection: ProfileSelection = try await request("profiles/\(id.uuidString.lowercased())/select", method: "POST", body: SelectProfileRequest(pin: pin), authenticated: true, allowProfileSelectionMutation: true)
+        guard generation == authenticationGeneration, selectionGeneration == profileSelectionGeneration else { throw CancellationError() }
+        pendingProfileContextPersistence = PendingProfileContextPersistence(
+            authenticationGeneration: generation,
+            selectionGeneration: selectionGeneration,
+            value: selection.profileContext
+        )
+        defer {
+            if pendingProfileContextPersistence?.selectionGeneration == selectionGeneration {
+                pendingProfileContextPersistence = nil
+            }
+        }
+        guard let tokens = credentials else { throw RivuneAPIError.notAuthenticated }
+        let stored = StoredCredentials(tokens: tokens, profileContext: selection.profileContext)
+        let saved = try await credentialStore.save(stored, for: serverURL, generation: generation)
+        guard saved, generation == authenticationGeneration, selectionGeneration == profileSelectionGeneration else { throw CancellationError() }
+        profileContext = selection.profileContext
+        profileSelectionGeneration += 1
+        return selection
     }
 
     public func clearProfileSelection() async throws {
-        _ = try await requestData("profiles/selection", method: "DELETE", body: Optional<Data>.none, authenticated: true)
+        guard !profileSelectionMutationInFlight else { throw CancellationError() }
+        profileSelectionMutationInFlight = true
+        defer { profileSelectionMutationInFlight = false }
+        let generation = authenticationGeneration
+        profileSelectionGeneration += 1
+        let selectionGeneration = profileSelectionGeneration
+        _ = try await requestData("profiles/selection", method: "DELETE", body: Optional<Data>.none, authenticated: true, allowProfileSelectionMutation: true)
+        guard generation == authenticationGeneration, selectionGeneration == profileSelectionGeneration else { throw CancellationError() }
+        pendingProfileContextPersistence = PendingProfileContextPersistence(
+            authenticationGeneration: generation,
+            selectionGeneration: selectionGeneration,
+            value: nil
+        )
+        defer {
+            if pendingProfileContextPersistence?.selectionGeneration == selectionGeneration {
+                pendingProfileContextPersistence = nil
+            }
+        }
+        guard let tokens = credentials else { throw RivuneAPIError.notAuthenticated }
+        let stored = StoredCredentials(tokens: tokens, profileContext: nil)
+        let saved = try await credentialStore.save(stored, for: serverURL, generation: generation)
+        guard saved, generation == authenticationGeneration, selectionGeneration == profileSelectionGeneration else { throw CancellationError() }
+        profileContext = nil
+        profileSelectionGeneration += 1
     }
 
     public func instanceSettings() async throws -> SettingsLayer {
@@ -811,29 +870,154 @@ public actor RivuneAPIClient {
         )
     }
 
+    public func collections() async throws -> [Collection] {
+        let result: CollectionList = try await request("collections", authenticated: true)
+        return result.collections
+    }
+
+    public func collection(id: UUID) async throws -> Collection {
+        try await request("collections/\(id.uuidString.lowercased())", authenticated: true)
+    }
+
+    public func resolveCollectionFolder(
+        collectionId: UUID,
+        folderId: UUID,
+        page: Int? = nil,
+        limit: Int? = nil,
+        language: String? = nil,
+        region: String? = nil
+    ) async throws -> ResolvedCollectionFolder {
+        try await request(
+            "collections/\(collectionId.uuidString.lowercased())/folders/\(folderId.uuidString.lowercased())/items",
+            query: queryItems(("page", page.map(String.init)), ("limit", limit.map(String.init)), ("language", language), ("region", region)),
+            authenticated: true
+        )
+    }
+
+    public func addonCatalogs() async throws -> [AddonCatalogDescriptor] {
+        let result: AddonCatalogDescriptorList = try await request("addons/catalogs", authenticated: true)
+        return result.catalogs
+    }
+
+    public func searchAddonCatalogs(
+        type: String,
+        search: String,
+        skip: Int? = nil,
+        limit: Int? = nil,
+        extras: [AddonExtraValue] = []
+    ) async throws -> AddonResourceBatch {
+        try await request(
+            "addons/catalogs/search/\(pathComponent(type))",
+            query: queryItems(("search", search), ("skip", skip.map(String.init)), ("limit", limit.map(String.init))) + extraQueryItems(extras),
+            authenticated: true
+        )
+    }
+
+    public func addonResource(
+        addonId: UUID,
+        resource: String,
+        type: String,
+        id: String,
+        skip: Int? = nil,
+        limit: Int? = nil,
+        extras: [AddonExtraValue] = []
+    ) async throws -> AddonResourceResult {
+        try await request(
+            "addons/\(addonId.uuidString.lowercased())/resource/\(pathComponent(resource))/\(pathComponent(type))/\(pathComponent(id))",
+            query: queryItems(("skip", skip.map(String.init)), ("limit", limit.map(String.init))) + extraQueryItems(extras),
+            authenticated: true
+        )
+    }
+
+    public func addonResources(
+        resource: String,
+        type: String,
+        id: String,
+        extras: [AddonExtraValue] = []
+    ) async throws -> AddonResourceBatch {
+        try await request(
+            "addons/resources/\(pathComponent(resource))/\(pathComponent(type))/\(pathComponent(id))",
+            query: extraQueryItems(extras),
+            authenticated: true
+        )
+    }
+
+    public func resolveTitle(_ input: TitleResolveInput) async throws -> TitleReference {
+        try await request("titles/resolve", method: "POST", body: input, authenticated: true)
+    }
+
+    public func resolveCustomSeries(_ input: CustomSeriesResolveInput) async throws -> CustomSeriesResolveResult {
+        try await request("titles/custom-series/resolve", method: "POST", body: input, authenticated: true)
+    }
+
+    public func library(mediaType: TitleMediaType? = nil, page: Int? = nil, pageSize: Int? = nil) async throws -> LibraryPage {
+        try await request(
+            "library",
+            query: queryItems(("mediaType", mediaType?.rawValue), ("page", page.map(String.init)), ("pageSize", pageSize.map(String.init))),
+            authenticated: true
+        )
+    }
+
+    public func tvLibraryMembership(_ identities: [TVLibraryIdentity]) async throws -> TVLibraryMembershipResult {
+        try await request("library/membership", method: "POST", body: TVLibraryMembershipRequest(identities: identities), authenticated: true)
+    }
+
+    public func addLibraryTitle(id: UUID) async throws -> LibraryItem {
+        try await request("library/\(id.uuidString.lowercased())", method: "PUT", authenticated: true)
+    }
+
+    public func removeLibraryTitle(id: UUID) async throws {
+        _ = try await requestData("library/\(id.uuidString.lowercased())", method: "DELETE", body: nil, authenticated: true)
+    }
+
+    public func sessionNotifications(after: String? = nil) async throws -> [SessionNotification] {
+        let result: SessionNotificationList = try await request("auth/notifications", query: queryItems(("after", after)), authenticated: true)
+        return result.notifications
+    }
+
+    public func acknowledgeSessionNotification(id: String) async throws {
+        _ = try await requestData("auth/notifications/\(pathComponent(id))", method: "DELETE", body: nil, authenticated: true)
+    }
+
+    public func resolveResponseResourceURL(_ value: String) throws -> URL {
+        guard let components = URLComponents(string: value), components.user == nil, components.password == nil,
+              let resolved = URL(string: value, relativeTo: serverURL)?.absoluteURL else {
+            throw RivuneAPIError.invalidServerURL(value)
+        }
+        let origin = try Self.canonicalServerOrigin(resolved)
+        if components.scheme == nil {
+            guard components.host == nil, origin == serverURL else { throw RivuneAPIError.invalidServerURL(value) }
+        } else if origin != serverURL && resolved.scheme?.lowercased() != "https" {
+            throw RivuneAPIError.invalidServerURL(value)
+        }
+        return resolved
+    }
+
 
     private func request<Response: Decodable>(_ path: String, method: String = "GET", query: [URLQueryItem] = [], authenticated: Bool) async throws -> Response {
         try await decodedRequest(path, method: method, query: query, body: nil, authenticated: authenticated)
     }
 
-    private func request<Response: Decodable, Body: Encodable>(_ path: String, method: String = "GET", query: [URLQueryItem] = [], body: Body, authenticated: Bool) async throws -> Response {
+    private func request<Response: Decodable, Body: Encodable>(_ path: String, method: String = "GET", query: [URLQueryItem] = [], body: Body, authenticated: Bool, allowProfileSelectionMutation: Bool = false) async throws -> Response {
         let data = try encoder.encode(body)
-        return try await decodedRequest(path, method: method, query: query, body: data, authenticated: authenticated)
+        return try await decodedRequest(path, method: method, query: query, body: data, authenticated: authenticated, allowProfileSelectionMutation: allowProfileSelectionMutation)
     }
 
-    private func decodedRequest<Response: Decodable>(_ path: String, method: String, query: [URLQueryItem], body: Data?, authenticated: Bool) async throws -> Response {
-        let data = try await requestData(path, method: method, query: query, body: body, authenticated: authenticated)
+    private func decodedRequest<Response: Decodable>(_ path: String, method: String, query: [URLQueryItem], body: Data?, authenticated: Bool, allowProfileSelectionMutation: Bool = false) async throws -> Response {
+        let data = try await requestData(path, method: method, query: query, body: body, authenticated: authenticated, allowProfileSelectionMutation: allowProfileSelectionMutation)
         do { return try decoder.decode(Response.self, from: data) }
         catch { throw RivuneAPIError.invalidResponse }
     }
 
-    private func requestData(_ path: String, method: String, query: [URLQueryItem] = [], body: Data?, authenticated: Bool) async throws -> Data {
-        try await requestResult(path, method: method, query: query, body: body, authenticated: authenticated).data
+    private func requestData(_ path: String, method: String, query: [URLQueryItem] = [], body: Data?, authenticated: Bool, allowProfileSelectionMutation: Bool = false) async throws -> Data {
+        try await requestResult(path, method: method, query: query, body: body, authenticated: authenticated, allowProfileSelectionMutation: allowProfileSelectionMutation).data
     }
 
-    private func requestResult(_ path: String, method: String, query: [URLQueryItem] = [], body: Data?, authenticated: Bool) async throws -> HTTPResult {
+    private func requestResult(_ path: String, method: String, query: [URLQueryItem] = [], body: Data?, authenticated: Bool, allowProfileSelectionMutation: Bool = false) async throws -> HTTPResult {
+        if authenticated, profileSelectionMutationInFlight, !allowProfileSelectionMutation { throw CancellationError() }
         if apiBaseURL == nil { _ = try await discover() }
         if authenticated { try await loadCredentialsIfNeeded() }
+        if authenticated, profileSelectionMutationInFlight, !allowProfileSelectionMutation { throw CancellationError() }
         let authorizationToken: String?
         if authenticated {
             guard let accessToken = credentials?.accessToken else { throw RivuneAPIError.notAuthenticated }
@@ -842,6 +1026,7 @@ public actor RivuneAPIClient {
             authorizationToken = nil
         }
         let requestGeneration = authenticated ? authenticationGeneration : nil
+        let requestProfileGeneration = authenticated ? profileSelectionGeneration : nil
         let url = try resolvedAPIURL(path: path, query: query)
         return try await perform(
             url: url,
@@ -850,6 +1035,7 @@ public actor RivuneAPIClient {
             authorizationToken: authorizationToken,
             retryAfterRefresh: authenticated,
             expectedAuthenticationGeneration: requestGeneration,
+            expectedProfileSelectionGeneration: requestProfileGeneration,
             credentialBearing: authenticated || Self.isCredentialBearingURL(url)
         )
     }
@@ -871,20 +1057,22 @@ public actor RivuneAPIClient {
             authorizationToken: authorizationToken,
             retryAfterRefresh: retryAfterRefresh,
             expectedAuthenticationGeneration: nil,
+            expectedProfileSelectionGeneration: nil,
             credentialBearing: true
         ).data
     }
 
     private func resolvedAPIURL(path: String, query: [URLQueryItem]) throws -> URL {
-        guard let base = apiBaseURL else { throw RivuneAPIError.invalidResponse }
-        var url = base
-        for component in path.split(separator: "/") { url.appendPathComponent(String(component)) }
-        if !query.isEmpty {
-            var parts = URLComponents(url: url, resolvingAgainstBaseURL: true)
-            parts?.queryItems = query
-            guard let composed = parts?.url else { throw RivuneAPIError.invalidServerURL(url.absoluteString) }
-            url = composed
+        guard let base = apiBaseURL,
+              var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else {
+            throw RivuneAPIError.invalidResponse
         }
+        var encodedPath = components.percentEncodedPath
+        if !encodedPath.hasSuffix("/") { encodedPath += "/" }
+        encodedPath += path.split(separator: "/").joined(separator: "/")
+        components.percentEncodedPath = encodedPath
+        if !query.isEmpty { components.queryItems = query }
+        guard let url = components.url else { throw RivuneAPIError.invalidServerURL(path) }
         return url
     }
 
@@ -898,6 +1086,7 @@ public actor RivuneAPIClient {
             authorizationToken = nil
         }
         let requestGeneration = authenticated ? authenticationGeneration : nil
+        let requestProfileGeneration = authenticated ? profileSelectionGeneration : nil
         let result = try await perform(
             url: url,
             method: method,
@@ -905,6 +1094,7 @@ public actor RivuneAPIClient {
             authorizationToken: authorizationToken,
             retryAfterRefresh: retryAfterRefresh,
             expectedAuthenticationGeneration: requestGeneration,
+            expectedProfileSelectionGeneration: requestProfileGeneration,
             credentialBearing: authenticated || Self.isCredentialBearingURL(url)
         )
         do { return try decoder.decode(Response.self, from: result.data) }
@@ -918,6 +1108,7 @@ public actor RivuneAPIClient {
         authorizationToken: String?,
         retryAfterRefresh: Bool,
         expectedAuthenticationGeneration: UInt64?,
+        expectedProfileSelectionGeneration: UInt64?,
         credentialBearing: Bool
     ) async throws -> HTTPResult {
         guard try Self.canonicalServerOrigin(url) == serverURL else {
@@ -934,6 +1125,9 @@ public actor RivuneAPIClient {
         if let authorizationToken {
             request.setValue("Bearer \(authorizationToken)", forHTTPHeaderField: "Authorization")
         }
+        if authorizationToken != nil, let profileContext, Self.usesProfileContext(url, method: method) {
+            request.setValue(profileContext, forHTTPHeaderField: "X-Rivune-Profile-Context")
+        }
 
         let transportRequest = request
         let result: (Data, HTTPURLResponse)
@@ -946,15 +1140,15 @@ public actor RivuneAPIClient {
                 result = try await transport.data(for: request)
             }
         } catch {
-            try ensureAuthenticationGeneration(expectedAuthenticationGeneration)
+            try ensureRequestGenerations(authentication: expectedAuthenticationGeneration, profile: expectedProfileSelectionGeneration)
             throw error
         }
-        try ensureAuthenticationGeneration(expectedAuthenticationGeneration)
+        try ensureRequestGenerations(authentication: expectedAuthenticationGeneration, profile: expectedProfileSelectionGeneration)
         let (data, response) = result
         try Self.enforceResponseLimit(data: data, response: response)
         if response.statusCode == 401, let authorizationToken, retryAfterRefresh {
             _ = try await refreshCredentials(failedAccessToken: authorizationToken)
-            try ensureAuthenticationGeneration(expectedAuthenticationGeneration)
+            try ensureRequestGenerations(authentication: expectedAuthenticationGeneration, profile: expectedProfileSelectionGeneration)
             guard let refreshedAccessToken = credentials?.accessToken else {
                 throw RivuneAPIError.notAuthenticated
             }
@@ -965,6 +1159,7 @@ public actor RivuneAPIClient {
                 authorizationToken: refreshedAccessToken,
                 retryAfterRefresh: false,
                 expectedAuthenticationGeneration: expectedAuthenticationGeneration,
+                expectedProfileSelectionGeneration: expectedProfileSelectionGeneration,
                 credentialBearing: true
             )
         }
@@ -974,10 +1169,9 @@ public actor RivuneAPIClient {
         return HTTPResult(data: data, response: response)
     }
 
-    private func ensureAuthenticationGeneration(_ expected: UInt64?) throws {
-        if let expected, expected != authenticationGeneration {
-            throw CancellationError()
-        }
+    private func ensureRequestGenerations(authentication: UInt64?, profile: UInt64?) throws {
+        if let authentication, authentication != authenticationGeneration { throw CancellationError() }
+        if let profile, profile != profileSelectionGeneration { throw CancellationError() }
     }
 
     private static func isCredentialBearingURL(_ url: URL) -> Bool {
@@ -986,6 +1180,17 @@ public actor RivuneAPIClient {
             path.hasSuffix("/auth/refresh") ||
             path.hasSuffix("/auth/device-code/token")
     }
+    private static func usesProfileContext(_ url: URL, method: String) -> Bool {
+        let path = url.path
+        if path.hasSuffix("/auth/logout") || path.hasSuffix("/auth/me") { return false }
+        if method == "DELETE", path.hasSuffix("/profiles/selection") { return false }
+        if method == "GET", path.hasSuffix("/profiles") { return false }
+        if method == "GET", path.contains("/profiles/"), path.hasSuffix("/avatar") { return false }
+        if method == "POST", path.contains("/profiles/"), path.hasSuffix("/select") { return false }
+        return true
+    }
+
+
 
     private func refreshCredentials(failedAccessToken: String? = nil) async throws -> TokenPair {
         if let failedAccessToken, let current = credentials, current.accessToken != failedAccessToken {
@@ -1045,7 +1250,15 @@ public actor RivuneAPIClient {
 
     private func setCredentials(_ value: TokenPair, generation: UInt64) async throws {
         guard generation == authenticationGeneration else { throw CancellationError() }
-        let saved = try await credentialStore.save(value, for: serverURL, generation: generation)
+        let persistedProfileContext: String?
+        if let pending = pendingProfileContextPersistence,
+           pending.authenticationGeneration == generation {
+            persistedProfileContext = pending.value
+        } else {
+            persistedProfileContext = profileContext
+        }
+        let stored = StoredCredentials(tokens: value, profileContext: persistedProfileContext)
+        let saved = try await credentialStore.save(stored, for: serverURL, generation: generation)
         guard saved, generation == authenticationGeneration else { throw CancellationError() }
         credentials = value
         loadedCredentials = true
@@ -1054,11 +1267,13 @@ public actor RivuneAPIClient {
     private func beginCredentialReplacement(preserveStoredCredentials: Bool) async throws -> UInt64 {
         authenticationGeneration += 1
         let generation = authenticationGeneration
-        let capturedCredentials = credentials
+        let capturedCredentials = credentials.map { StoredCredentials(tokens: $0, profileContext: profileContext) }
         credentials = nil
+        profileContext = nil
         loadedCredentials = !preserveStoredCredentials
         refreshOperation?.task.cancel()
         refreshOperation = nil
+        profileSelectionGeneration += 1
         for cancel in pendingAuthenticationCancellations.values {
             cancel()
         }
@@ -1092,8 +1307,9 @@ public actor RivuneAPIClient {
         }
     }
 
-    private func installRestoredCredentials(_ restored: TokenPair?) {
-        credentials = restored
+    private func installRestoredCredentials(_ restored: StoredCredentials?) {
+        credentials = restored?.tokens
+        profileContext = restored?.profileContext
         loadedCredentials = true
     }
 
@@ -1102,7 +1318,8 @@ public actor RivuneAPIClient {
         let generation = authenticationGeneration
         let restored = try await credentialStore.load(for: serverURL, generation: generation)
         guard generation == authenticationGeneration else { throw CancellationError() }
-        credentials = restored
+        credentials = restored?.tokens
+        profileContext = restored?.profileContext
         loadedCredentials = true
     }
 
@@ -1172,5 +1389,9 @@ public actor RivuneAPIClient {
 
     private func queryItems(_ values: (String, String?)...) -> [URLQueryItem] {
         values.compactMap { name, value in value.map { URLQueryItem(name: name, value: $0) } }
+    }
+
+    private func extraQueryItems(_ values: [AddonExtraValue]) -> [URLQueryItem] {
+        values.map { URLQueryItem(name: $0.name, value: $0.value) }
     }
 }

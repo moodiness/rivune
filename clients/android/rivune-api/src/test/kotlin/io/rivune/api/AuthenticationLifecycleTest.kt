@@ -18,6 +18,9 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import okhttp3.Interceptor
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -142,9 +145,123 @@ class AuthenticationLifecycleTest {
         }
     }
 
+    @Test
+    fun failedReplacementLoginLeavesNoMixedAuthenticationState() = runBlocking {
+        lifecycleFixture(initialTokens = tokenPair("old")).use { fixture ->
+            fixture.client.discover()
+            assertTrue(fixture.client.restoreSession())
+            fixture.transport.loginFailure = IOException("login unavailable")
+
+            assertFailsWith<IOException> {
+                fixture.client.login("new-user", "password", testDevice())
+            }
+
+            assertNull(fixture.store.credentials)
+            assertFalse(fixture.client.restoreSession())
+        }
+    }
+
+    @Test
+    fun authenticatedResponseCannotCrossProfileClear() = runBlocking {
+        lifecycleFixture(initialTokens = tokenPair("old")).use { fixture ->
+            val profileId = UUID.fromString("44444444-4444-4444-8444-444444444444")
+            fixture.client.discover()
+            assertTrue(fixture.client.restoreSession())
+            fixture.client.selectProfile(profileId)
+            fixture.transport.failNextCollectionsWithUnauthorized()
+            val collectionGate = fixture.transport.blockNext("/api/v1/collections")
+            val staleRequest = async(start = CoroutineStart.UNDISPATCHED) { fixture.client.collections() }
+            collectionGate.awaitRequest()
+
+            fixture.client.clearProfileSelection()
+            collectionGate.release()
+
+            assertFailsWith<CancellationException> { staleRequest.await() }
+            assertEquals(0, fixture.transport.requestCount("/api/v1/auth/refresh"))
+        }
+    }
+
+    @Test
+    fun profileMutationsReachServerInCallOrder() = runBlocking {
+        lifecycleFixture(initialTokens = tokenPair("old")).use { fixture ->
+            val profileId = UUID.fromString("44444444-4444-4444-8444-444444444444")
+            fixture.client.discover()
+            assertTrue(fixture.client.restoreSession())
+            fixture.client.selectProfile(profileId)
+            val clearGate = fixture.transport.blockNext("/api/v1/profiles/selection")
+            val clear = async(start = CoroutineStart.UNDISPATCHED) { fixture.client.clearProfileSelection() }
+            clearGate.awaitRequest()
+
+            val reselection = async(start = CoroutineStart.UNDISPATCHED) { fixture.client.selectProfile(profileId) }
+            assertEquals(1, fixture.transport.requestCount("/api/v1/profiles/$profileId/select"))
+            clearGate.release()
+
+            clear.await()
+            reselection.await()
+            assertEquals(2, fixture.transport.requestCount("/api/v1/profiles/$profileId/select"))
+        }
+    }
+
+    @Test
+    fun browseRequestDoesNotStartDuringProfileMutation() = runBlocking {
+        lifecycleFixture(initialTokens = tokenPair("old")).use { fixture ->
+            val profileId = UUID.fromString("44444444-4444-4444-8444-444444444444")
+            fixture.client.discover()
+            assertTrue(fixture.client.restoreSession())
+            fixture.client.selectProfile(profileId)
+            val clearGate = fixture.transport.blockNext("/api/v1/profiles/selection")
+            val clear = async(start = CoroutineStart.UNDISPATCHED) { fixture.client.clearProfileSelection() }
+            clearGate.awaitRequest()
+
+            assertFailsWith<CancellationException> { fixture.client.collections() }
+            assertEquals(0, fixture.transport.requestCount("/api/v1/collections"))
+            clearGate.release()
+            clear.await()
+        }
+    }
+
+    @Test
+    fun profileContextPersistsAcrossClientReconstructionAndTokenRefresh() = runBlocking {
+        lifecycleFixture(initialTokens = tokenPair("old")).use { fixture ->
+            val profileId = UUID.fromString("44444444-4444-4444-8444-444444444444")
+            fixture.client.discover()
+            assertTrue(fixture.client.restoreSession())
+            fixture.client.selectProfile(profileId)
+            assertEquals("context-one", fixture.store.credentials?.profileContext)
+
+            val restored = fixture.reconstructedClient()
+            restored.discover()
+            assertTrue(restored.restoreSession())
+            restored.collections()
+            assertEquals("context-one", fixture.transport.lastRequest("/api/v1/collections").profileContext)
+
+            restored.refreshSession()
+            assertEquals("refreshed-access", fixture.store.credentials?.tokens?.accessToken)
+            assertEquals("context-one", fixture.store.credentials?.profileContext)
+
+            val refreshed = fixture.reconstructedClient()
+            refreshed.discover()
+            assertTrue(refreshed.restoreSession())
+            refreshed.collections()
+            val collection = fixture.transport.lastRequest("/api/v1/collections")
+            assertEquals("Bearer refreshed-access", collection.authorization)
+            assertEquals("context-one", collection.profileContext)
+
+            refreshed.clearProfileSelection()
+            assertNull(fixture.store.credentials?.profileContext)
+        }
+    }
+
+    @Test
+    fun storedCredentialsWithoutProfileContextRemainReadable() {
+        val encoded = Json.encodeToString(StoredCredentials("https://media.example.com/", tokenPair("legacy")))
+        assertFalse(encoded.contains("profileContext"))
+        assertNull(Json.decodeFromString<StoredCredentials>(encoded).profileContext)
+    }
+
     private fun lifecycleFixture(initialTokens: TokenPair? = null): LifecycleFixture {
         val server = MockWebServer().apply { start() }
-        val issuer = server.url("/").toString()
+        val issuer = server.loopbackUrl("/").toString()
         val store = RecordingCredentialStore(initialTokens?.let { StoredCredentials(issuer, it) })
         val transport = BlockingAuthTransport()
         val client = RivuneApiClient(
@@ -168,6 +285,12 @@ private class LifecycleFixture(
         transport.releaseAll()
         server.shutdown()
     }
+
+    fun reconstructedClient() = RivuneApiClient(
+        serverUrl = server.loopbackUrl("/").toString(),
+        credentialStore = store,
+        httpClient = OkHttpClient.Builder().addInterceptor(transport).build(),
+    )
 }
 
 private class RecordingCredentialStore(
@@ -196,16 +319,24 @@ private class RecordingCredentialStore(
 private data class RecordedAuthRequest(
     val path: String,
     val authorization: String?,
+    val profileContext: String?,
 )
 
 private class BlockingAuthTransport : Interceptor {
     private val gates = ConcurrentHashMap<String, TransportGate>()
     private val requests = mutableListOf<RecordedAuthRequest>()
     private val loginCount = AtomicInteger()
+    private val unauthorizedCollections = AtomicInteger()
 
+    @Volatile
+    var loginFailure: IOException? = null
     @Volatile
     var logoutFailure: IOException? = null
 
+
+    fun failNextCollectionsWithUnauthorized() {
+        check(unauthorizedCollections.compareAndSet(0, 1)) { "A collection failure is already queued" }
+    }
     fun blockNext(path: String): TransportGate = TransportGate().also { gate ->
         check(gates.putIfAbsent(path, gate) == null) { "A gate already exists for $path" }
     }
@@ -218,6 +349,10 @@ private class BlockingAuthTransport : Interceptor {
         requests.single { it.path == path }
     }
 
+    fun lastRequest(path: String): RecordedAuthRequest = synchronized(requests) {
+        requests.last { it.path == path }
+    }
+
     fun releaseAll() {
         gates.values.forEach(TransportGate::release)
         gates.clear()
@@ -227,22 +362,36 @@ private class BlockingAuthTransport : Interceptor {
         val request = chain.request()
         val path = request.url.encodedPath
         synchronized(requests) {
-            requests += RecordedAuthRequest(path, request.header("Authorization"))
+            requests += RecordedAuthRequest(
+                path,
+                request.header("Authorization"),
+                request.header("X-Rivune-Profile-Context"),
+            )
         }
         gates.remove(path)?.block()
+        if (path == "/api/v1/auth/login") loginFailure?.let { throw it }
         if (path == "/api/v1/auth/logout") logoutFailure?.let { throw it }
 
-        val body = when (path) {
-            "/.well-known/rivune" -> DISCOVERY_JSON
-            "/api/v1/auth/login" -> tokenJson("login-${loginCount.incrementAndGet()}")
-            "/api/v1/auth/device-code/token" -> tokenJson("device")
-            "/api/v1/auth/refresh" -> tokenJson("refreshed")
+        val rejectCollections = path == "/api/v1/collections" && unauthorizedCollections.compareAndSet(1, 0)
+        val status = when {
+            path == "/api/v1/profiles/selection" -> 204
+            rejectCollections -> 401
+            else -> 200
+        }
+        val body = when {
+            rejectCollections -> """{"error":{"code":"expired","message":"Expired"}}"""
+            path == "/.well-known/rivune" -> DISCOVERY_JSON
+            path == "/api/v1/auth/login" -> tokenJson("login-${loginCount.incrementAndGet()}")
+            path == "/api/v1/auth/device-code/token" -> tokenJson("device")
+            path == "/api/v1/auth/refresh" -> tokenJson("refreshed")
+            path == "/api/v1/collections" -> """{"collections":[]}"""
+            path.endsWith("/select") -> PROFILE_SELECTION_JSON
             else -> "{}"
         }
         return Response.Builder()
             .request(request)
             .protocol(Protocol.HTTP_1_1)
-            .code(200)
+            .code(status)
             .message("OK")
             .header("Content-Type", "application/json")
             .body(body.toResponseBody(JSON_MEDIA_TYPE))
@@ -252,6 +401,7 @@ private class BlockingAuthTransport : Interceptor {
     private companion object {
         val JSON_MEDIA_TYPE = "application/json".toMediaType()
         const val DISCOVERY_JSON = """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}"""
+        const val PROFILE_SELECTION_JSON = """{"profile":{"id":"44444444-4444-4444-8444-444444444444","name":"Viewer","description":null,"categoryId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","category":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","name":"Default","color":null,"icon":null},"isChild":false,"hasPin":false,"canManage":true,"enabled":true,"availableFrom":null,"availableUntil":null,"accessStartTime":null,"accessEndTime":null,"accessTimezone":"UTC","accessible":true,"avatar":{"kind":"preset","presetId":"one","url":"/api/v1/avatar"}},"expiresAt":"2026-08-12T12:00:00Z","profileContext":"context-one"}"""
     }
 }
 

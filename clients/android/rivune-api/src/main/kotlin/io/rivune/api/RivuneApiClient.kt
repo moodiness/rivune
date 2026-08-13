@@ -4,6 +4,7 @@ import android.content.Context
 import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.Dispatchers
@@ -36,13 +37,7 @@ private fun isCredentialTransportAllowed(url: HttpUrl): Boolean =
         url.encodedPassword.isEmpty() &&
         (url.scheme == "https" || (url.scheme == "http" && isLoopbackHost(url.host)))
 
-private fun isLoopbackHost(host: String): Boolean {
-    if (host == "localhost" || host == "::1") return true
-    val octets = host.split('.')
-    return octets.size == 4 &&
-        octets.first() == "127" &&
-        octets.all { it.toIntOrNull() in 0..255 }
-}
+private fun isLoopbackHost(host: String): Boolean = host == "localhost" || host == "127.0.0.1"
 
 private fun canonicalOrigin(url: HttpUrl): String = HttpUrl.Builder()
     .scheme(url.scheme)
@@ -57,7 +52,7 @@ sealed class RivuneApiException(message: String, cause: Throwable? = null) : Exc
     class InvalidResponse(cause: Throwable? = null) : RivuneApiException("The Rivune server returned an invalid response", cause)
     class NotAuthenticated : RivuneApiException("Authentication is required")
     class Server(val status: Int, val code: String, override val message: String) : RivuneApiException(message)
-    class ResponseTooLarge : RivuneApiException("The Rivune server response exceeds the 16 MiB limit")
+    class ResponseTooLarge(limit: String = "16 MiB") : RivuneApiException("The Rivune server response exceeds the $limit limit")
 }
 
 @Serializable
@@ -131,15 +126,26 @@ class RivuneApiClient(
     private val discoveryMutex = Mutex()
     private val credentialStore = OrderedCredentialStore(credentialStore)
     private val refreshMutex = Mutex()
-    private val httpClient = httpClient.newBuilder()
-        .followRedirects(false)
-        .followSslRedirects(false)
+    private val profileSelectionMutex = Mutex()
+    private val httpClient = httpClient.secureBuilder().build()
+    private val collectionArtworkHttpClient = httpClient.secureBuilder()
+        .callTimeout(COLLECTION_ARTWORK_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .readTimeout(COLLECTION_ARTWORK_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .writeTimeout(COLLECTION_ARTWORK_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .build()
+    private val mediaPreparationHttpClient = httpClient.secureBuilder()
+        .callTimeout(MEDIA_PREPARATION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .readTimeout(MEDIA_PREPARATION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .writeTimeout(MEDIA_PREPARATION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .build()
     private var apiBaseUrl: HttpUrl? = null
     private var credentials: TokenPair? = null
     private var credentialsLoaded = false
     private var authenticationGeneration = 0L
 
+    private var profileContext: String? = null
+    private var profileContextGeneration = 0L
+    private var profileContextMutationInFlight = false
     suspend fun discover(): Discovery = discoveryMutex.withLock {
         val generation = currentAuthenticationGeneration()
         val url = serverUrl.resolve("/.well-known/rivune") ?: throw RivuneApiException.InvalidServerUrl(serverUrl.toString())
@@ -176,7 +182,7 @@ class RivuneApiClient(
     }
 
     suspend fun login(username: String, password: String, device: LoginDevice): TokenPair {
-        val generation = currentAuthenticationGeneration()
+        val generation = beginCredentialReplacement()
         val result: TokenPair = request(
             path = "auth/login",
             method = "POST",
@@ -190,7 +196,7 @@ class RivuneApiClient(
     suspend fun refreshSession(): TokenPair {
         loadCredentialsIfNeeded()
         val snapshot = authenticationSnapshot()
-        return refreshCredentials(snapshot.accessToken, snapshot.generation)
+        return refreshCredentials(snapshot.accessToken, snapshot)
     }
 
     suspend fun logout() {
@@ -201,6 +207,9 @@ class RivuneApiClient(
                 val capturedCredentials = credentials
                 credentials = null
                 credentialsLoaded = true
+                profileContext = null
+                profileContextGeneration += 1
+                profileContextMutationInFlight = false
                 credentialStore.invalidateAndClear(
                     issuer = credentialIssuer,
                     newGeneration = generation,
@@ -304,7 +313,7 @@ class RivuneApiClient(
     )
 
     suspend fun exchangeDeviceAuthorization(deviceCode: String): TokenPair {
-        val generation = currentAuthenticationGeneration()
+        val generation = beginCredentialReplacement()
         val result: TokenPair = request(
             path = "auth/device-code/token",
             method = "POST",
@@ -324,14 +333,32 @@ class RivuneApiClient(
 
     suspend fun profiles(): List<Profile> = request<ProfileList>("profiles", authenticated = true).profiles
 
-    suspend fun selectProfile(id: UUID, pin: String? = null): ProfileSelection = request(
-        path = "profiles/$id/select",
-        method = "POST",
-        body = requestJson.encodeToString(SelectProfileRequest(pin)),
-        authenticated = true,
-    )
+    suspend fun selectProfile(id: UUID, pin: String? = null): ProfileSelection = profileSelectionMutex.withLock {
+        val state = reserveProfileMutation()
+        try {
+            val selection: ProfileSelection = request(
+                path = "profiles/$id/select",
+                method = "POST",
+                body = requestJson.encodeToString(SelectProfileRequest(pin)),
+                authenticated = true,
+                expectedProfileMutation = state,
+            )
+            commitProfileContext(selection.profileContext, state)
+            selection
+        } finally {
+            finishProfileMutation()
+        }
+    }
 
-    suspend fun clearProfileSelection() = requestUnit("profiles/selection", "DELETE", authenticated = true)
+    suspend fun clearProfileSelection() = profileSelectionMutex.withLock {
+        val state = reserveProfileMutation()
+        try {
+            requestUnit("profiles/selection", "DELETE", authenticated = true, expectedProfileMutation = state)
+            commitProfileContext(null, state)
+        } finally {
+            finishProfileMutation()
+        }
+    }
 
     suspend fun instanceSettings(): SettingsLayer = request("settings", authenticated = true)
 
@@ -346,12 +373,10 @@ class RivuneApiClient(
 
     suspend fun profileSettings(id: UUID): SettingsLayer = request("profiles/$id/settings", authenticated = true)
 
-    suspend fun updateProfileSettings(id: UUID, transcoding: String?): SettingsLayer = request(
+    suspend fun updateProfileSettings(id: UUID, input: ProfileSettingsUpdate): SettingsLayer = request(
         path = "profiles/$id/settings",
         method = "PATCH",
-        body = buildJsonObject {
-            if (transcoding == null) put("transcoding", JsonNull) else put("transcoding", transcoding)
-        }.toString(),
+        body = profileSettingsUpdateBody(input),
         authenticated = true,
     )
 
@@ -397,6 +422,184 @@ class RivuneApiClient(
         authenticated = true,
     )
 
+    suspend fun calendar(from: String, to: String, language: String? = null): List<CalendarEvent> = request<CalendarEventList>(
+        path = "calendar",
+        query = mapOf("from" to from, "to" to to, "language" to language),
+        authenticated = true,
+    ).events
+
+    suspend fun collections(): List<Collection> = request<CollectionList>(
+        path = "collections",
+        authenticated = true,
+    ).collections
+
+    suspend fun collection(id: UUID): Collection = request(
+        path = "collections/$id",
+        authenticated = true,
+    )
+    suspend fun profileAvatar(profileId: UUID): ByteArray {
+        val url = endpoint("profiles/$profileId/avatar", emptyMap())
+        return executeBytes(url, authenticated = true, retryAfterRefresh = true)
+    }
+
+
+    suspend fun resolveCollectionFolder(
+        collectionId: UUID,
+        folderId: UUID,
+        page: Int? = null,
+        limit: Int? = null,
+        language: String? = null,
+        region: String? = null,
+    ): ResolvedCollectionFolder = request(
+        path = "collections/$collectionId/folders/$folderId/items",
+        query = mapOf(
+            "page" to page?.toString(),
+            "limit" to limit?.toString(),
+            "language" to language,
+            "region" to region,
+        ),
+        authenticated = true,
+    )
+    suspend fun resolveCollectionFolderArtwork(
+        collectionId: UUID,
+        folderId: UUID,
+    ): ResolvedCollectionFolder = request(
+        path = "collections/$collectionId/folders/$folderId/items",
+        query = mapOf("page" to "1", "limit" to "1"),
+        authenticated = true,
+        client = collectionArtworkHttpClient,
+    )
+
+
+    suspend fun addonCatalogs(): List<AddonCatalogDescriptor> = request<AddonCatalogDescriptorList>(
+        path = "addons/catalogs",
+        authenticated = true,
+    ).catalogs
+
+    suspend fun searchAddonCatalogs(
+        type: String,
+        search: String,
+        skip: Int? = null,
+        limit: Int? = null,
+        extras: List<Pair<String, String>> = emptyList(),
+    ): AddonResourceBatch = requestWithQueryItems(
+        path = "addons/catalogs/search/${encodePathSegment(type)}",
+        query = listOfNotNull(
+            "search" to search,
+            skip?.let { "skip" to it.toString() },
+            limit?.let { "limit" to it.toString() },
+        ) + extras,
+        authenticated = true,
+    )
+
+    suspend fun addonResource(
+        addonId: UUID,
+        resource: String,
+        type: String,
+        id: String,
+        skip: Int? = null,
+        limit: Int? = null,
+        extras: List<Pair<String, String>> = emptyList(),
+    ): AddonResourceResult = requestWithQueryItems(
+        path = "addons/$addonId/resource/${encodePathSegment(resource)}/${encodePathSegment(type)}/${encodePathSegment(id)}",
+        query = listOfNotNull(
+            skip?.let { "skip" to it.toString() },
+            limit?.let { "limit" to it.toString() },
+        ) + extras,
+        authenticated = true,
+    )
+
+    suspend fun addonResources(
+        resource: String,
+        type: String,
+        id: String,
+        extras: List<Pair<String, String>> = emptyList(),
+    ): AddonResourceBatch = requestWithQueryItems(
+        path = "addons/resources/${encodePathSegment(resource)}/${encodePathSegment(type)}/${encodePathSegment(id)}",
+        query = extras,
+        authenticated = true,
+    )
+
+    suspend fun resolveTitle(input: TitleResolveInput): TitleReference = request(
+        path = "titles/resolve",
+        method = "POST",
+        body = requestJson.encodeToString(input),
+        authenticated = true,
+    )
+
+    suspend fun resolveCustomSeries(input: CustomSeriesResolveInput): CustomSeriesResolveResult = request(
+        path = "titles/custom-series/resolve",
+        method = "POST",
+        body = requestJson.encodeToString(input),
+        authenticated = true,
+    )
+
+    suspend fun library(
+        mediaType: TitleMediaType? = null,
+        page: Int? = null,
+        pageSize: Int? = null,
+    ): LibraryPage = request(
+        path = "library",
+        query = mapOf(
+            "mediaType" to mediaType?.wireValue,
+            "page" to page?.toString(),
+            "pageSize" to pageSize?.toString(),
+        ),
+        authenticated = true,
+    )
+
+    suspend fun tvLibraryMembership(identities: List<TVLibraryIdentity>): TVLibraryMembershipResult = request(
+        path = "library/membership",
+        method = "POST",
+        body = requestJson.encodeToString(TVLibraryMembershipRequest(identities)),
+        authenticated = true,
+    )
+
+    suspend fun addLibraryTitle(titleId: UUID): LibraryItem = request(
+        path = "library/$titleId",
+        method = "PUT",
+        authenticated = true,
+    )
+
+    suspend fun removeLibraryTitle(titleId: UUID) = requestUnit(
+        path = "library/$titleId",
+        method = "DELETE",
+        authenticated = true,
+    )
+
+    suspend fun sessionNotifications(after: String? = null): List<SessionNotification> = request<SessionNotificationList>(
+        path = "auth/notifications",
+        query = mapOf("after" to after),
+        authenticated = true,
+    ).notifications
+
+    suspend fun acknowledgeSessionNotification(notificationId: String) = requestUnit(
+        path = "auth/notifications/${encodePathSegment(notificationId)}",
+        method = "DELETE",
+        authenticated = true,
+    )
+
+    fun resolveResponseResourceUrl(value: String): HttpUrl? {
+        value.toHttpUrlOrNull()?.let { absolute ->
+            return absolute.takeIf(::isCredentialTransportAllowed)
+        }
+        return credentialIssuer.toHttpUrlOrNull()
+            ?.resolve(value)
+            ?.takeIf { canonicalOrigin(it) == credentialIssuer }
+    }
+
+    fun resolveResponseArtworkUrl(value: String): HttpUrl? {
+        if (value.startsWith("//")) return null
+        val issuer = credentialIssuer.toHttpUrlOrNull() ?: return null
+        val resolved = value.toHttpUrlOrNull() ?: issuer.resolve(value) ?: return null
+        return resolved.takeIf {
+            it.username.isEmpty() &&
+                it.password.isEmpty() &&
+                canonicalOrigin(it) == credentialIssuer &&
+                isCredentialTransportAllowed(it)
+        }
+    }
+
     suspend fun playbackSources(
         mediaType: String,
         resourceId: String,
@@ -424,6 +627,7 @@ class RivuneApiClient(
         method = "POST",
         body = requestJson.encodeToString(PlaybackPrepareRequest(sourceRef, startSeconds)),
         authenticated = true,
+        client = mediaPreparationHttpClient,
     )
 
     suspend fun resolvePlayback(
@@ -437,6 +641,7 @@ class RivuneApiClient(
         method = "POST",
         body = requestJson.encodeToString(PlaybackResolveRequest(sourceRef, titleId, preferredAudioTrack, preferredSubtitleId, startSeconds)),
         authenticated = true,
+        client = mediaPreparationHttpClient,
     )
 
     suspend fun stopPlayback(sessionId: UUID) = requestUnit("playback/sessions/$sessionId", "DELETE", authenticated = true)
@@ -508,9 +713,23 @@ class RivuneApiClient(
         query: Map<String, String?> = emptyMap(),
         body: String? = null,
         authenticated: Boolean,
+        expectedProfileMutation: AuthenticationState? = null,
+        client: OkHttpClient = httpClient,
     ): Response {
         val url = endpoint(path, query)
-        return execute(url, method, body, authenticated, retryAfterRefresh = authenticated)
+        return execute(url, method, body, authenticated, retryAfterRefresh = authenticated, expectedProfileMutation = expectedProfileMutation, client = client)
+    }
+
+    private suspend inline fun <reified Response> requestWithQueryItems(
+        path: String,
+        method: String = "GET",
+        query: List<Pair<String, String>> = emptyList(),
+        body: String? = null,
+        authenticated: Boolean,
+        client: OkHttpClient = httpClient,
+    ): Response {
+        val url = endpoint(path, query)
+        return execute(url, method, body, authenticated, retryAfterRefresh = authenticated, client = client)
     }
 
     private suspend inline fun <reified Response> requestNullable(
@@ -532,9 +751,10 @@ class RivuneApiClient(
         query: Map<String, String?> = emptyMap(),
         body: String? = null,
         authenticated: Boolean,
+        expectedProfileMutation: AuthenticationState? = null,
     ) {
         val url = endpoint(path, query)
-        executeData(url, method, body, authenticated, retryAfterRefresh = authenticated)
+        executeData(url, method, body, authenticated, retryAfterRefresh = authenticated, expectedProfileMutation = expectedProfileMutation)
     }
 
     private suspend fun endpoint(path: String, query: Map<String, String?>): HttpUrl {
@@ -550,14 +770,29 @@ class RivuneApiClient(
         }.build()
     }
 
+    private suspend fun endpoint(path: String, query: List<Pair<String, String>>): HttpUrl {
+        var base = authenticationMutex.withLock { apiBaseUrl }
+        if (base == null) {
+            discover()
+            base = authenticationMutex.withLock { apiBaseUrl }
+        }
+        val resolvedBase = base ?: throw RivuneApiException.InvalidResponse()
+        return resolvedBase.newBuilder().apply {
+            path.split('/').filter { it.isNotEmpty() }.forEach(::addEncodedPathSegment)
+            query.forEach { (name, value) -> addQueryParameter(name, value) }
+        }.build()
+    }
+
     private suspend inline fun <reified Response> execute(
         url: HttpUrl,
         method: String,
         body: String?,
         authenticated: Boolean,
         retryAfterRefresh: Boolean,
+        expectedProfileMutation: AuthenticationState? = null,
+        client: OkHttpClient = httpClient,
     ): Response {
-        val data = executeData(url, method, body, authenticated, retryAfterRefresh)
+        val data = executeData(url, method, body, authenticated, retryAfterRefresh, expectedProfileMutation = expectedProfileMutation, client = client)
         return decodeResponse(data.body)
     }
 
@@ -574,44 +809,132 @@ class RivuneApiClient(
         authenticated: Boolean,
         retryAfterRefresh: Boolean,
         explicitAccessToken: String? = null,
+        expectedAuthentication: AuthenticationSnapshot? = null,
+        expectedProfileMutation: AuthenticationState? = null,
+        client: OkHttpClient = httpClient,
     ): ResponseData {
         requireServerDestination(url)
-        val authentication = if (authenticated) {
+        val authentication = expectedAuthentication ?: if (authenticated) {
             loadCredentialsIfNeeded()
-            authenticationSnapshot()
+            authenticationSnapshot(expectedProfileMutation)
         } else {
             null
         }
+        if (authenticated && expectedAuthentication != null) requireProfileMutationState(expectedProfileMutation)
         val accessToken = explicitAccessToken ?: authentication?.accessToken
         val request = Request.Builder()
             .url(url)
             .header("Accept", "application/json")
             .apply {
                 if (accessToken != null) header("Authorization", "Bearer $accessToken")
+                authentication?.profileContext?.takeIf { usesProfileContext(url, method) }
+                    ?.let { header("X-Rivune-Profile-Context", it) }
                 val requestBody = body?.toRequestBody(JSON_MEDIA_TYPE)
                     ?: if (method == "POST" || method == "PUT" || method == "PATCH") ByteArray(0).toRequestBody(JSON_MEDIA_TYPE) else null
                 method(method, requestBody)
             }
             .build()
 
-        val response = try {
-            withContext(Dispatchers.IO) { httpClient.newCall(request).execute() }
+        val responseData = try {
+            withContext(Dispatchers.IO) {
+                client.newCall(request).execute().use { response ->
+                    requireServerDestination(response.request.url)
+                    if (response.code in 300..399) throw decodeServerError(response.code, "")
+                    ResponseData(response.code, readResponseBody(response.body))
+                }
+            }
         } catch (cause: IOException) {
+            authentication?.let { requireAuthenticationState(it) }
             throw cause
         }
-        val responseCode = response.code
-        val responseSuccessful = response.isSuccessful
-        val responseBody = response.use {
-            requireServerDestination(it.request.url)
-            if (responseCode in 300..399) throw decodeServerError(responseCode, "")
-            readResponseBody(it.body)
-        }
+        val responseCode = responseData.status
+        val responseSuccessful = responseCode in 200..299
+        val responseBody = responseData.body
+        authentication?.let { requireAuthenticationState(it) }
         if (responseCode == 401 && authentication != null && retryAfterRefresh) {
-            refreshCredentials(accessToken, authentication.generation)
-            return executeData(url, method, body, authenticated = true, retryAfterRefresh = false)
+            val refreshed = refreshCredentials(accessToken, authentication)
+            requireAuthenticationState(authentication)
+            return executeData(
+                url,
+                method,
+                body,
+                authenticated = true,
+                retryAfterRefresh = false,
+                expectedAuthentication = authentication.copy(tokens = refreshed),
+                expectedProfileMutation = expectedProfileMutation,
+                client = client,
+            )
         }
         if (!responseSuccessful) throw decodeServerError(responseCode, responseBody)
         return ResponseData(responseCode, responseBody)
+    }
+
+    private suspend fun executeBytes(
+        url: HttpUrl,
+        authenticated: Boolean,
+        retryAfterRefresh: Boolean,
+        expectedAuthentication: AuthenticationSnapshot? = null,
+    ): ByteArray {
+        requireServerDestination(url)
+        val authentication = expectedAuthentication ?: if (authenticated) {
+            loadCredentialsIfNeeded()
+            authenticationSnapshot()
+        } else {
+            null
+        }
+        val request = Request.Builder()
+            .url(url)
+            .header("Accept", "image/*")
+            .apply {
+                authentication?.accessToken?.let { header("Authorization", "Bearer $it") }
+            }
+            .build()
+        val responseData: Pair<Int, ByteArray> = try {
+            withContext(Dispatchers.IO) {
+                httpClient.newCall(request).execute().use { response ->
+                    requireServerDestination(response.request.url)
+                    if (response.code in 300..399) throw decodeServerError(response.code, "")
+                    val body = response.body
+                    if (body != null && body.contentLength() > MAX_PROFILE_AVATAR_BYTES) {
+                        throw RivuneApiException.ResponseTooLarge("2 MiB")
+                    }
+                    val bytes = readBoundedBytes(body, MAX_PROFILE_AVATAR_BYTES)
+                    response.code to bytes
+                }
+            }
+        } catch (cause: IOException) {
+            authentication?.let { requireCurrentAuthenticationGeneration(it.generation) }
+            throw cause
+        }
+        authentication?.let { requireCurrentAuthenticationGeneration(it.generation) }
+        if (responseData.first == 401 && authentication != null && retryAfterRefresh) {
+            val refreshed = refreshCredentials(authentication.accessToken, authentication, requireProfileContext = false)
+            requireCurrentAuthenticationGeneration(authentication.generation)
+            return executeBytes(
+                url,
+                authenticated = true,
+                retryAfterRefresh = false,
+                expectedAuthentication = authentication.copy(tokens = refreshed),
+            )
+        }
+        if (responseData.first !in 200..299) {
+            throw decodeServerError(responseData.first, responseData.second.toString(StandardCharsets.UTF_8))
+        }
+        return responseData.second
+    }
+
+    private fun readBoundedBytes(body: ResponseBody?, maximumBytes: Long): ByteArray {
+        if (body == null) return ByteArray(0)
+        val source = body.source()
+        val bufferedBody = Buffer()
+        var remaining = maximumBytes
+        while (remaining > 0L) {
+            val read = source.read(bufferedBody, remaining)
+            if (read == -1L) return bufferedBody.readByteArray()
+            remaining -= read
+        }
+        if (!source.exhausted()) throw RivuneApiException.ResponseTooLarge("2 MiB")
+        return bufferedBody.readByteArray()
     }
 
     private data class ResponseData(val status: Int, val body: String)
@@ -636,13 +959,25 @@ class RivuneApiClient(
 
     private suspend fun refreshCredentials(
         failedAccessToken: String?,
-        expectedGeneration: Long,
+        expectedAuthentication: AuthenticationSnapshot,
+        requireProfileContext: Boolean = true,
     ): TokenPair = refreshMutex.withLock {
+        val expectedGeneration = expectedAuthentication.generation
+        if (requireProfileContext) {
+            requireAuthenticationState(expectedAuthentication)
+        } else {
+            requireCurrentAuthenticationGeneration(expectedGeneration)
+        }
         val snapshot = authenticationMutex.withLock {
             requireAuthenticationGeneration(expectedGeneration)
+            if (requireProfileContext) {
+                requireProfileContextGeneration(expectedAuthentication.profileContextGeneration)
+            }
             AuthenticationSnapshot(
-                expectedGeneration,
-                credentials ?: throw RivuneApiException.NotAuthenticated(),
+                generation = expectedGeneration,
+                tokens = credentials ?: throw RivuneApiException.NotAuthenticated(),
+                profileContext = profileContext,
+                profileContextGeneration = profileContextGeneration,
             )
         }
         if (failedAccessToken != null && snapshot.accessToken != failedAccessToken) {
@@ -650,37 +985,63 @@ class RivuneApiClient(
         }
         val refreshToken = snapshot.tokens.refreshToken
         val url = endpoint("auth/refresh", emptyMap())
-        authenticationMutex.withLock { requireAuthenticationGeneration(expectedGeneration) }
+        if (requireProfileContext) {
+            requireAuthenticationState(expectedAuthentication)
+        } else {
+            requireCurrentAuthenticationGeneration(expectedGeneration)
+        }
         requireServerDestination(url)
-        try {
-            val result: TokenPair = execute(
+        val result = try {
+            val refreshed: TokenPair = execute(
                 url = url,
                 method = "POST",
                 body = requestJson.encodeToString(RefreshRequest(refreshToken)),
                 authenticated = false,
                 retryAfterRefresh = false,
             )
-            setCredentials(result, expectedGeneration)
-            result
+            setCredentials(refreshed, expectedGeneration)
+            refreshed
         } catch (cause: Exception) {
             clearCredentialsAfterRefreshFailure(expectedGeneration, refreshToken)
             throw cause
         }
+        if (requireProfileContext) {
+            requireAuthenticationState(expectedAuthentication)
+        } else {
+            requireCurrentAuthenticationGeneration(expectedGeneration)
+        }
+        result
     }
 
-    private suspend fun setCredentials(value: TokenPair, expectedGeneration: Long) {
-        authenticationMutex.withLock { requireAuthenticationGeneration(expectedGeneration) }
+
+    private suspend fun setCredentials(
+        value: TokenPair,
+        expectedGeneration: Long,
+    ) = authenticationMutex.withLock {
+        requireAuthenticationGeneration(expectedGeneration)
         val saved = credentialStore.save(
-            StoredCredentials(credentialIssuer, value),
+            StoredCredentials(credentialIssuer, value, profileContext),
             expectedGeneration,
         )
         if (!saved) throw staleAuthentication()
-        authenticationMutex.withLock {
-            requireAuthenticationGeneration(expectedGeneration)
-            credentials = value
-            credentialsLoaded = true
-        }
+        requireAuthenticationGeneration(expectedGeneration)
+        credentials = value
+        credentialsLoaded = true
     }
+
+    private suspend fun commitProfileContext(value: String?, expectedState: AuthenticationState) =
+        authenticationMutex.withLock {
+            requireAuthenticationState(expectedState)
+            val currentCredentials = credentials ?: throw RivuneApiException.NotAuthenticated()
+            val saved = credentialStore.save(
+                StoredCredentials(credentialIssuer, currentCredentials, value),
+                expectedState.authenticationGeneration,
+            )
+            if (!saved) throw staleAuthentication()
+            requireAuthenticationState(expectedState)
+            profileContext = value
+            profileContextGeneration += 1
+        }
 
     private suspend fun loadCredentialsIfNeeded() {
         val generation = authenticationMutex.withLock {
@@ -688,8 +1049,9 @@ class RivuneApiClient(
             authenticationGeneration
         }
         val stored = credentialStore.load(credentialIssuer, generation)
-        val restored = stored?.takeIf { it.issuer == credentialIssuer }?.tokens
-        if (stored != null && restored == null) {
+        val matching = stored?.takeIf { it.issuer == credentialIssuer }
+        val restored = matching?.tokens
+        if (stored != null && matching == null) {
             runCatching { credentialStore.clear(credentialIssuer, generation) }
         }
         authenticationMutex.withLock {
@@ -697,6 +1059,10 @@ class RivuneApiClient(
             if (!credentialsLoaded) {
                 credentials = restored
                 credentialsLoaded = true
+                if (profileContext != matching?.profileContext) {
+                    profileContext = matching?.profileContext
+                    profileContextGeneration += 1
+                }
             }
         }
     }
@@ -713,22 +1079,91 @@ class RivuneApiClient(
             } else {
                 credentials = null
                 credentialsLoaded = true
+                profileContext = null
+                profileContextGeneration += 1
+                profileContextMutationInFlight = false
                 true
             }
         }
         if (shouldClear) runCatching { credentialStore.clear(credentialIssuer, expectedGeneration) }
     }
+    private suspend fun beginCredentialReplacement(): Long = withContext(NonCancellable) {
+        authenticationMutex.withLock {
+            authenticationGeneration += 1
+            val generation = authenticationGeneration
+            val capturedCredentials = credentials
+            credentials = null
+            credentialsLoaded = true
+            profileContext = null
+            profileContextGeneration += 1
+            profileContextMutationInFlight = false
+            val cleanup = credentialStore.invalidateAndClear(
+                issuer = credentialIssuer,
+                newGeneration = generation,
+                capturedCredentials = capturedCredentials,
+            )
+            cleanup.error?.let { throw it }
+            generation
+        }
+    }
+
 
     private suspend fun currentAuthenticationGeneration(): Long =
         authenticationMutex.withLock { authenticationGeneration }
 
-    private suspend fun authenticationSnapshot(): AuthenticationSnapshot =
+    private suspend fun authenticationSnapshot(expectedProfileMutation: AuthenticationState? = null): AuthenticationSnapshot =
         authenticationMutex.withLock {
+            requireProfileMutationStateLocked(expectedProfileMutation)
             AuthenticationSnapshot(
                 generation = authenticationGeneration,
                 tokens = credentials ?: throw RivuneApiException.NotAuthenticated(),
+                profileContext = profileContext,
+                profileContextGeneration = profileContextGeneration,
             )
         }
+
+
+    private suspend fun reserveProfileMutation(): AuthenticationState =
+        authenticationMutex.withLock {
+            profileContextGeneration += 1
+            profileContextMutationInFlight = true
+            AuthenticationState(authenticationGeneration, profileContextGeneration, true)
+        }
+
+    private suspend fun finishProfileMutation() = withContext(NonCancellable) {
+        authenticationMutex.withLock { profileContextMutationInFlight = false }
+    }
+    private suspend fun requireCurrentAuthenticationGeneration(expectedGeneration: Long) {
+        authenticationMutex.withLock { requireAuthenticationGeneration(expectedGeneration) }
+    }
+
+
+    private suspend fun requireProfileMutationState(expected: AuthenticationState?) {
+        authenticationMutex.withLock { requireProfileMutationStateLocked(expected) }
+    }
+
+    private fun requireProfileMutationStateLocked(expected: AuthenticationState?) {
+        val state = AuthenticationState(authenticationGeneration, profileContextGeneration, profileContextMutationInFlight)
+        if (state.profileContextMutationInFlight && state != expected) throw staleAuthentication()
+        if (expected != null && state != expected) throw staleAuthentication()
+    }
+
+    private suspend fun requireAuthenticationState(expected: AuthenticationSnapshot) {
+        authenticationMutex.withLock {
+            if (authenticationGeneration != expected.generation ||
+                profileContextGeneration != expected.profileContextGeneration
+            ) throw staleAuthentication()
+        }
+    }
+
+    private fun requireAuthenticationState(expected: AuthenticationState) {
+        requireAuthenticationGeneration(expected.authenticationGeneration)
+        requireProfileContextGeneration(expected.profileContextGeneration)
+    }
+
+    private fun requireProfileContextGeneration(expectedGeneration: Long) {
+        if (profileContextGeneration != expectedGeneration) throw staleAuthentication()
+    }
 
     private fun requireAuthenticationGeneration(expectedGeneration: Long) {
         if (authenticationGeneration != expectedGeneration) throw staleAuthentication()
@@ -740,9 +1175,27 @@ class RivuneApiClient(
     private data class AuthenticationSnapshot(
         val generation: Long,
         val tokens: TokenPair,
+        val profileContext: String?,
+        val profileContextGeneration: Long,
     ) {
         val accessToken: String
             get() = tokens.accessToken
+    }
+
+    private data class AuthenticationState(
+        val authenticationGeneration: Long,
+        val profileContextGeneration: Long,
+        val profileContextMutationInFlight: Boolean = false,
+    )
+
+    private fun usesProfileContext(url: HttpUrl, method: String): Boolean {
+        val path = url.encodedPath
+        if (path.endsWith("/auth/logout") || path.endsWith("/auth/me")) return false
+        if (method == "GET" && path.endsWith("/profiles")) return false
+        if (method == "GET" && path.contains("/profiles/") && path.endsWith("/avatar")) return false
+        if (method == "DELETE" && path.endsWith("/profiles/selection")) return false
+        if (method == "POST" && path.contains("/profiles/") && path.endsWith("/select")) return false
+        return true
     }
 
     private fun requireServerDestination(url: HttpUrl) {
@@ -769,29 +1222,48 @@ class RivuneApiClient(
         .last()
 
 
+    private fun profileSettingsUpdateBody(input: ProfileSettingsUpdate): String = buildJsonObject {
+        putPatch("maximumResolution", input.maximumResolution) { name, value -> put(name, value) }
+        putPatch("preferDirectPlay", input.preferDirectPlay) { name, value -> put(name, value) }
+        putPatch("audioLanguage", input.audioLanguage) { name, value -> put(name, value) }
+        putPatch("subtitleLanguage", input.subtitleLanguage) { name, value -> put(name, value) }
+        putPatch("transcoding", input.transcoding) { name, value -> put(name, value) }
+    }.toString()
+
     private fun categoryUpdateBody(input: CategoryUpdateRequest): String = buildJsonObject {
         input.name?.let { put("name", it) }
-        putPatch("description", input.description)
-        putPatch("color", input.color)
-        putPatch("icon", input.icon)
+        putPatch("description", input.description) { name, value -> put(name, value) }
+        putPatch("color", input.color) { name, value -> put(name, value) }
+        putPatch("icon", input.icon) { name, value -> put(name, value) }
         input.isDefault?.let { put("isDefault", it) }
     }.toString()
 
     private fun deviceUpdateBody(input: DeviceUpdateRequest): String = buildJsonObject {
         input.name?.let { put("name", it) }
         input.categoryId?.let { put("categoryId", it.toString()) }
-        putPatch("internalNote", input.internalNote)
+        putPatch("internalNote", input.internalNote) { name, value -> put(name, value) }
     }.toString()
 
-    private fun kotlinx.serialization.json.JsonObjectBuilder.putPatch(name: String, field: PatchField<String>) {
+    private inline fun <T> kotlinx.serialization.json.JsonObjectBuilder.putPatch(
+        name: String,
+        field: PatchField<T>,
+        putValue: kotlinx.serialization.json.JsonObjectBuilder.(String, T) -> Unit,
+    ) {
         when (field) {
             PatchField.Omitted -> Unit
             PatchField.Null -> put(name, JsonNull)
-            is PatchField.Value -> put(name, field.value)
+            is PatchField.Value -> putValue(name, field.value)
         }
     }
+    private fun OkHttpClient.secureBuilder() = newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+
     private companion object {
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         const val MAX_RESPONSE_BODY_BYTES = 16L * 1024L * 1024L
+        const val MAX_PROFILE_AVATAR_BYTES = 2L * 1024L * 1024L
+        const val COLLECTION_ARTWORK_TIMEOUT_SECONDS = 10L
+        const val MEDIA_PREPARATION_TIMEOUT_SECONDS = 180L
     }
 }

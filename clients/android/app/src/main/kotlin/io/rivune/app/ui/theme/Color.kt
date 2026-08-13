@@ -1,0 +1,25 @@
+package io.rivune.app.ui.theme
+
+import androidx.compose.ui.graphics.Color
+
+internal val RivuneBackground = Color(0xFF08090C)
+internal val RivuneBackgroundSoft = Color(0xFF0D0E12)
+internal val RivuneSurface = Color(0xFF13141A)
+internal val RivuneSurfaceRaised = Color(0xFF1A1B22)
+internal val RivuneSurfaceInteractive = Color(0xFF202128)
+internal val RivuneSurfaceSelected = Color(0xFF2C211F)
+internal val RivuneText = Color(0xFFF7F3EF)
+internal val RivuneTextSoft = Color(0xFFC3BCB8)
+internal val RivuneTextMuted = Color(0xFF918B89)
+internal val RivuneAccent = Color(0xFFF29A78)
+internal val RivuneAccentStrong = Color(0xFFFFB08E)
+internal val RivuneAccentPressed = Color(0xFFDB8262)
+internal val RivuneAccentSubtle = Color(0xFF4A2921)
+internal val RivuneAccentInk = Color(0xFF26120C)
+internal val RivuneBorder = Color(0xFF32333A)
+internal val RivuneBorderStrong = Color(0xFF4A4B53)
+internal val RivuneDanger = Color(0xFFF28589)
+internal val RivuneDangerContainer = Color(0xFF3B1D22)
+internal val RivuneDangerText = Color(0xFFFFDADC)
+internal val RivuneSuccess = Color(0xFF7DD8B0)
+internal val RivuneWarning = Color(0xFFE6B56E)

@@ -1252,13 +1252,13 @@ func TestProviderSubtitleIndicesAreStableAndDoNotCollideWithMediaTracks(t *testi
 	streams := []MediaStreamInfo{{Type: "Video", Index: 0}, {Type: "Audio", Index: 2}, {Type: "Subtitle", Index: 7}}
 	subtitles := []playback.Subtitle{
 		{ID: "subtitle-1", Delivery: "external"},
-		{ID: "embedded-subtitle-7", Delivery: "external"},
+		{ID: "embedded-subtitle-7.vtt", Delivery: "external"},
 		{ID: "subtitle-2", Delivery: "external"},
 	}
 	first := compatibilitySubtitleBindings(streams, subtitles)
 	second := compatibilitySubtitleBindings(streams, subtitles)
 	if !reflect.DeepEqual(first, second) || len(first) != 3 || first[0].index != 8 || first[0].assetID != "subtitle-1" ||
-		first[1].index != 7 || first[1].assetID != "embedded-subtitle-7" || first[2].index != 9 || first[2].assetID != "subtitle-2" {
+		first[1].index != 7 || first[1].assetID != "embedded-subtitle-7.vtt" || first[2].index != 9 || first[2].assetID != "subtitle-2" {
 		t.Fatalf("unstable or colliding subtitle bindings: first=%+v second=%+v", first, second)
 	}
 }

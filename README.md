@@ -71,9 +71,12 @@ See [Production operations](docs/operations.md) for the complete Pangolin networ
 
 Backend requirements are Go 1.26 and PostgreSQL 18. Frontend requirements are Node.js 22 and npm. Typed clients live under [`clients/`](clients/); the public contract is [`protocol/openapi.yaml`](protocol/openapi.yaml).
 
+The Android project includes the native Rivune application for phones, tablets, and Android TV plus the reusable `rivune-api` SDK. It supports server discovery, restored sessions, passwordless device pairing, category-scoped profiles and PINs, and paginated collection browsing.
+
 ```sh
 cd web && npm ci && npm run build
 cd ../server && go test ./...
+cd ../clients/android && ./gradlew :rivune-api:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
 ```
 
 ## License

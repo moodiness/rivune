@@ -3,14 +3,24 @@ import Foundation
 import Security
 #endif
 
+public struct StoredCredentials: Codable, Sendable, Equatable {
+    public let tokens: TokenPair
+    public let profileContext: String?
+
+    public init(tokens: TokenPair, profileContext: String?) {
+        self.tokens = tokens
+        self.profileContext = profileContext
+    }
+}
+
 public protocol CredentialStore: Sendable {
-    func load(for issuer: URL) async throws -> TokenPair?
-    func save(_ credentials: TokenPair, for issuer: URL) async throws
+    func load(for issuer: URL) async throws -> StoredCredentials?
+    func save(_ credentials: StoredCredentials, for issuer: URL) async throws
     func clear(for issuer: URL) async throws
 }
 
 struct CredentialCleanupResult: @unchecked Sendable {
-    let credentials: TokenPair?
+    let credentials: StoredCredentials?
     let error: Error?
 }
 
@@ -28,7 +38,7 @@ actor OrderedCredentialStore {
         generation = newGeneration
     }
 
-    func load(for issuer: URL, generation expectedGeneration: UInt64) async throws -> TokenPair? {
+    func load(for issuer: URL, generation expectedGeneration: UInt64) async throws -> StoredCredentials? {
         guard expectedGeneration == generation else { throw CancellationError() }
         let predecessor = mutationTail
         if let predecessor { await predecessor.value }
@@ -39,7 +49,7 @@ actor OrderedCredentialStore {
     }
 
     func save(
-        _ credentials: TokenPair,
+        _ credentials: StoredCredentials,
         for issuer: URL,
         generation expectedGeneration: UInt64
     ) async throws -> Bool {
@@ -74,7 +84,7 @@ actor OrderedCredentialStore {
     func invalidateAndClear(
         for issuer: URL,
         generation newGeneration: UInt64,
-        capturedCredentials: TokenPair?
+        capturedCredentials: StoredCredentials?
     ) async -> CredentialCleanupResult {
         precondition(newGeneration > generation)
         generation = newGeneration
@@ -123,8 +133,13 @@ public enum CredentialStoreError: Error, LocalizedError, Sendable {
 public struct KeychainCredentialStore: CredentialStore {
     private struct PersistedCredentials: Codable {
         let issuer: String
+        let credentials: StoredCredentials
+    }
+    private struct LegacyPersistedCredentials: Codable {
+        let issuer: String
         let credentials: TokenPair
     }
+
 
     private let service: String
 
@@ -132,7 +147,7 @@ public struct KeychainCredentialStore: CredentialStore {
         self.service = service
     }
 
-    public func load(for issuer: URL) async throws -> TokenPair? {
+    public func load(for issuer: URL) async throws -> StoredCredentials? {
         try removeLegacyCredential()
         let query = scopedQuery(for: issuer, returningData: true)
         var result: CFTypeRef?
@@ -141,15 +156,22 @@ public struct KeychainCredentialStore: CredentialStore {
         guard status == errSecSuccess, let data = result as? Data else {
             throw CredentialStoreError.keychain(status)
         }
-        guard let persisted = try? JSONDecoder().decode(PersistedCredentials.self, from: data),
-              persisted.issuer == issuer.absoluteString else {
-            try delete(scopedQuery(for: issuer))
-            return nil
+        let decoder = JSONDecoder()
+        if let persisted = try? decoder.decode(PersistedCredentials.self, from: data),
+           persisted.issuer == issuer.absoluteString {
+            return persisted.credentials
         }
-        return persisted.credentials
+        if let legacy = try? decoder.decode(LegacyPersistedCredentials.self, from: data),
+           legacy.issuer == issuer.absoluteString {
+            let migrated = StoredCredentials(tokens: legacy.credentials, profileContext: nil)
+            try await save(migrated, for: issuer)
+            return migrated
+        }
+        try delete(scopedQuery(for: issuer))
+        return nil
     }
 
-    public func save(_ credentials: TokenPair, for issuer: URL) async throws {
+    public func save(_ credentials: StoredCredentials, for issuer: URL) async throws {
         try removeLegacyCredential()
         let persisted = PersistedCredentials(issuer: issuer.absoluteString, credentials: credentials)
         let data = try JSONEncoder().encode(persisted)

@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -2586,7 +2587,8 @@ func compatibilitySubtitleBindings(streams []MediaStreamInfo, subtitles []playba
 			continue
 		}
 		if strings.HasPrefix(subtitle.ID, "embedded-subtitle-") {
-			index, err := strconv.Atoi(strings.TrimPrefix(subtitle.ID, "embedded-subtitle-"))
+			rawIndex := strings.TrimPrefix(subtitle.ID, "embedded-subtitle-")
+			index, err := strconv.Atoi(strings.TrimSuffix(rawIndex, path.Ext(rawIndex)))
 			if err != nil || index < 0 || index > maximumCompatibilitySubtitleIndex {
 				continue
 			}

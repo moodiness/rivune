@@ -132,11 +132,11 @@ private struct StubCredentialStore: CredentialStore {
     let issuer: URL
     let token: TokenPair
 
-    func load(for requestedIssuer: URL) async throws -> TokenPair? {
-        requestedIssuer == issuer ? token : nil
+    func load(for requestedIssuer: URL) async throws -> StoredCredentials? {
+        requestedIssuer == issuer ? StoredCredentials(tokens: token, profileContext: nil) : nil
     }
 
-    func save(_ credentials: TokenPair, for issuer: URL) async throws {}
+    func save(_ credentials: StoredCredentials, for issuer: URL) async throws {}
     func clear(for issuer: URL) async throws {}
 }
 

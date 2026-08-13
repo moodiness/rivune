@@ -38,7 +38,7 @@ class ApiV20ContractsTest {
         server.enqueue(jsonResponse("""{"sources":[],"providerErrors":[]}"""))
         server.start()
         try {
-            val serverUrl = server.url("/").toString()
+            val serverUrl = server.loopbackUrl("/").toString()
             val client = RivuneApiClient(serverUrl, V20CredentialStore(serverUrl, tokenPair()))
             val discovery = client.discover()
             assertEquals(true, discovery.setupCompleted)
@@ -73,6 +73,23 @@ class ApiV20ContractsTest {
     }
 
     @Test
+    fun playbackMediaInspectionTreatsLegacyNullTrackArraysAsEmpty() {
+        val inspection = json.decodeFromString<PlaybackMediaInspection>(
+            """{"container":"mp4","videoTracks":[{"index":0,"type":"video","codec":"h264"}],"audioTracks":[{"index":1,"type":"audio","codec":"aac"}],"subtitleTracks":null}""",
+        )
+
+        assertEquals(1, inspection.videoTracks.size)
+        assertEquals(1, inspection.audioTracks.size)
+        assertEquals(emptyList(), inspection.subtitleTracks)
+
+        val session = json.decodeFromString<PlaybackSession>(
+            """{"id":"44444444-4444-4444-8444-444444444444","selectedSourceId":"source","sources":[{"id":"source","addonId":"33333333-3333-4333-8333-333333333333","manifestId":"addon","mode":"direct","url":"https://media.example/movie.mp4","protocol":"http","compatible":true}],"subtitles":null,"providerErrors":null,"expiresAt":"2099-01-01T00:00:00Z"}""",
+        )
+        assertEquals(emptyList(), session.subtitles)
+        assertEquals(emptyList(), session.providerErrors)
+    }
+
+    @Test
     fun progressionRoutesSerializeVersionsAndNoContentReturnsNull() = runBlocking {
         val progress = progressFixture(version = 9)
         val server = MockWebServer()
@@ -88,7 +105,7 @@ class ApiV20ContractsTest {
         server.enqueue(MockResponse().setResponseCode(204))
         server.start()
         try {
-            val serverUrl = server.url("/").toString()
+            val serverUrl = server.loopbackUrl("/").toString()
             val client = RivuneApiClient(serverUrl, V20CredentialStore(serverUrl, tokenPair()))
 
             assertNull(client.playbackProgress(titleId))
