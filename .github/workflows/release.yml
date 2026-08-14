@@ -469,7 +469,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if gh release view "${RELEASE_TAG}" --repo "${REPOSITORY}" >/dev/null 2>&1; then
+          release_id=""
+          matching_releases() {
+            gh api --paginate --slurp "repos/${REPOSITORY}/releases?per_page=100" |
+              jq "[.[][] | select(.tag_name == \"${RELEASE_TAG}\")]"
+          }
+          cleanup_draft() {
+            if [[ -z "${release_id}" ]]; then
+              release_id="$(matching_releases | jq -r 'map(select(.draft == true)) | if length == 1 then .[0].id else empty end' 2>/dev/null || true)"
+            fi
+            if [[ -n "${release_id}" ]]; then
+              gh api --method DELETE "repos/${REPOSITORY}/releases/${release_id}" >/dev/null 2>&1 || true
+            fi
+          }
+          if [[ "$(matching_releases | jq 'length')" != 0 ]]; then
             echo "A release already exists for ${RELEASE_TAG}; refusing to replace it." >&2
             exit 1
           fi
@@ -483,13 +496,13 @@ jobs:
           if [[ "${RELEASE_STABLE}" != true ]]; then
             release_args+=(--prerelease)
           fi
-          trap 'gh release delete "${RELEASE_TAG}" --repo "${REPOSITORY}" --yes >/dev/null 2>&1 || true' ERR
+          trap cleanup_draft ERR
           gh release create "${RELEASE_TAG}" "${release_args[@]}" \
             release-assets/SHA256SUMS \
             release-assets/rivune-android-update.json \
             "release-assets/rivune-android-${RELEASE_TAG#v}.apk"
 
-          release_id="$(gh api "repos/${REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.id')"
+          release_id="$(matching_releases | jq -er 'map(select(.draft == true)) | select(length == 1) | .[0].id')"
           expected_assets="$(printf '%s\n' SHA256SUMS rivune-android-update.json "rivune-android-${RELEASE_TAG#v}.apk" | sort)"
           actual_assets="$(gh api --paginate "repos/${REPOSITORY}/releases/${release_id}/assets" --jq '.[].name' | sort)"
           if [[ "${actual_assets}" != "${expected_assets}" ]]; then
