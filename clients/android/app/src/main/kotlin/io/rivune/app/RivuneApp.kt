@@ -1,6 +1,7 @@
 package io.rivune.app
 
 import android.animation.ValueAnimator
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.os.Build
@@ -63,6 +64,7 @@ import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -79,8 +81,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
@@ -129,8 +139,9 @@ import java.util.Locale
 import kotlinx.coroutines.delay
 
 @Composable
-fun RivuneRoot(viewModel: RivuneViewModel) {
+internal fun RivuneRoot(viewModel: RivuneViewModel, updates: AppUpdateCoordinator, activity: Activity) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val updateState by updates.state.collectAsStateWithLifecycle()
     val inlineFailure = state.destination == AppDestination.Server || state.destination == AppDestination.Pairing
 
     RivuneTheme {
@@ -150,6 +161,8 @@ fun RivuneRoot(viewModel: RivuneViewModel) {
                         AppDestination.Loading -> LoadingScreen()
                         AppDestination.Server -> ServerScreen(
                             serverInput = state.serverInput,
+                            updateState = updateState,
+                            onCheckForUpdates = updates::checkManually,
                             isBusy = state.isBusy,
                             failure = state.failure,
                             isTv = state.isTv,
@@ -175,7 +188,12 @@ fun RivuneRoot(viewModel: RivuneViewModel) {
                             onLogout = viewModel::logout,
                             onRefresh = viewModel::refresh,
                         )
-                        AppDestination.Viewer -> ViewerShell(state = state, viewModel = viewModel)
+                        AppDestination.Viewer -> ViewerShell(
+                            state = state,
+                            viewModel = viewModel,
+                            updateState = updateState,
+                            onCheckForUpdates = updates::checkManually,
+                        )
                     }
                 }
 
@@ -219,8 +237,90 @@ fun RivuneRoot(viewModel: RivuneViewModel) {
                     onDismiss = viewModel::dismissPin,
                 )
             }
+
+            AppUpdateDialog(
+                state = updateState,
+                isTv = state.isTv,
+                onDownload = updates::download,
+                onInstall = { updates.install(activity) },
+                onDismiss = updates::dismiss,
+            )
         }
     }
+}
+
+@Composable
+private fun AppUpdateDialog(
+    state: AppUpdateState,
+    isTv: Boolean,
+    onDownload: () -> Unit,
+    onInstall: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val visible = state is AppUpdateState.Available || state is AppUpdateState.Downloading ||
+        state is AppUpdateState.ReadyToInstall || state is AppUpdateState.NeedsPermission ||
+        state is AppUpdateState.Installing || state is AppUpdateState.Error || state is AppUpdateState.UpToDate
+    val confirmFocus = remember { FocusRequester() }
+    LaunchedEffect(state, isTv) {
+        if (isTv && visible && state !is AppUpdateState.Downloading && state !is AppUpdateState.Installing) {
+            confirmFocus.requestFocus()
+        }
+    }
+    if (!visible) return
+    val title = when (state) {
+        is AppUpdateState.UpToDate -> stringResource(R.string.update_up_to_date_title)
+        is AppUpdateState.Available -> stringResource(R.string.update_available_title)
+        is AppUpdateState.ReadyToInstall, is AppUpdateState.NeedsPermission -> stringResource(R.string.update_ready_title)
+        is AppUpdateState.Error -> stringResource(R.string.update_error_title)
+        else -> stringResource(R.string.update_working_title)
+    }
+    val body = when (state) {
+        is AppUpdateState.UpToDate -> stringResource(R.string.update_up_to_date, state.currentVersion)
+        is AppUpdateState.Available -> stringResource(R.string.update_available_body, state.manifest.version)
+        is AppUpdateState.Downloading -> stringResource(R.string.update_downloading)
+        is AppUpdateState.ReadyToInstall -> stringResource(R.string.update_ready_body)
+        is AppUpdateState.NeedsPermission -> stringResource(R.string.update_permission_body)
+        is AppUpdateState.Installing -> stringResource(R.string.update_installing)
+        is AppUpdateState.Error -> stringResource(R.string.update_error_body)
+        else -> ""
+    }
+    AlertDialog(
+        onDismissRequest = {
+            if (state !is AppUpdateState.Downloading && state !is AppUpdateState.Installing) onDismiss()
+        },
+        icon = { Icon(Icons.Rounded.SystemUpdate, contentDescription = null) },
+        title = { Text(title) },
+        text = {
+            Row(horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.md), verticalAlignment = Alignment.CenterVertically) {
+                if (state is AppUpdateState.Downloading || state is AppUpdateState.Installing) {
+                    CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+                }
+                Text(body)
+            }
+        },
+        confirmButton = {
+            when (state) {
+                is AppUpdateState.Available -> RivunePrimaryButton(
+                    label = stringResource(R.string.update_download), onClick = onDownload, isTv = isTv,
+                    modifier = Modifier.focusRequester(confirmFocus),
+                )
+                is AppUpdateState.ReadyToInstall, is AppUpdateState.NeedsPermission -> RivunePrimaryButton(
+                    label = stringResource(R.string.update_install), onClick = onInstall, isTv = isTv,
+                    modifier = Modifier.focusRequester(confirmFocus),
+                )
+                is AppUpdateState.Error, is AppUpdateState.UpToDate -> RivunePrimaryButton(
+                    label = stringResource(R.string.error_dismiss), onClick = onDismiss, isTv = isTv,
+                    modifier = Modifier.focusRequester(confirmFocus),
+                )
+                else -> Unit
+            }
+        },
+        dismissButton = {
+            if (state is AppUpdateState.Available || state is AppUpdateState.ReadyToInstall || state is AppUpdateState.NeedsPermission) {
+                RivuneTextButton(label = stringResource(R.string.update_later), onClick = onDismiss, isTv = isTv)
+            }
+        },
+    )
 }
 
 @Composable
@@ -279,13 +379,18 @@ internal fun ServerScreen(
     isBusy: Boolean,
     failure: UiFailure?,
     isTv: Boolean,
+    updateState: AppUpdateState = AppUpdateState.Idle,
     onConnect: (String) -> Unit,
     onClearFailure: () -> Unit,
+    onCheckForUpdates: () -> Unit = {},
 ) {
     var server by remember(serverInput) { mutableStateOf(serverInput) }
     val view = LocalView.current
     val failureText = failure?.let { failureMessage(it) }
     val submit = { if (server.isNotBlank() && !isBusy) onConnect(server.trim()) }
+    val inputFocus = remember { FocusRequester() }
+    val submitFocus = remember { FocusRequester() }
+    val updateFocus = remember { FocusRequester() }
 
     LaunchedEffect(failure) {
         if (failure != null) performRejectHaptic(view)
@@ -306,7 +411,19 @@ internal fun ServerScreen(
                 if (failure != null) onClearFailure()
             },
             label = stringResource(R.string.server_label),
-            modifier = Modifier.fillMaxWidth().testTag(RivuneTestTags.ServerInput),
+            modifier = Modifier
+                .fillMaxWidth()
+                .focusRequester(inputFocus)
+                .focusProperties { down = if (server.isNotBlank()) submitFocus else updateFocus }
+                .onPreviewKeyEvent { event ->
+                    if (isTv && event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                        if (server.isNotBlank()) submitFocus.requestFocus() else updateFocus.requestFocus()
+                        true
+                    } else {
+                        false
+                    }
+                }
+                .testTag(RivuneTestTags.ServerInput),
             placeholder = stringResource(R.string.server_placeholder),
             supportingText = failureText ?: stringResource(R.string.server_supporting),
             enabled = !isBusy,
@@ -329,11 +446,28 @@ internal fun ServerScreen(
                 },
             ),
             onClick = submit,
-            modifier = Modifier.fillMaxWidth().testTag(RivuneTestTags.ServerSubmit),
+            modifier = Modifier
+                .fillMaxWidth()
+                .focusRequester(submitFocus)
+                .focusProperties { up = inputFocus; down = updateFocus }
+                .testTag(RivuneTestTags.ServerSubmit),
             enabled = server.isNotBlank(),
             isTv = isTv,
             loading = isBusy,
             loadingDescription = stringResource(R.string.server_loading_description),
+        )
+        Spacer(Modifier.height(RivuneSpacing.sm))
+        RivuneTextButton(
+            label = stringResource(R.string.update_check),
+            onClick = onCheckForUpdates,
+            enabled = updateState !is AppUpdateState.Checking && updateState !is AppUpdateState.Downloading &&
+                updateState !is AppUpdateState.Installing,
+            isTv = isTv,
+            icon = Icons.Rounded.SystemUpdate,
+            modifier = Modifier
+                .fillMaxWidth()
+                .focusRequester(updateFocus)
+                .focusProperties { up = if (server.isNotBlank()) submitFocus else inputFocus },
         )
     }
 }

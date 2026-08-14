@@ -15,16 +15,36 @@ Every release tag must be an annotated `vMAJOR.MINOR.PATCH` Semantic Version poi
 2. Review user-visible and operational changes, including required environment changes and migration behavior.
 3. For protocol changes, confirm the protocol version and [`protocol/openapi.yaml`](../protocol/openapi.yaml) describe the shipped behavior and supported native clients have been updated.
 4. For database changes, run the disposable clean-install and immediately-previous-version upgrade checks documented in [Production operations](operations.md#migration-and-proxy-validation).
-5. Choose the next version according to the rules above.
-6. Rewrite [`.github/release-notes.md`](../.github/release-notes.md) as product-facing notes and start it with `# Rivune vMAJOR.MINOR.PATCH` matching the chosen tag. The release gate rejects stale or mismatched notes; GitHub-generated contributor summaries are not used.
+5. Configure the protected `release` environment with secrets `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, and `ANDROID_KEY_PASSWORD`, plus variables `ANDROID_KEY_ALIAS` and `ANDROID_SIGNING_CERT_SHA256`. The certificate fingerprint is 64 hexadecimal SHA-256 characters; colons and uppercase are accepted by the workflow and normalized before publication.
+6. Choose the next version according to the rules above.
+7. Rewrite [`.github/release-notes.md`](../.github/release-notes.md) as product-facing notes and start it with `# Rivune vMAJOR.MINOR.PATCH` matching the chosen tag. The release gate rejects stale or mismatched notes; GitHub-generated contributor summaries are not used.
+
+Create the Android release identity once, before the first APK is published:
+
+```sh
+keytool -genkeypair -v -storetype PKCS12 -keystore rivune-release.p12 -alias rivune-android-release -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=Rivune Android Release, O=Rivune, C=FR"
+keytool -list -v -storetype PKCS12 -keystore rivune-release.p12 -alias rivune-android-release
+```
+
+Use a generated high-entropy password and keep the same value for the PKCS12 store and key. Store the base64 encoding of the complete PKCS12 file as `ANDROID_KEYSTORE_BASE64`, that password as both password secrets, the alias as `ANDROID_KEY_ALIAS`, and the certificate's normalized SHA-256 fingerprint as `ANDROID_SIGNING_CERT_SHA256`. Keep two separate encrypted offline backups of the PKCS12 file, password, alias, and fingerprint. Never commit them. Losing or replacing this key prevents existing `io.rivune.app` installations from accepting future updates.
+
+The Android manifest contract has no secret dependency and can be checked locally with:
+
+```sh
+cd clients/android/update
+go test ./...
+go run . --help
+go run . generate --help
+go run . validate --help
+```
 
 Create and push one annotated tag:
 
 ```sh
 git switch main
 git pull --ff-only
-git tag -a v1.5.3 -m "Rivune v1.5.3"
-git push origin v1.5.3
+git tag -a v1.6.0 -m "Rivune v1.6.0"
+git push origin v1.6.0
 ```
 
 The tag push runs `Release candidate CI`. Its read-only `authorize` job resolves
@@ -40,7 +60,7 @@ AMD64 container job also validates the single supported CPU-only manifest,
 `compose.yaml`, plus that manifest combined with the supported
 `compose.amd-intel.yaml` GPU overlay, using non-secret placeholders.
 
-Only a successful candidate run is authorized to proceed in `Publish release`, whose top-level permission remains `contents: read`. Its `Authorize tested release candidate` job repeats the annotated-tag and same-commit checks without write permission. The externally approved `Publish multi-architecture image` job alone receives `packages: write`, reauthorizes the refs immediately before publishing the OCI image, and emits its provenance and SBOM. Release creation then runs automatically in a separate `contents: write` job only after image publication succeeds; immediately before writing, it reauthorizes the refs again. The release job intentionally has no second `environment: release` declaration, so one deliberate approval protects the ordered publication without adding a redundant post-publication prompt.
+Only a successful candidate run is authorized to proceed in `Publish release`, whose top-level permission remains `contents: read`. Its `Authorize tested release candidate` job repeats the annotated-tag and same-commit checks without write permission. The sole job attached to the protected `release` environment decodes the private keystore into an ephemeral directory, derives Android `versionName` from the tag and a monotone `versionCode` from twice the tested `main` commit count (with the stable release ranked after a prerelease on the same commit), builds and verifies the signed APK, and produces the dedicated Android manifest and checksums. Signature, certificate fingerprint, package identity, versions, file size, SHA-256, manifest contract, and exact checksum set must all pass before the OCI image can be pushed. The job then reauthorizes refs, publishes the multi-architecture image, provenance, and SBOM, and finally uploads the immutable Actions artifact. The separate `contents: write` job downloads and revalidates that artifact, reauthorizes refs, creates a draft GitHub Release with the complete asset set, verifies the remote assets, and only then makes the release visible. It intentionally has no second `environment: release` declaration, so one deliberate approval protects the ordered publication without exposing signing secrets to the release job.
 
 To reproduce the Compose policy checks locally with disposable, non-production values, run exactly:
 
@@ -100,22 +120,24 @@ The environment response must show `moodiness` as required reviewer, `can_admins
 
 ## Published artifacts
 
-After all gates succeed, the workflow publishes one OCI manifest to `ghcr.io/moodiness/rivune` for exactly `linux/amd64` and `linux/arm64`, with provenance and an SBOM. A stable `v1.5.3` release receives:
+After all gates succeed, the workflow publishes one OCI manifest to `ghcr.io/moodiness/rivune` for exactly `linux/amd64` and `linux/arm64`, with provenance and an SBOM. A stable `v1.6.0` release receives:
 
 ```text
-1.5.3
-1.5
+1.6.0
+1.6
 1
 sha-<short-commit>
 latest
 ```
 
-A prerelease such as `v2.0.0-rc.1` receives its full SemVer and SHA tags, but does not move the stable major, minor, or `latest` aliases. The workflow then creates the matching GitHub Release from the curated notes committed at the tested tag. A stable release is explicitly marked as GitHub's latest release; a prerelease is not. If image publication fails, no GitHub Release is created.
+The matching GitHub Release contains exactly `rivune-android-1.6.0.apk`, `rivune-android-update.json`, and `SHA256SUMS`. The JSON document is an Android-specific schema-v1 manifest with the common release metadata and one `package` object; it does not advertise unbuilt platforms. `SHA256SUMS` covers exactly the APK and JSON manifest. The APK is universal, uses application ID `io.rivune.app`, requires Android 8.0 or newer, and is signed with the certificate fingerprint recorded in the manifest.
+
+A prerelease such as `v2.0.0-rc.1` receives its full SemVer and SHA tags, but does not move the stable major, minor, or `latest` aliases. Its update manifest channel and GitHub prerelease flag are both `prerelease`. A stable release uses channel `stable`, becomes GitHub's latest release, and provides the stable URL `https://github.com/moodiness/rivune/releases/latest/download/rivune-android-update.json`. If APK signing, asset validation, or image publication fails, no public GitHub Release is created.
 
 Verify the release and its OCI attestations after the workflow completes:
 
 ```sh
-image=ghcr.io/moodiness/rivune:1.5.3
+image=ghcr.io/moodiness/rivune:1.6.0
 docker buildx imagetools inspect "${image}"
 docker buildx imagetools inspect "${image}" --raw > rivune-manifest.json
 jq -e '[.manifests[] | select((.annotations // {})["vnd.docker.reference.type"] != "attestation-manifest") | [.platform.os, .platform.architecture]] | sort == [["linux", "amd64"], ["linux", "arm64"]]' rivune-manifest.json
@@ -124,7 +146,7 @@ docker pull "${image}"
 docker image inspect "${image}" --format '{{json .RepoDigests}}'
 ```
 
-The first policy assertion requires exactly the `linux/amd64` and `linux/arm64` runnable manifests and no others. The second requires one OCI attestation manifest for each runnable platform, as emitted by the workflow's `provenance: mode=max` and `sbom: true` settings. Record the immutable index digest and assertion outputs as the post-release attestation. Confirm in the GitHub UI that the Release points to the same annotated tag and includes the curated notes before announcing it.
+The first policy assertion requires exactly the `linux/amd64` and `linux/arm64` runnable manifests and no others. The second requires one OCI attestation manifest for each runnable platform, as emitted by the workflow's `provenance: mode=max` and `sbom: true` settings. Record the immutable index digest and assertion outputs as the post-release attestation. Confirm in the GitHub UI that the Release points to the same annotated tag, includes the curated notes, and contains exactly the three Android release assets above. Download them, run `sha256sum --check SHA256SUMS`, and inspect the APK certificate with Android SDK `apksigner verify --verbose --print-certs` before announcing the release.
 
 ## Failure and retry
 

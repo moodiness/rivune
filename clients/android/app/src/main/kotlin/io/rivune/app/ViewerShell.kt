@@ -136,6 +136,8 @@ private val ViewerPreferencesMaxWidth = RivuneDimensions.preferencesMax
 internal fun ViewerShell(
     state: RivuneUiState,
     viewModel: RivuneViewModel,
+    updateState: AppUpdateState,
+    onCheckForUpdates: () -> Unit,
 ) {
     val viewer = state.viewer
     when {
@@ -169,6 +171,8 @@ internal fun ViewerShell(
                 onBack = viewModel::closeProfilePreferences,
                 onRetry = viewModel::openProfilePreferences,
                 onUpdate = viewModel::updateProfilePreferences,
+                updateState = updateState,
+                onCheckForUpdates = onCheckForUpdates,
             )
         }
         viewer.detail != null -> {
@@ -368,6 +372,8 @@ private fun ProfilePreferencesScreen(
     onBack: () -> Unit,
     onRetry: () -> Unit,
     onUpdate: (ProfileSettingsUpdate) -> Unit,
+    updateState: AppUpdateState,
+    onCheckForUpdates: () -> Unit,
 ) {
     val padding = if (isTv) ViewerTvPadding else ViewerPhonePadding
     val settings = state.settings
@@ -492,8 +498,42 @@ private fun ProfilePreferencesScreen(
                     )
                 }
             }
+            item {
+                Column(
+                    modifier = Modifier.widthIn(max = ViewerPreferencesMaxWidth).fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(RivuneSpacing.sm),
+                ) {
+                    SectionTitle(stringResource(R.string.update_section), isTv)
+                    Text(
+                        text = updatePreferenceStatus(updateState),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    RivuneSecondaryButton(
+                        label = stringResource(R.string.update_check),
+                        onClick = onCheckForUpdates,
+                        enabled = updateState !is AppUpdateState.Checking &&
+                            updateState !is AppUpdateState.Downloading && updateState !is AppUpdateState.Installing,
+                        loading = updateState is AppUpdateState.Checking,
+                        isTv = isTv,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun updatePreferenceStatus(state: AppUpdateState): String = when (state) {
+    is AppUpdateState.Checking -> stringResource(R.string.update_checking)
+    is AppUpdateState.UpToDate -> stringResource(R.string.update_up_to_date, state.currentVersion)
+    is AppUpdateState.Available -> stringResource(R.string.update_available_status, state.manifest.version)
+    is AppUpdateState.Downloading -> stringResource(R.string.update_downloading)
+    is AppUpdateState.ReadyToInstall, is AppUpdateState.NeedsPermission -> stringResource(R.string.update_ready_status)
+    is AppUpdateState.Installing -> stringResource(R.string.update_installing)
+    is AppUpdateState.Error -> stringResource(R.string.update_failed_status)
+    AppUpdateState.Idle -> stringResource(R.string.update_idle)
 }
 
 @Composable
