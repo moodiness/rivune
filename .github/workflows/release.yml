@@ -134,7 +134,7 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
   publish:
-    name: Publish multi-architecture image
+    name: Build assets and publish multi-architecture image
     if: needs.authorize.outputs.authorized == 'true'
     needs:
       - authorize
@@ -149,6 +149,134 @@ jobs:
         with:
           ref: ${{ needs.authorize.outputs.sha }}
           persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26"
+          cache: false
+      - name: Set up Java
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4
+      - name: Install Android signing tools
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+      - name: Build and verify signed Android release assets
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+          ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+          RELEASE_SHA: ${{ needs.authorize.outputs.sha }}
+          RELEASE_STABLE: ${{ needs.authorize.outputs.stable }}
+          RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_PASSWORD ANDROID_KEY_ALIAS ANDROID_SIGNING_CERT_SHA256; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Required Android release signing configuration is missing: ${name}" >&2
+              exit 1
+            fi
+          done
+
+          version_name="${RELEASE_TAG#v}"
+          commit_count="$(git rev-list --count HEAD)"
+          if [[ ! "${commit_count}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "The main commit count is invalid: ${commit_count}" >&2
+            exit 1
+          fi
+          if [[ "${RELEASE_STABLE}" == true ]]; then
+            channel=stable
+            version_code=$((commit_count * 2 + 1))
+          else
+            channel=prerelease
+            version_code=$((commit_count * 2))
+          fi
+          if (( version_code > 2100000000 )); then
+            echo "The derived Android versionCode is too large: ${version_code}" >&2
+            exit 1
+          fi
+          published_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          asset_name="rivune-android-${version_name}.apk"
+          release_url="https://github.com/${REPOSITORY}/releases/tag/${RELEASE_TAG}"
+          asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${asset_name}"
+
+          mkdir -p release-assets .release-private
+          if [[ ! "${ANDROID_KEYSTORE_BASE64}" =~ ^[A-Za-z0-9+/]*={0,2}$ ]] ||
+             (( ${#ANDROID_KEYSTORE_BASE64} % 4 != 0 )) ||
+             ! printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > .release-private/rivune-release.keystore; then
+            echo "ANDROID_KEYSTORE_BASE64 is not valid base64." >&2
+            exit 1
+          fi
+          if [[ ! -s .release-private/rivune-release.keystore ]]; then
+            echo "Decoded Android keystore is empty." >&2
+            exit 1
+          fi
+
+          export RIVUNE_ANDROID_VERSION_NAME="${version_name}"
+          export RIVUNE_ANDROID_VERSION_CODE="${version_code}"
+          export RIVUNE_ANDROID_KEYSTORE_PATH="${GITHUB_WORKSPACE}/.release-private/rivune-release.keystore"
+          export RIVUNE_ANDROID_KEYSTORE_PASSWORD="${ANDROID_KEYSTORE_PASSWORD}"
+          export RIVUNE_ANDROID_KEY_ALIAS="${ANDROID_KEY_ALIAS}"
+          export RIVUNE_ANDROID_KEY_PASSWORD="${ANDROID_KEY_PASSWORD}"
+          bash clients/android/gradlew -p clients/android --no-daemon :app:assembleRelease
+
+          cp clients/android/app/build/outputs/apk/release/app-release.apk "release-assets/${asset_name}"
+          apksigner="${ANDROID_HOME}/build-tools/36.0.0/apksigner"
+          aapt="${ANDROID_HOME}/build-tools/36.0.0/aapt"
+          "${apksigner}" verify --verbose --print-certs "release-assets/${asset_name}" > .release-private/apksigner.txt
+          actual_cert="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' .release-private/apksigner.txt | tr '[:upper:]' '[:lower:]')"
+          expected_cert="$(printf '%s' "${ANDROID_SIGNING_CERT_SHA256}" | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+          if [[ ! "${expected_cert}" =~ ^[0-9a-f]{64}$ ]] || [[ "${actual_cert}" != "${expected_cert}" ]]; then
+            echo "The APK signing certificate does not match ANDROID_SIGNING_CERT_SHA256." >&2
+            exit 1
+          fi
+          if [[ "$(grep -c '^Signer #[0-9][0-9]* certificate SHA-256 digest:' .release-private/apksigner.txt)" != 1 ]]; then
+            echo "The APK must have exactly one signing certificate." >&2
+            exit 1
+          fi
+
+          badging="$("${aapt}" dump badging "release-assets/${asset_name}" | sed -n '1p')"
+          [[ "${badging}" == *"package: name='io.rivune.app'"* ]] || { echo "Unexpected APK applicationId." >&2; exit 1; }
+          [[ "${badging}" == *" versionCode='${version_code}'"* ]] || { echo "Unexpected APK versionCode." >&2; exit 1; }
+          [[ "${badging}" == *" versionName='${version_name}'"* ]] || { echo "Unexpected APK versionName." >&2; exit 1; }
+
+          (
+            cd clients/android/update
+            go run . generate \
+              --apk "${GITHUB_WORKSPACE}/release-assets/${asset_name}" \
+              --output "${GITHUB_WORKSPACE}/release-assets/rivune-android-update.json" \
+              --channel "${channel}" \
+              --tag-name "${RELEASE_TAG}" \
+              --published-at "${published_at}" \
+              --release-url "${release_url}" \
+              --apk-url "${asset_url}" \
+              --application-id io.rivune.app \
+              --build-version "${version_code}" \
+              --signing-certificate-sha256 "${expected_cert}"
+            go run . validate \
+              --apk "${GITHUB_WORKSPACE}/release-assets/${asset_name}" \
+              --channel "${channel}" \
+              --tag-name "${RELEASE_TAG}" \
+              --release-url "${release_url}" \
+              --apk-url "${asset_url}" \
+              "${GITHUB_WORKSPACE}/release-assets/rivune-android-update.json"
+          )
+          (
+            cd release-assets
+            sha256sum "${asset_name}" rivune-android-update.json > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+          rm -rf .release-private
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
       - name: Set up Docker Buildx
@@ -213,9 +341,18 @@ jobs:
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=rivune-container
+      - name: Upload immutable public release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets-${{ needs.authorize.outputs.sha }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
 
   release:
-    name: Create GitHub release notes
+    name: Publish atomic GitHub release
     if: needs.authorize.outputs.authorized == 'true'
     needs:
       - authorize
@@ -229,6 +366,59 @@ jobs:
         with:
           ref: ${{ needs.authorize.outputs.sha }}
           persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26"
+          cache: false
+      - name: Download immutable release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets-${{ needs.authorize.outputs.sha }}
+          path: release-assets
+      - name: Verify release assets and references
+        env:
+          RELEASE_STABLE: ${{ needs.authorize.outputs.stable }}
+          RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version_name="${RELEASE_TAG#v}"
+          asset_name="rivune-android-${version_name}.apk"
+          expected_files="$(printf '%s\n' SHA256SUMS rivune-android-update.json "${asset_name}" | sort)"
+          actual_files="$(find release-assets -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+          if [[ "${actual_files}" != "${expected_files}" ]]; then
+            echo "Immutable artifact does not contain the exact release asset set." >&2
+            exit 1
+          fi
+          checksum_files="$(sed -nE 's/^[0-9a-f]{64}  (.+)$/\1/p' release-assets/SHA256SUMS | sort)"
+          expected_checksum_files="$(printf '%s\n' rivune-android-update.json "${asset_name}" | sort)"
+          if [[ "${checksum_files}" != "${expected_checksum_files}" ]]; then
+            echo "SHA256SUMS must contain exactly the APK and update manifest." >&2
+            exit 1
+          fi
+          (
+            cd release-assets
+            sha256sum --check --strict SHA256SUMS
+          )
+          if [[ "${RELEASE_STABLE}" == true ]]; then
+            expected_channel=stable
+          else
+            expected_channel=prerelease
+          fi
+          expected_release_url="https://github.com/${REPOSITORY}/releases/tag/${RELEASE_TAG}"
+          expected_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${asset_name}"
+          (
+            cd clients/android/update
+            go run . validate \
+              --apk "${GITHUB_WORKSPACE}/release-assets/${asset_name}" \
+              --channel "${expected_channel}" \
+              --tag-name "${RELEASE_TAG}" \
+              --release-url "${expected_release_url}" \
+              --apk-url "${expected_asset_url}" \
+              "${GITHUB_WORKSPACE}/release-assets/rivune-android-update.json"
+          )
       - name: Validate curated release notes
         env:
           RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
@@ -269,12 +459,53 @@ jobs:
             echo "Release authorization expired because main or the tag moved." >&2
             exit 1
           fi
-      - name: Create release with curated notes
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
-        with:
-          tag_name: ${{ needs.authorize.outputs.tag }}
-          target_commitish: ${{ needs.authorize.outputs.sha }}
-          body_path: .github/release-notes.md
-          prerelease: ${{ needs.authorize.outputs.stable != 'true' }}
-          name: ${{ needs.authorize.outputs.tag }}
-          make_latest: ${{ needs.authorize.outputs.stable == 'true' }}
+      - name: Create, verify, and publish draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.authorize.outputs.sha }}
+          RELEASE_STABLE: ${{ needs.authorize.outputs.stable }}
+          RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "${RELEASE_TAG}" --repo "${REPOSITORY}" >/dev/null 2>&1; then
+            echo "A release already exists for ${RELEASE_TAG}; refusing to replace it." >&2
+            exit 1
+          fi
+          release_args=(
+            --repo "${REPOSITORY}"
+            --target "${RELEASE_SHA}"
+            --title "${RELEASE_TAG}"
+            --notes-file .github/release-notes.md
+            --draft
+          )
+          if [[ "${RELEASE_STABLE}" != true ]]; then
+            release_args+=(--prerelease)
+          fi
+          trap 'gh release delete "${RELEASE_TAG}" --repo "${REPOSITORY}" --yes >/dev/null 2>&1 || true' ERR
+          gh release create "${RELEASE_TAG}" "${release_args[@]}" \
+            release-assets/SHA256SUMS \
+            release-assets/rivune-android-update.json \
+            "release-assets/rivune-android-${RELEASE_TAG#v}.apk"
+
+          release_id="$(gh api "repos/${REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.id')"
+          expected_assets="$(printf '%s\n' SHA256SUMS rivune-android-update.json "rivune-android-${RELEASE_TAG#v}.apk" | sort)"
+          actual_assets="$(gh api --paginate "repos/${REPOSITORY}/releases/${release_id}/assets" --jq '.[].name' | sort)"
+          if [[ "${actual_assets}" != "${expected_assets}" ]]; then
+            echo "Draft release asset set is incomplete or contains unexpected files." >&2
+            exit 1
+          fi
+
+          prerelease=false
+          make_latest=false
+          if [[ "${RELEASE_STABLE}" == true ]]; then
+            make_latest=true
+          else
+            prerelease=true
+          fi
+          gh api --method PATCH "repos/${REPOSITORY}/releases/${release_id}" \
+            -F draft=false \
+            -F prerelease="${prerelease}" \
+            -f make_latest="${make_latest}" >/dev/null
+          trap - ERR

@@ -27,14 +27,24 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
+        val updates = (application as RivuneApplication).appUpdates
         setContent {
-            RivuneRoot(viewModel)
+            RivuneRoot(viewModel, updates, this)
         }
+        updates.checkAutomatically()
     }
 
     override fun onResume() {
         super.onResume()
         viewModel.refreshExternalPlaybackSupport()
+        val updates = (application as RivuneApplication).appUpdates
+        updates.activityResumed(this)
+        updates.resumeAfterPermission(this)
+    }
+
+    override fun onPause() {
+        (application as RivuneApplication).appUpdates.activityPaused(this)
+        super.onPause()
     }
 
     override fun onDestroy() {

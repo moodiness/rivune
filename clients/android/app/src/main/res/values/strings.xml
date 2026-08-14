@@ -184,6 +184,29 @@
     <string name="pin_submit">Unlock</string>
     <string name="pin_submitting">Checking…</string>
 
+    <string name="update_section">Application updates</string>
+    <string name="update_check">Check for updates</string>
+    <string name="update_idle">Rivune checks automatically at most once every 24 hours.</string>
+    <string name="update_checking">Checking for an update…</string>
+    <string name="update_up_to_date">Rivune %1$s is up to date.</string>
+    <string name="update_up_to_date_title">Rivune is up to date</string>
+    <string name="update_available_status">Rivune %1$s is available.</string>
+    <string name="update_ready_status">The verified update is ready to install.</string>
+    <string name="update_failed_status">The last update check failed. You can try again.</string>
+    <string name="update_available_title">Update available</string>
+    <string name="update_available_body">Rivune %1$s is available. Download it now?</string>
+    <string name="update_working_title">Updating Rivune</string>
+    <string name="update_downloading">Downloading and verifying the update…</string>
+    <string name="update_ready_title">Ready to install</string>
+    <string name="update_ready_body">The download and signature were verified. Android will ask you to confirm installation.</string>
+    <string name="update_permission_body">Allow Rivune to request app installations, then return here. Android will still ask you to confirm this update.</string>
+    <string name="update_installing">Waiting for Android’s installation confirmation…</string>
+    <string name="update_error_title">Update unsuccessful</string>
+    <string name="update_error_body">Rivune could not complete the update operation. Try again from preferences.</string>
+    <string name="update_download">Download</string>
+    <string name="update_install">Continue to Android</string>
+    <string name="update_later">Later</string>
+
     <string name="error_title">Something needs your attention</string>
     <string name="error_dismiss">Dismiss</string>
     <string name="error_invalid_server">This server address is not valid. Check it and try again.</string>

@@ -13,6 +13,14 @@ private const val IMAGE_MEMORY_CACHE_PERCENT = 0.20
 private const val IMAGE_DISK_CACHE_BYTES = 64L * 1024L * 1024L
 
 class RivuneApplication : Application(), ImageLoaderFactory {
+    internal val appUpdates: AppUpdateCoordinator by lazy {
+        AppUpdateCoordinator(
+            context = this,
+            enabled = BuildConfig.APP_UPDATES_ENABLED,
+            manifestUrl = BuildConfig.UPDATE_MANIFEST_URL,
+        )
+    }
+
     override fun newImageLoader(): ImageLoader = ImageLoader.Builder(this)
         .crossfade(RivuneMotion.normal)
         .memoryCache {

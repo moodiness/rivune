@@ -184,6 +184,29 @@
     <string name="pin_submit">Déverrouiller</string>
     <string name="pin_submitting">Vérification…</string>
 
+    <string name="update_section">Mises à jour de l’application</string>
+    <string name="update_check">Rechercher des mises à jour</string>
+    <string name="update_idle">Rivune effectue une vérification automatique au plus une fois toutes les 24 heures.</string>
+    <string name="update_checking">Recherche d’une mise à jour…</string>
+    <string name="update_up_to_date">Rivune %1$s est à jour.</string>
+    <string name="update_up_to_date_title">Rivune est à jour</string>
+    <string name="update_available_status">Rivune %1$s est disponible.</string>
+    <string name="update_ready_status">La mise à jour vérifiée est prête à être installée.</string>
+    <string name="update_failed_status">La dernière recherche a échoué. Vous pouvez réessayer.</string>
+    <string name="update_available_title">Mise à jour disponible</string>
+    <string name="update_available_body">Rivune %1$s est disponible. Voulez-vous la télécharger ?</string>
+    <string name="update_working_title">Mise à jour de Rivune</string>
+    <string name="update_downloading">Téléchargement et vérification de la mise à jour…</string>
+    <string name="update_ready_title">Prête à être installée</string>
+    <string name="update_ready_body">Le téléchargement et la signature ont été vérifiés. Android vous demandera de confirmer l’installation.</string>
+    <string name="update_permission_body">Autorisez Rivune à demander l’installation d’applications, puis revenez ici. Android vous demandera toujours de confirmer cette mise à jour.</string>
+    <string name="update_installing">En attente de la confirmation d’installation d’Android…</string>
+    <string name="update_error_title">Échec de la mise à jour</string>
+    <string name="update_error_body">Rivune n’a pas pu terminer la mise à jour. Réessayez depuis les préférences.</string>
+    <string name="update_download">Télécharger</string>
+    <string name="update_install">Continuer dans Android</string>
+    <string name="update_later">Plus tard</string>
+
     <string name="error_title">Une action est nécessaire</string>
     <string name="error_dismiss">Fermer</string>
     <string name="error_invalid_server">Cette adresse de serveur est invalide. Vérifiez-la puis réessayez.</string>
