@@ -1455,6 +1455,7 @@ func (service *Service) fetch(ctx context.Context, record cacheRecord) error {
 	request.Header.Set("Accept", "image/png,image/jpeg;q=0.9,image/webp;q=0.5")
 	request.Header.Set("Accept-Encoding", "identity")
 	request.Header.Set("User-Agent", "Rivune-Artwork-Cache/1")
+	requestwork.PropagateRequestID(request)
 	started := requestwork.Now()
 	requestwork.BeginOutbound(ctx, started)
 	counted := byteCountingReader{}

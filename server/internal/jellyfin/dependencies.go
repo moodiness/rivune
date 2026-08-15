@@ -19,6 +19,12 @@ type Authentication interface {
 	Logout(context.Context, AuthenticatedSession) error
 }
 
+type QuickConnectAuthentication interface {
+	BeginQuickConnect(context.Context, ClientIdentity) (QuickConnectStatus, error)
+	PollQuickConnect(context.Context, string, ClientIdentity) (QuickConnectStatus, error)
+	LoginQuickConnect(context.Context, string, ClientIdentity) (LoginResult, error)
+}
+
 // AuthenticatedRequestPolicy applies request-scoped authorization after a
 // compatibility credential has resolved to a principal.
 type AuthenticatedRequestPolicy interface {

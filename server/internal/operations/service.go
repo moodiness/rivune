@@ -82,10 +82,65 @@ func (service *Service) Overview(ctx context.Context, principal auth.Principal) 
 	if err != nil {
 		return OperationsOverview{}, err
 	}
+	status, err := service.operationalStatus(ctx)
+	if err != nil {
+		return OperationsOverview{}, err
+	}
 	return OperationsOverview{
 		MetadataCache: cache, MetadataRefresh: schedule,
+		PostgreSQLPool: service.postgreSQLPoolStatus(), TrackingOutbox: status.tracking,
+		Addons: status.addons, Playback: status.playback,
 		HousekeepingIntervalMinutes: int(service.housekeepingInterval / time.Minute),
 	}, nil
+}
+
+type operationalStatus struct {
+	tracking TrackingOutboxStatus
+	addons   AddonStatus
+	playback PlaybackStatus
+}
+
+func (service *Service) postgreSQLPoolStatus() PostgreSQLPoolStatus {
+	stats := service.pool.Stat()
+	return PostgreSQLPoolStatus{
+		Acquired: stats.AcquiredConns(), Idle: stats.IdleConns(), Total: stats.TotalConns(), Max: stats.MaxConns(),
+		WaitCount: stats.EmptyAcquireCount(), WaitDurationMilliseconds: stats.EmptyAcquireWaitTime().Milliseconds(),
+	}
+}
+
+func (service *Service) operationalStatus(ctx context.Context) (operationalStatus, error) {
+	var status operationalStatus
+	err := service.pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*)::bigint FROM profile_tracking_outbox),
+			(SELECT count(*)::bigint FROM profile_tracking_outbox
+			 WHERE next_attempt_at <= now() AND (leased_until IS NULL OR leased_until <= now())),
+			(SELECT COALESCE(GREATEST(0, floor(extract(epoch FROM now() - min(created_at))))::bigint, 0)
+			 FROM profile_tracking_outbox),
+			(SELECT count(*)::bigint FROM profile_addons),
+			(SELECT count(*)::bigint FROM profile_addons WHERE enabled),
+			(SELECT max(updated_at) FROM profile_addons),
+			(SELECT count(*)::bigint FROM playback_sessions
+			 WHERE expires_at > now() AND last_seen_at > now() - interval '30 minutes'),
+			(SELECT count(*)::bigint FROM playback_sessions playback
+			 WHERE playback.expires_at > now()
+			   AND playback.last_seen_at > now() - interval '30 minutes'
+			   AND EXISTS (
+			       SELECT 1
+			       FROM jsonb_array_elements(
+			           CASE WHEN jsonb_typeof(playback.assets) = 'array' THEN playback.assets ELSE '[]'::jsonb END
+			       ) asset
+			       WHERE asset->>'kind' IN ('transcode', 'transcode_audio')
+			   ))
+	`).Scan(
+		&status.tracking.Pending, &status.tracking.Due, &status.tracking.OldestAgeSeconds,
+		&status.addons.Total, &status.addons.Enabled, &status.addons.LatestUpdatedAt,
+		&status.playback.Active, &status.playback.Transcoding,
+	)
+	if err != nil {
+		return operationalStatus{}, fmt.Errorf("query operational status: %w", err)
+	}
+	return status, nil
 }
 
 func (service *Service) UpdateMetadataRefreshSchedule(

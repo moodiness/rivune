@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -94,6 +95,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -142,7 +144,10 @@ import kotlinx.coroutines.delay
 internal fun RivuneRoot(viewModel: RivuneViewModel, updates: AppUpdateCoordinator, activity: Activity) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val updateState by updates.state.collectAsStateWithLifecycle()
-    val inlineFailure = state.destination == AppDestination.Server || state.destination == AppDestination.Pairing
+    val inlineFailure = state.destination == AppDestination.Server ||
+        state.destination == AppDestination.Pairing ||
+        state.destination == AppDestination.Profiles ||
+        state.pendingProfile != null
 
     RivuneTheme {
         Surface(
@@ -182,6 +187,8 @@ internal fun RivuneRoot(viewModel: RivuneViewModel, updates: AppUpdateCoordinato
                             profiles = state.profiles,
                             isBusy = state.isBusy,
                             isTv = state.isTv,
+                            failure = state.failure,
+                            onClearFailure = viewModel::clearFailure,
                             resourceUrl = viewModel::artworkUrl,
                             avatarData = state.profileAvatarData,
                             onSelect = viewModel::selectProfile,
@@ -223,7 +230,7 @@ internal fun RivuneRoot(viewModel: RivuneViewModel, updates: AppUpdateCoordinato
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
                             .navigationBarsPadding()
-                            .padding(RivuneSpacing.lg),
+                            .padding(if (state.isTv) RivuneSpacing.xxl else RivuneSpacing.lg),
                     )
                 }
             }
@@ -232,6 +239,7 @@ internal fun RivuneRoot(viewModel: RivuneViewModel, updates: AppUpdateCoordinato
                 PinDialog(
                     profile = profile,
                     isBusy = state.isBusy,
+                    failure = state.failure,
                     isTv = state.isTv,
                     onSubmit = viewModel::submitPin,
                     onDismiss = viewModel::dismissPin,
@@ -384,6 +392,7 @@ internal fun ServerScreen(
     onClearFailure: () -> Unit,
     onCheckForUpdates: () -> Unit = {},
 ) {
+    val keyboardController = LocalSoftwareKeyboardController.current
     var server by remember(serverInput) { mutableStateOf(serverInput) }
     val view = LocalView.current
     val failureText = failure?.let { failureMessage(it) }
@@ -391,10 +400,17 @@ internal fun ServerScreen(
     val inputFocus = remember { FocusRequester() }
     val submitFocus = remember { FocusRequester() }
     val updateFocus = remember { FocusRequester() }
-
+    LaunchedEffect(isTv) {
+        if (isTv) {
+            keyboardController?.hide()
+            if (server.isBlank()) updateFocus.requestFocus() else submitFocus.requestFocus()
+        }
+    }
     LaunchedEffect(failure) {
         if (failure != null) performRejectHaptic(view)
     }
+
+
 
     AuthFrame(isTv = isTv) {
         RivuneScreenHeading(
@@ -487,6 +503,8 @@ internal fun PairingScreen(
     val clipboard = remember(view) { view.context.getSystemService(ClipboardManager::class.java) }
     var copied by remember(pairing?.userCode) { mutableStateOf(false) }
     var confirmDisconnect by remember { mutableStateOf(false) }
+    val pairingActionFocus = remember { FocusRequester() }
+    val cancelDisconnectFocus = remember { FocusRequester() }
     val expired = failure == UiFailure.PAIRING_EXPIRED
     val visualState = when {
         pairingAccepted -> PairingVisualState.SUCCESS
@@ -508,6 +526,24 @@ internal fun PairingScreen(
     LaunchedEffect(failure) {
         if (failure != null) performRejectHaptic(view)
     }
+    LaunchedEffect(isTv, visualState, isBusy) {
+        if (isTv && !isBusy && (visualState == PairingVisualState.CODE || visualState == PairingVisualState.ERROR)) {
+            delay(RivuneMotion.normal.toLong())
+            pairingActionFocus.requestFocus()
+        }
+    }
+    LaunchedEffect(isTv, confirmDisconnect) {
+        if (isTv && confirmDisconnect) cancelDisconnectFocus.requestFocus()
+    }
+    val copyCode: (() -> Unit)? = if (isTv || pairing == null) {
+        null
+    } else {
+        {
+            clipboard.setPrimaryClip(ClipData.newPlainText("Rivune pairing code", pairing.userCode))
+            copied = true
+            performClickHaptic(view)
+        }
+    }
 
     BoxWithConstraints(
         modifier = Modifier
@@ -516,127 +552,136 @@ internal fun PairingScreen(
         contentAlignment = Alignment.TopCenter,
     ) {
         val tablet = maxWidth >= RivuneBreakpoints.compact
-        val horizontalPadding = when {
-            isTv -> RivuneSpacing.display
-            tablet -> RivuneSpacing.huge
-            else -> RivuneSpacing.xl
-        }
-        val contentMaxWidth = when {
-            isTv -> 880.dp
-            tablet -> RivuneDimensions.contentMaxTablet
-            else -> RivuneDimensions.contentMax
-        }
-        val compactHeight = maxHeight < 720.dp
-        val sectionGap = when {
-            compactHeight -> RivuneSpacing.lg
-            tablet -> RivuneSpacing.xxl
-            else -> RivuneSpacing.xl
-        }
+        val fontScale = LocalDensity.current.fontScale
+        val tvLandscape = isTv &&
+            maxWidth >= RivuneBreakpoints.expanded &&
+            maxHeight >= 480.dp &&
+            fontScale < 1.3f
 
-        Column(
-            modifier = Modifier
-                .widthIn(max = contentMaxWidth)
-                .fillMaxWidth()
-                .heightIn(min = maxHeight)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = horizontalPadding, vertical = if (compactHeight) RivuneSpacing.md else RivuneSpacing.xl),
-            verticalArrangement = Arrangement.Center,
-        ) {
-            RivuneBrandLockup(
-                name = stringResource(R.string.app_name),
-                mark = stringResource(R.string.brand_mark),
-                tagline = if (tablet || isTv) stringResource(R.string.brand_tagline) else null,
-                markSize = if (isTv) 64.dp else 48.dp,
-            )
-            Spacer(Modifier.height(if (compactHeight) RivuneSpacing.lg else RivuneSpacing.xl))
-            RivuneScreenHeading(
-                eyebrow = stringResource(R.string.pairing_eyebrow),
-                title = stringResource(R.string.pairing_title),
-                body = stringResource(R.string.pairing_body),
-                isTv = isTv,
-            )
-            Spacer(Modifier.height(sectionGap))
-
-            AnimatedContent(
-                targetState = visualState,
-                transitionSpec = {
-                    fadeIn(tween(RivuneMotion.normal)) togetherWith fadeOut(tween(RivuneMotion.fast))
-                },
-                label = "pairing-state",
-            ) { state ->
-                when (state) {
-                    PairingVisualState.SUCCESS -> PairingSuccessState(isTv)
-                    PairingVisualState.LOADING -> PairingLoadingState(isTv)
-                    PairingVisualState.ERROR -> PairingIssueState(
-                        title = stringResource(if (expired) R.string.pairing_expired_title else R.string.error_title),
-                        body = if (expired) {
-                            stringResource(R.string.pairing_expired_body)
-                        } else {
-                            failure?.let { failureMessage(it) }.orEmpty()
-                        },
-                        isTv = isTv,
+        if (tvLandscape) {
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = RivuneSpacing.display, vertical = RivuneSpacing.xxl),
+                horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.xxxl),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .width(360.dp)
+                        .fillMaxHeight(),
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    RivuneBrandLockup(
+                        name = stringResource(R.string.app_name),
+                        mark = stringResource(R.string.brand_mark),
+                        tagline = stringResource(R.string.brand_tagline),
+                        markSize = 48.dp,
                     )
-                    PairingVisualState.CODE -> Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        PairingValue(
-                            label = stringResource(R.string.pairing_code_label),
-                            value = checkNotNull(pairing).userCode,
-                            isTv = isTv,
-                            copied = copied,
-                            onCopy = if (isTv) null else {
-                                {
-                                    clipboard.setPrimaryClip(ClipData.newPlainText("Rivune pairing code", pairing.userCode))
-                                    copied = true
-                                    performClickHaptic(view)
-                                }
-                            },
-                        )
-                        Spacer(Modifier.height(RivuneSpacing.lg))
-                        if (failure == null) {
-                            PairingWaitingState(copied = copied, isTv = isTv)
-                        } else {
-                            PairingInlineIssue(message = failureMessage(failure), isTv = isTv)
-                        }
-                    }
+                    Spacer(Modifier.height(RivuneSpacing.xxl))
+                    RivuneScreenHeading(
+                        eyebrow = stringResource(R.string.pairing_eyebrow),
+                        title = stringResource(R.string.pairing_title),
+                        body = stringResource(R.string.pairing_body),
+                        isTv = true,
+                    )
+                }
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    PairingStateContent(
+                        visualState = visualState,
+                        pairing = pairing,
+                        expired = expired,
+                        failure = failure,
+                        isTv = true,
+                        compactTv = true,
+                        copied = copied,
+                        onCopy = null,
+                    )
+                    Spacer(Modifier.height(RivuneSpacing.xl))
+                    PairingActions(
+                        pairing = pairing,
+                        pairingAccepted = pairingAccepted,
+                        isBusy = isBusy,
+                        failure = failure,
+                        isTv = true,
+                        onRestart = onRestart,
+                        onDisconnectRequest = { confirmDisconnect = true },
+                        focusRequester = pairingActionFocus,
+                    )
                 }
             }
+        } else {
+            val horizontalPadding = when {
+                isTv -> RivuneSpacing.display
+                tablet -> RivuneSpacing.huge
+                else -> RivuneSpacing.xl
+            }
+            val contentMaxWidth = when {
+                isTv -> 880.dp
+                tablet -> RivuneDimensions.contentMaxTablet
+                else -> RivuneDimensions.contentMax
+            }
+            val compactHeight = maxHeight < 720.dp
+            val sectionGap = when {
+                compactHeight -> RivuneSpacing.lg
+                tablet -> RivuneSpacing.xxl
+                else -> RivuneSpacing.xl
+            }
 
-            Spacer(Modifier.height(sectionGap))
-            AnimatedVisibility(visible = !pairingAccepted) {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    if (pairing == null && failure != null) {
-                        RivunePrimaryButton(
-                            label = stringResource(if (isBusy) R.string.pairing_restart_loading else R.string.pairing_restart),
-                            onClick = onRestart,
-                            modifier = Modifier.fillMaxWidth().testTag(RivuneTestTags.PairingRestart),
-                            enabled = !isBusy,
-                            loading = isBusy,
-                            isTv = isTv,
-                            icon = Icons.Rounded.Refresh,
-                        )
-                    } else {
-                        RivuneSecondaryButton(
-                            label = stringResource(if (isBusy) R.string.pairing_restart_loading else R.string.pairing_restart),
-                            onClick = onRestart,
-                            modifier = Modifier.fillMaxWidth().testTag(RivuneTestTags.PairingRestart),
-                            enabled = !isBusy,
-                            loading = isBusy,
-                            isTv = isTv,
-                            icon = Icons.Rounded.Refresh,
-                        )
-                    }
-                    Spacer(Modifier.height(RivuneSpacing.xs))
-                    RivuneTextButton(
-                        label = stringResource(R.string.pairing_disconnect),
-                        onClick = { confirmDisconnect = true },
-                        modifier = Modifier.fillMaxWidth().testTag(RivuneTestTags.PairingDisconnect),
-                        enabled = !isBusy,
-                        isTv = isTv,
-                        destructive = true,
-                    )
-                }
+            Column(
+                modifier = Modifier
+                    .widthIn(max = contentMaxWidth)
+                    .fillMaxWidth()
+                    .heightIn(min = maxHeight)
+                    .verticalScroll(rememberScrollState())
+                    .padding(
+                        horizontal = horizontalPadding,
+                        vertical = if (compactHeight) RivuneSpacing.md else RivuneSpacing.xl,
+                    ),
+                verticalArrangement = if (compactHeight) Arrangement.Top else Arrangement.Center,
+            ) {
+                RivuneBrandLockup(
+                    name = stringResource(R.string.app_name),
+                    mark = stringResource(R.string.brand_mark),
+                    tagline = if (tablet || isTv) stringResource(R.string.brand_tagline) else null,
+                    markSize = if (isTv) 64.dp else 48.dp,
+                )
+                Spacer(Modifier.height(if (compactHeight) RivuneSpacing.lg else RivuneSpacing.xl))
+                RivuneScreenHeading(
+                    eyebrow = stringResource(R.string.pairing_eyebrow),
+                    title = stringResource(R.string.pairing_title),
+                    body = stringResource(R.string.pairing_body),
+                    isTv = isTv,
+                )
+                Spacer(Modifier.height(sectionGap))
+                PairingStateContent(
+                    visualState = visualState,
+                    pairing = pairing,
+                    expired = expired,
+                    failure = failure,
+                    isTv = isTv,
+                    compactTv = false,
+                    copied = copied,
+                    onCopy = copyCode,
+                )
+                Spacer(Modifier.height(sectionGap))
+                PairingActions(
+                    pairing = pairing,
+                    pairingAccepted = pairingAccepted,
+                    isBusy = isBusy,
+                    failure = failure,
+                    isTv = isTv,
+                    onRestart = onRestart,
+                    onDisconnectRequest = { confirmDisconnect = true },
+                    focusRequester = pairingActionFocus,
+                )
             }
         }
     }
@@ -660,6 +705,7 @@ internal fun PairingScreen(
             },
             dismissButton = {
                 RivuneTextButton(
+                    modifier = Modifier.focusRequester(cancelDisconnectFocus),
                     label = stringResource(R.string.pin_cancel),
                     onClick = { confirmDisconnect = false },
                     isTv = isTv,
@@ -672,16 +718,135 @@ internal fun PairingScreen(
 }
 
 @Composable
+private fun PairingStateContent(
+    visualState: PairingVisualState,
+    pairing: PairingInfo?,
+    expired: Boolean,
+    failure: UiFailure?,
+    isTv: Boolean,
+    compactTv: Boolean,
+    copied: Boolean,
+    onCopy: (() -> Unit)?,
+) {
+    AnimatedContent(
+        targetState = visualState to pairing,
+        transitionSpec = {
+            fadeIn(tween(RivuneMotion.normal)) togetherWith fadeOut(tween(RivuneMotion.fast))
+        },
+        label = "pairing-state",
+    ) { contentState ->
+        val state = contentState.first
+        val statePairing = contentState.second
+        when (state) {
+            PairingVisualState.SUCCESS -> PairingSuccessState(isTv)
+            PairingVisualState.LOADING -> PairingLoadingState(isTv = isTv, compactTv = compactTv)
+            PairingVisualState.ERROR -> PairingIssueState(
+                title = stringResource(if (expired) R.string.pairing_expired_title else R.string.error_title),
+                body = if (expired) {
+                    stringResource(R.string.pairing_expired_body)
+                } else {
+                    failure?.let { failureMessage(it) }.orEmpty()
+                },
+                isTv = isTv,
+            )
+            PairingVisualState.CODE -> if (statePairing == null) {
+                PairingLoadingState(isTv = isTv, compactTv = compactTv)
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    PairingValue(
+                        label = stringResource(R.string.pairing_code_label),
+                        value = statePairing.userCode,
+                        isTv = isTv,
+                        compactTv = compactTv,
+                        copied = copied,
+                        onCopy = onCopy,
+                    )
+                    Spacer(Modifier.height(if (compactTv) RivuneSpacing.md else RivuneSpacing.lg))
+                    if (failure == null) {
+                        PairingWaitingState(copied = copied, isTv = isTv)
+                    } else {
+                        PairingInlineIssue(message = failureMessage(failure), isTv = isTv)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PairingActions(
+    pairing: PairingInfo?,
+    pairingAccepted: Boolean,
+    isBusy: Boolean,
+    failure: UiFailure?,
+    isTv: Boolean,
+    onRestart: () -> Unit,
+    onDisconnectRequest: () -> Unit,
+    focusRequester: FocusRequester,
+) {
+    AnimatedVisibility(visible = !pairingAccepted) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            if (pairing == null && failure != null) {
+                RivunePrimaryButton(
+                    label = stringResource(if (isBusy) R.string.pairing_restart_loading else R.string.pairing_restart),
+                    onClick = onRestart,
+                    modifier = Modifier.fillMaxWidth().focusRequester(focusRequester).testTag(RivuneTestTags.PairingRestart),
+                    enabled = !isBusy,
+                    loading = isBusy,
+                    isTv = isTv,
+                    icon = Icons.Rounded.Refresh,
+                )
+            } else {
+                RivuneSecondaryButton(
+                    label = stringResource(if (isBusy) R.string.pairing_restart_loading else R.string.pairing_restart),
+                    onClick = onRestart,
+                    modifier = Modifier.fillMaxWidth().focusRequester(focusRequester).testTag(RivuneTestTags.PairingRestart),
+                    enabled = !isBusy,
+                    loading = isBusy,
+                    isTv = isTv,
+                    icon = Icons.Rounded.Refresh,
+                )
+            }
+            Spacer(Modifier.height(RivuneSpacing.xs))
+            RivuneTextButton(
+                label = stringResource(R.string.pairing_disconnect),
+                onClick = onDisconnectRequest,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(if (pairing == null && failure == null) Modifier.focusRequester(focusRequester) else Modifier)
+                    .testTag(RivuneTestTags.PairingDisconnect),
+                enabled = !isBusy,
+                isTv = isTv,
+                destructive = true,
+            )
+        }
+    }
+}
+
+@Composable
 private fun ProfilesScreen(
     profiles: List<Profile>,
     isBusy: Boolean,
     isTv: Boolean,
+    failure: UiFailure?,
     resourceUrl: (String?) -> String?,
     avatarData: Map<java.util.UUID, ByteArray>,
     onSelect: (Profile) -> Unit,
     onLogout: () -> Unit,
     onRefresh: () -> Unit,
+    onClearFailure: () -> Unit,
 ) {
+    val refreshFocus = remember { FocusRequester() }
+    val firstProfileFocus = remember { FocusRequester() }
+    val firstFocusableIndex = profiles.indexOfFirst { it.enabled && it.accessible }
+    LaunchedEffect(isTv, profiles, isBusy) {
+        if (isTv && !isBusy) {
+            if (firstFocusableIndex >= 0) firstProfileFocus.requestFocus() else refreshFocus.requestFocus()
+        }
+    }
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
@@ -691,7 +856,8 @@ private fun ProfilesScreen(
         val wide = maxWidth >= 720.dp
         val horizontalPadding = responsiveHorizontalPadding(maxWidth, isTv)
         val columns = when {
-            isTv -> 5
+            isTv && maxWidth >= 1100.dp -> 5
+            isTv -> 4
             maxWidth >= 1100.dp -> 5
             wide -> 4
             else -> 2
@@ -706,6 +872,7 @@ private fun ProfilesScreen(
                         onClick = onRefresh,
                         enabled = !isBusy,
                         isTv = isTv,
+                        modifier = Modifier.focusRequester(refreshFocus),
                     )
                     ToolbarAction(
                         label = stringResource(R.string.logout),
@@ -716,6 +883,14 @@ private fun ProfilesScreen(
                     )
                 },
             )
+            if (failure != null) {
+                FailureBanner(
+                    message = failureMessage(failure),
+                    onDismiss = onClearFailure,
+                    isTv = isTv,
+                    modifier = Modifier.padding(horizontal = horizontalPadding),
+                )
+            }
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -739,6 +914,7 @@ private fun ProfilesScreen(
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(columns),
                         modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(bottom = if (isTv) RivuneSpacing.xxl else RivuneSpacing.md),
                         horizontalArrangement = Arrangement.spacedBy(if (isTv) 24.dp else 16.dp),
                         verticalArrangement = Arrangement.spacedBy(if (isTv) 24.dp else 16.dp),
                     ) {
@@ -748,6 +924,11 @@ private fun ProfilesScreen(
                                 imageModel = avatarData[profile.id]
                                     ?: profile.avatar.url.takeIf { profile.avatar.kind == "preset" }?.let(resourceUrl),
                                 enabled = profile.enabled && profile.accessible && !isBusy,
+                                modifier = if (profiles.indexOf(profile) == firstFocusableIndex) {
+                                    Modifier.focusRequester(firstProfileFocus)
+                                } else {
+                                    Modifier
+                                },
                                 isTv = isTv,
                                 onClick = { onSelect(profile) },
                             )
@@ -775,7 +956,9 @@ private fun AuthFrame(
             .windowInsetsPadding(WindowInsets.safeDrawing)
             .imePadding(),
     ) {
-        val wide = maxWidth >= RivuneBreakpoints.expanded && maxHeight >= 600.dp && fontScale < 1.5f
+        val wide = maxWidth >= RivuneBreakpoints.expanded &&
+            maxHeight >= (if (isTv) 480.dp else 600.dp) &&
+            fontScale < 1.5f
         Row(modifier = Modifier.fillMaxSize()) {
             if (wide) {
                 Box(
@@ -803,7 +986,7 @@ private fun AuthFrame(
                         horizontal = if (isTv) RivuneSpacing.display else RivuneSpacing.xl,
                         vertical = if (isTv) RivuneSpacing.huge else RivuneSpacing.xxl,
                     ),
-                contentAlignment = Alignment.Center,
+                contentAlignment = if (wide) Alignment.Center else Alignment.TopCenter,
             ) {
                 Column(
                     modifier = Modifier
@@ -837,31 +1020,37 @@ private fun PairingValue(
     label: String,
     value: String,
     isTv: Boolean,
+    compactTv: Boolean,
     copied: Boolean,
     onCopy: (() -> Unit)?,
 ) {
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     val copyDescription = stringResource(if (copied) R.string.pairing_copied else R.string.pairing_copy)
+    val semanticsModifier = Modifier.semantics {
+        contentDescription = "$label, $value"
+        if (copied) stateDescription = copyDescription
+    }
+    val interactionModifier = if (onCopy == null) {
+        semanticsModifier
+    } else {
+        semanticsModifier.clickable(
+            onClickLabel = copyDescription,
+            role = Role.Button,
+            onClick = onCopy,
+        )
+    }
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .testTag(RivuneTestTags.PairingCode)
-            .semantics {
-                contentDescription = "$label, $value"
-                if (copied) stateDescription = copyDescription
-            }
-            .clickable(
-                enabled = onCopy != null,
-                onClickLabel = copyDescription,
-                role = Role.Button,
-                onClick = { onCopy?.invoke() },
-            ),
+            .then(interactionModifier),
         shape = RivuneShapes.extraLarge,
         color = MaterialTheme.colorScheme.surfaceContainer,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         BoxWithConstraints {
             val baseSize = when {
+                compactTv -> 54f
                 isTv -> 72f
                 maxWidth >= 520.dp -> 62f
                 else -> 43f
@@ -871,8 +1060,12 @@ private fun PairingValue(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(
-                        horizontal = if (isTv) RivuneSpacing.xxxl else RivuneSpacing.xl,
-                        vertical = if (isTv) RivuneSpacing.xxxl else RivuneSpacing.xxl,
+                        horizontal = if (isTv) RivuneSpacing.xxl else RivuneSpacing.xl,
+                        vertical = when {
+                            compactTv -> RivuneSpacing.xl
+                            isTv -> RivuneSpacing.xxxl
+                            else -> RivuneSpacing.xxl
+                        },
                     ),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
@@ -892,7 +1085,7 @@ private fun PairingValue(
                     style = MaterialTheme.typography.labelMedium,
                     textAlign = TextAlign.Center,
                 )
-                Spacer(Modifier.height(if (isTv) RivuneSpacing.md else RivuneSpacing.sm))
+                Spacer(Modifier.height(if (compactTv) RivuneSpacing.sm else if (isTv) RivuneSpacing.md else RivuneSpacing.sm))
                 Text(
                     text = value,
                     maxLines = 1,
@@ -903,7 +1096,7 @@ private fun PairingValue(
                     fontWeight = FontWeight.SemiBold,
                     fontSize = codeSize,
                     lineHeight = codeSize * 1.15f,
-                    letterSpacing = (if (isTv) 5f else 2f).sp,
+                    letterSpacing = (if (compactTv) 3f else if (isTv) 5f else 2f).sp,
                     textAlign = TextAlign.Center,
                 )
                 if (onCopy != null) {
@@ -938,7 +1131,7 @@ private enum class PairingVisualState {
 }
 
 @Composable
-private fun PairingLoadingState(isTv: Boolean) {
+private fun PairingLoadingState(isTv: Boolean, compactTv: Boolean) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -948,7 +1141,7 @@ private fun PairingLoadingState(isTv: Boolean) {
         RivuneSkeleton(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(if (isTv) 210.dp else 174.dp),
+                .height(if (compactTv) 160.dp else if (isTv) 210.dp else 174.dp),
             shape = RivuneShapes.extraLarge,
         )
         Spacer(Modifier.height(RivuneSpacing.lg))
@@ -1128,6 +1321,7 @@ private fun ProfileCard(
     imageModel: Any?,
     enabled: Boolean,
     isTv: Boolean,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
     val status = when {
@@ -1139,7 +1333,7 @@ private fun ProfileCard(
         onClick = onClick,
         enabled = enabled,
         isTv = isTv,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .semantics {
                 contentDescription = listOfNotNull(profile.name, status).joinToString(", ")
@@ -1172,7 +1366,7 @@ private fun ProfileCard(
                 Text(
                     text = it,
                     color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.bodyMedium,
                 )
@@ -1194,7 +1388,7 @@ private fun TopBar(
             .fillMaxWidth()
             .padding(
                 horizontal = if (isTv) RivuneSpacing.huge else RivuneSpacing.md,
-                vertical = RivuneSpacing.sm,
+                vertical = if (isTv) RivuneSpacing.xxl else RivuneSpacing.sm,
             ),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
@@ -1221,10 +1415,12 @@ private fun ToolbarAction(
     onClick: () -> Unit,
     enabled: Boolean,
     isTv: Boolean,
+    modifier: Modifier = Modifier,
 ) {
     if (isTv) {
         RivuneTextButton(
             label = label,
+            modifier = modifier,
             onClick = onClick,
             enabled = enabled,
             isTv = true,
@@ -1247,9 +1443,14 @@ private fun ToolbarAction(
 }
 
 @Composable
-private fun FailureBanner(message: String, onDismiss: () -> Unit, isTv: Boolean) {
+private fun FailureBanner(
+    message: String,
+    onDismiss: () -> Unit,
+    isTv: Boolean,
+    modifier: Modifier = Modifier,
+) {
     Surface(
-        modifier = Modifier
+        modifier = modifier
             .widthIn(max = RivuneDimensions.contentMaxTablet)
             .fillMaxWidth()
             .semantics {
@@ -1289,10 +1490,16 @@ private fun FailureBanner(message: String, onDismiss: () -> Unit, isTv: Boolean)
 private fun PinDialog(
     profile: Profile,
     isBusy: Boolean,
+    failure: UiFailure?,
     isTv: Boolean,
     onSubmit: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val inputFocus = remember { FocusRequester() }
+    val pinFailure = failure == UiFailure.PROFILE_PIN_INVALID || failure == UiFailure.PROFILE_PIN_RATE_LIMITED
+    LaunchedEffect(isTv, profile.id, isBusy) {
+        if (isTv && !isBusy) inputFocus.requestFocus()
+    }
     var pin by remember(profile.id) { mutableStateOf("") }
     val submit = {
         if (pin.length in 4..8 && !isBusy) {
@@ -1321,6 +1528,9 @@ private fun PinDialog(
                     onValueChange = { value -> pin = value.filter(Char::isDigit).take(8) },
                     label = stringResource(R.string.pin_label),
                     enabled = !isBusy,
+                    modifier = Modifier.focusRequester(inputFocus),
+                    isError = pinFailure,
+                    supportingText = if (pinFailure) failureMessage(checkNotNull(failure)) else null,
                     isTv = isTv,
                     leadingIcon = Icons.Rounded.Lock,
                     visualTransformation = PasswordVisualTransformation(),

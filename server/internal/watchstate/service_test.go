@@ -45,6 +45,65 @@ func (counter *progressBatchQueryCounter) TraceQueryStart(ctx context.Context, _
 func (*progressBatchQueryCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {
 }
 
+func captureActiveProfileTestSession(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	principal auth.Principal,
+	profileID string,
+) auth.Principal {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `
+		CREATE TEMPORARY TABLE IF NOT EXISTS auth_sessions (
+			id uuid PRIMARY KEY,
+			user_id uuid NOT NULL,
+			device_id uuid NOT NULL,
+			access_token_hash bytea NOT NULL,
+			access_expires_at timestamptz NOT NULL,
+			refresh_expires_at timestamptz NOT NULL,
+			authorization_scope text NOT NULL,
+			category_id uuid,
+			active_profile_id uuid,
+			profile_grant_expires_at timestamptz,
+			profile_context_hash bytea,
+			revoked_at timestamptz
+		)
+	`); err != nil {
+		t.Fatalf("create active profile session fixture: %v", err)
+	}
+
+	if principal.UserID == "" {
+		if err := pool.QueryRow(ctx, `SELECT gen_random_uuid()::text`).Scan(&principal.UserID); err != nil {
+			t.Fatalf("generate active profile user ID: %v", err)
+		}
+	}
+	if err := pool.QueryRow(ctx, `SELECT gen_random_uuid()::text, gen_random_uuid()::text`).Scan(
+		&principal.SessionID,
+		&principal.DeviceID,
+	); err != nil {
+		t.Fatalf("generate active profile session identity: %v", err)
+	}
+	contextHash := []byte("watchstate-test-profile-context!")
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO auth_sessions (
+			id, user_id, device_id, access_token_hash, access_expires_at, refresh_expires_at,
+			authorization_scope, category_id, active_profile_id, profile_grant_expires_at,
+			profile_context_hash
+		) VALUES (
+			$1::uuid, $2::uuid, $3::uuid, $4::bytea, $5::timestamptz, $5::timestamptz + interval '1 hour',
+			$6::text, $7::uuid, $8::uuid, $5::timestamptz, $9::bytea
+		)
+	`, principal.SessionID, principal.UserID, principal.DeviceID, contextHash, expiresAt,
+		principal.AuthorizationScope, principal.CategoryID, profileID, contextHash); err != nil {
+		t.Fatalf("insert active profile session fixture: %v", err)
+	}
+	principal.ActiveProfileID = &profileID
+	principal.ProfileGrantExpiresAt = &expiresAt
+	principal.ProfileContextHash = contextHash
+	return principal
+}
+
 func TestActiveProfileIDRequiresUnexpiredSelection(t *testing.T) {
 	profileID := "11111111-1111-4111-8111-111111111111"
 	future := time.Now().UTC().Add(time.Hour)
@@ -383,20 +442,17 @@ func TestResolveTitleCanonicalIdentityCannotBePoisonedAcrossProfiles(t *testing.
 	}}
 	service := NewService(pool, time.UTC)
 	service.SetCanonicalProvider(provider, canonicalResolverStub{"movie:imdb:tt00123": "123"})
-	expiresAt := time.Now().UTC().Add(time.Hour)
 	categoryID := "33333333-3333-4333-8333-333333333333"
 	attackerProfileID := "11111111-1111-4111-8111-111111111111"
 	victimProfileID := "55555555-5555-4555-8555-555555555555"
-	attacker := auth.Principal{
+	attacker := captureActiveProfileTestSession(t, ctx, pool, auth.Principal{
 		UserID: "44444444-4444-4444-8444-444444444444", Role: "member",
 		AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID,
-		ActiveProfileID: &attackerProfileID, ProfileGrantExpiresAt: &expiresAt,
-	}
-	victim := auth.Principal{
+	}, attackerProfileID)
+	victim := captureActiveProfileTestSession(t, ctx, pool, auth.Principal{
 		UserID: "66666666-6666-4666-8666-666666666666", Role: "member",
 		AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID,
-		ActiveProfileID: &victimProfileID, ProfileGrantExpiresAt: &expiresAt,
-	}
+	}, victimProfileID)
 
 	attackerResult, err := service.ResolveTitle(ctx, attacker, ResolveTitleInput{
 		MediaType: "movie", Provider: "imdb", ExternalID: "tt00123", ResourceID: "attacker-resource",
@@ -602,11 +658,10 @@ func TestResolveTitleProfileScopedFallbackIsolatedAndLibraryPreservesIdentity(t 
 		t.Fatalf("create profile title identity fixtures: %v", err)
 	}
 
-	expiresAt := time.Now().UTC().Add(time.Hour)
 	profileOneID := "11111111-1111-4111-8111-111111111111"
 	profileTwoID := "22222222-2222-4222-8222-222222222222"
-	profileOne := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileOneID, ProfileGrantExpiresAt: &expiresAt}
-	profileTwo := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileTwoID, ProfileGrantExpiresAt: &expiresAt}
+	profileOne := captureActiveProfileTestSession(t, ctx, pool, auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}, profileOneID)
+	profileTwo := captureActiveProfileTestSession(t, ctx, pool, auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}, profileTwoID)
 	service := NewService(pool, time.UTC)
 	externalID := strings.Repeat("addon-claim-", 20)
 
@@ -960,13 +1015,12 @@ func TestTVLibraryIsProfileScopedAndSurvivesAddonRemoval(t *testing.T) {
 		t.Fatalf("create TV library fixtures: %v", err)
 	}
 
-	expiresAt := time.Now().UTC().Add(time.Hour)
 	profileOneID := "11111111-1111-4111-8111-111111111111"
 	profileTwoID := "22222222-2222-4222-8222-222222222222"
 	profileThreeID := "33333333-3333-4333-8333-333333333333"
-	profileOne := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileOneID, ProfileGrantExpiresAt: &expiresAt}
-	profileTwo := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileTwoID, ProfileGrantExpiresAt: &expiresAt}
-	profileThree := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileThreeID, ProfileGrantExpiresAt: &expiresAt}
+	profileOne := captureActiveProfileTestSession(t, ctx, pool, auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}, profileOneID)
+	profileTwo := captureActiveProfileTestSession(t, ctx, pool, auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}, profileTwoID)
+	profileThree := captureActiveProfileTestSession(t, ctx, pool, auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}, profileThreeID)
 	trackingSink := &recordingTrackingSink{}
 	service := NewService(pool, time.UTC, trackingSink)
 
@@ -1454,8 +1508,7 @@ func TestDismissContinuePersistsUntilNewWatchActivity(t *testing.T) {
 	}
 
 	profileID := "11111111-1111-4111-8111-111111111111"
-	expiresAt := time.Now().UTC().Add(time.Hour)
-	principal := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt}
+	principal := captureActiveProfileTestSession(t, ctx, pool, auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}, profileID)
 	service := NewService(pool, time.UTC)
 
 	initial, err := service.ContinueWatching(ctx, principal, 10)
@@ -1583,11 +1636,9 @@ func TestProgressBatchUsesOneLogicalQueryAndAtomicVersions(t *testing.T) {
 		"00000000-0000-4000-8000-000000000411",
 		"00000000-0000-4000-8000-000000000412",
 	}
-	expiresAt := time.Now().UTC().Add(time.Hour)
-	principal := auth.Principal{
+	principal := captureActiveProfileTestSession(t, ctx, pool, auth.Principal{
 		Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
-		ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt,
-	}
+	}, profileID)
 	service := NewService(pool, time.UTC)
 
 	readBefore := counter.read.Load()
@@ -1604,11 +1655,10 @@ func TestProgressBatchUsesOneLogicalQueryAndAtomicVersions(t *testing.T) {
 	}
 
 	otherCategoryID := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-	unauthorized := auth.Principal{
+	unauthorized := captureActiveProfileTestSession(t, ctx, pool, auth.Principal{
 		UserID: "22222222-2222-4222-8222-222222222222", Role: "member",
 		AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &otherCategoryID,
-		ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt,
-	}
+	}, profileID)
 	if _, err := service.GetProgressBatch(ctx, unauthorized, titleIDs); !errors.Is(err, ErrProfileRequired) {
 		t.Fatalf("expected cross-profile batch refusal, got %v", err)
 	}
@@ -1732,12 +1782,11 @@ func TestResolveCustomSeriesPreservesStableHierarchyProgressAndScope(t *testing.
 		t.Fatalf("create custom series fixtures: %v", err)
 	}
 
-	expiresAt := time.Now().UTC().Add(time.Hour)
 	profileOneID := "11111111-1111-4111-8111-111111111111"
 	profileTwoID := "22222222-2222-4222-8222-222222222222"
 	categoryID := "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
-	profileOne := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: &profileOneID, ProfileGrantExpiresAt: &expiresAt}
-	profileTwo := auth.Principal{UserID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", Role: "member", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID, ActiveProfileID: &profileTwoID, ProfileGrantExpiresAt: &expiresAt}
+	profileOne := captureActiveProfileTestSession(t, ctx, pool, auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}, profileOneID)
+	profileTwo := captureActiveProfileTestSession(t, ctx, pool, auth.Principal{UserID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", Role: "member", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID}, profileTwoID)
 	service := NewService(pool, time.UTC)
 	input := ResolveCustomSeriesInput{
 		SourceAddonID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", SourceType: "anime",

@@ -5,19 +5,70 @@ import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.descriptors.PrimitiveKind
 import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
 import kotlinx.serialization.descriptors.SerialDescriptor
 import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
-import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
-import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.decodeFromJsonElement
 
 object RivuneProtocol {
     const val VERSION: Int = 20
+}
+
+enum class DiscoveryCapability(val identifier: String) {
+    BOUNDED_AGGREGATE_RESOURCES("bounded-aggregate-resources"),
+    PROFILE_ARCHIVES_V1("profile-archives-v1"),
+    REQUEST_CORRELATION("request-correlation"),
+}
+
+private const val MAX_DISCOVERY_CAPABILITIES = 64
+private const val MAX_DISCOVERY_CAPABILITY_LENGTH = 64
+private val discoveryCapabilityPattern = Regex("^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+private fun isSafeDiscoveryCapabilityIdentifier(identifier: String): Boolean =
+    identifier.length in 1..MAX_DISCOVERY_CAPABILITY_LENGTH && discoveryCapabilityPattern.matches(identifier)
+
+internal fun normalizedDiscoveryCapabilities(element: JsonElement?): List<String> {
+    val values = element as? JsonArray ?: return emptyList()
+    val capabilities = ArrayList<String>(minOf(values.size, MAX_DISCOVERY_CAPABILITIES))
+    val seen = HashSet<String>(minOf(values.size, MAX_DISCOVERY_CAPABILITIES))
+    for (value in values) {
+        val primitive = value as? JsonPrimitive ?: continue
+        if (!primitive.isString) continue
+        val identifier = primitive.content
+        if (!isSafeDiscoveryCapabilityIdentifier(identifier) || !seen.add(identifier)) continue
+        capabilities.add(identifier)
+        if (capabilities.size == MAX_DISCOVERY_CAPABILITIES) break
+    }
+    return capabilities
+}
+
+internal object DiscoveryCapabilitiesSerializer : KSerializer<List<String>> {
+    private val delegate = ListSerializer(String.serializer())
+    override val descriptor: SerialDescriptor = delegate.descriptor
+
+    override fun serialize(encoder: Encoder, value: List<String>) = delegate.serialize(encoder, value)
+
+    override fun deserialize(decoder: Decoder): List<String> {
+        if (decoder is JsonDecoder) return normalizedDiscoveryCapabilities(decoder.decodeJsonElement())
+        val values = delegate.deserialize(decoder)
+        val capabilities = ArrayList<String>(minOf(values.size, MAX_DISCOVERY_CAPABILITIES))
+        val seen = HashSet<String>(minOf(values.size, MAX_DISCOVERY_CAPABILITIES))
+        for (identifier in values) {
+            if (!isSafeDiscoveryCapabilityIdentifier(identifier) || !seen.add(identifier)) continue
+            capabilities.add(identifier)
+            if (capabilities.size == MAX_DISCOVERY_CAPABILITIES) break
+        }
+        return capabilities
+    }
 }
 
 object UUIDSerializer : KSerializer<UUID> {
@@ -37,7 +88,14 @@ data class Discovery(
     val demoAvailable: Boolean? = null,
     val timezone: String,
     val interfaceLanguage: String,
-)
+    @Serializable(with = DiscoveryCapabilitiesSerializer::class)
+    val capabilities: List<String> = emptyList(),
+) {
+    fun supportsCapability(capability: DiscoveryCapability): Boolean = capability.identifier in capabilities
+
+    val supportsProfileArchives: Boolean
+        get() = supportsCapability(DiscoveryCapability.PROFILE_ARCHIVES_V1)
+}
 
 @Serializable
 enum class AuthorizationScope {

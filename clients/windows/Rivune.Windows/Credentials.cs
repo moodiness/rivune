@@ -16,6 +16,7 @@ public sealed record StoredCredentials
 {
     public required string Issuer { get; init; }
     public required TokenPair Credentials { get; init; }
+    public string? ProfileContext { get; init; }
 }
 
 public sealed class CredentialStoreException : Exception

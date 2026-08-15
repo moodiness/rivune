@@ -158,6 +158,9 @@ func authorizeAssignments(ctx context.Context, tx pgx.Tx, principal auth.Princip
 	if err := lockCategoryRows(ctx, tx, mergeIDs(assignments.categoryIDs, profileCategoryIDs)); err != nil {
 		return err
 	}
+	if err := authorizeActiveProfile(ctx, tx, principal, activeProfileID); err != nil {
+		return err
+	}
 	if err := authorizeProfileAssignments(ctx, tx, principal, activeProfileID, assignments.profileIDs); err != nil {
 		return err
 	}

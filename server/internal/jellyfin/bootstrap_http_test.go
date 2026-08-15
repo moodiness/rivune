@@ -341,6 +341,72 @@ func TestSocketRequiresAuthenticationAndLogoutClosesBoundedConnection(t *testing
 		t.Fatalf("logout retained sockets = %d", bootstrapSocketCount(handler.bootstrap))
 	}
 }
+
+func TestForgetCompatibilitySessionsClosesBoundedConnection(t *testing.T) {
+	handler, _, token, current := newBootstrapHTTPFixture(t, false)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	connection, err := websocket.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/socket?api_key="+token+"&DeviceId=device-a", "", server.URL)
+	if err != nil {
+		t.Fatalf("open compatibility socket: %v", err)
+	}
+	defer connection.Close()
+	var keepalive WebSocketMessageDto
+	if err := websocket.JSON.Receive(connection, &keepalive); err != nil {
+		t.Fatalf("receive initial compatibility keepalive: %v", err)
+	}
+	handler.ForgetCompatibilitySessions([]string{current.ID})
+	_ = connection.SetReadDeadline(time.Now().Add(time.Second))
+	var message json.RawMessage
+	if err := websocket.JSON.Receive(connection, &message); err == nil {
+		t.Fatalf("revoked compatibility socket remained readable: %s", message)
+	}
+	if bootstrapSocketCount(handler.bootstrap) != 0 {
+		t.Fatalf("revocation hook retained sockets = %d", bootstrapSocketCount(handler.bootstrap))
+	}
+}
+
+func TestHandlerGenerationCancellationClosesSockets(t *testing.T) {
+	handler, _, token, _ := newBootstrapHTTPFixture(t, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		handler.Run(ctx)
+		close(done)
+	}()
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	connection, err := websocket.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/socket?api_key="+token+"&DeviceId=device-a", "", server.URL)
+	if err != nil {
+		cancel()
+		t.Fatalf("open generation compatibility socket: %v", err)
+	}
+	defer connection.Close()
+	var keepalive WebSocketMessageDto
+	if err := websocket.JSON.Receive(connection, &keepalive); err != nil {
+		cancel()
+		t.Fatalf("receive generation compatibility keepalive: %v", err)
+	}
+	cancel()
+	_ = connection.SetReadDeadline(time.Now().Add(time.Second))
+	var message json.RawMessage
+	if err := websocket.JSON.Receive(connection, &message); err == nil {
+		t.Fatalf("generation-canceled socket remained readable: %s", message)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler generation did not finish after cancellation")
+	}
+	if bootstrapSocketCount(handler.bootstrap) != 0 {
+		t.Fatalf("generation cancellation retained sockets = %d", bootstrapSocketCount(handler.bootstrap))
+	}
+	if late, lateErr := websocket.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/socket?api_key="+token+"&DeviceId=device-a", "", server.URL); lateErr == nil {
+		_ = late.Close()
+		t.Fatal("retired handler generation accepted a new compatibility socket")
+	}
+}
+
 func TestViewingReportProjectsAuthorizedItemAndRejectsForeignSession(t *testing.T) {
 	handler, _, token, current := newBootstrapHTTPFixture(t, true)
 	itemID := "c1000000-0000-4000-8000-000000000001"
@@ -482,6 +548,48 @@ func TestLogoutClosesOwnerSocketAndPublishesRemainingProfileSessions(t *testing.
 		t.Fatalf("logout session event=%+v", event)
 	}
 	handler.bootstrap.releaseSocket(peerLease)
+}
+
+func TestForgetCompatibilitySessionsClosesOnlyExactSocketsAndPlayback(t *testing.T) {
+	handler, _, _, target := newBootstrapHTTPFixture(t, true)
+	foreign := bootstrapSession("b2000000-0000-4000-8000-000000000001", bootstrapProfileB, "device-b")
+	targetLease, targetOK := handler.bootstrap.acquireSocket(target)
+	foreignLease, foreignOK := handler.bootstrap.acquireSocket(foreign)
+	if !targetOK || !foreignOK {
+		t.Fatal("failed to prepare compatibility socket revocation fixtures")
+	}
+	handler.playSessions.entries["target-play"] = &playSessionEntry{
+		compatSessionID: target.ID, playSessionID: "target-play", expiresAt: target.ExpiresAt, sources: map[string]*playSessionSource{},
+	}
+	handler.playSessions.entries["foreign-play"] = &playSessionEntry{
+		compatSessionID: foreign.ID, playSessionID: "foreign-play", expiresAt: foreign.ExpiresAt, sources: map[string]*playSessionSource{},
+	}
+
+	handler.ForgetCompatibilitySessions([]string{target.ID})
+
+	select {
+	case <-targetLease.closed:
+	default:
+		t.Fatal("revoked compatibility socket remained open")
+	}
+	select {
+	case <-foreignLease.closed:
+		t.Fatal("unrelated compatibility socket was closed")
+	default:
+	}
+	if handler.bootstrap.sessions[target.ID] != nil || handler.bootstrap.sockets[targetLease.id] != nil {
+		t.Fatal("revoked compatibility session remained in bootstrap registry")
+	}
+	if handler.bootstrap.sessions[foreign.ID] == nil || handler.bootstrap.sockets[foreignLease.id] != foreignLease {
+		t.Fatal("unrelated compatibility session was removed from bootstrap registry")
+	}
+	if handler.playSessions.entries["target-play"] != nil || handler.playSessions.entries["foreign-play"] == nil {
+		t.Fatalf("play-session retirement target=%t foreign=%t", handler.playSessions.entries["target-play"] != nil, handler.playSessions.entries["foreign-play"] != nil)
+	}
+	if _, revoked := handler.playSessions.revokedSessions[target.ID]; !revoked {
+		t.Fatal("revoked compatibility session can race a new play-session registration")
+	}
+	handler.bootstrap.releaseSocket(foreignLease)
 }
 
 func TestSocketBrokerIsProfileScopedAndDisconnectsBackpressuredConsumer(t *testing.T) {

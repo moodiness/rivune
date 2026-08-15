@@ -4,6 +4,9 @@ import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
@@ -13,6 +16,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performImeAction
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.test.platform.app.InstrumentationRegistry
@@ -45,7 +49,7 @@ class OnboardingUiTest {
             .performTextInput("media.example.com")
         composeRule.onNodeWithTag(RivuneTestTags.ServerSubmit)
             .assertIsEnabled()
-            .performClick()
+        composeRule.onNodeWithTag(RivuneTestTags.ServerInput).performImeAction()
 
         composeRule.runOnIdle { assertEquals("media.example.com", submitted) }
     }
@@ -157,6 +161,31 @@ class OnboardingUiTest {
 
         composeRule.onNodeWithTag(RivuneTestTags.PairingSuccess).assertIsDisplayed()
         composeRule.onNodeWithText(string(R.string.pairing_success_title)).assertIsDisplayed()
+    }
+
+    @Test
+    fun acceptedPairingTransitionKeepsItsOutgoingCode() {
+        var pairing by mutableStateOf<PairingInfo?>(PairingInfo("ABCD-EFGH"))
+        var accepted by mutableStateOf(false)
+        setRivuneContent {
+            PairingScreen(
+                pairing = pairing,
+                pairingAccepted = accepted,
+                isBusy = false,
+                failure = null,
+                isTv = true,
+                onRestart = {},
+                onDisconnect = {},
+            )
+        }
+
+        composeRule.onNodeWithTag(RivuneTestTags.PairingCode).assertIsDisplayed()
+        composeRule.runOnIdle {
+            pairing = null
+            accepted = true
+        }
+
+        composeRule.onNodeWithTag(RivuneTestTags.PairingSuccess).assertIsDisplayed()
     }
 
     private fun setRivuneContent(content: @androidx.compose.runtime.Composable () -> Unit) {

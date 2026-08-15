@@ -55,9 +55,39 @@ type MetadataCacheStatus struct {
 	ArtworkSnapshots int `json:"artworkSnapshots"`
 }
 
+type PostgreSQLPoolStatus struct {
+	Acquired                 int32 `json:"acquired"`
+	Idle                     int32 `json:"idle"`
+	Total                    int32 `json:"total"`
+	Max                      int32 `json:"max"`
+	WaitCount                int64 `json:"waitCount"`
+	WaitDurationMilliseconds int64 `json:"waitDurationMilliseconds"`
+}
+
+type TrackingOutboxStatus struct {
+	Pending          int64 `json:"pending"`
+	Due              int64 `json:"due"`
+	OldestAgeSeconds int64 `json:"oldestAgeSeconds"`
+}
+
+type AddonStatus struct {
+	Total           int64      `json:"total"`
+	Enabled         int64      `json:"enabled"`
+	LatestUpdatedAt *time.Time `json:"latestUpdatedAt"`
+}
+
+type PlaybackStatus struct {
+	Active      int64 `json:"active"`
+	Transcoding int64 `json:"transcoding"`
+}
+
 type OperationsOverview struct {
 	MetadataCache               MetadataCacheStatus     `json:"metadataCache"`
 	MetadataRefresh             MetadataRefreshSchedule `json:"metadataRefresh"`
+	PostgreSQLPool              PostgreSQLPoolStatus    `json:"postgresqlPool"`
+	TrackingOutbox              TrackingOutboxStatus    `json:"trackingOutbox"`
+	Addons                      AddonStatus             `json:"addons"`
+	Playback                    PlaybackStatus          `json:"playback"`
 	HousekeepingIntervalMinutes int                     `json:"housekeepingIntervalMinutes"`
 }
 

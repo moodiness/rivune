@@ -145,6 +145,9 @@ func profileContextExemptRequest(r *http.Request) bool {
 	if path == "/api/v1/profiles/selection" {
 		return r.Method == http.MethodPost || r.Method == http.MethodDelete
 	}
+	if profileArchiveRequest(path) {
+		return true
+	}
 	if r.Method == http.MethodGet && (path == "/api/v1/profiles" ||
 		strings.HasSuffix(path, "/avatar") && strings.HasPrefix(path, "/api/v1/profiles/")) {
 		return true
@@ -162,10 +165,17 @@ func maintenanceExemptRequest(r *http.Request) bool {
 	if path == "/api/v1/operations" || strings.HasPrefix(path, "/api/v1/operations/") {
 		return true
 	}
+	if profileArchiveRequest(path) {
+		return true
+	}
 	if r.Method == http.MethodGet && (path == "/api/v1/profiles" || strings.HasSuffix(path, "/avatar") && strings.HasPrefix(path, "/api/v1/profiles/")) {
 		return true
 	}
 	return r.Method == http.MethodPost && strings.HasPrefix(path, "/api/v1/profiles/") && strings.HasSuffix(path, "/select")
+}
+func profileArchiveRequest(path string) bool {
+	return strings.HasPrefix(path, "/api/v1/profiles/") &&
+		(strings.HasSuffix(path, "/archive") || strings.HasSuffix(path, "/archive/import"))
 }
 
 func (a *API) maintenanceStatus(w http.ResponseWriter, r *http.Request) (bool, *string, bool) {

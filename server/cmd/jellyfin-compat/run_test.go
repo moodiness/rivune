@@ -143,6 +143,32 @@ func TestRunIsolatesCapturesCanonicalizesAndScrubs(t *testing.T) {
 	}
 }
 
+func TestRunCapturesAuthenticationChallenge(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("WWW-Authenticate", "MediaBrowser")
+		writer.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	manifest := testManifest(t, 1000, 4096, `{"statuses":[401],"maxBytes":0}`)
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := t.TempDir()
+	targets := []targetSpec{{Name: "left", URL: parsed}, {Name: "right", URL: parsed}}
+	if err := runManifest(context.Background(), manifest, targets, output, os.LookupEnv); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range targets {
+		snapshot := readTestFile(t, filepath.Join(output, target.Name, "request.http"))
+		if !strings.Contains(snapshot, "Www-Authenticate: MediaBrowser\n") {
+			t.Fatalf("%s snapshot omitted authentication challenge:\n%s", target.Name, snapshot)
+		}
+	}
+}
+
 func TestScrubberHandlesMixedCasePercentEscapes(t *testing.T) {
 	t.Parallel()
 	scrub := &scrubber{}

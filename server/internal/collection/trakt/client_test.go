@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/collection"
+	"github.com/moodiness/rivune/server/internal/requestwork"
 )
 
 func TestResolveCollectionSourceSendsTraktContractAndNormalizesItems(t *testing.T) {
@@ -64,5 +66,27 @@ func TestResolveCollectionSourceConsumesSharedItemBudgetBeforeNormalization(t *t
 	}, 1)
 	if err == nil || !budget.Exceeded() {
 		t.Fatalf("Trakt item budget error = %v, exceeded=%t", err, budget.Exceeded())
+	}
+}
+
+func TestResolveCollectionSourceEndsObservationWhenResponseIsClosedEarly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(time.Millisecond)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"private":"unread-provider-payload"}`))
+	}))
+	defer server.Close()
+	ctx, counters := requestwork.WithCounters(context.Background())
+
+	client := newWithBaseURL("client-id", server.URL, server.Client())
+	_, err := client.ResolveCollectionSource(ctx, collection.TraktSource{
+		ListID: 123, MediaType: collection.MediaTypeMovie, SortBy: "rank", SortHow: "asc",
+	}, 1)
+	if err == nil {
+		t.Fatal("Trakt unauthorized response unexpectedly succeeded")
+	}
+	snapshot := counters.Snapshot()
+	if snapshot.OutboundCalls != 1 || snapshot.UpstreamBytes != 0 || snapshot.OutboundDuration <= 0 {
+		t.Fatalf("early-close snapshot = %+v, want one completed call and zero consumed bytes", snapshot)
 	}
 }

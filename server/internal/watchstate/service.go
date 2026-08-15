@@ -2900,7 +2900,7 @@ func authorizeTitleSnapshotProfiles(ctx context.Context, tx pgx.Tx, principal au
 }
 
 func authorizedActiveManagerProfileID(ctx context.Context, tx pgx.Tx, principal auth.Principal) (string, error) {
-	profileID, err := activeProfileID(principal)
+	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
 	if err != nil {
 		return "", err
 	}
@@ -2924,6 +2924,13 @@ func authorizedActiveProfileID(ctx context.Context, tx pgx.Tx, principal auth.Pr
 		return "", fmt.Errorf("authorize active watchstate profile: %w", err)
 	}
 	if !authorized {
+		return "", ErrProfileRequired
+	}
+	valid, err := auth.LockActiveProfileSelection(ctx, tx, principal)
+	if err != nil {
+		return "", fmt.Errorf("lock active watchstate selection: %w", err)
+	}
+	if !valid {
 		return "", ErrProfileRequired
 	}
 	return profileID, nil

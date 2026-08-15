@@ -440,6 +440,87 @@ func TestAtomicLinkedLogoutHonorsCancellationWithoutPartialRevocation(t *testing
 	assertAtomicLogoutState(t, pool, fixture, false, time.Time{}, time.Time{})
 }
 
+type quickConnectInitiatingIdentityNative struct {
+	*auth.Service
+	result            auth.JellyfinQuickConnectResult
+	exchangedDeviceID string
+}
+
+func (*quickConnectInitiatingIdentityNative) BeginJellyfinQuickConnect(context.Context, auth.JellyfinQuickConnectInput) (auth.DeviceAuthorization, error) {
+	return auth.DeviceAuthorization{}, errors.New("unexpected Quick Connect initiation")
+}
+
+func (*quickConnectInitiatingIdentityNative) PollJellyfinQuickConnect(context.Context, string, string) (auth.JellyfinQuickConnectStatus, error) {
+	return auth.JellyfinQuickConnectStatus{}, errors.New("unexpected Quick Connect poll")
+}
+
+func (native *quickConnectInitiatingIdentityNative) ExchangeJellyfinQuickConnect(_ context.Context, _ string, deviceID string) (auth.JellyfinQuickConnectResult, error) {
+	native.exchangedDeviceID = deviceID
+	return native.result, nil
+}
+
+func TestQuickConnectExchangeBindsPersistedInitiatingIdentity(t *testing.T) {
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL to run Quick Connect identity binding test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool, err := database.Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	fixture := seedAtomicLogoutFixture(t, pool)
+	nativeService, err := auth.NewService(pool, time.Hour, 24*time.Hour, "UTC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := &quickConnectInitiatingIdentityNative{
+		Service: nativeService,
+		result: auth.JellyfinQuickConnectResult{
+			Tokens:    auth.TokenPair{SessionID: fixture.authSessionID, RefreshExpiresAt: time.Now().UTC().Add(time.Hour)},
+			ProfileID: fixture.profileID, ProfileName: "Initiating profile",
+			DeviceID: "initiating-device", DeviceName: "Initiating Android",
+			AppName: "ARVIO", AppVersion: "2.4.0",
+		},
+	}
+	store, err := NewSessionStore(pool, native)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewAuthenticationService(
+		func(context.Context, auth.JellyfinProfileLoginInput) (auth.JellyfinProfileLoginResult, error) {
+			return auth.JellyfinProfileLoginResult{}, errors.New("unexpected profile login")
+		},
+		native,
+		store,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := service.LoginQuickConnect(ctx, "rivune_dc_identity", ClientIdentity{
+		Client: strings.Repeat("substitute", 200), Device: "Substitute device",
+		DeviceID: "initiating-device", Version: "99.0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var clientName, deviceName, deviceID, version string
+	if err := pool.QueryRow(ctx, `
+		SELECT client_name, device_name, client_device_id, client_version
+		FROM jellyfin_compat_sessions WHERE id = $1::uuid
+	`, result.Credential.SessionID).Scan(&clientName, &deviceName, &deviceID, &version); err != nil {
+		t.Fatal(err)
+	}
+	if native.exchangedDeviceID != "initiating-device" || clientName != "ARVIO" ||
+		deviceName != "Initiating Android" || deviceID != "initiating-device" || version != "2.4.0" ||
+		result.Client != (ClientIdentity{Client: "ARVIO", Device: "Initiating Android", DeviceID: "initiating-device", Version: "2.4.0"}) {
+		t.Fatalf("exchange device=%q stored=%q/%q/%q/%q result=%+v", native.exchangedDeviceID, clientName, deviceName, deviceID, version, result.Client)
+	}
+}
+
 func newAuthLifecycleService(t *testing.T, native *authLifecycleNativeFake) *AuthenticationService {
 	t.Helper()
 	service, err := NewAuthenticationService(

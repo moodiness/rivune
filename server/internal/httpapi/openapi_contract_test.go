@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -54,13 +55,15 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		request := httptest.NewRequest(http.MethodGet, "/.well-known/rivune", nil)
 		response := serveContractRequest(t, api, request, http.StatusOK)
 		var state struct {
-			SetupRequired  bool  `json:"setupRequired"`
-			SetupCompleted *bool `json:"setupCompleted"`
-			DemoAvailable  *bool `json:"demoAvailable"`
+			SetupRequired  bool     `json:"setupRequired"`
+			SetupCompleted *bool    `json:"setupCompleted"`
+			DemoAvailable  *bool    `json:"demoAvailable"`
+			Capabilities   []string `json:"capabilities"`
 		}
 		decodeResponse(t, response, &state)
-		if state.SetupRequired || state.SetupCompleted == nil || !*state.SetupCompleted || state.DemoAvailable == nil || *state.DemoAvailable {
-			t.Fatalf("unexpected configured discovery lifecycle state: %+v", state)
+		if state.SetupRequired || state.SetupCompleted == nil || !*state.SetupCompleted || state.DemoAvailable == nil || *state.DemoAvailable ||
+			!slices.Equal(state.Capabilities, nativeCapabilities[:]) {
+			t.Fatalf("unexpected configured discovery state: %+v", state)
 		}
 		validateContractResponse(t, document, "/.well-known/rivune", nil, request, response)
 	})
@@ -865,6 +868,12 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 					NextRunAt: &nextRun, LastStartedAt: &lastStarted, LastCompletedAt: &lastCompleted,
 					LastStatus: &lastStatus, LastResult: &operations.MetadataRefreshResult{Candidates: 50, Refreshed: 48, Failed: 2},
 				},
+				PostgreSQLPool: operations.PostgreSQLPoolStatus{
+					Acquired: 2, Idle: 3, Total: 5, Max: 10, WaitCount: 7, WaitDurationMilliseconds: 145,
+				},
+				TrackingOutbox:              operations.TrackingOutboxStatus{Pending: 12, Due: 3, OldestAgeSeconds: 420},
+				Addons:                      operations.AddonStatus{Total: 8, Enabled: 7, LatestUpdatedAt: &lastCompleted},
+				Playback:                    operations.PlaybackStatus{Active: 4, Transcoding: 2},
 				HousekeepingIntervalMinutes: 5,
 			},
 			schedule: operations.MetadataRefreshSchedule{

@@ -554,6 +554,205 @@ func TestLatestItemsReturnsJellyfinArrayForVirtualView(t *testing.T) {
 	}
 }
 
+func TestCatalogItemsAggregatesRequestedLimitInBoundedPages(t *testing.T) {
+	for _, userRoute := range []bool{false, true} {
+		name := "items"
+		if userRoute {
+			name = "user_items"
+		}
+		t.Run(name, func(t *testing.T) {
+			handler, reader, token := newCatalogHTTPHandler(t)
+			const start = 17
+			const requested = MaximumLatestQueryLimit
+			const total = start + requested
+			reader.pageFunc = func(query watchstate.CatalogQuery) (watchstate.CatalogPage, error) {
+				count := min(query.Limit, total-query.Offset)
+				items := make([]watchstate.CatalogTitle, count)
+				for index := range items {
+					items[index] = watchstate.CatalogTitle{
+						ID: strconv.Itoa(query.Offset + index), MediaType: "movie", Title: strconv.Itoa(query.Offset + index),
+						Genres: []string{}, ProviderIDs: map[string]string{},
+					}
+				}
+				return watchstate.CatalogPage{Items: items, Offset: query.Offset, Limit: query.Limit, Total: total}, nil
+			}
+			target := "/Items?IncludeItemTypes=Movie&StartIndex=17&Limit=" + strconv.Itoa(requested)
+			request := authenticatedCatalogRequest(t, token, target)
+			if userRoute {
+				request = authenticatedCatalogRequest(t, token, "/Users/"+catalogTestProfileID+target)
+				request.SetPathValue("id", catalogTestProfileID)
+			}
+			response := httptest.NewRecorder()
+			if userRoute {
+				handler.handleUserItems(response, request)
+			} else {
+				handler.handleItems(response, request)
+			}
+			var result QueryResult[BaseItemDto]
+			decodeCatalogResponse(t, response, &result)
+			if response.Code != http.StatusOK || len(result.Items) != requested || result.StartIndex != start || result.TotalRecordCount != total {
+				t.Fatalf("status=%d items=%d start=%d total=%d body=%s", response.Code, len(result.Items), result.StartIndex, result.TotalRecordCount, response.Body.String())
+			}
+			for index, item := range result.Items {
+				want := strconv.Itoa(start + index)
+				if item.Id != want || item.Name != want {
+					t.Fatalf("item[%d]=%+v, want id/name %q", index, item, want)
+				}
+			}
+			if len(reader.queries) != 6 {
+				t.Fatalf("catalog calls=%d, want 6: %+v", len(reader.queries), reader.queries)
+			}
+			for index, query := range reader.queries {
+				wantOffset := start + index*MaximumQueryLimit
+				wantLimit := min(MaximumQueryLimit, requested-index*MaximumQueryLimit)
+				if query.Offset != wantOffset || query.Limit != wantLimit || query.Limit > MaximumQueryLimit {
+					t.Fatalf("query[%d]=%+v, want offset=%d limit=%d", index, query, wantOffset, wantLimit)
+				}
+			}
+		})
+	}
+}
+
+func TestListCatalogItemsStopsSafelyOnShortAndChangingPages(t *testing.T) {
+	tests := []struct {
+		name      string
+		page      func(watchstate.CatalogQuery) watchstate.CatalogPage
+		wantItems int
+		wantTotal int
+		wantCalls int
+	}{
+		{
+			name: "short page",
+			page: func(query watchstate.CatalogQuery) watchstate.CatalogPage {
+				count := query.Limit
+				if query.Offset == 200 {
+					count = 37
+				}
+				return catalogPaginationPage(query, count, 1000)
+			},
+			wantItems: 237, wantTotal: 1000, wantCalls: 2,
+		},
+		{
+			name: "oversized page",
+			page: func(query watchstate.CatalogQuery) watchstate.CatalogPage {
+				return catalogPaginationPage(query, query.Limit+50, 300)
+			},
+			wantItems: 300, wantTotal: 300, wantCalls: 2,
+		},
+		{
+			name: "total below returned pages",
+			page: func(query watchstate.CatalogQuery) watchstate.CatalogPage {
+				return catalogPaginationPage(query, query.Limit, 250)
+			},
+			wantItems: 250, wantTotal: 250, wantCalls: 2,
+		},
+		{
+			name: "changing total remains stable",
+			page: func(query watchstate.CatalogQuery) watchstate.CatalogPage {
+				total := 450
+				if query.Offset == 200 {
+					total = 100
+				} else if query.Offset > 200 {
+					total = 900
+				}
+				page := catalogPaginationPage(query, query.Limit, total)
+				page.Offset = -1
+				return page
+			},
+			wantItems: 450, wantTotal: 450, wantCalls: 3,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler, reader, _ := newCatalogHTTPHandler(t)
+			reader.pageFunc = func(query watchstate.CatalogQuery) (watchstate.CatalogPage, error) {
+				return test.page(query), nil
+			}
+			page, err := handler.listCatalogItems(context.Background(), auth.Principal{}, watchstate.CatalogQuery{Limit: MaximumQueryLimit}, MaximumLatestQueryLimit)
+			if err != nil {
+				t.Fatalf("listCatalogItems: %v", err)
+			}
+			if len(page.Items) != test.wantItems || page.Offset != 0 || page.Limit != MaximumLatestQueryLimit || page.Total != test.wantTotal || len(reader.queries) != test.wantCalls {
+				t.Fatalf("page items=%d offset=%d limit=%d total=%d calls=%d", len(page.Items), page.Offset, page.Limit, page.Total, len(reader.queries))
+			}
+		})
+	}
+}
+
+func TestListCatalogItemsReturnsLateErrorsAndCancellationWithoutPartialPage(t *testing.T) {
+	lateErr := errors.New("late catalog failure")
+	t.Run("late error", func(t *testing.T) {
+		handler, reader, _ := newCatalogHTTPHandler(t)
+		reader.pageFunc = func(query watchstate.CatalogQuery) (watchstate.CatalogPage, error) {
+			if query.Offset != 0 {
+				return watchstate.CatalogPage{}, lateErr
+			}
+			return catalogPaginationPage(query, query.Limit, 1000), nil
+		}
+		page, err := handler.listCatalogItems(context.Background(), auth.Principal{}, watchstate.CatalogQuery{Limit: MaximumQueryLimit}, MaximumLatestQueryLimit)
+		if !errors.Is(err, lateErr) || len(page.Items) != 0 || len(reader.queries) != 2 {
+			t.Fatalf("page=%+v err=%v calls=%d", page, err, len(reader.queries))
+		}
+	})
+	t.Run("handler does not emit partial success", func(t *testing.T) {
+		handler, reader, token := newCatalogHTTPHandler(t)
+		reader.pageFunc = func(query watchstate.CatalogQuery) (watchstate.CatalogPage, error) {
+			if query.Offset != 0 {
+				return watchstate.CatalogPage{}, lateErr
+			}
+			return catalogPaginationPage(query, query.Limit, 1000), nil
+		}
+		response := httptest.NewRecorder()
+		handler.handleItems(response, authenticatedCatalogRequest(t, token, "/Items?IncludeItemTypes=Movie&Limit="+strconv.Itoa(MaximumLatestQueryLimit)))
+		if response.Code != http.StatusInternalServerError || strings.Contains(response.Body.String(), `"Items"`) || len(reader.queries) != 2 {
+			t.Fatalf("status=%d calls=%d body=%s", response.Code, len(reader.queries), response.Body.String())
+		}
+	})
+	t.Run("cancellation", func(t *testing.T) {
+		handler, reader, _ := newCatalogHTTPHandler(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		reader.pageFunc = func(query watchstate.CatalogQuery) (watchstate.CatalogPage, error) {
+			cancel()
+			return catalogPaginationPage(query, query.Limit, 1000), nil
+		}
+		page, err := handler.listCatalogItems(ctx, auth.Principal{}, watchstate.CatalogQuery{Limit: MaximumQueryLimit}, MaximumLatestQueryLimit)
+		if !errors.Is(err, context.Canceled) || len(page.Items) != 0 || len(reader.queries) != 1 {
+			t.Fatalf("page=%+v err=%v calls=%d", page, err, len(reader.queries))
+		}
+	})
+}
+
+func TestCatalogItemsCountOnlyAndSmallLimitsKeepSingleRead(t *testing.T) {
+	for _, limit := range []int{0, 200} {
+		t.Run(strconv.Itoa(limit), func(t *testing.T) {
+			handler, reader, token := newCatalogHTTPHandler(t)
+			reader.page = catalogPaginationPage(watchstate.CatalogQuery{Limit: max(limit, 1)}, max(limit, 1), 750)
+			response := httptest.NewRecorder()
+			handler.handleItems(response, authenticatedCatalogRequest(t, token, "/Items?IncludeItemTypes=Movie&Limit="+strconv.Itoa(limit)))
+			var result QueryResult[BaseItemDto]
+			decodeCatalogResponse(t, response, &result)
+			wantItems := limit
+			if limit == 0 {
+				wantItems = 0
+			}
+			if response.Code != http.StatusOK || len(reader.queries) != 1 || len(result.Items) != wantItems || result.TotalRecordCount != 750 || reader.queries[0].Limit != max(limit, 1) {
+				t.Fatalf("status=%d result items=%d total=%d queries=%+v", response.Code, len(result.Items), result.TotalRecordCount, reader.queries)
+			}
+		})
+	}
+}
+
+func catalogPaginationPage(query watchstate.CatalogQuery, count, total int) watchstate.CatalogPage {
+	items := make([]watchstate.CatalogTitle, count)
+	for index := range items {
+		items[index] = watchstate.CatalogTitle{
+			ID: strconv.Itoa(query.Offset + index), MediaType: "movie", Title: strconv.Itoa(query.Offset + index),
+			Genres: []string{}, ProviderIDs: map[string]string{},
+		}
+	}
+	return watchstate.CatalogPage{Items: items, Offset: query.Offset, Limit: query.Limit, Total: total}
+}
+
 func TestLatestItemsStreamsPinnedClientLimitsInBoundedCatalogChunks(t *testing.T) {
 	for _, requested := range []int{1000, MaximumLatestQueryLimit} {
 		t.Run(strconv.Itoa(requested), func(t *testing.T) {
@@ -684,6 +883,7 @@ func TestCatalogSortForwardsSupportedKeysAndIgnoresUnknownHints(t *testing.T) {
 		{key: "SortName,SortName,ProductionYear", order: "Ascending", want: "sortname,sortname,productionyear"},
 		{key: "DateCreated,SortName,ProductionYear", order: "Descending", want: "datecreated,sortname,productionyear"},
 		{key: "DateLastContentAdded,DateCreated,SortName", order: "Descending", want: "datelastcontentadded,datecreated,sortname"},
+		{key: "CommunityRating", order: "Descending", want: "communityrating"},
 	}
 	for index, test := range tests {
 		request := authenticatedCatalogRequest(t, token, "/Items?ParentId=22222222-2222-4222-8222-222222222222&Limit=10&SortBy="+test.key+"&SortOrder="+test.order)
@@ -723,7 +923,6 @@ func TestCatalogSortForwardsSupportedKeysAndIgnoresUnknownHints(t *testing.T) {
 		query string
 		want  string
 	}{
-		{query: "&SortBy=CommunityRating&SortOrder=Ascending"},
 		{query: "&SortOrder=Descending"},
 		{query: "&SortBy=Default,AiredEpisodeOrder,DigitalReleaseDate"},
 		{query: "&SortBy=PrivateProviderURL"},
@@ -760,6 +959,50 @@ func TestCatalogProjectsCanonicalGenericVideoRows(t *testing.T) {
 		t.Fatalf("generic Video projection status=%d queries=%+v result=%+v body=%s", response.Code, reader.queries, result, response.Body.String())
 	}
 	requireDeferredMediaSource(t, result.Items[0])
+}
+
+func TestCatalogCommunityRatingSortMatchesARVIOOrdering(t *testing.T) {
+	handler, reader, token := newCatalogHTTPHandler(t)
+	ratingNine, ratingFive := float32(9), float32(5)
+	firstNine := "00000000-0000-4000-8000-000000000001"
+	secondNine := "00000000-0000-4000-8000-000000000002"
+	five := "00000000-0000-4000-8000-000000000003"
+	missing := "00000000-0000-4000-8000-000000000004"
+	reader.titles = map[string]watchstate.CatalogTitle{
+		firstNine:  {ID: firstNine, MediaType: "movie", Title: "First Nine", CommunityRating: &ratingNine},
+		secondNine: {ID: secondNine, MediaType: "movie", Title: "Second Nine", CommunityRating: &ratingNine},
+		five:       {ID: five, MediaType: "movie", Title: "Five", CommunityRating: &ratingFive},
+		missing:    {ID: missing, MediaType: "movie", Title: "Missing"},
+	}
+	ids := strings.Join([]string{secondNine, missing, five, firstNine}, ",")
+	for _, test := range []struct {
+		query       string
+		want        []string
+		wantRatings []float32
+	}{
+		{query: "SortBy=CommunityRating&SortOrder=Descending", want: []string{firstNine, secondNine, five, missing}, wantRatings: []float32{9, 9, 5}},
+		{query: "SortBy=CommunityRating&SortOrder=Ascending", want: []string{five, firstNine, secondNine, missing}, wantRatings: []float32{5, 9, 9}},
+	} {
+		request := authenticatedCatalogRequest(t, token, "/Items?Ids="+ids+"&"+test.query)
+		response := httptest.NewRecorder()
+		handler.handleItems(response, request)
+		var result QueryResult[BaseItemDto]
+		decodeCatalogResponse(t, response, &result)
+		got := make([]string, len(result.Items))
+		for index := range result.Items {
+			got[index] = result.Items[index].Id
+		}
+		gotRatings := make([]float32, 0, len(result.Items))
+		for index := range result.Items {
+			if result.Items[index].CommunityRating != nil {
+				gotRatings = append(gotRatings, *result.Items[index].CommunityRating)
+			}
+		}
+		if response.Code != http.StatusOK || !reflect.DeepEqual(got, test.want) ||
+			!reflect.DeepEqual(gotRatings, test.wantRatings) || result.Items[len(result.Items)-1].CommunityRating != nil {
+			t.Fatalf("%s status=%d ids=%v ratings=%v items=%+v body=%s", test.query, response.Code, got, gotRatings, result.Items, response.Body.String())
+		}
+	}
 }
 
 func TestCatalogSortUsesStableIDTieBreaker(t *testing.T) {

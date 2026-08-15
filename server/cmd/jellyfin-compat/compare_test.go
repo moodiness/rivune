@@ -109,6 +109,27 @@ func TestCompareAcceptsMatchingSnapshots(t *testing.T) {
 	}
 }
 
+func TestArchivedOracleSmokeSummaryMatchesCurrentComparator(t *testing.T) {
+	t.Parallel()
+	archive := filepath.Join("..", "..", "..", "scripts", "jellyfin-compat", "artifacts", "oracle-smoke")
+	summary, err := compareSnapshots(
+		filepath.Join(archive, "upstream"),
+		filepath.Join(archive, "rivune"),
+		t.TempDir(),
+	)
+	if err == nil || !strings.Contains(err.Error(), "2 compared step(s) differ") {
+		t.Fatalf("archived comparison error = %v, want two documented differences", err)
+	}
+	encoded, err := marshalCanonical(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := readTestFile(t, filepath.Join(archive, "recompare", "summary.json"))
+	if string(encoded) != stored {
+		t.Fatalf("archived summary is not reproducible with the current comparator:\n got %s\nwant %s", stored, encoded)
+	}
+}
+
 func TestSemanticComparisonPreservesDTOOrderingPaginationAndHTTPContract(t *testing.T) {
 	t.Parallel()
 	equivalentJSON, err := compareSemanticSnapshots(
@@ -172,6 +193,45 @@ func TestSemanticComparisonPreservesDTOOrderingPaginationAndHTTPContract(t *test
 		if httpMismatches[index].Path != want {
 			t.Fatalf("HTTP mismatch %d path = %q, want %q; all = %+v", index, httpMismatches[index].Path, want, httpMismatches)
 		}
+	}
+}
+
+func TestSemanticComparisonDetectsAuthenticationChallengeChanges(t *testing.T) {
+	t.Parallel()
+	const captured = "HTTP/1.1 401 Unauthorized\nWWW-Authenticate: MediaBrowser\nX-Jellyfin-Compat-Body: sha256\n\n"
+	tests := []struct {
+		name      string
+		right     string
+		wantPath  string
+		wantLeft  string
+		wantRight string
+	}{
+		{
+			name:      "missing",
+			right:     "HTTP/1.1 401 Unauthorized\nX-Jellyfin-Compat-Body: sha256\n\n",
+			wantPath:  "/headers/Www-Authenticate",
+			wantLeft:  `["MediaBrowser"]`,
+			wantRight: "<missing>",
+		},
+		{
+			name:      "different",
+			right:     "HTTP/1.1 401 Unauthorized\nWWW-Authenticate: Bearer\nX-Jellyfin-Compat-Body: sha256\n\n",
+			wantPath:  "/headers/Www-Authenticate/0",
+			wantLeft:  `"MediaBrowser"`,
+			wantRight: `"Bearer"`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			mismatches, err := compareSemanticSnapshots("system-endpoint", ".http", []byte(captured), []byte(test.right))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(mismatches) != 1 || mismatches[0].Path != test.wantPath || mismatches[0].Left != test.wantLeft || mismatches[0].Right != test.wantRight {
+				t.Fatalf("challenge mismatches = %+v", mismatches)
+			}
+		})
 	}
 }
 

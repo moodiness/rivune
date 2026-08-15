@@ -1,0 +1,399 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+case "${SCRIPT_PATH}" in
+  */*) SCRIPT_DIRECTORY="${SCRIPT_PATH%/*}" ;;
+  *) SCRIPT_DIRECTORY="." ;;
+esac
+ROOT_DIR="$(cd -P -- "${SCRIPT_DIRECTORY}" && pwd)"
+cd -- "${ROOT_DIR}"
+
+usage() {
+  cat <<'USAGE'
+Usage: ./rivune COMMAND [ARGUMENTS]
+
+Commands:
+  setup --version X.Y.Z [--public-url HTTPS_ORIGIN]
+  up
+  down
+  restart
+  pull
+  status
+  logs [service]
+  doctor
+  backup BACKUP_FILE
+  verify-backup --expect-backup-id ID BACKUP_FILE
+  verify-backup --allow-legacy SHA256 BACKUP_FILE
+  restore --expect-backup-id ID BACKUP_FILE
+  restore --allow-rollback ID BACKUP_FILE
+  restore --initialize-state ID BACKUP_FILE
+  restore --allow-legacy SHA256 BACKUP_FILE
+  help
+USAGE
+}
+
+fail_usage() {
+  printf '%s\n' "$1" >&2
+  printf 'Run ./rivune help for usage.\n' >&2
+  exit 64
+}
+
+require_no_arguments() {
+  local command_name="$1"
+  shift
+  (( $# == 0 )) || fail_usage "${command_name} does not accept arguments"
+}
+
+require_environment_file() {
+  if [[ -L .env || ! -f .env ]]; then
+    printf 'A regular .env file is required; run ./rivune setup first.\n' >&2
+    exit 1
+  fi
+}
+
+pin_compose_environment() {
+  export COMPOSE_FILE="${ROOT_DIR}/compose.yaml"
+  export COMPOSE_ENV_FILES="${ROOT_DIR}/.env"
+  unset COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_PATH_SEPARATOR
+}
+
+validate_public_url() {
+  local value="$1"
+  local authority port=""
+  [[ -n "${value}" && "${value}" == https://* ]] || return 1
+  [[ "${value}" != *$'\n'* && "${value}" != *$'\r'* && "${value}" != *[[:space:]]* ]] || return 1
+  authority="${value#https://}"
+  [[ -n "${authority}" && "${authority}" != *"/"* && "${authority}" != *"@"* &&
+     "${authority}" != *"?"* && "${authority}" != *"#"* && "${authority}" != *"\\"* ]] || return 1
+
+  if [[ "${authority}" == \[* ]]; then
+    if [[ ! "${authority}" =~ ^\[[0-9A-Fa-f:]+\](:([0-9]+))?$ ]]; then
+      return 1
+    fi
+    [[ "${authority}" == *:* ]] || return 1
+    port="${BASH_REMATCH[2]:-}"
+  else
+    if [[ ! "${authority}" =~ ^([A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?)(:([0-9]+))?$ ]]; then
+      return 1
+    fi
+    [[ "${BASH_REMATCH[1]}" != *..* ]] || return 1
+    port="${BASH_REMATCH[4]:-}"
+  fi
+
+  if [[ -n "${port}" ]] && (( 10#${port} < 1 || 10#${port} > 65535 )); then
+    return 1
+  fi
+}
+
+validate_version() {
+  local value="$1"
+  [[ "${value}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+}
+
+setup_environment() {
+  local public_url="" version=""
+  local public_url_set=false version_set=false
+  local option value line temporary_environment=""
+  local -a generated_secrets=()
+  local postgres_superuser_password database_password restore_password setup_token encryption_key
+
+  while (( $# > 0 )); do
+    option="$1"
+    case "${option}" in
+      --public-url|--version)
+        (( $# >= 2 )) || fail_usage "${option} requires a value"
+        value="$2"
+        shift 2
+        ;;
+      --public-url=*)
+        value="${option#*=}"
+        option=--public-url
+        shift
+        ;;
+      --version=*)
+        value="${option#*=}"
+        option=--version
+        shift
+        ;;
+      *) fail_usage "Unknown setup option: ${option}" ;;
+    esac
+    case "${option}" in
+      --public-url)
+        [[ "${public_url_set}" == false ]] || fail_usage '--public-url may be specified only once'
+        public_url_set=true
+        public_url="${value}"
+        ;;
+      --version)
+        [[ "${version_set}" == false ]] || fail_usage '--version may be specified only once'
+        version_set=true
+        version="${value}"
+        ;;
+    esac
+  done
+  [[ "${version_set}" == true ]] || fail_usage '--version is required and must be a stable numeric version such as 1.6.0'
+
+  if [[ "${public_url_set}" == true ]] && ! validate_public_url "${public_url}"; then
+    fail_usage '--public-url must be a complete HTTPS origin without credentials, path, query, or fragment'
+  fi
+  validate_version "${version}" || fail_usage '--version must be a stable numeric version such as 1.6.0; mutable tags such as latest are not supported'
+
+  if [[ -e .env || -L .env ]]; then
+    printf 'Refusing to overwrite existing .env path.\n' >&2
+    exit 1
+  fi
+  if [[ -L .env.example || ! -f .env.example || ! -r .env.example ]]; then
+    printf 'A readable, regular .env.example is required.\n' >&2
+    exit 1
+  fi
+  if ! command -v openssl >/dev/null 2>&1; then
+    printf 'OpenSSL is required to generate installation secrets.\n' >&2
+    exit 1
+  fi
+
+  generate_secret() {
+    local variable_name="$1" candidate existing duplicate attempts
+    for (( attempts = 0; attempts < 16; attempts++ )); do
+      candidate="$(openssl rand -hex 32 2>/dev/null)" || {
+        printf 'OpenSSL failed to generate installation secrets.\n' >&2
+        exit 1
+      }
+      if [[ ! "${candidate}" =~ ^[0-9a-f]{64}$ || "${candidate}" =~ ^0{64}$ ]]; then
+        continue
+      fi
+      duplicate=false
+      for existing in "${generated_secrets[@]}"; do
+        if [[ "${candidate}" == "${existing}" ]]; then
+          duplicate=true
+          break
+        fi
+      done
+      if [[ "${duplicate}" == false ]]; then
+        generated_secrets+=("${candidate}")
+        printf -v "${variable_name}" '%s' "${candidate}"
+        return
+      fi
+    done
+    printf 'OpenSSL did not produce independent valid installation secrets.\n' >&2
+    exit 1
+  }
+
+  generate_secret postgres_superuser_password
+  generate_secret database_password
+  generate_secret restore_password
+  generate_secret setup_token
+  generate_secret encryption_key
+
+  umask 077
+  cleanup_setup() {
+    if [[ -n "${temporary_environment}" ]]; then
+      rm -f -- "${temporary_environment}"
+    fi
+  }
+  handle_setup_signal() {
+    local status="$1"
+    trap - EXIT HUP INT QUIT TERM
+    cleanup_setup
+    exit "${status}"
+  }
+  trap cleanup_setup EXIT
+  trap 'handle_setup_signal 129' HUP
+  trap 'handle_setup_signal 130' INT
+  trap 'handle_setup_signal 131' QUIT
+  trap 'handle_setup_signal 143' TERM
+
+  if ! temporary_environment="$(mktemp -- "${ROOT_DIR}/.rivune-env.XXXXXXXXXX")"; then
+    printf 'Could not create a private temporary environment file.\n' >&2
+    exit 1
+  fi
+
+  exec 3> "${temporary_environment}"
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    case "${line}" in
+      RIVUNE_POSTGRES_SUPERUSER_PASSWORD=*) line="RIVUNE_POSTGRES_SUPERUSER_PASSWORD=${postgres_superuser_password}" ;;
+      RIVUNE_DATABASE_PASSWORD=*) line="RIVUNE_DATABASE_PASSWORD=${database_password}" ;;
+      RIVUNE_RESTORE_PASSWORD=*) line="RIVUNE_RESTORE_PASSWORD=${restore_password}" ;;
+      RIVUNE_SETUP_TOKEN=*) line="RIVUNE_SETUP_TOKEN=${setup_token}" ;;
+      RIVUNE_ENCRYPTION_KEYS=*) line="RIVUNE_ENCRYPTION_KEYS=1:${encryption_key}" ;;
+      RIVUNE_PUBLIC_URL=*) line="RIVUNE_PUBLIC_URL=${public_url}" ;;
+      RIVUNE_VERSION=*) line="RIVUNE_VERSION=${version}" ;;
+    esac
+    printf '%s\n' "${line}" >&3
+  done < .env.example
+  exec 3>&-
+  chmod 600 -- "${temporary_environment}"
+
+  if ! ln -T -- "${temporary_environment}" .env; then
+    printf 'Refusing to overwrite existing .env path.\n' >&2
+    exit 1
+  fi
+  rm -f -- "${temporary_environment}"
+  temporary_environment=""
+
+  trap - EXIT HUP INT QUIT TERM
+  unset postgres_superuser_password database_password restore_password setup_token encryption_key generated_secrets
+  printf 'Created private .env configuration.\n'
+}
+
+compose_exec() {
+  exec docker compose --env-file .env -f compose.yaml "$@"
+}
+
+doctor_ok() {
+  printf '[OK] %s\n' "$1"
+}
+
+doctor_fail() {
+  printf '[FAIL] %s\n' "$1" >&2
+  exit 1
+}
+
+run_doctor() {
+  local tool mode owner line key raw_value value
+  local service container_id state port public_url
+  local -A environment=()
+  local -a required_variables=(
+    RIVUNE_POSTGRES_SUPERUSER_PASSWORD
+    RIVUNE_DATABASE_PASSWORD
+    RIVUNE_RESTORE_PASSWORD
+    RIVUNE_SETUP_TOKEN
+    RIVUNE_ENCRYPTION_KEYS
+  )
+
+  for tool in docker curl openssl stat; do
+    command -v "${tool}" >/dev/null 2>&1 || doctor_fail "Required tool is unavailable: ${tool}"
+    doctor_ok "Required tool is available: ${tool}"
+  done
+  docker compose --env-file .env -f compose.yaml version >/dev/null 2>&1 || doctor_fail 'Docker Compose plugin is unavailable'
+  doctor_ok 'Docker Compose plugin is available'
+
+  [[ ! -L .env && -f .env && -r .env ]] || doctor_fail '.env is not a readable regular file'
+  mode="$(stat -c '%a' -- .env 2>/dev/null)" || doctor_fail 'Could not inspect .env permissions'
+  owner="$(stat -c '%u' -- .env 2>/dev/null)" || doctor_fail 'Could not inspect .env ownership'
+  [[ "${mode}" == 600 && "${owner}" == "${EUID}" ]] || doctor_fail '.env must be owned by the current user with mode 0600'
+  doctor_ok '.env ownership and permissions are private'
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line%$'\r'}"
+    [[ -n "${line}" && "${line}" != \#* && "${line}" == *=* ]] || continue
+    key="${line%%=*}"
+    [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    raw_value="${line#*=}"
+    value="${raw_value}"
+    if (( ${#value} >= 2 )) &&
+       { [[ "${value:0:1}" == \" && "${value: -1}" == \" ]] ||
+         [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; }; then
+      value="${value:1:${#value}-2}"
+    fi
+    environment["${key}"]="${value}"
+  done < .env
+
+  for key in "${required_variables[@]}"; do
+    [[ -n "${environment[${key}]:-}" ]] || doctor_fail "Required variable is missing: ${key}"
+  done
+  [[ "${environment[RIVUNE_POSTGRES_SUPERUSER_PASSWORD]}" != "${environment[RIVUNE_DATABASE_PASSWORD]}" &&
+     "${environment[RIVUNE_POSTGRES_SUPERUSER_PASSWORD]}" != "${environment[RIVUNE_RESTORE_PASSWORD]}" &&
+     "${environment[RIVUNE_DATABASE_PASSWORD]}" != "${environment[RIVUNE_RESTORE_PASSWORD]}" ]] ||
+    doctor_fail 'PostgreSQL passwords must be distinct'
+  doctor_ok 'Required variables are present and database passwords are distinct'
+
+  docker compose --env-file .env -f compose.yaml config --quiet >/dev/null 2>&1 || doctor_fail 'Compose configuration is invalid'
+  doctor_ok 'Compose configuration is valid'
+
+  for service in postgres rivune; do
+    container_id="$(docker compose --env-file .env -f compose.yaml ps -q "${service}" 2>/dev/null)" ||
+      doctor_fail "Could not inspect service: ${service}"
+    [[ -n "${container_id}" && "${container_id}" != *$'\n'* ]] || doctor_fail "Service is not running: ${service}"
+    state="$(docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' "${container_id}" 2>/dev/null)" ||
+      doctor_fail "Could not inspect service state: ${service}"
+    [[ "${state}" == 'running healthy' ]] || doctor_fail "Service is not running and healthy: ${service}"
+    doctor_ok "Service is running and healthy: ${service}"
+  done
+
+  docker compose --env-file .env -f compose.yaml exec -T postgres \
+    pg_isready --username rivune --dbname rivune >/dev/null 2>&1 || doctor_fail 'PostgreSQL is not ready'
+  doctor_ok 'PostgreSQL accepts connections'
+
+  port="${environment[RIVUNE_PORT]:-8080}"
+  if [[ ! "${port}" =~ ^[0-9]+$ ]] || (( 10#${port} < 1 || 10#${port} > 65535 )); then
+    doctor_fail 'RIVUNE_PORT is invalid'
+  fi
+  curl --fail --silent --show-error --max-time 10 --output /dev/null -- \
+    "http://127.0.0.1:${port}/ready" 2>/dev/null || doctor_fail 'Local readiness endpoint failed'
+  doctor_ok 'Local readiness endpoint is healthy'
+
+  public_url="${environment[RIVUNE_PUBLIC_URL]:-}"
+  if [[ -n "${public_url}" ]]; then
+    validate_public_url "${public_url}" || doctor_fail 'RIVUNE_PUBLIC_URL is not a safe HTTPS origin'
+    curl --fail --silent --show-error --max-time 10 --output /dev/null -- \
+      "${public_url}/ready" 2>/dev/null || doctor_fail 'Public readiness endpoint failed'
+    doctor_ok 'Public readiness endpoint is healthy'
+  else
+    doctor_ok 'Public readiness endpoint is not configured'
+  fi
+}
+
+command_name="${1:-help}"
+if (( $# > 0 )); then
+  shift
+fi
+case "${command_name}" in
+  setup) setup_environment "$@" ;;
+  up)
+    require_no_arguments up "$@"
+    require_environment_file
+    compose_exec up -d
+    ;;
+  down)
+    require_no_arguments down "$@"
+    require_environment_file
+    compose_exec down
+    ;;
+  restart)
+    require_no_arguments restart "$@"
+    require_environment_file
+    compose_exec restart
+    ;;
+  pull)
+    require_no_arguments pull "$@"
+    require_environment_file
+    compose_exec pull
+    ;;
+  status)
+    require_no_arguments status "$@"
+    require_environment_file
+    compose_exec ps
+    ;;
+  logs)
+    (( $# <= 1 )) || fail_usage 'logs accepts at most one service'
+    if (( $# == 1 )) && [[ "$1" != rivune && "$1" != postgres ]]; then
+      fail_usage 'logs service must be rivune or postgres'
+    fi
+    require_environment_file
+    compose_exec logs "$@"
+    ;;
+  doctor)
+    require_no_arguments doctor "$@"
+    run_doctor
+    ;;
+  backup)
+    (( $# == 1 )) || fail_usage 'backup requires exactly one BACKUP_FILE'
+    require_environment_file
+    pin_compose_environment
+    exec "${ROOT_DIR}/scripts/postgres-backup.sh" "$@"
+    ;;
+  verify-backup)
+    pin_compose_environment
+    exec "${ROOT_DIR}/scripts/postgres-verify-backup.sh" "$@"
+    ;;
+  restore)
+    require_environment_file
+    pin_compose_environment
+    exec "${ROOT_DIR}/scripts/postgres-restore.sh" "$@"
+    ;;
+  help|-h|--help)
+    require_no_arguments help "$@"
+    usage
+    ;;
+  *) fail_usage "Unknown command: ${command_name}" ;;
+esac

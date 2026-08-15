@@ -1,12 +1,15 @@
 package collection
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
@@ -33,19 +36,25 @@ func TestSharedCollectionManagementRequiresEveryAssignedProfile(t *testing.T) {
 
 	ctx := context.Background()
 	const (
-		categoryID     = "11111111-1111-4111-8111-111111111111"
-		userID         = "22222222-2222-4222-8222-222222222222"
-		profileAID     = "33333333-3333-4333-8333-333333333333"
-		profileBID     = "44444444-4444-4444-8444-444444444444"
-		collectionID   = "55555555-5555-4555-8555-555555555555"
-		memberUserID   = "66666666-6666-4666-8666-666666666666"
-		backdropSource = "https://art.example/private/collection/backdrop.jpg?token=collection-secret&size=original"
-		coverSource    = "https://art.example/private/folder/cover.jpg?token=cover-secret&size=original"
-		logoSource     = "https://art.example/private/folder/logo.png?token=logo-secret&size=original"
-		heroSource     = "https://art.example/private/folder/hero.jpg?token=hero-secret&size=original"
+		categoryID      = "11111111-1111-4111-8111-111111111111"
+		userID          = "22222222-2222-4222-8222-222222222222"
+		profileAID      = "33333333-3333-4333-8333-333333333333"
+		profileBID      = "44444444-4444-4444-8444-444444444444"
+		collectionID    = "55555555-5555-4555-8555-555555555555"
+		memberUserID    = "66666666-6666-4666-8666-666666666666"
+		deviceID        = "77777777-7777-4777-8777-777777777777"
+		memberDeviceID  = "88888888-8888-4888-8888-888888888888"
+		sessionID       = "99999999-9999-4999-8999-999999999999"
+		memberSessionID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		backdropSource  = "https://art.example/private/collection/backdrop.jpg?token=collection-secret&size=original"
+		coverSource     = "https://art.example/private/folder/cover.jpg?token=cover-secret&size=original"
+		logoSource      = "https://art.example/private/folder/logo.png?token=logo-secret&size=original"
+		heroSource      = "https://art.example/private/folder/hero.jpg?token=hero-secret&size=original"
 	)
 	foldersJSON := `[{"title":"Featured","tileShape":"poster","sourceView":"merged","coverImageUrl":"` + coverSource + `","titleLogoUrl":"` + logoSource + `","heroBackdropUrl":"` + heroSource + `","focusGifEnabled":false,"hideTitle":false,"sources":[]}]`
 	if _, err := pool.Exec(ctx, `
+		CREATE TEMPORARY TABLE users (id uuid PRIMARY KEY);
+		CREATE TEMPORARY TABLE devices (id uuid PRIMARY KEY, user_id uuid NOT NULL);
 		CREATE TEMPORARY TABLE profiles (
 			id uuid PRIMARY KEY,
 			category_id uuid,
@@ -56,6 +65,11 @@ func TestSharedCollectionManagementRequiresEveryAssignedProfile(t *testing.T) {
 			profile_id uuid NOT NULL,
 			can_manage boolean NOT NULL DEFAULT false,
 			PRIMARY KEY (user_id, profile_id)
+		);
+		CREATE TEMPORARY TABLE auth_sessions (
+			id uuid PRIMARY KEY, user_id uuid NOT NULL, device_id uuid NOT NULL,
+			access_expires_at timestamptz NOT NULL, active_profile_id uuid,
+			profile_grant_expires_at timestamptz, profile_context_hash bytea, revoked_at timestamptz
 		);
 		CREATE TEMPORARY TABLE profile_collections (
 			id uuid PRIMARY KEY,
@@ -91,6 +105,10 @@ func TestSharedCollectionManagementRequiresEveryAssignedProfile(t *testing.T) {
 		t.Fatalf("create shared collection authorization fixtures: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
+		INSERT INTO users (id) VALUES ($4::uuid), ($6::uuid);
+		INSERT INTO devices (id, user_id) VALUES
+			($10::uuid, $4::uuid), ($12::uuid, $6::uuid);
+
 		WITH inserted_profiles AS (
 			INSERT INTO profiles (id, category_id, name) VALUES
 				($1::uuid, $3::uuid, 'Profile A'), ($2::uuid, $3::uuid, 'Profile B')
@@ -110,16 +128,25 @@ func TestSharedCollectionManagementRequiresEveryAssignedProfile(t *testing.T) {
 		SELECT inserted_collection.id, target.profile_id, 0
 		FROM inserted_collection
 		CROSS JOIN (VALUES ($1::uuid), ($2::uuid)) target(profile_id)
-	`, profileAID, profileBID, categoryID, userID, collectionID, memberUserID, backdropSource, foldersJSON); err != nil {
+		;
+		INSERT INTO auth_sessions (
+			id, user_id, device_id, access_expires_at, active_profile_id,
+			profile_grant_expires_at, profile_context_hash
+		) VALUES
+			($9::uuid, $4::uuid, $10::uuid, now() + interval '1 hour', $1::uuid, now() + interval '1 hour', decode(repeat('c1', 32), 'hex')),
+			($11::uuid, $6::uuid, $12::uuid, now() + interval '1 hour', $1::uuid, now() + interval '1 hour', decode(repeat('c2', 32), 'hex'))
+	`, pgx.QueryExecModeSimpleProtocol, profileAID, profileBID, categoryID, userID, collectionID, memberUserID, backdropSource, foldersJSON,
+		sessionID, deviceID, memberSessionID, memberDeviceID); err != nil {
 		t.Fatalf("seed shared collection authorization boundary: %v", err)
 	}
 
 	expiresAt := time.Now().UTC().Add(time.Hour)
 	activeProfileID := profileAID
 	principal := auth.Principal{
-		UserID: userID, Role: "member",
+		SessionID: sessionID, UserID: userID, DeviceID: deviceID, Role: "member",
 		AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: stringPointer(categoryID),
 		ActiveProfileID: &activeProfileID, ProfileGrantExpiresAt: &expiresAt,
+		ProfileContextHash: bytes.Repeat([]byte{0xc1}, sha256.Size),
 	}
 	input := SaveInput{
 		Title: "Changed", ExpectedVersion: 1,
@@ -134,6 +161,9 @@ func TestSharedCollectionManagementRequiresEveryAssignedProfile(t *testing.T) {
 	service := NewService(pool, nil, nil, nil, nil)
 	memberPrincipal := principal
 	memberPrincipal.UserID = memberUserID
+	memberPrincipal.SessionID = memberSessionID
+	memberPrincipal.DeviceID = memberDeviceID
+	memberPrincipal.ProfileContextHash = bytes.Repeat([]byte{0xc2}, sha256.Size)
 	if _, err := service.Management(ctx, memberPrincipal, collectionID); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("member collection management read: got %v, want ErrForbidden", err)
 	}
@@ -232,11 +262,15 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 		collectionBID       = "6d000000-0000-4000-8000-000000000005"
 		foreignProfileID    = "6d000000-0000-4000-8000-000000000006"
 		foreignCollectionID = "6d000000-0000-4000-8000-000000000007"
+		deviceID            = "6d000000-0000-4000-8000-000000000008"
+		sessionID           = "6d000000-0000-4000-8000-000000000009"
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cleanup := func() {
 		cleanupCtx := context.Background()
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM auth_sessions WHERE id = $1::uuid`, sessionID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM devices WHERE id = $1::uuid`, deviceID)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM profile_collections WHERE id = ANY($1::uuid[])`, []string{collectionAID, collectionBID, foreignCollectionID})
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM profiles WHERE id = ANY($1::uuid[])`, []string{profileID, foreignProfileID})
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM users WHERE id = $1::uuid`, userID)
@@ -265,6 +299,19 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 				($2::uuid, $3::uuid, false),
 				($2::uuid, $6::uuid, false)
 			RETURNING profile_id
+		), inserted_device AS (
+			INSERT INTO devices (id, user_id, name, platform, category_id, approved_at)
+			VALUES ($8::uuid, $2::uuid, 'Collection reorder device', 'test', $1::uuid, now())
+			RETURNING id
+		), inserted_session AS (
+			INSERT INTO auth_sessions (
+				id, user_id, device_id, access_token_hash, access_expires_at, refresh_expires_at,
+				authorization_scope, category_id, active_profile_id, profile_grant_expires_at, profile_context_hash
+			) VALUES (
+				$9::uuid, $2::uuid, $8::uuid, decode(repeat('d1', 32), 'hex'), now() + interval '1 hour',
+				now() + interval '2 hours', 'category', $1::uuid, $3::uuid, now() + interval '1 hour', decode(repeat('d2', 32), 'hex')
+			)
+			RETURNING id
 		), inserted_collections AS (
 			INSERT INTO profile_collections (id, profile_id, title, folders, position)
 			VALUES
@@ -285,7 +332,7 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 			($4::uuid, $3::uuid, 0),
 			($5::uuid, $3::uuid, 1),
 			($7::uuid, $6::uuid, 0)
-	`, categoryID, userID, profileID, collectionAID, collectionBID, foreignProfileID, foreignCollectionID); err != nil {
+	`, categoryID, userID, profileID, collectionAID, collectionBID, foreignProfileID, foreignCollectionID, deviceID, sessionID); err != nil {
 		t.Fatalf("seed collection reorder authorization boundary: %v", err)
 	}
 
@@ -293,9 +340,10 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 	category := categoryID
 	activeProfile := profileID
 	principal := auth.Principal{
-		UserID: userID, Role: "member",
+		SessionID: sessionID, UserID: userID, DeviceID: deviceID, Role: "member",
 		AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &category,
 		ActiveProfileID: &activeProfile, ProfileGrantExpiresAt: &expiresAt,
+		ProfileContextHash: bytes.Repeat([]byte{0xd2}, sha256.Size),
 	}
 	service := NewService(pool, nil, nil, nil, nil)
 	reversed := ReorderInput{CollectionIDs: []string{collectionBID, collectionAID}}

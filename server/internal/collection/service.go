@@ -481,6 +481,9 @@ func (service *Service) preflightImportAuthorization(ctx context.Context, princi
 }
 
 func authorizeImportProfile(ctx context.Context, tx pgx.Tx, principal auth.Principal, profileID string) error {
+	if err := authorizeActiveProfile(ctx, tx, principal, profileID); err != nil {
+		return err
+	}
 	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, true)
 	if err != nil {
 		return fmt.Errorf("authorize collection import profile: %w", err)
@@ -754,6 +757,13 @@ func authorizeActiveProfile(ctx context.Context, tx pgx.Tx, principal auth.Princ
 		return fmt.Errorf("authorize active collection profile: %w", err)
 	}
 	if !authorized {
+		return ErrActiveProfileRequired
+	}
+	valid, err := auth.LockActiveProfileSelection(ctx, tx, principal)
+	if err != nil {
+		return fmt.Errorf("lock active collection selection: %w", err)
+	}
+	if !valid {
 		return ErrActiveProfileRequired
 	}
 	return nil

@@ -1298,6 +1298,13 @@ func authorizeActiveProfile(ctx context.Context, tx pgx.Tx, principal auth.Princ
 	if !authorized {
 		return ErrActiveProfileRequired
 	}
+	valid, err := auth.LockActiveProfileSelection(ctx, tx, principal)
+	if err != nil {
+		return fmt.Errorf("lock active addon selection: %w", err)
+	}
+	if !valid {
+		return ErrActiveProfileRequired
+	}
 	return nil
 }
 

@@ -47,6 +47,42 @@ type AuthenticationResult struct {
 	ServerId    string         `json:"ServerId"`
 }
 
+const (
+	quickConnectSecretPrefix    = "rivune_dc_"
+	quickConnectSecretMaxLength = 128
+)
+
+func validQuickConnectSecret(secret string) bool {
+	if len(secret) <= len(quickConnectSecretPrefix) || len(secret) > quickConnectSecretMaxLength ||
+		secret[:len(quickConnectSecretPrefix)] != quickConnectSecretPrefix {
+		return false
+	}
+	for index := len(quickConnectSecretPrefix); index < len(secret); index++ {
+		current := secret[index]
+		if current >= 'A' && current <= 'Z' || current >= 'a' && current <= 'z' ||
+			current >= '0' && current <= '9' || current == '_' || current == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+type QuickConnectResult struct {
+	Authenticated bool      `json:"Authenticated"`
+	Secret        string    `json:"Secret"`
+	Code          string    `json:"Code"`
+	DateAdded     time.Time `json:"DateAdded"`
+	DeviceID      string    `json:"DeviceId"`
+	DeviceName    string    `json:"DeviceName"`
+	AppName       string    `json:"AppName"`
+	AppVersion    string    `json:"AppVersion"`
+}
+
+type AuthenticateWithQuickConnect struct {
+	Secret string `json:"Secret"`
+}
+
 type UserDto struct {
 	Name                      string            `json:"Name"`
 	ServerId                  string            `json:"ServerId"`

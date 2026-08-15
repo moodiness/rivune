@@ -205,6 +205,11 @@ func ParseItemQuery(values url.Values) (ItemQuery, error) {
 	return query, nil
 }
 
+func requestedItemQuery(query ItemQuery) ItemQuery {
+	query.Limit = query.RequestedLimit
+	return query
+}
+
 func validateQueryBudget(values url.Values) error {
 	parameters := 0
 	bytes := 0

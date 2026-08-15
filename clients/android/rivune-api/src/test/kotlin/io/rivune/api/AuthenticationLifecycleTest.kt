@@ -182,6 +182,86 @@ class AuthenticationLifecycleTest {
     }
 
     @Test
+    fun cancellationDuringProfileRequestPreparationDoesNotSendMutation() = runBlocking {
+        lifecycleFixture(initialTokens = tokenPair("old")).use { fixture ->
+            val profileId = UUID.fromString("44444444-4444-4444-8444-444444444444")
+            val discoveryGate = fixture.transport.blockNext("/.well-known/rivune")
+            val selection = async(start = CoroutineStart.UNDISPATCHED) { fixture.client.selectProfile(profileId) }
+            discoveryGate.awaitRequest()
+
+            selection.cancel()
+            discoveryGate.release()
+
+            assertFailsWith<CancellationException> { selection.await() }
+            assertEquals(0, fixture.transport.requestCount("/api/v1/profiles/$profileId/select"))
+            assertNull(fixture.store.credentials?.profileContext)
+        }
+    }
+
+    @Test
+    fun cancelledSelectResponseReconcilesContextBeforeReportingCancellation() = runBlocking {
+        lifecycleFixture(initialTokens = tokenPair("old")).use { fixture ->
+            val profileId = UUID.fromString("44444444-4444-4444-8444-444444444444")
+            fixture.client.discover()
+            assertTrue(fixture.client.restoreSession())
+
+            lateinit var selection: kotlinx.coroutines.Deferred<ProfileSelection>
+            fixture.transport.onNextResponse("/api/v1/profiles/$profileId/select") { selection.cancel() }
+            selection = async(start = CoroutineStart.LAZY) { fixture.client.selectProfile(profileId) }
+            selection.start()
+            selection.join()
+
+            assertFailsWith<CancellationException> { selection.await() }
+            assertEquals("context-one", fixture.store.credentials?.profileContext)
+            fixture.client.collections()
+            assertEquals("context-one", fixture.transport.lastRequest("/api/v1/collections").profileContext)
+        }
+    }
+
+    @Test
+    fun cancelledClearResponseReconcilesContextBeforeReportingCancellation() = runBlocking {
+        lifecycleFixture(initialTokens = tokenPair("old")).use { fixture ->
+            val profileId = UUID.fromString("44444444-4444-4444-8444-444444444444")
+            fixture.client.discover()
+            assertTrue(fixture.client.restoreSession())
+            fixture.client.selectProfile(profileId)
+
+            lateinit var clear: kotlinx.coroutines.Deferred<Unit>
+            fixture.transport.onNextResponse("/api/v1/profiles/selection") { clear.cancel() }
+            clear = async(start = CoroutineStart.LAZY) { fixture.client.clearProfileSelection() }
+            clear.start()
+            clear.join()
+
+            assertFailsWith<CancellationException> { clear.await() }
+            assertNull(fixture.store.credentials?.profileContext)
+            fixture.client.collections()
+            assertNull(fixture.transport.lastRequest("/api/v1/collections").profileContext)
+        }
+    }
+
+    @Test
+    fun credentialReplacementRejectsProfileResponseFromEarlierEpoch() = runBlocking {
+        lifecycleFixture(initialTokens = tokenPair("old")).use { fixture ->
+            val profileId = UUID.fromString("44444444-4444-4444-8444-444444444444")
+            fixture.client.discover()
+            assertTrue(fixture.client.restoreSession())
+            val selectionGate = fixture.transport.blockNext("/api/v1/profiles/$profileId/select")
+            val staleSelection = async(start = CoroutineStart.UNDISPATCHED) { fixture.client.selectProfile(profileId) }
+            selectionGate.awaitRequest()
+
+            fixture.client.logout()
+            fixture.client.login("new-user", "password", testDevice())
+            selectionGate.release()
+
+            assertFailsWith<CancellationException> { staleSelection.await() }
+            assertEquals("login-1-access", fixture.store.credentials?.tokens?.accessToken)
+            assertNull(fixture.store.credentials?.profileContext)
+            fixture.client.collections()
+            assertNull(fixture.transport.lastRequest("/api/v1/collections").profileContext)
+        }
+    }
+
+    @Test
     fun profileMutationsReachServerInCallOrder() = runBlocking {
         lifecycleFixture(initialTokens = tokenPair("old")).use { fixture ->
             val profileId = UUID.fromString("44444444-4444-4444-8444-444444444444")
@@ -324,6 +404,7 @@ private data class RecordedAuthRequest(
 
 private class BlockingAuthTransport : Interceptor {
     private val gates = ConcurrentHashMap<String, TransportGate>()
+    private val responseCallbacks = ConcurrentHashMap<String, () -> Unit>()
     private val requests = mutableListOf<RecordedAuthRequest>()
     private val loginCount = AtomicInteger()
     private val unauthorizedCollections = AtomicInteger()
@@ -339,6 +420,10 @@ private class BlockingAuthTransport : Interceptor {
     }
     fun blockNext(path: String): TransportGate = TransportGate().also { gate ->
         check(gates.putIfAbsent(path, gate) == null) { "A gate already exists for $path" }
+    }
+
+    fun onNextResponse(path: String, callback: () -> Unit) {
+        check(responseCallbacks.putIfAbsent(path, callback) == null) { "A response callback already exists for $path" }
     }
 
     fun requestCount(path: String): Int = synchronized(requests) {
@@ -388,7 +473,7 @@ private class BlockingAuthTransport : Interceptor {
             path.endsWith("/select") -> PROFILE_SELECTION_JSON
             else -> "{}"
         }
-        return Response.Builder()
+        val response = Response.Builder()
             .request(request)
             .protocol(Protocol.HTTP_1_1)
             .code(status)
@@ -396,6 +481,8 @@ private class BlockingAuthTransport : Interceptor {
             .header("Content-Type", "application/json")
             .body(body.toResponseBody(JSON_MEDIA_TYPE))
             .build()
+        responseCallbacks.remove(path)?.invoke()
+        return response
     }
 
     private companion object {

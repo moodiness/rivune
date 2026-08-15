@@ -3,6 +3,7 @@ package addon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -127,6 +128,74 @@ func (transport *installManifestTransport) Resource(ctx context.Context, transpo
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func withAddonTestSession(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	deviceCategoryID string,
+	principal auth.Principal,
+) auth.Principal {
+	t.Helper()
+	if principal.ActiveProfileID == nil {
+		t.Fatal("addon test session requires an active profile")
+	}
+	nonce := fmt.Sprintf("%s:%s:%d", principal.UserID, *principal.ActiveProfileID, time.Now().UnixNano())
+	accessHash := sha256.Sum256([]byte("addon-access:" + nonce))
+	contextHash := sha256.Sum256([]byte("addon-context:" + nonce))
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO devices (user_id, name, platform, category_id, approved_at)
+		VALUES ($1::uuid, $2, 'addon-test', $3::uuid, now())
+		RETURNING id::text
+	`, principal.UserID, fmt.Sprintf("Addon fixture %x", accessHash[:6]), deviceCategoryID).Scan(&principal.DeviceID); err != nil {
+		t.Fatalf("insert addon test device: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM devices WHERE id = $1::uuid`, principal.DeviceID)
+	})
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO auth_sessions (
+			user_id, device_id, access_token_hash, access_expires_at, refresh_expires_at,
+			authorization_scope, category_id, active_profile_id, profile_grant_expires_at,
+			profile_context_hash
+		) VALUES (
+			$1::uuid, $2::uuid, $3, now() + interval '2 hours', now() + interval '4 hours',
+			$4, $5::uuid, $6::uuid, now() + interval '2 hours', $7
+		)
+		RETURNING id::text, profile_grant_expires_at
+	`, principal.UserID, principal.DeviceID, accessHash[:], principal.AuthorizationScope,
+		principal.CategoryID, *principal.ActiveProfileID, contextHash[:],
+	).Scan(&principal.SessionID, &principal.ProfileGrantExpiresAt); err != nil {
+		t.Fatalf("insert addon test auth session: %v", err)
+	}
+	principal.ProfileContextHash = contextHash[:]
+	return principal
+}
+
+func selectAddonTestProfile(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	principal *auth.Principal,
+	profileID string,
+) {
+	t.Helper()
+	contextHash := sha256.Sum256([]byte(fmt.Sprintf(
+		"addon-context:%s:%s:%d", principal.SessionID, profileID, time.Now().UnixNano(),
+	)))
+	if err := pool.QueryRow(ctx, `
+		UPDATE auth_sessions
+		SET active_profile_id = $2::uuid,
+		    profile_grant_expires_at = now() + interval '2 hours',
+		    profile_context_hash = $3
+		WHERE id = $1::uuid
+		RETURNING profile_grant_expires_at
+	`, principal.SessionID, profileID, contextHash[:]).Scan(&principal.ProfileGrantExpiresAt); err != nil {
+		t.Fatalf("select addon test profile: %v", err)
+	}
+	principal.ActiveProfileID = new(profileID)
+	principal.ProfileContextHash = contextHash[:]
 }
 
 func executeTestRequest(id string) plannedRequest {
@@ -338,6 +407,7 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 		UserID: userID, Role: "admin", AuthorizationScope: auth.AuthorizationScopeCategory,
 		CategoryID: &categoryA, ActiveProfileID: new(profileAID), ProfileGrantExpiresAt: &expiresAt,
 	}
+	principal = withAddonTestSession(t, ctx, pool, categoryAID, principal)
 	rawManifest := json.RawMessage(`{"id":"org.rivune.authorization-boundary","version":"1.0.0","name":"Authorization Boundary","description":"Validated preview","types":["movie","series"],"resources":["catalog","stream","catalog"],"catalogs":[{"type":"movie","id":"searchable","extra":[{"name":"search"},{"name":"skip"}]}],"behaviorHints":{"adult":true,"p2p":true,"configurationRequired":true}}`)
 	manifest, validatedRawManifest, err := ParseManifest(rawManifest)
 	if err != nil {
@@ -373,6 +443,7 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 		UserID: userID, Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
 		ActiveProfileID: new(profileAID), ProfileGrantExpiresAt: &expiresAt,
 	}
+	globalPrincipal = withAddonTestSession(t, ctx, pool, categoryAID, globalPrincipal)
 	if _, err := service.Preview(ctx, globalPrincipal, InstallInput{TransportURL: transportURL, ProfileIDs: []string{categoryBID}}); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("preview with unauthorized profile assignment error = %v, want %v", err, ErrForbidden)
 	}
@@ -607,12 +678,12 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	if err != nil || len(diagnostics.Diagnostics) != 1 || diagnostics.Diagnostics[0].AddonID != installed.ID {
 		t.Fatalf("active profile A diagnostics = %+v, error %v", diagnostics, err)
 	}
-	globalPrincipal.ActiveProfileID = new(profileBID)
+	selectAddonTestProfile(t, ctx, pool, &globalPrincipal, profileBID)
 	diagnostics, err = service.Diagnostics(ctx, globalPrincipal)
 	if err != nil || len(diagnostics.Diagnostics) != 2 || diagnostics.Diagnostics[0].AddonID != installed.ID || diagnostics.Diagnostics[1].AddonID != profileScopedAddonID || diagnostics.Diagnostics[1].State != DiagnosticStateUnknown {
 		t.Fatalf("active profile B diagnostics = %+v, error %v", diagnostics, err)
 	}
-	globalPrincipal.ActiveProfileID = new(profileAID)
+	selectAddonTestProfile(t, ctx, pool, &globalPrincipal, profileAID)
 	managed, err := service.Management(ctx, globalPrincipal, installed.ID)
 	if err != nil {
 		t.Fatalf("authorized addon management lookup: %v", err)
@@ -854,7 +925,7 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	`, installed.ID, changedTransportURL); err != nil {
 		t.Fatalf("restore public addon transport: %v", err)
 	}
-	principal.ActiveProfileID = new(profileBID)
+	selectAddonTestProfile(t, ctx, pool, &principal, profileBID)
 	if _, err := pool.Exec(ctx, `
 		UPDATE user_profile_access
 		SET can_manage = false
@@ -879,7 +950,6 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	`, installed.ID, profileBID); err != nil {
 		t.Fatalf("revoke addon assignment: %v", err)
 	}
-	principal.ActiveProfileID = new(profileBID)
 	if err := service.ValidatePlaybackAccess(ctx, principal, installed.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("revoked playback access validation error = %v, want %v", err, ErrNotFound)
 	}
@@ -891,7 +961,7 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	if transport.resourceCalls != resourceCallsBeforeRevocation {
 		t.Fatalf("resource transport calls after assignment revocation = %d, want %d", transport.resourceCalls, resourceCallsBeforeRevocation)
 	}
-	globalPrincipal.ActiveProfileID = new(profileAID)
+	selectAddonTestProfile(t, ctx, pool, &globalPrincipal, profileAID)
 	disabled = false
 	if _, err := service.Update(ctx, globalPrincipal, installed.ID, UpdateAddonInput{
 		Enabled: &disabled, ProfileIDs: []string{profileAID},
@@ -983,6 +1053,7 @@ func TestRefreshAuthorizesEveryAssignmentBeforeFetchAndCommit(t *testing.T) {
 		UserID: userID, Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
 		ActiveProfileID: new(profileAID), ProfileGrantExpiresAt: &expiresAt,
 	}
+	globalPrincipal = withAddonTestSession(t, ctx, pool, categoryID, globalPrincipal)
 	installed, err := service.Install(ctx, globalPrincipal, InstallInput{
 		TransportURL: transportURL,
 		ProfileIDs:   []string{profileAID, profileBID},
@@ -996,6 +1067,7 @@ func TestRefreshAuthorizesEveryAssignmentBeforeFetchAndCommit(t *testing.T) {
 		UserID: userID, Role: "member", AuthorizationScope: auth.AuthorizationScopeCategory,
 		CategoryID: &category, ActiveProfileID: new(profileAID), ProfileGrantExpiresAt: &expiresAt,
 	}
+	viewer = withAddonTestSession(t, ctx, pool, categoryID, viewer)
 	manager := viewer
 	manager.Role = "admin"
 
@@ -1809,6 +1881,7 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 		AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &category,
 		ActiveProfileID: &activeProfile, ProfileGrantExpiresAt: &expiresAt,
 	}
+	principal = withAddonTestSession(t, ctx, pool, categoryID, principal)
 	service := NewService(pool, nil, discardLogger())
 	reversed := ReorderInput{AddonIDs: []string{addonBID, addonAID}}
 	if _, err := service.Reorder(ctx, principal, reversed); !errors.Is(err, ErrForbidden) {
@@ -1871,6 +1944,8 @@ func TestReorderRequiresManagementAndSerializesGrantRevocation(t *testing.T) {
 	globalPrincipal := principal
 	globalPrincipal.Role = "admin"
 	globalPrincipal.AuthorizationScope = auth.AuthorizationScopeGlobalAdministrator
+	globalPrincipal.CategoryID = nil
+	globalPrincipal = withAddonTestSession(t, ctx, pool, categoryID, globalPrincipal)
 	if _, err := service.Reorder(ctx, globalPrincipal, reversed); err != nil {
 		t.Fatalf("global administrator addon reorder: %v", err)
 	}
@@ -2056,6 +2131,7 @@ func TestCategoryAssignmentsAreDurableEffectiveAndSeparate(t *testing.T) {
 		UserID: userID, Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
 		ActiveProfileID: new(profileAID), ProfileGrantExpiresAt: &expiresAt,
 	}
+	globalPrincipal = withAddonTestSession(t, ctx, pool, categoryAID, globalPrincipal)
 	rawManifest := json.RawMessage(`{"id":"org.rivune.category-assignment","version":"1.0.0","name":"Category Assignment","types":["movie"],"resources":["catalog","stream"],"catalogs":[{"type":"movie","id":"category"}]}`)
 	manifest, rawManifest, err := ParseManifest(rawManifest)
 	if err != nil {
@@ -2106,6 +2182,7 @@ func TestCategoryAssignmentsAreDurableEffectiveAndSeparate(t *testing.T) {
 		UserID: userID, Role: "admin", AuthorizationScope: auth.AuthorizationScopeCategory,
 		CategoryID: &categoryA, ActiveProfileID: new(profileAID), ProfileGrantExpiresAt: &expiresAt,
 	}
+	categoryDelegated = withAddonTestSession(t, ctx, pool, categoryAID, categoryDelegated)
 	manifestCalls := transport.calls
 	if _, err := service.Refresh(ctx, categoryDelegated, installed.ID); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("delegated category refresh error = %v, want %v", err, ErrForbidden)
@@ -2186,6 +2263,7 @@ func TestCategoryAssignmentsAreDurableEffectiveAndSeparate(t *testing.T) {
 	}
 	futurePrincipal := globalPrincipal
 	futurePrincipal.ActiveProfileID = new(futureID)
+	futurePrincipal = withAddonTestSession(t, ctx, pool, categoryAID, futurePrincipal)
 	if list, err := service.List(ctx, futurePrincipal); err != nil || len(list) != 1 || list[0].ID != installed.ID {
 		t.Fatalf("future profile inherited addon = %+v, error %v", list, err)
 	}
@@ -2202,11 +2280,13 @@ func TestCategoryAssignmentsAreDurableEffectiveAndSeparate(t *testing.T) {
 	}
 	profileBGlobal := globalPrincipal
 	profileBGlobal.ActiveProfileID = new(profileBID)
+	profileBGlobal = withAddonTestSession(t, ctx, pool, categoryAID, profileBGlobal)
 	categoryB := categoryBID
 	profileBDelegated := auth.Principal{
 		UserID: userID, Role: "admin", AuthorizationScope: auth.AuthorizationScopeCategory,
 		CategoryID: &categoryB, ActiveProfileID: new(profileBID), ProfileGrantExpiresAt: &expiresAt,
 	}
+	profileBDelegated = withAddonTestSession(t, ctx, pool, categoryBID, profileBDelegated)
 	if list, err := service.List(ctx, profileBGlobal); err != nil || len(list) != 1 {
 		t.Fatalf("overlapping explicit/category access was not deduplicated = %+v, error %v", list, err)
 	}

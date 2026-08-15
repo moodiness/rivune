@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/moodiness/rivune/server/internal/metadata"
+	"github.com/moodiness/rivune/server/internal/requestwork"
 )
 
 func TestProductionClientRejectsCrossOriginRedirect(t *testing.T) {
@@ -44,7 +45,12 @@ func TestNormalizeCastRetainsUpToOneHundredUniqueMembers(t *testing.T) {
 }
 
 func TestSearchMoviesSendsBearerTokenAndNormalizesResults(t *testing.T) {
+	const responsePayload = `{"page":2,"results":[{"id":78,"title":"Blade Runner","original_title":"Blade Runner","original_language":"en","overview":"A replicant hunter.","release_date":"1982-06-25","poster_path":"/poster.jpg","backdrop_path":"/backdrop.jpg","vote_average":7.9,"vote_count":14000}],"total_pages":3,"total_results":41}`
+	const requestID = "provider-correlation-7"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(requestwork.RequestIDHeader) != requestID {
+			t.Fatalf("outbound request ID = %q, want %q", r.Header.Get(requestwork.RequestIDHeader), requestID)
+		}
 		if r.URL.Path != "/search/movie" {
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
@@ -56,12 +62,14 @@ func TestSearchMoviesSendsBearerTokenAndNormalizesResults(t *testing.T) {
 			t.Fatalf("unexpected query: %v", query)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"page":2,"results":[{"id":78,"title":"Blade Runner","original_title":"Blade Runner","original_language":"en","overview":"A replicant hunter.","release_date":"1982-06-25","poster_path":"/poster.jpg","backdrop_path":"/backdrop.jpg","vote_average":7.9,"vote_count":14000}],"total_pages":3,"total_results":41}`))
+		_, _ = w.Write([]byte(responsePayload))
 	}))
 	defer server.Close()
 
 	client := newWithBaseURL("Bearer api-read-token", server.URL, server.Client())
-	page, err := client.SearchMovies(context.Background(), metadata.SearchOptions{
+	ctx, counters := requestwork.WithCounters(context.Background())
+	ctx, _ = requestwork.WithRequestID(ctx, requestID)
+	page, err := client.SearchMovies(ctx, metadata.SearchOptions{
 		QueryOptions: metadata.QueryOptions{Page: 2, Language: "fr-FR", Region: "FR"},
 		Query:        "Blade Runner",
 	})
@@ -74,6 +82,10 @@ func TestSearchMoviesSendsBearerTokenAndNormalizesResults(t *testing.T) {
 	movie := page.Items[0]
 	if movie.ExternalID != "78" || movie.PosterURL != imageBaseURL+"/w780/poster.jpg" || movie.BackdropURL != imageBaseURL+"/original/backdrop.jpg" {
 		t.Fatalf("unexpected normalized movie: %+v", movie)
+	}
+	snapshot := counters.Snapshot()
+	if snapshot.OutboundCalls != 1 || snapshot.UpstreamBytes != int64(len(responsePayload)) || snapshot.OutboundDuration <= 0 {
+		t.Fatalf("outbound snapshot = %+v, want one completed call and %d bytes", snapshot, len(responsePayload))
 	}
 }
 

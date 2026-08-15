@@ -466,6 +466,7 @@ func (proxy *ffmpegEgressProxy) fetchTarget(ctx context.Context, method string, 
 		}
 		request.Header.Set("User-Agent", "Rivune-Playback/1")
 		proxy.applySourceCredentials(request)
+		requestwork.PropagateRequestID(request)
 		started := requestwork.Now()
 		requestwork.BeginOutbound(ctx, started)
 		upstream, err := proxy.transport.RoundTrip(request)

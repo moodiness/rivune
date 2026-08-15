@@ -209,8 +209,9 @@ func (a *API) buildJellyfinCompatibility(
 		debug = runtimeSettings.Load().JellyfinDebug
 	}
 	compatHandler, err := jellyfin.New(jellyfin.Dependencies{
-		ServerInfo: serverInfo, Authentication: compatAuthentication, AuthenticatedPolicy: jellyfinMaintenancePolicy{settings: a.settings},
-		Catalog: compatCatalog, Collections: collections, Artwork: artwork, Playback: playbackDelivery, MediaSegments: compatMediaSegments,
+		ServerInfo: serverInfo, Authentication: compatAuthentication, QuickConnect: compatAuthentication,
+		AuthenticatedPolicy: jellyfinMaintenancePolicy{settings: a.settings},
+		Catalog:             compatCatalog, Collections: collections, Artwork: artwork, Playback: playbackDelivery, MediaSegments: compatMediaSegments,
 		Watchstate: catalog, DisplayPreferences: displayPreferences, Logger: a.logger, Debug: debug,
 	})
 	if err != nil {
@@ -266,6 +267,10 @@ func (a *API) setJellyfinCompatibilityDesired(enabled bool) {
 		return
 	}
 	a.jellyfinCompatibilityMu.Lock()
+	if enabled && a.jellyfinCompatibilityRevocationPending {
+		a.jellyfinCompatibilityMu.Unlock()
+		return
+	}
 	if a.jellyfinCompatibilityDesired != enabled {
 		a.jellyfinCompatibilityDesired = enabled
 		a.jellyfinCompatibilityRevision++
@@ -275,11 +280,16 @@ func (a *API) setJellyfinCompatibilityDesired(enabled bool) {
 	}
 	signal := a.jellyfinCompatibilitySignal
 	var cancel context.CancelFunc
+	var generation *jellyfin.Handler
 	if !enabled {
 		a.jellyfinCompatibility = nil
 		cancel = a.jellyfinCompatibilityCancel
+		generation = a.jellyfinCompatibilityGeneration
 	}
 	a.jellyfinCompatibilityMu.Unlock()
+	if generation != nil {
+		generation.CloseCompatibilitySockets()
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -304,12 +314,16 @@ func (a *API) RequestJellyfinCompatibilityReplacement() {
 	}
 	a.jellyfinCompatibilityRevision++
 	a.jellyfinCompatibility = nil
+	generation := a.jellyfinCompatibilityGeneration
 	cancel := a.jellyfinCompatibilityCancel
 	if a.jellyfinCompatibilitySignal == nil {
 		a.jellyfinCompatibilitySignal = make(chan struct{}, 1)
 	}
 	signal := a.jellyfinCompatibilitySignal
 	a.jellyfinCompatibilityMu.Unlock()
+	if generation != nil {
+		generation.CloseCompatibilitySockets()
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -361,7 +375,7 @@ func (a *API) applyCanonicalJellyfinCompatibilityDesired(ctx context.Context, en
 	current := a.jellyfinCompatibilityDesired
 	pending := a.jellyfinCompatibilityRevocationPending
 	a.jellyfinCompatibilityMu.Unlock()
-	if current == enabled && !(pending && !enabled) {
+	if current == enabled && !pending {
 		return nil
 	}
 	if enabled {
@@ -489,7 +503,12 @@ func (a *API) runJellyfinCompatibility(ctx context.Context) {
 			a.jellyfinCompatibilitySettingsMu.Unlock()
 			cancelReconcile()
 			if ctx.Err() != nil {
-				continue
+				a.jellyfinCompatibilityMu.Lock()
+				cancel := a.jellyfinCompatibilityCancel
+				done := a.jellyfinCompatibilityDone
+				a.jellyfinCompatibilityMu.Unlock()
+				a.stopJellyfinCompatibilityGeneration(cancel, done)
+				return
 			}
 			if reconcileErr != nil {
 				if a.logger != nil {
@@ -511,6 +530,7 @@ func (a *API) runJellyfinCompatibility(ctx context.Context) {
 
 		a.jellyfinCompatibilityMu.Lock()
 		desired := a.jellyfinCompatibilityDesired
+		revocationPending := a.jellyfinCompatibilityRevocationPending
 		revision := a.jellyfinCompatibilityRevision
 		active := a.jellyfinCompatibility
 		cancel := a.jellyfinCompatibilityCancel
@@ -534,7 +554,7 @@ func (a *API) runJellyfinCompatibility(ctx context.Context) {
 			a.stopJellyfinCompatibilityGeneration(cancel, done)
 			continue
 		}
-		if !desired {
+		if !desired || revocationPending {
 			a.stopJellyfinCompatibilityGeneration(cancel, done)
 			failedAttempts = 0
 			waitForJellyfinCompatibilityRetry(ctx, a.jellyfinCompatibilityActivationSignal(), pollDelay)
@@ -612,12 +632,13 @@ func (a *API) startJellyfinCompatibilityGeneration(parent context.Context, revis
 	generationContext, cancel := context.WithCancel(parent)
 	done := make(chan struct{})
 	a.jellyfinCompatibilityMu.Lock()
-	if !a.jellyfinCompatibilityDesired || a.jellyfinCompatibilityRevision != revision || a.jellyfinCompatibility != nil {
+	if !a.jellyfinCompatibilityDesired || a.jellyfinCompatibilityRevocationPending || a.jellyfinCompatibilityRevision != revision || a.jellyfinCompatibility != nil {
 		a.jellyfinCompatibilityMu.Unlock()
 		cancel()
 		return false
 	}
 	a.jellyfinCompatibility = handler
+	a.jellyfinCompatibilityGeneration = handler
 	a.jellyfinCompatibilityCancel = cancel
 	a.jellyfinCompatibilityDone = done
 	runner := a.jellyfinCompatibilityRunner
@@ -637,6 +658,12 @@ func (a *API) stopJellyfinCompatibilityGeneration(cancel context.CancelFunc, don
 	if cancel == nil || done == nil {
 		return
 	}
+	a.jellyfinCompatibilityMu.Lock()
+	generation := a.jellyfinCompatibilityGeneration
+	a.jellyfinCompatibilityMu.Unlock()
+	if generation != nil {
+		generation.CloseCompatibilitySockets()
+	}
 	cancel()
 	<-done
 	a.clearJellyfinCompatibilityGeneration(done)
@@ -649,6 +676,7 @@ func (a *API) clearJellyfinCompatibilityGeneration(done <-chan struct{}) {
 		return
 	}
 	a.jellyfinCompatibility = nil
+	a.jellyfinCompatibilityGeneration = nil
 	a.jellyfinCompatibilityCancel = nil
 	a.jellyfinCompatibilityDone = nil
 }

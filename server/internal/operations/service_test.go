@@ -2,11 +2,13 @@ package operations
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -278,6 +280,73 @@ func TestMetadataCacheStatusCountsOnlyProviderCompatibleRoots(t *testing.T) {
 	}
 }
 
+func TestOperationalStatusHandlesEmptyAndPopulatedTables(t *testing.T) {
+	pool := newOperationsPostgresPool(t, operationalStatusTestDDL)
+	service := newTestService(pool, &fakeMetadataRefresher{}, &fakeMaintenanceCleaner{}, &fakePlaybackMaintenance{})
+	ctx := context.Background()
+
+	empty, err := service.operationalStatus(ctx)
+	if err != nil {
+		t.Fatalf("load empty operational status: %v", err)
+	}
+	if empty.tracking != (TrackingOutboxStatus{}) || empty.addons.Total != 0 || empty.addons.Enabled != 0 ||
+		empty.addons.LatestUpdatedAt != nil || empty.playback != (PlaybackStatus{}) {
+		t.Fatalf("empty operational status = %+v", empty)
+	}
+
+	latestAddonUpdate := time.Date(2026, time.August, 13, 16, 30, 0, 0, time.UTC)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO profile_tracking_outbox (next_attempt_at, leased_until, created_at) VALUES
+			(now() - interval '1 minute', NULL, now() - interval '2 minutes'),
+			(now() + interval '1 hour', NULL, now() - interval '1 minute'),
+			(now() - interval '1 minute', now() + interval '1 minute', now() - interval '30 seconds')
+	`); err != nil {
+		t.Fatalf("seed tracking outbox status: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO profile_addons (enabled, updated_at) VALUES
+			(true, $1), (false, $1 - interval '1 hour'), (true, $1 - interval '2 hours')
+	`, latestAddonUpdate); err != nil {
+		t.Fatalf("seed add-on status: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO playback_sessions (assets, expires_at, last_seen_at) VALUES
+			('[{"kind":"stream","url":"https://secret.invalid/direct"}]', now() + interval '1 hour', now()),
+			('[{"kind":"transcode","url":"https://secret.invalid/video"}]', now() + interval '1 hour', now()),
+			('[{"kind":"transcode_audio","headers":{"Authorization":"secret"}}]', now() + interval '1 hour', now()),
+			('[{"kind":"transcode"}]', now() + interval '1 hour', now() - interval '31 minutes')
+	`); err != nil {
+		t.Fatalf("seed playback status: %v", err)
+	}
+
+	populated, err := service.operationalStatus(ctx)
+	if err != nil {
+		t.Fatalf("load populated operational status: %v", err)
+	}
+	if populated.tracking.Pending != 3 || populated.tracking.Due != 1 || populated.tracking.OldestAgeSeconds < 120 {
+		t.Fatalf("tracking outbox status = %+v", populated.tracking)
+	}
+	if populated.addons.Total != 3 || populated.addons.Enabled != 2 || populated.addons.LatestUpdatedAt == nil ||
+		!populated.addons.LatestUpdatedAt.Equal(latestAddonUpdate) {
+		t.Fatalf("addon status = %+v", populated.addons)
+	}
+	if populated.playback != (PlaybackStatus{Active: 3, Transcoding: 2}) {
+		t.Fatalf("playback status = %+v", populated.playback)
+	}
+	encoded, err := json.Marshal(OperationsOverview{TrackingOutbox: populated.tracking, Addons: populated.addons, Playback: populated.playback})
+	if err != nil {
+		t.Fatalf("encode operational status: %v", err)
+	}
+	if strings.Contains(string(encoded), "secret.invalid") || strings.Contains(string(encoded), "Authorization") {
+		t.Fatalf("operational status exposed source data: %s", encoded)
+	}
+	poolStatus := service.postgreSQLPoolStatus()
+	if poolStatus.Max != 1 || poolStatus.Total < 1 || poolStatus.Acquired < 0 || poolStatus.Idle < 0 ||
+		poolStatus.WaitCount < 0 || poolStatus.WaitDurationMilliseconds < 0 {
+		t.Fatalf("PostgreSQL pool status = %+v", poolStatus)
+	}
+}
+
 func TestRunActionDispatchesToSelectedServices(t *testing.T) {
 	t.Run("housekeeping", func(t *testing.T) {
 		metadataService := &fakeMetadataRefresher{}
@@ -514,5 +583,22 @@ const metadataCacheTestDDL = `
 		expires_at timestamptz NOT NULL,
 		PRIMARY KEY (title_id, provider, language),
 		FOREIGN KEY (title_id, provider) REFERENCES title_external_ids(title_id, provider) ON DELETE CASCADE
+	)
+`
+
+const operationalStatusTestDDL = `
+	CREATE TEMPORARY TABLE profile_tracking_outbox (
+		next_attempt_at timestamptz NOT NULL,
+		leased_until timestamptz,
+		created_at timestamptz NOT NULL
+	);
+	CREATE TEMPORARY TABLE profile_addons (
+		enabled boolean NOT NULL,
+		updated_at timestamptz NOT NULL
+	);
+	CREATE TEMPORARY TABLE playback_sessions (
+		assets jsonb NOT NULL,
+		expires_at timestamptz NOT NULL,
+		last_seen_at timestamptz NOT NULL
 	)
 `

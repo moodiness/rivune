@@ -5,6 +5,13 @@ This product uses the TMDB API but is not endorsed or certified by TMDB.
 
 This product uses the TVDB API but is not endorsed or certified by TVDB.
 
+This product can use the Fanart.tv, Trakt, and Simkl APIs when configured by an
+operator. Rivune is not endorsed, certified, or sponsored by those services.
+
+Jellyfin and Stremio are names and trademarks of their respective owners.
+Rivune's compatibility surfaces are independent implementations and do not imply
+affiliation, endorsement, or certification.
+
 This product includes FFmpeg as packaged by Debian. The packaged build is distributed
 under the GNU General Public License version 2 or later. See https://ffmpeg.org/legal.html.
 

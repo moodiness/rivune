@@ -142,6 +142,7 @@ export function DevicePairingPage() {
           </div>
         </div>
           : <Button onClick={() => void begin()}><RefreshCw size={18} /> {t("pairing.generateCode")}</Button>}
+      <Button type="button" variant="secondary" onClick={() => window.location.assign("/pair")}>{t("pairing.approveDevice")} <ArrowRight size={18} /></Button>
       <button type="button" className="text-button pairing-card__owner" onClick={() => setOwnerSignIn(true)}><KeyRound size={16} /> {t("pairing.ownerSignIn")}</button>
     </section>
     <footer className="auth-footer"><ShieldCheck size={14} /> {t("pairing.deviceFooter")}</footer>

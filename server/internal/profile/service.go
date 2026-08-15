@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"golang.org/x/text/unicode/norm"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -39,6 +40,8 @@ type Service struct {
 	grantTTL        time.Duration
 	defaultTimezone string
 	runtimeSettings *runtimesettings.Source
+	notifierMu      sync.RWMutex
+	notifier        func([]string)
 }
 
 type Profile struct {
@@ -107,6 +110,27 @@ func NewService(pool *pgxpool.Pool, grantTTL time.Duration, defaultTimezone stri
 
 func NewServiceWithRuntimeSettings(pool *pgxpool.Pool, grantTTL time.Duration, runtimeSettings *runtimesettings.Source) *Service {
 	return &Service{pool: pool, grantTTL: grantTTL, runtimeSettings: runtimeSettings}
+}
+
+// SetCompatibilitySessionRevocationNotifier installs the best-effort callback
+// invoked after a committed profile mutation invalidates compatibility sessions.
+func (s *Service) SetCompatibilitySessionRevocationNotifier(notifier func([]string)) {
+	if s == nil {
+		return
+	}
+	s.notifierMu.Lock()
+	s.notifier = notifier
+	s.notifierMu.Unlock()
+}
+
+func (s *Service) compatibilitySessionRevocationNotifier() func([]string) {
+	if s == nil {
+		return nil
+	}
+	s.notifierMu.RLock()
+	notifier := s.notifier
+	s.notifierMu.RUnlock()
+	return notifier
 }
 func (s *Service) runtimeTimezone(ctx context.Context) string {
 	if s.runtimeSettings != nil {
@@ -416,6 +440,8 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, profileI
 		}
 	}
 
+	notifyRevoked := s.compatibilitySessionRevocationNotifier()
+	revokedCompatibilitySessionIDs := make([]string, 0)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Profile{}, fmt.Errorf("begin profile update: %w", err)
@@ -573,6 +599,11 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, profileI
 		`, current.ID); err != nil {
 			return Profile{}, fmt.Errorf("revoke disabled profile credential: %w", err)
 		}
+		revokedIDs, err := lockActiveProfileCompatibilitySessionIDs(ctx, tx, current.ID)
+		if err != nil {
+			return Profile{}, fmt.Errorf("lock disabled profile compatibility sessions: %w", err)
+		}
+		revokedCompatibilitySessionIDs = append(revokedCompatibilitySessionIDs, revokedIDs...)
 		if _, err := tx.Exec(ctx, `
 			UPDATE auth_sessions
 			SET revoked_at = COALESCE(revoked_at, now()),
@@ -599,6 +630,11 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, profileI
 	}
 	if categoryChanged {
 		if !disabledTransition {
+			revokedIDs, err := lockActiveProfileCompatibilitySessionIDs(ctx, tx, current.ID)
+			if err != nil {
+				return Profile{}, fmt.Errorf("lock changed profile category compatibility sessions: %w", err)
+			}
+			revokedCompatibilitySessionIDs = append(revokedCompatibilitySessionIDs, revokedIDs...)
 			if _, err := tx.Exec(ctx, `
 				UPDATE auth_sessions
 				SET revoked_at = COALESCE(revoked_at, now()),
@@ -618,6 +654,14 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, profileI
 			`, current.ID); err != nil {
 				return Profile{}, fmt.Errorf("clear global profile selections after category change: %w", err)
 			}
+			if _, err := tx.Exec(ctx, `
+				UPDATE jellyfin_compat_sessions
+				SET revoked_at = COALESCE(revoked_at, now()),
+				    revoked_reason = COALESCE(revoked_reason, 'profile_category_changed')
+				WHERE profile_id = $1::uuid
+			`, current.ID); err != nil {
+				return Profile{}, fmt.Errorf("revoke changed profile category compatibility sessions: %w", err)
+			}
 		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO access_category_audit_events (
@@ -628,6 +672,11 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, profileI
 			return Profile{}, fmt.Errorf("audit profile category change: %w", err)
 		}
 	} else if !disabledTransition && (accessChanged || input.PINSet) {
+		revokedIDs, err := lockActiveProfileCompatibilitySessionIDs(ctx, tx, current.ID)
+		if err != nil {
+			return Profile{}, fmt.Errorf("lock changed profile access compatibility sessions: %w", err)
+		}
+		revokedCompatibilitySessionIDs = append(revokedCompatibilitySessionIDs, revokedIDs...)
 		if _, err := tx.Exec(ctx, `
 			UPDATE auth_sessions
 			SET active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL
@@ -635,10 +684,19 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, profileI
 		`, current.ID); err != nil {
 			return Profile{}, fmt.Errorf("clear changed profile selections: %w", err)
 		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE jellyfin_compat_sessions
+			SET revoked_at = COALESCE(revoked_at, now()),
+			    revoked_reason = COALESCE(revoked_reason, 'profile_access_changed')
+			WHERE profile_id = $1::uuid
+		`, current.ID); err != nil {
+			return Profile{}, fmt.Errorf("revoke changed profile access compatibility sessions: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Profile{}, fmt.Errorf("commit profile update: %w", err)
 	}
+	notifyProfileCompatibilitySessionRevocations(notifyRevoked, revokedCompatibilitySessionIDs)
 	current.HasPIN = currentPINHash != nil
 	current.Accessible = profileAccessible(current, time.Now().UTC())
 	return current, nil
@@ -649,6 +707,7 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, profileI
 	if profileID == "" {
 		return ErrNotFound
 	}
+	notifyRevoked := s.compatibilitySessionRevocationNotifier()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin profile deletion: %w", err)
@@ -749,6 +808,10 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, profileI
 	`, profileID).Scan(&candidateAddonIDs, &candidateCollectionIDs); err != nil {
 		return fmt.Errorf("query profile deletion resources: %w", err)
 	}
+	revokedCompatibilitySessionIDs, err := lockActiveProfileCompatibilitySessionIDs(ctx, tx, profileID)
+	if err != nil {
+		return fmt.Errorf("lock deleted profile compatibility sessions: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE auth_sessions
 		SET active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL
@@ -784,7 +847,63 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, profileI
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit profile deletion: %w", err)
 	}
+	notifyProfileCompatibilitySessionRevocations(notifyRevoked, revokedCompatibilitySessionIDs)
 	return nil
+}
+
+func lockActiveProfileCompatibilitySessionIDs(ctx context.Context, tx pgx.Tx, profileID string) ([]string, error) {
+	if _, err := tx.Exec(ctx, `
+		SELECT id
+		FROM auth_sessions
+		WHERE active_profile_id = $1::uuid
+		   OR id IN (
+		       SELECT auth_session_id FROM jellyfin_compat_sessions WHERE profile_id = $1::uuid
+		   )
+		   OR jellyfin_credential_id IN (
+		       SELECT id FROM profile_jellyfin_credentials WHERE profile_id = $1::uuid
+		   )
+		ORDER BY id
+		FOR UPDATE
+	`, profileID); err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT id::text
+		FROM jellyfin_compat_sessions
+		WHERE profile_id = $1::uuid
+		  AND revoked_at IS NULL
+		  AND expires_at > now()
+		ORDER BY id
+		FOR UPDATE
+	`, profileID)
+	if err != nil {
+		return nil, err
+	}
+	return readCompatibilitySessionIDs(rows)
+}
+
+func readCompatibilitySessionIDs(rows pgx.Rows) ([]string, error) {
+	defer rows.Close()
+	sessionIDs := make([]string, 0)
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			return nil, err
+		}
+		sessionIDs = append(sessionIDs, sessionID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return sessionIDs, nil
+}
+
+func notifyProfileCompatibilitySessionRevocations(notifier func([]string), sessionIDs []string) {
+	if notifier == nil || len(sessionIDs) == 0 {
+		return
+	}
+	defer func() { _ = recover() }()
+	notifier(sessionIDs)
 }
 
 func (s *Service) Select(ctx context.Context, principal auth.Principal, profileID string, providedPIN *string, requireManagement bool) (Selection, error) {

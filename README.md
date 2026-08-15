@@ -10,38 +10,25 @@ Rivune is an open-source media backend and responsive web app with no predefined
 
 ## Install with Docker Compose
 
-Requirements: Docker Engine with Compose and a secure random-value generator such as OpenSSL.
+Requirements: Docker Engine with Compose v2, Bash, and OpenSSL. On a Linux host, use the root operator command; it creates a mode-0600 `.env` with five independent secrets and refuses to overwrite an existing path:
 
 ```sh
 git clone https://github.com/moodiness/rivune.git
 cd rivune
-./scripts/create-env.sh
+./rivune setup --public-url https://media.example.com --version 1.6.0
+./rivune up
+./rivune doctor
 ```
 
-On Windows PowerShell, run `.\scripts\create-env.ps1` instead. The helpers create a private `.env` without overwriting an existing path.
+Omit `--public-url` for a loopback-only installation. `--version` is required and accepts only an exact stable numeric release such as `1.6.0`; mutable image tags such as `latest` are rejected so a fresh install is reproducible. `./rivune help` lists explicit wrappers for lifecycle, logs, diagnostics, authenticated backup verification, and restore. The command always resolves the repository Compose file and never prints generated secrets.
 
-Generate independent values for the three database passwords, setup token, and encryption key, then fill these entries in `.env`:
+On Windows PowerShell, run `.\scripts\create-env.ps1`, fill the generated private `.env`, then use `docker compose pull` and `docker compose up -d`. The lower-level `./scripts/create-env.sh` path remains available on Unix hosts that need to customize `.env` before startup.
 
-```dotenv
-RIVUNE_POSTGRES_SUPERUSER_PASSWORD=<output of: openssl rand -hex 32>
-RIVUNE_DATABASE_PASSWORD=<different output of: openssl rand -hex 32>
-RIVUNE_RESTORE_PASSWORD=<different output of: openssl rand -hex 32>
-RIVUNE_SETUP_TOKEN=<different output of: openssl rand -hex 32>
-RIVUNE_ENCRYPTION_KEYS=1:<different output of: openssl rand -hex 32>
-RIVUNE_PUBLIC_URL=https://media.example.com
-RIVUNE_VERSION=latest
-```
+`RIVUNE_ENCRYPTION_KEYS` uses active-first `version:64-lowercase-hex` pairs with unique positive versions and unique, non-zero keys. Back up the generated keyring separately and securely. A database backup cannot recover encrypted integration credentials or profile tracking tokens without every matching key version.
 
-`RIVUNE_ENCRYPTION_KEYS` is strict: entries are active-first `version:64-lowercase-hex` pairs with unique positive versions and unique, non-zero keys. Back up the keyring separately and securely. A database backup cannot recover encrypted integration credentials or profile tracking tokens without every matching key version.
+Open [http://localhost:8080](http://localhost:8080) for a loopback deployment. For a normal HTTPS installation, keep using `compose.yaml`, set `RIVUNE_PUBLIC_URL` to the public HTTPS origin, and put Rivune behind Pangolin/Newt or an operator-managed reverse proxy. The proxy must terminate TLS and target Rivune over HTTP on port `8080`; then open `RIVUNE_PUBLIC_URL`. Enter `RIVUNE_SETUP_TOKEN` to claim the instance and create the first administrator.
 
-For a local, loopback-only installation:
-
-```sh
-docker compose pull
-docker compose up -d
-```
-
-Open [http://localhost:8080](http://localhost:8080). For a normal HTTPS installation, keep using `compose.yaml`, set `RIVUNE_PUBLIC_URL` to the public HTTPS origin, and put Rivune behind Pangolin/Newt or an operator-managed reverse proxy. The proxy must terminate TLS and target Rivune over HTTP on port `8080`; then open `RIVUNE_PUBLIC_URL`. Enter `RIVUNE_SETUP_TOKEN` to claim the instance and create the first administrator.
+Global administrators can export and atomically merge a versioned profile archive through the documented API. It includes profile settings, explicitly assigned add-ons and collections, stable title identities, library/progress/favorite/user-data state, and tracking preferences, but never passwords, PINs, sessions, provider credentials, or assignment policy. Add-on transport URLs are intentionally portable and can contain tokens: store the downloaded JSON with credential-file permissions.
 
 ## First-run configuration
 
@@ -69,7 +56,7 @@ See [Production operations](docs/operations.md) for the complete Pangolin networ
 
 ## Development
 
-Backend requirements are Go 1.26 and PostgreSQL 18. Frontend requirements are Node.js 22 and npm. Typed clients live under [`clients/`](clients/); the public contract is [`protocol/openapi.yaml`](protocol/openapi.yaml).
+Backend requirements are Go 1.26.6 or newer in the 1.26 line and PostgreSQL 18. Frontend requirements are Node.js 22 and npm. Typed clients live under [`clients/`](clients/); the public contract is [`protocol/openapi.yaml`](protocol/openapi.yaml).
 
 The Android project includes the native Rivune application for phones, tablets, and Android TV plus the reusable `rivune-api` SDK. It supports server discovery, restored sessions, passwordless device pairing, category-scoped profiles and PINs, and paginated collection browsing.
 

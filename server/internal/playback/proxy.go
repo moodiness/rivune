@@ -470,6 +470,7 @@ func (service *Service) fetchAsset(ctx context.Context, incoming *http.Request, 
 		}
 	}
 	request.Header.Set("User-Agent", "Rivune-Playback/1")
+	requestwork.PropagateRequestID(request)
 	started := requestwork.Now()
 	requestwork.BeginOutbound(ctx, started)
 	response, err := service.client.Do(request)

@@ -404,18 +404,34 @@ class RivuneViewModel internal constructor(
     }
 
     fun disconnectServer() {
+        if (mutableState.value.isBusy) return
+        val currentGateway = gateway ?: return
         generation += 1
+        val operationGeneration = generation
         folderRequestGeneration += 1
         viewerRequestGeneration += 1
         pairingJob?.cancel()
         pairingJob = null
-        gateway = null
-        searchDescriptors = emptyList()
-        serverStore.clear()
-        mutableState.value = RivuneUiState(
-            destination = AppDestination.Server,
-            isTv = tvDevice,
-        )
+        mutableState.value = mutableState.value.copy(isBusy = true, failure = null)
+        viewModelScope.launch {
+            val result = currentGateway.logout()
+            if (!isCurrent(operationGeneration)) return@launch
+            if (!result.localCredentialsCleared) {
+                mutableState.value = mutableState.value.copy(
+                    isBusy = false,
+                    failure = UiFailure.LOGOUT_FAILED,
+                )
+                return@launch
+            }
+            gateway = null
+            searchDescriptors = emptyList()
+            serverStore.clear()
+            mutableState.value = RivuneUiState(
+                destination = AppDestination.Server,
+                isTv = tvDevice,
+                failure = if (result.serverSessionClosed) null else UiFailure.LOGOUT_FAILED,
+            )
+        }
     }
 
     fun selectProfile(profile: Profile) {
@@ -1057,12 +1073,18 @@ class RivuneViewModel internal constructor(
     }
 
     fun previousCalendarMonth() {
-        mutableState.value = mutableState.value.copy(calendarMonth = mutableState.value.calendarMonth.minusMonths(1))
+        mutableState.value = mutableState.value.copy(
+            calendarMonth = mutableState.value.calendarMonth.minusMonths(1),
+            calendarEvents = emptyList(),
+        )
         loadCalendar()
     }
 
     fun nextCalendarMonth() {
-        mutableState.value = mutableState.value.copy(calendarMonth = mutableState.value.calendarMonth.plusMonths(1))
+        mutableState.value = mutableState.value.copy(
+            calendarMonth = mutableState.value.calendarMonth.plusMonths(1),
+            calendarEvents = emptyList(),
+        )
         loadCalendar()
     }
 
@@ -1732,6 +1754,10 @@ class RivuneViewModel internal constructor(
             selectedCollectionId = collectionId,
             isBusy = true,
             failure = null,
+            viewer = mutableState.value.viewer.copy(
+                loading = ViewerLoading.FOLDER,
+                inlineFailure = null,
+            ),
         )
         viewModelScope.launch {
             try {
@@ -1756,6 +1782,7 @@ class RivuneViewModel internal constructor(
                     resolvedFolder = content,
                     isBusy = false,
                     failure = null,
+                    viewer = mutableState.value.viewer.copy(loading = null, inlineFailure = null),
                 )
             } catch (cause: CancellationException) {
                 throw cause
@@ -1766,7 +1793,10 @@ class RivuneViewModel internal constructor(
 
                     handleSessionExpired(operationGeneration)
                 } else {
-                    mutableState.value = mutableState.value.copy(isBusy = false, failure = failure)
+                    mutableState.value = mutableState.value.copy(
+                        isBusy = false,
+                        viewer = mutableState.value.viewer.copy(loading = null, inlineFailure = failure),
+                    )
                 }
             }
         }

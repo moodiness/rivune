@@ -79,11 +79,18 @@ authentication, the current user, views, items, search, `HEAD` artwork,
 Identifiers, tokens, sessions, paths, playback URLs, and timestamps are captured
 or canonicalized with a local justification.
 
-`compare: per-target` is intentional when identities, libraries, metadata
-providers, or topologies differ. In particular, the `observed-gap` cases make
-network detection and artwork availability explicit. These snapshots remain
-inspectable, but their differences are not turned into a false equivalence.
-Only the content-free logout contract is compared exactly.
+The current manifest has ten `compare: semantic` steps and one `compare: exact`
+step; it has no `compare: per-target` steps. The `artwork-primary-head` step is
+explicitly `status: observed-gap` because artwork availability and negotiated
+representation depend on each target's metadata provider, but the comparator
+still evaluates that capture semantically instead of skipping it or claiming
+equivalence. Only the content-free logout contract is compared exactly.
+The archived oracle smoke summary records all 11 comparisons: 9 matched and
+`skipped` is empty. `system-endpoint` differs because upstream returns an empty
+401 without cache, content type, or challenge headers while Rivune returns its
+canonical no-store JSON error with `WWW-Authenticate: MediaBrowser`; the summary
+records every resulting header, body-kind, and JSON mismatch. `user-views`
+differs at `/Items/0/ChildCount` (`9` upstream, `1` Rivune).
 
 The bootstrap process configures only the oracle. Rivune must therefore already
 expose the expected profile and synthetic title; the harness neither creates a

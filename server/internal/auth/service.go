@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -57,6 +58,8 @@ type Service struct {
 	dummyHash                         string
 	deviceAuthorizationCapacity       int
 	deviceAuthorizationSourceCapacity int
+	compatibilityNotifierMu           sync.RWMutex
+	compatibilityNotifier             func([]string)
 }
 
 type LoginInput struct {
@@ -191,6 +194,25 @@ func NewServiceWithRuntimeSettings(pool *pgxpool.Pool, accessTTL, refreshTTL tim
 	return service, nil
 }
 
+func (s *Service) SetCompatibilitySessionRevocationNotifier(notifier func([]string)) {
+	if s == nil {
+		return
+	}
+	s.compatibilityNotifierMu.Lock()
+	s.compatibilityNotifier = notifier
+	s.compatibilityNotifierMu.Unlock()
+}
+
+func (s *Service) compatibilitySessionRevocationNotifier() func([]string) {
+	if s == nil {
+		return nil
+	}
+	s.compatibilityNotifierMu.RLock()
+	notifier := s.compatibilityNotifier
+	s.compatibilityNotifierMu.RUnlock()
+	return notifier
+}
+
 func (s *Service) runtimeTimezone(ctx context.Context) string {
 	if s.runtimeSettings != nil {
 		return runtimesettings.Load(ctx, s.runtimeSettings).Timezone
@@ -317,7 +339,7 @@ func (s *Service) LoginJellyfinProfile(ctx context.Context, input JellyfinProfil
 		SELECT id::text
 		FROM users
 		WHERE id = $1::uuid
-		FOR SHARE
+		FOR UPDATE
 	`, discoveredOwnerUserID).Scan(&lockedUserID); errors.Is(err, pgx.ErrNoRows) {
 		return JellyfinProfileLoginResult{}, ErrInvalidCredentials
 	} else if err != nil {
@@ -570,6 +592,7 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 		return TokenPair{}, fmt.Errorf("begin token refresh: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	notifyRevoked := s.compatibilitySessionRevocationNotifier()
 
 	var sessionID, deviceID, role string
 	var scope AuthorizationScope
@@ -603,16 +626,25 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 	now := time.Now().UTC()
 	if consumedAt != nil || revokedAt != nil || !refreshExpiresAt.After(now) {
 		if consumedAt != nil && revokedAt == nil && !now.Before(consumedAt.Add(refreshTokenReuseGracePeriod)) {
+			revokedIDs, lockErr := lockActiveCompatibilitySessionIDs(ctx, tx, sessionID)
+			if lockErr != nil {
+				return TokenPair{}, fmt.Errorf("lock replayed compatibility sessions: %w", lockErr)
+			}
 			if _, err := tx.Exec(ctx, "UPDATE auth_sessions SET revoked_at = $2, revoked_reason = 'refresh_token_reuse' WHERE id = $1", sessionID, now); err != nil {
 				return TokenPair{}, fmt.Errorf("revoke replayed session: %w", err)
 			}
 			if err := tx.Commit(ctx); err != nil {
 				return TokenPair{}, fmt.Errorf("commit replay revocation: %w", err)
 			}
+			notifyCompatibilitySessionRevocations(notifyRevoked, revokedIDs)
 		}
 		return TokenPair{}, ErrInvalidToken
 	}
 	if !validSessionScope(role, scope, sessionCategoryID, deviceCategoryID, activeProfileCategoryID) {
+		revokedIDs, lockErr := lockActiveCompatibilitySessionIDs(ctx, tx, sessionID)
+		if lockErr != nil {
+			return TokenPair{}, fmt.Errorf("lock mismatched compatibility sessions: %w", lockErr)
+		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE auth_sessions
 			SET revoked_at = $2, revoked_reason = 'authorization_category_mismatch'
@@ -623,6 +655,7 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 		if err := tx.Commit(ctx); err != nil {
 			return TokenPair{}, fmt.Errorf("commit mismatch revocation: %w", err)
 		}
+		notifyCompatibilitySessionRevocations(notifyRevoked, revokedIDs)
 		return TokenPair{}, ErrInvalidToken
 	}
 
@@ -716,11 +749,7 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 		return Principal{}, fmt.Errorf("authenticate access token: %w", err)
 	}
 	if !validSessionScope(principal.Role, principal.AuthorizationScope, principal.CategoryID, deviceCategoryID, activeProfileCategoryID) {
-		if _, err := s.pool.Exec(ctx, `
-			UPDATE auth_sessions
-			SET revoked_at = now(), revoked_reason = 'authorization_category_mismatch'
-			WHERE id = $1 AND revoked_at IS NULL
-		`, principal.SessionID); err != nil {
+		if err := s.revokeNativeSession(ctx, principal.SessionID, principal.UserID, "authorization_category_mismatch"); err != nil {
 			return Principal{}, fmt.Errorf("revoke mismatched session: %w", err)
 		}
 		return Principal{}, ErrInvalidToken
@@ -728,11 +757,7 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 	if principal.AuthorizationScope == AuthorizationScopeCategory &&
 		principal.ActiveProfileID != nil && !hasActiveProfileAccess {
 		activeProfileID := *principal.ActiveProfileID
-		if _, err := s.pool.Exec(ctx, `
-			UPDATE auth_sessions
-			SET active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL
-			WHERE id = $1 AND active_profile_id::text = $2
-		`, principal.SessionID, activeProfileID); err != nil {
+		if err := s.clearNativeProfileCompatibilitySessions(ctx, principal.SessionID, principal.UserID, activeProfileID, "profile_access_invalid"); err != nil {
 			return Principal{}, fmt.Errorf("clear unauthorized profile grant: %w", err)
 		}
 		principal.ActiveProfileID = nil
@@ -744,11 +769,7 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 	access.AccessTimezone = s.runtimeTimezone(ctx)
 	activeProfileID := principal.ActiveProfileID
 	if reconcileProfileGrant(&principal, access, time.Now().UTC()) {
-		if _, err := s.pool.Exec(ctx, `
-			UPDATE auth_sessions
-			SET active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL
-			WHERE id = $1 AND active_profile_id::text = $2
-		`, principal.SessionID, *activeProfileID); err != nil {
+		if err := s.clearNativeProfileCompatibilitySessions(ctx, principal.SessionID, principal.UserID, *activeProfileID, "profile_access_unavailable"); err != nil {
 			return Principal{}, fmt.Errorf("clear unavailable profile grant: %w", err)
 		}
 	}
@@ -856,15 +877,7 @@ func (s *Service) Account(ctx context.Context, principal Principal) (Account, er
 }
 
 func (s *Service) Logout(ctx context.Context, principal Principal) error {
-	_, err := s.pool.Exec(ctx, `
-		UPDATE auth_sessions
-		SET revoked_at = COALESCE(revoked_at, now()), revoked_reason = COALESCE(revoked_reason, 'logout')
-		WHERE id = $1 AND user_id = $2
-	`, principal.SessionID, principal.UserID)
-	if err != nil {
-		return fmt.Errorf("revoke current session: %w", err)
-	}
-	return nil
+	return s.revokeNativeSession(ctx, principal.SessionID, principal.UserID, "logout")
 }
 
 func (s *Service) Sessions(ctx context.Context, principal Principal) ([]Session, error) {
@@ -1207,68 +1220,153 @@ func (s *Service) RevokeProfileSession(ctx context.Context, principal Principal,
 	if !authorized {
 		return ErrForbidden
 	}
-	command, err := tx.Exec(ctx, `
-		UPDATE auth_sessions session
-		SET revoked_at = COALESCE(session.revoked_at, now()),
-		    revoked_reason = COALESCE(session.revoked_reason, 'profile_manager_revoked')
-		WHERE session.id::text = $1
-		  AND session.active_profile_id::text = $2
-		  AND (
-		    $3
-		    OR (
-		      session.authorization_scope = 'category'
-		      AND session.category_id::text = $4
-		      AND EXISTS (
-		        SELECT 1 FROM devices device
-		        WHERE device.id = session.device_id AND device.category_id = session.category_id
-		      )
-		    )
-		  )
-		  AND session.profile_grant_expires_at > now()
-		  AND session.revoked_at IS NULL
-		  AND session.refresh_expires_at > now()
-	`, sessionID, profileID, principal.IsGlobalAdministrator(), principalCategoryID(principal))
-	if err != nil {
-		return fmt.Errorf("revoke profile session: %w", err)
-	}
-	if command.RowsAffected() == 0 {
+	var lockedSessionID string
+	err = tx.QueryRow(ctx, `
+		SELECT session.id::text FROM auth_sessions session
+		WHERE session.id::text = $1 AND session.active_profile_id::text = $2
+		  AND ($3 OR (session.authorization_scope = 'category' AND session.category_id::text = $4
+		       AND EXISTS (SELECT 1 FROM devices device WHERE device.id = session.device_id AND device.category_id = session.category_id)))
+		  AND session.profile_grant_expires_at > now() AND session.revoked_at IS NULL AND session.refresh_expires_at > now()
+		FOR UPDATE
+	`, sessionID, profileID, principal.IsGlobalAdministrator(), principalCategoryID(principal)).Scan(&lockedSessionID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrSessionNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("lock profile session: %w", err)
+	}
+	revokedIDs, err := lockActiveCompatibilitySessionIDs(ctx, tx, lockedSessionID)
+	if err != nil {
+		return fmt.Errorf("lock profile compatibility sessions: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE auth_sessions SET revoked_at = now(), revoked_reason = 'profile_manager_revoked' WHERE id = $1::uuid`, lockedSessionID); err != nil {
+		return fmt.Errorf("revoke profile session: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit profile session revocation: %w", err)
 	}
+	notifyCompatibilitySessionRevocations(s.compatibilitySessionRevocationNotifier(), revokedIDs)
 	return nil
 }
 
 func (s *Service) RevokeSession(ctx context.Context, principal Principal, sessionID string) error {
-	if strings.TrimSpace(sessionID) == "" {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
 		return ErrSessionNotFound
 	}
-	command, err := s.pool.Exec(ctx, `
-		UPDATE auth_sessions session
-		SET revoked_at = COALESCE(session.revoked_at, now()),
-		    revoked_reason = COALESCE(session.revoked_reason, 'user_revoked')
-		WHERE session.id::text = $1
-		  AND session.user_id = $2
-		  AND session.revoked_at IS NULL
-		  AND (
-		    $3
-		    OR (
-		      session.authorization_scope = 'category'
-		      AND session.category_id::text = $4
-		      AND EXISTS (
-		        SELECT 1 FROM devices device
-		        WHERE device.id = session.device_id AND device.category_id = session.category_id
-		      )
-		    )
-		  )
-	`, sessionID, principal.UserID, principal.IsGlobalAdministrator(), principalCategoryID(principal))
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		return fmt.Errorf("begin session revocation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var lockedSessionID string
+	err = tx.QueryRow(ctx, `
+		SELECT session.id::text FROM auth_sessions session
+		WHERE session.id::text = $1 AND session.user_id = $2::uuid AND session.revoked_at IS NULL
+		  AND ($3 OR (session.authorization_scope = 'category' AND session.category_id::text = $4
+		       AND EXISTS (SELECT 1 FROM devices device WHERE device.id = session.device_id AND device.category_id = session.category_id)))
+		FOR UPDATE
+	`, sessionID, principal.UserID, principal.IsGlobalAdministrator(), principalCategoryID(principal)).Scan(&lockedSessionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrSessionNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("lock session revocation: %w", err)
+	}
+	revokedIDs, err := lockActiveCompatibilitySessionIDs(ctx, tx, lockedSessionID)
+	if err != nil {
+		return fmt.Errorf("lock compatibility sessions for revocation: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE auth_sessions SET revoked_at = now(), revoked_reason = 'user_revoked' WHERE id = $1::uuid`, lockedSessionID); err != nil {
 		return fmt.Errorf("revoke session: %w", err)
 	}
-	if command.RowsAffected() == 0 {
-		return ErrSessionNotFound
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit session revocation: %w", err)
 	}
+	notifyCompatibilitySessionRevocations(s.compatibilitySessionRevocationNotifier(), revokedIDs)
+	return nil
+}
+
+func (s *Service) revokeNativeSession(ctx context.Context, nativeSessionID, userID, reason string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin native session revocation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var lockedSessionID string
+	err = tx.QueryRow(ctx, `SELECT id::text FROM auth_sessions WHERE id = $1::uuid AND user_id = $2::uuid FOR UPDATE`, nativeSessionID, userID).Scan(&lockedSessionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("lock native session revocation: %w", err)
+	}
+	revokedIDs, err := lockActiveCompatibilitySessionIDs(ctx, tx, lockedSessionID)
+	if err != nil {
+		return fmt.Errorf("lock linked compatibility sessions: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE auth_sessions SET revoked_at = COALESCE(revoked_at, now()), revoked_reason = COALESCE(revoked_reason, $2) WHERE id = $1::uuid`, lockedSessionID, reason); err != nil {
+		return fmt.Errorf("revoke native session: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit native session revocation: %w", err)
+	}
+	notifyCompatibilitySessionRevocations(s.compatibilitySessionRevocationNotifier(), revokedIDs)
+	return nil
+}
+
+func lockActiveCompatibilitySessionIDs(ctx context.Context, tx pgx.Tx, nativeSessionID string) ([]string, error) {
+	rows, err := tx.Query(ctx, `SELECT id::text FROM jellyfin_compat_sessions WHERE auth_session_id = $1::uuid AND revoked_at IS NULL AND expires_at > now() ORDER BY id FOR UPDATE`, nativeSessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func notifyCompatibilitySessionRevocations(notifier func([]string), sessionIDs []string) {
+	if notifier == nil || len(sessionIDs) == 0 {
+		return
+	}
+	defer func() { _ = recover() }()
+	notifier(sessionIDs)
+}
+
+func (s *Service) clearNativeProfileCompatibilitySessions(ctx context.Context, nativeSessionID, userID, profileID, reason string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var lockedSessionID string
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM auth_sessions WHERE id = $1::uuid AND user_id = $2::uuid AND active_profile_id = $3::uuid FOR UPDATE`, nativeSessionID, userID, profileID).Scan(&lockedSessionID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	revokedIDs, err := lockActiveCompatibilitySessionIDs(ctx, tx, lockedSessionID)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE auth_sessions SET active_profile_id = NULL, profile_grant_expires_at = NULL, profile_context_hash = NULL WHERE id = $1::uuid`, lockedSessionID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE jellyfin_compat_sessions SET revoked_at = COALESCE(revoked_at, now()), revoked_reason = COALESCE(revoked_reason, $2) WHERE auth_session_id = $1::uuid AND profile_id = $3::uuid`, lockedSessionID, reason, profileID); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	notifyCompatibilitySessionRevocations(s.compatibilitySessionRevocationNotifier(), revokedIDs)
 	return nil
 }
 
@@ -1335,7 +1433,7 @@ func upsertDevice(ctx context.Context, tx pgx.Tx, userID, role string, input Log
 	return deviceID, deviceCategory, nil
 }
 
-func reserveDeviceSlot(ctx context.Context, tx pgx.Tx, userID string) error {
+func lockDeviceOwner(ctx context.Context, tx pgx.Tx, userID string) error {
 	var lockedUserID string
 	if err := tx.QueryRow(ctx, `
 		SELECT id::text
@@ -1345,7 +1443,10 @@ func reserveDeviceSlot(ctx context.Context, tx pgx.Tx, userID string) error {
 	`, userID).Scan(&lockedUserID); err != nil {
 		return fmt.Errorf("lock device owner: %w", err)
 	}
+	return nil
+}
 
+func requireAvailableDeviceSlot(ctx context.Context, tx pgx.Tx, userID string) error {
 	var deviceCount int
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*)
@@ -1358,6 +1459,13 @@ func reserveDeviceSlot(ctx context.Context, tx pgx.Tx, userID string) error {
 		return ErrDeviceQuotaReached
 	}
 	return nil
+}
+
+func reserveDeviceSlot(ctx context.Context, tx pgx.Tx, userID string) error {
+	if err := lockDeviceOwner(ctx, tx, userID); err != nil {
+		return err
+	}
+	return requireAvailableDeviceSlot(ctx, tx, userID)
 }
 
 func passwordLoginCategoryID(ctx context.Context, tx pgx.Tx, userID, role string) (*string, error) {

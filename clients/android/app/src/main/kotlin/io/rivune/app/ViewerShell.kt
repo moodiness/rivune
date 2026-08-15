@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -80,6 +81,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -268,7 +270,14 @@ private fun ViewerRoot(
                 isTv = state.isTv,
                 onAccount = { showAccount = true },
             )
-            Row(modifier = Modifier.weight(1f)) {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(
+                        start = if (state.isTv) ViewerTvPadding else 0.dp,
+                        bottom = if (state.isTv) RivuneSpacing.xl else 0.dp,
+                    ),
+            ) {
                 if (useRail) {
                     ViewerRail(
                         selected = state.viewer.selectedTab,
@@ -377,16 +386,22 @@ private fun ProfilePreferencesScreen(
 ) {
     val padding = if (isTv) ViewerTvPadding else ViewerPhonePadding
     val settings = state.settings
+    val backFocus = remember { FocusRequester() }
+    LaunchedEffect(isTv) {
+        if (isTv) backFocus.requestFocus()
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
-            .navigationBarsPadding(),
+            .navigationBarsPadding()
+            .imePadding(),
     ) {
         ScreenToolbar(
             title = stringResource(R.string.viewer_preferences),
             onBack = onBack,
             isTv = isTv,
+            backModifier = Modifier.focusRequester(backFocus),
         )
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
@@ -544,6 +559,7 @@ private fun LanguagePreferenceCard(
     isTv: Boolean,
     onSelect: (String) -> Unit,
 ) {
+    val keyboardController = LocalSoftwareKeyboardController.current
     val standardOptions = listOf(
         "auto" to stringResource(R.string.viewer_language_auto),
         "en" to stringResource(R.string.viewer_language_english),
@@ -564,6 +580,7 @@ private fun LanguagePreferenceCard(
     }
     val submitCustom = {
         customValue.trim().takeIf { it.isNotEmpty() && it != selected }?.let(onSelect)
+        keyboardController?.hide()
         Unit
     }
     PreferenceChoiceCard(
@@ -610,6 +627,7 @@ private fun PreferenceChoiceCard(
     onSelect: (String) -> Unit,
     extraContent: (@Composable () -> Unit)? = null,
 ) {
+    val readOnlyDescription = stringResource(R.string.viewer_preferences_read_only)
     Surface(
         modifier = Modifier.widthIn(max = ViewerPreferencesMaxWidth).fillMaxWidth(),
         shape = RivuneShapes.large,
@@ -634,12 +652,16 @@ private fun PreferenceChoiceCard(
                 options.forEach { (value, label) ->
                     val isSelected = selected == value
                     RivuneFocusSurface(
-                        onClick = { if (!isSelected) onSelect(value) },
-                        enabled = enabled,
+                        onClick = { if (enabled && !isSelected) onSelect(value) },
+                        enabled = enabled || isTv,
                         selected = isSelected,
                         isTv = isTv,
                         shape = RivuneShapes.pill,
-                        modifier = Modifier.heightIn(min = if (isTv) ViewerTvTarget else ViewerPhoneTarget),
+                        modifier = Modifier
+                            .heightIn(min = if (isTv) ViewerTvTarget else ViewerPhoneTarget)
+                            .semantics {
+                                if (!enabled) stateDescription = readOnlyDescription
+                            },
                     ) {
                         Row(
                             modifier = Modifier.padding(horizontal = RivuneSpacing.md, vertical = RivuneSpacing.xs),
@@ -689,7 +711,10 @@ private fun ViewerHeader(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = if (isTv) RivuneDimensions.buttonHeightTv else RivuneDimensions.fieldHeight)
-            .padding(horizontal = if (isTv) ViewerTvPadding else ViewerPhonePadding),
+            .padding(
+                horizontal = if (isTv) ViewerTvPadding else ViewerPhonePadding,
+                vertical = if (isTv) RivuneSpacing.xxl else 0.dp,
+            ),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.md),
     ) {
@@ -725,6 +750,10 @@ private fun ViewerRail(
     isTv: Boolean,
     onSelect: (ViewerTab) -> Unit,
 ) {
+    val selectedFocus = remember { FocusRequester() }
+    LaunchedEffect(isTv, selected) {
+        if (isTv) selectedFocus.requestFocus()
+    }
     NavigationRail(
         modifier = Modifier
             .fillMaxHeight()
@@ -748,6 +777,7 @@ private fun ViewerRail(
                 ),
                 modifier = Modifier
                     .heightIn(min = if (isTv) ViewerTvTarget else ViewerPhoneTarget)
+                    .then(if (tab == selected) Modifier.focusRequester(selectedFocus) else Modifier)
                     .semantics { contentDescription = label },
             )
             Spacer(Modifier.height(if (isTv) RivuneSpacing.sm else RivuneSpacing.xxs))
@@ -827,7 +857,7 @@ private fun HomeRoot(
         if (loading == ViewerLoading.HOME && continueWatching.isEmpty() && collections.isEmpty()) {
             item { MediaRowSkeleton(isTv = isTv) }
         }
-        if (collections.isEmpty() && loading != ViewerLoading.HOME) {
+        if (collections.isEmpty() && loading != ViewerLoading.HOME && failure == null) {
             item {
                 InlineEmpty(
                     title = stringResource(R.string.home_empty_collections_title),
@@ -862,7 +892,7 @@ private fun HomeRoot(
                     } else {
                         LazyRow(
                             horizontalArrangement = Arrangement.spacedBy(ViewerCardGap),
-                            contentPadding = PaddingValues(end = padding),
+                            contentPadding = PaddingValues(start = RivuneSpacing.xxs, end = padding),
                         ) {
                             items(collection.folders, key = { it.id ?: "${collection.id}:${it.title}" }) { folder ->
                                 FolderTile(
@@ -901,16 +931,23 @@ private fun FolderRoot(
             .statusBarsPadding()
             .navigationBarsPadding(),
     ) {
+        val backFocus = remember { FocusRequester() }
+        LaunchedEffect(isTv, folder.folder.id) {
+            if (isTv) backFocus.requestFocus()
+        }
         ScreenToolbar(
             title = collectionTitle ?: stringResource(R.string.home_folders),
             onBack = onBack,
             isTv = isTv,
+            backModifier = Modifier.focusRequester(backFocus),
         )
         Column(modifier = Modifier.padding(horizontal = padding)) {
             Text(
                 text = listOfNotNull(folder.folder.coverEmoji, folder.folder.title).joinToString(" "),
                 modifier = Modifier.semantics { heading() },
                 style = if (isTv) MaterialTheme.typography.displayLarge else MaterialTheme.typography.headlineLarge,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
             )
             Spacer(Modifier.height(RivuneSpacing.xs))
             Text(
@@ -930,7 +967,7 @@ private fun FolderRoot(
                 Spacer(Modifier.height(RivuneSpacing.md))
             }
         }
-        if (folder.items.isEmpty() && loading != ViewerLoading.FOLDER) {
+        if (folder.items.isEmpty() && loading != ViewerLoading.FOLDER && failure == null) {
             InlineEmpty(
                 title = stringResource(R.string.folder_empty_title),
                 body = stringResource(R.string.folder_empty_body),
@@ -938,7 +975,7 @@ private fun FolderRoot(
             )
         } else {
             LazyVerticalGrid(
-                columns = GridCells.Adaptive(if (isTv) RivuneDimensions.posterWidthTv else RivuneDimensions.posterWidth),
+                columns = GridCells.Adaptive(RivuneDimensions.posterWidth),
                 modifier = Modifier.weight(1f),
                 contentPadding = PaddingValues(start = padding, end = padding, bottom = RivuneSpacing.xxxl),
                 horizontalArrangement = Arrangement.spacedBy(ViewerCardGap),
@@ -980,12 +1017,23 @@ private fun SearchRoot(
 ) {
     var query by remember(state.query) { mutableStateOf(state.query) }
     val trimmed = query.trim()
-    val submit = { if (trimmed.length >= 2) onSearch(trimmed) }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val firstResultFocus = remember { FocusRequester() }
+    val submit = {
+        if (trimmed.length >= 2) {
+            onSearch(trimmed)
+            keyboardController?.hide()
+        }
+    }
     val padding = if (isTv) ViewerTvPadding else ViewerPhonePadding
+    LaunchedEffect(isTv, state.query, state.items.firstOrNull()?.id) {
+        if (isTv && state.items.isNotEmpty()) firstResultFocus.requestFocus()
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = padding),
+            .padding(horizontal = padding)
+            .imePadding(),
     ) {
         RivuneTextField(
             value = query,
@@ -1034,7 +1082,7 @@ private fun SearchRoot(
         }
         when {
             state.items.isNotEmpty() -> LazyVerticalGrid(
-                columns = GridCells.Adaptive(if (isTv) RivuneDimensions.posterWidthTv else RivuneDimensions.posterWidth),
+                columns = GridCells.Adaptive(RivuneDimensions.posterWidth),
                 modifier = Modifier.weight(1f),
                 contentPadding = PaddingValues(bottom = RivuneSpacing.xxxl),
                 horizontalArrangement = Arrangement.spacedBy(ViewerCardGap),
@@ -1045,6 +1093,11 @@ private fun SearchRoot(
                         target = item,
                         imageUrl = artworkUrl(item.posterUrl ?: item.backgroundUrl),
                         isTv = isTv,
+                        modifier = if (item == state.items.first()) {
+                            Modifier.focusRequester(firstResultFocus)
+                        } else {
+                            Modifier
+                        },
                         onClick = { onMedia(item) },
                     )
                 }
@@ -1133,7 +1186,7 @@ private fun LibraryRoot(
             )
         } else {
             LazyVerticalGrid(
-                columns = GridCells.Adaptive(if (isTv) RivuneDimensions.posterWidthTv else RivuneDimensions.posterWidth),
+                columns = GridCells.Adaptive(RivuneDimensions.posterWidth),
                 modifier = Modifier.weight(1f),
                 contentPadding = PaddingValues(bottom = RivuneSpacing.xxxl),
                 horizontalArrangement = Arrangement.spacedBy(ViewerCardGap),
@@ -1253,6 +1306,7 @@ private fun CalendarRoot(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DetailScreen(
     state: ViewerState,
@@ -1280,6 +1334,17 @@ private fun DetailScreen(
     )
     val cast = movie?.cast ?: series?.cast.orEmpty()
     val padding = if (isTv) ViewerTvPadding else ViewerPhonePadding
+    val backFocus = remember { FocusRequester() }
+    val playFocus = remember { FocusRequester() }
+    val hasPlayAction = detail.target.mediaType != "series"
+    val showStatus = state.inlineFailure != null || state.loading == ViewerLoading.DETAIL ||
+        state.loading == ViewerLoading.SEASON || state.loading == ViewerLoading.SOURCES ||
+        state.loading == ViewerLoading.ACTION
+    LaunchedEffect(isTv, detail.target.id, state.inlineFailure) {
+        if (isTv && state.sourcePicker == null) {
+            if (hasPlayAction && state.inlineFailure == null) playFocus.requestFocus() else backFocus.requestFocus()
+        }
+    }
     val detailLoadingLabel = stringResource(
         when (state.loading) {
             ViewerLoading.SEASON -> R.string.viewer_loading_season
@@ -1294,12 +1359,26 @@ private fun DetailScreen(
             .statusBarsPadding()
             .navigationBarsPadding(),
     ) {
-        ScreenToolbar(title = title, onBack = onBack, isTv = isTv)
+        ScreenToolbar(title = title, onBack = onBack, isTv = isTv, backModifier = Modifier.focusRequester(backFocus))
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = padding, end = padding, bottom = RivuneSpacing.huge),
             verticalArrangement = Arrangement.spacedBy(RivuneSpacing.xl),
         ) {
+            if (showStatus) {
+                item {
+                    InlineStatus(
+                        failure = state.inlineFailure,
+                        loading = state.loading == ViewerLoading.DETAIL ||
+                            state.loading == ViewerLoading.SEASON ||
+                            state.loading == ViewerLoading.SOURCES ||
+                            state.loading == ViewerLoading.ACTION,
+                        onRetry = onRetry,
+                        isTv = isTv,
+                        loadingLabel = detailLoadingLabel,
+                    )
+                }
+            }
             item {
                 BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
                     val wide = maxWidth >= RivuneBreakpoints.expanded
@@ -1315,6 +1394,7 @@ private fun DetailScreen(
                                 onPlay = onPlay,
                                 onToggleLibrary = onToggleLibrary,
                                 onToggleWatched = onToggleWatched,
+                                playModifier = Modifier.focusRequester(playFocus),
                                 modifier = Modifier.weight(0.54f),
                             )
                         }
@@ -1330,29 +1410,21 @@ private fun DetailScreen(
                                 onPlay = onPlay,
                                 onToggleLibrary = onToggleLibrary,
                                 onToggleWatched = onToggleWatched,
+                                playModifier = Modifier.focusRequester(playFocus),
                             )
                         }
                     }
                 }
             }
-            item {
-                InlineStatus(
-                    failure = state.inlineFailure,
-                    loading = state.loading == ViewerLoading.DETAIL ||
-                        state.loading == ViewerLoading.SEASON ||
-                        state.loading == ViewerLoading.SOURCES ||
-                        state.loading == ViewerLoading.ACTION,
-                    onRetry = onRetry,
-                    isTv = isTv,
-                    loadingLabel = detailLoadingLabel,
-                )
-            }
             if (cast.isNotEmpty()) {
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(RivuneSpacing.sm)) {
                         SectionTitle(stringResource(R.string.viewer_cast), isTv)
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.xs)) {
-                            items(cast, key = { it.id }) { member ->
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.xs),
+                            verticalArrangement = Arrangement.spacedBy(RivuneSpacing.xs),
+                        ) {
+                            cast.forEach { member ->
                                 Surface(
                                     color = MaterialTheme.colorScheme.surface,
                                     shape = RivuneShapes.small,
@@ -1372,7 +1444,10 @@ private fun DetailScreen(
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(RivuneSpacing.sm)) {
                         SectionTitle(stringResource(R.string.viewer_seasons), isTv)
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(ViewerCardGap)) {
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = RivuneSpacing.xxs),
+                            horizontalArrangement = Arrangement.spacedBy(ViewerCardGap),
+                        ) {
                             items(series.seasons, key = { it.id }) { summary ->
                                 SeasonTile(
                                     title = summary.name,
@@ -1438,6 +1513,7 @@ private fun DetailSummary(
     onPlay: () -> Unit,
     onToggleLibrary: () -> Unit,
     onToggleWatched: () -> Unit,
+    playModifier: Modifier = Modifier,
     modifier: Modifier = Modifier,
 ) {
     val locale = Locale.getDefault()
@@ -1452,6 +1528,8 @@ private fun DetailSummary(
             text = title,
             modifier = Modifier.semantics { heading() },
             style = if (isTv) MaterialTheme.typography.displayLarge else MaterialTheme.typography.headlineLarge,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
         )
         if (metadata.isNotEmpty()) {
             Text(
@@ -1460,9 +1538,6 @@ private fun DetailSummary(
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
-        if (!overview.isNullOrBlank()) {
-            Text(text = overview, style = MaterialTheme.typography.bodyLarge)
-        }
         if (detail.target.mediaType != "series") {
             RivunePrimaryButton(
                 label = stringResource(R.string.viewer_play),
@@ -1470,7 +1545,7 @@ private fun DetailSummary(
                 enabled = actionsEnabled,
                 isTv = isTv,
                 icon = Icons.Rounded.PlayArrow,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = playModifier.fillMaxWidth(),
             )
         }
         if (detail.target.mediaType != "episode") {
@@ -1496,6 +1571,9 @@ private fun DetailSummary(
                 icon = if (watched) Icons.Rounded.Check else Icons.Rounded.Add,
                 modifier = Modifier.fillMaxWidth(),
             )
+        }
+        if (!overview.isNullOrBlank()) {
+            Text(text = overview, style = MaterialTheme.typography.bodyLarge)
         }
         detail.progress?.takeIf { it.durationSeconds > 0 && !it.completed }?.let { progress ->
             PlaybackProgressSummary(progress.positionSeconds, progress.durationSeconds)
@@ -1530,80 +1608,101 @@ private fun SourcePickerDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
-        Surface(
+        Box(
             modifier = Modifier
-                .fillMaxWidth(if (isTv) 0.66f else 0.92f)
-                .widthIn(max = RivuneDimensions.contentMaxTablet)
-                .heightIn(max = RivuneDimensions.contentMaxTablet),
-            shape = RivuneShapes.large,
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = RivuneElevation.overlay,
+                .fillMaxSize()
+                .padding(
+                    horizontal = if (isTv) RivuneSpacing.huge else RivuneSpacing.md,
+                    vertical = if (isTv) RivuneSpacing.xl else RivuneSpacing.md,
+                ),
+            contentAlignment = Alignment.Center,
         ) {
-            Column(modifier = Modifier.padding(if (isTv) RivuneSpacing.xxl else RivuneSpacing.lg)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            stringResource(R.string.viewer_choose_source),
-                            modifier = Modifier.semantics { heading() },
-                            style = MaterialTheme.typography.headlineMedium,
-                        )
-                        Text(
-                            picker.target.title,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth(if (isTv) 0.72f else 1f)
+                    .widthIn(max = RivuneDimensions.contentMaxTablet)
+                    .fillMaxHeight(),
+                shape = RivuneShapes.large,
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = RivuneElevation.overlay,
+            ) {
+                Column(modifier = Modifier.padding(if (isTv) RivuneSpacing.xxl else RivuneSpacing.lg)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                stringResource(R.string.viewer_choose_source),
+                                modifier = Modifier.semantics { heading() },
+                                style = MaterialTheme.typography.headlineMedium,
+                            )
+                            Text(
+                                picker.target.title,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                        RivuneTextButton(label = stringResource(R.string.pin_cancel), onClick = onDismiss, isTv = isTv)
                     }
-                    RivuneTextButton(label = stringResource(R.string.pin_cancel), onClick = onDismiss, isTv = isTv)
-                }
-                Spacer(Modifier.height(RivuneSpacing.md))
-                InlineStatus(
-                    loading = loading,
-                    failure = failure,
-                    onRetry = onRetry,
-                    isTv = isTv,
-                    loadingLabel = stringResource(R.string.viewer_preparing_source),
-                )
-                if (picker.partial) {
-                    InlineWarning(stringResource(R.string.viewer_sources_partial))
-                    Spacer(Modifier.height(RivuneSpacing.sm))
-                }
-                if (picker.options.isEmpty() && failure == null) {
-                    InlineEmpty(
-                        title = stringResource(R.string.viewer_sources_empty_title),
-                        body = stringResource(R.string.viewer_sources_empty_body),
+                    Spacer(Modifier.height(RivuneSpacing.md))
+                    InlineStatus(
+                        loading = loading,
+                        failure = failure,
+                        onRetry = onRetry,
+                        isTv = isTv,
+                        loadingLabel = stringResource(R.string.viewer_preparing_source),
                     )
-                } else {
-                    LazyColumn(verticalArrangement = Arrangement.spacedBy(RivuneSpacing.xs)) {
-                        items(picker.options, key = { it.id }) { option ->
-                            RivuneFocusSurface(
-                                onClick = {
-                                    val players = ExternalPlaybackSupport(externalPlayers)
-                                        .playersFor(option.mode, option.protocol, option.container)
-                                    if (players.isEmpty()) onChoose(option, null) else targetSource = option
-                                },
-                                isTv = isTv,
-                                enabled = !loading,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .then(
-                                        if (option.id == picker.options.first().id) Modifier.focusRequester(firstSourceFocus)
-                                        else Modifier,
-                                    ),
-                            ) {
-                                Column(modifier = Modifier.padding(RivuneSpacing.md)) {
-                                    Text(option.name, style = MaterialTheme.typography.titleMedium)
-                                    Text(
-                                        text = listOfNotNull(
-                                            option.addonName,
-                                            option.description,
-                                            option.container?.uppercase(Locale.getDefault()),
-                                            option.protocol.uppercase(Locale.getDefault()),
-                                        ).joinToString(" · "),
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                    )
+                    if (picker.partial) {
+                        InlineWarning(stringResource(R.string.viewer_sources_partial))
+                        Spacer(Modifier.height(RivuneSpacing.sm))
+                    }
+                    if (picker.options.isEmpty() && failure == null) {
+                        InlineEmpty(
+                            title = stringResource(R.string.viewer_sources_empty_title),
+                            body = stringResource(R.string.viewer_sources_empty_body),
+                        )
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.weight(1f, fill = false),
+                            contentPadding = PaddingValues(vertical = RivuneSpacing.xxs),
+                            verticalArrangement = Arrangement.spacedBy(RivuneSpacing.xs),
+                        ) {
+                            items(picker.options, key = { it.id }) { option ->
+                                RivuneFocusSurface(
+                                    onClick = {
+                                        val players = ExternalPlaybackSupport(externalPlayers)
+                                            .playersFor(option.mode, option.protocol, option.container)
+                                        if (players.isEmpty()) onChoose(option, null) else targetSource = option
+                                    },
+                                    isTv = isTv,
+                                    enabled = !loading,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .then(
+                                            if (option.id == picker.options.first().id) Modifier.focusRequester(firstSourceFocus)
+                                            else Modifier,
+                                        ),
+                                ) {
+                                    Column(modifier = Modifier.padding(RivuneSpacing.md)) {
+                                        Text(
+                                            option.name,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                            style = MaterialTheme.typography.titleMedium,
+                                        )
+                                        Text(
+                                            text = listOfNotNull(
+                                                option.addonName,
+                                                option.description,
+                                                option.container?.uppercase(Locale.getDefault()),
+                                                option.protocol.uppercase(Locale.getDefault()),
+                                            ).joinToString(" · "),
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1645,55 +1744,78 @@ private fun PlaybackTargetDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
-        Surface(
+        Box(
             modifier = Modifier
-                .fillMaxWidth(if (isTv) 0.58f else 0.88f)
-                .widthIn(max = RivuneDimensions.contentMax),
-            shape = RivuneShapes.large,
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = RivuneElevation.overlay,
+                .fillMaxSize()
+                .padding(
+                    horizontal = if (isTv) RivuneSpacing.huge else RivuneSpacing.md,
+                    vertical = if (isTv) RivuneSpacing.xl else RivuneSpacing.md,
+                ),
+            contentAlignment = Alignment.Center,
         ) {
-            Column(
-                modifier = Modifier.padding(if (isTv) RivuneSpacing.xxl else RivuneSpacing.lg),
-                verticalArrangement = Arrangement.spacedBy(RivuneSpacing.xs),
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth(if (isTv) 0.62f else 1f)
+                    .widthIn(max = RivuneDimensions.contentMax)
+                    .fillMaxHeight(),
+                shape = RivuneShapes.large,
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = RivuneElevation.overlay,
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            stringResource(R.string.viewer_choose_player),
-                            modifier = Modifier.semantics { heading() },
-                            style = MaterialTheme.typography.headlineMedium,
-                        )
-                        Text(
-                            source.name,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
+                Column(
+                    modifier = Modifier.padding(if (isTv) RivuneSpacing.xxl else RivuneSpacing.lg),
+                    verticalArrangement = Arrangement.spacedBy(RivuneSpacing.xs),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                stringResource(R.string.viewer_choose_player),
+                                modifier = Modifier.semantics { heading() },
+                                style = MaterialTheme.typography.headlineMedium,
+                            )
+                            Text(
+                                source.name,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                        RivuneTextButton(label = stringResource(R.string.pin_cancel), onClick = onDismiss, isTv = isTv)
                     }
-                    RivuneTextButton(label = stringResource(R.string.pin_cancel), onClick = onDismiss, isTv = isTv)
-                }
-                Spacer(Modifier.height(RivuneSpacing.sm))
-                if (source.mode != io.rivune.api.PlaybackMode.EXTERNAL) {
-                    PlaybackTargetRow(
-                        label = stringResource(R.string.viewer_player_rivune),
-                        supporting = stringResource(R.string.viewer_player_rivune_body),
-                        isTv = isTv,
-                        onClick = { onChoose(null) },
-                        modifier = Modifier.focusRequester(firstTargetFocus),
-                    )
-                }
-                players.forEachIndexed { index, player ->
-                    PlaybackTargetRow(
-                        label = player.label,
-                        supporting = stringResource(R.string.viewer_player_external_body),
-                        isTv = isTv,
-                        onClick = { onChoose(player) },
-                        modifier = if (source.mode == io.rivune.api.PlaybackMode.EXTERNAL && index == 0) {
-                            Modifier.focusRequester(firstTargetFocus)
-                        } else {
-                            Modifier
-                        },
-                    )
+                    Spacer(Modifier.height(RivuneSpacing.sm))
+                    LazyColumn(
+                        modifier = Modifier.weight(1f, fill = false),
+                        contentPadding = PaddingValues(vertical = RivuneSpacing.xxs),
+                        verticalArrangement = Arrangement.spacedBy(RivuneSpacing.xs),
+                    ) {
+                        if (source.mode != io.rivune.api.PlaybackMode.EXTERNAL) {
+                            item(key = "rivune") {
+                                PlaybackTargetRow(
+                                    label = stringResource(R.string.viewer_player_rivune),
+                                    supporting = stringResource(R.string.viewer_player_rivune_body),
+                                    isTv = isTv,
+                                    onClick = { onChoose(null) },
+                                    modifier = Modifier.focusRequester(firstTargetFocus),
+                                )
+                            }
+                        }
+                        items(players, key = { it.packageName }) { player ->
+                            PlaybackTargetRow(
+                                label = player.label,
+                                supporting = stringResource(R.string.viewer_player_external_body),
+                                isTv = isTv,
+                                onClick = { onChoose(player) },
+                                modifier = if (
+                                    source.mode == io.rivune.api.PlaybackMode.EXTERNAL && player == players.first()
+                                ) {
+                                    Modifier.focusRequester(firstTargetFocus)
+                                } else {
+                                    Modifier
+                                },
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1714,10 +1836,12 @@ private fun PlaybackTargetRow(
         modifier = modifier.fillMaxWidth(),
     ) {
         Column(modifier = Modifier.padding(RivuneSpacing.md)) {
-            Text(label, style = MaterialTheme.typography.titleMedium)
+            Text(label, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
             Text(
                 supporting,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
@@ -1738,99 +1862,158 @@ private fun AccountDialog(
 ) {
     val displayedName = profileName ?: stringResource(R.string.viewer_unknown_profile)
     val targetSize = if (isTv) ViewerTvTarget else ViewerPhoneTarget
-    AlertDialog(
+    val firstActionFocus = remember { FocusRequester() }
+    LaunchedEffect(isTv) {
+        if (isTv) firstActionFocus.requestFocus()
+    }
+    BackHandler(onBack = onDismiss)
+    Dialog(
         onDismissRequest = onDismiss,
-        icon = { Icon(Icons.Rounded.AccountCircle, contentDescription = null) },
-        title = { Text(stringResource(R.string.viewer_account_title), modifier = Modifier.semantics { heading() }) },
-        text = {
-            Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(RivuneSpacing.md),
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(
+                    horizontal = if (isTv) RivuneSpacing.huge else RivuneSpacing.md,
+                    vertical = if (isTv) RivuneSpacing.xl else RivuneSpacing.md,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth(if (isTv) 0.62f else 1f)
+                    .widthIn(max = RivuneDimensions.contentMax)
+                    .fillMaxHeight(),
+                shape = RivuneShapes.large,
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = RivuneElevation.overlay,
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.md),
+                Column(
+                    modifier = Modifier.padding(if (isTv) RivuneSpacing.xxl else RivuneSpacing.lg),
+                    verticalArrangement = Arrangement.spacedBy(RivuneSpacing.md),
                 ) {
-                    RivuneArtwork(
-                        model = profileAvatarModel,
-                        fallback = displayedName.trim().take(1).takeIf { it.isNotBlank() }
-                            ?.uppercase(Locale.getDefault()) ?: stringResource(R.string.viewer_profile_fallback),
-                        modifier = Modifier.size(targetSize).clip(CircleShape),
-                    )
-                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(RivuneSpacing.xxs)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.sm),
+                    ) {
+                        Icon(Icons.Rounded.AccountCircle, contentDescription = null)
                         Text(
-                            text = stringResource(R.string.viewer_profile).uppercase(Locale.getDefault()),
-                            color = MaterialTheme.colorScheme.primary,
-                            style = MaterialTheme.typography.labelMedium,
-                        )
-                        Text(
-                            text = displayedName,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.titleLarge,
-                        )
-                        Text(
-                            text = stringResource(R.string.viewer_server).uppercase(Locale.getDefault()),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                        Text(
-                            text = serverName,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.bodyMedium,
+                            stringResource(R.string.viewer_account_title),
+                            modifier = Modifier.weight(1f).semantics { heading() },
+                            style = MaterialTheme.typography.headlineMedium,
                         )
                     }
+                    LazyColumn(
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(vertical = RivuneSpacing.xxs),
+                        verticalArrangement = Arrangement.spacedBy(RivuneSpacing.md),
+                    ) {
+                        item {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.md),
+                            ) {
+                                RivuneArtwork(
+                                    model = profileAvatarModel,
+                                    fallback = displayedName.trim().take(1).takeIf { it.isNotBlank() }
+                                        ?.uppercase(Locale.getDefault()) ?: stringResource(R.string.viewer_profile_fallback),
+                                    modifier = Modifier.size(targetSize).clip(CircleShape),
+                                )
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(RivuneSpacing.xxs),
+                                ) {
+                                    Text(
+                                        text = stringResource(R.string.viewer_profile).uppercase(Locale.getDefault()),
+                                        color = MaterialTheme.colorScheme.primary,
+                                        style = MaterialTheme.typography.labelMedium,
+                                    )
+                                    Text(
+                                        text = displayedName,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.titleLarge,
+                                    )
+                                    Text(
+                                        text = stringResource(R.string.viewer_server).uppercase(Locale.getDefault()),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        style = MaterialTheme.typography.labelSmall,
+                                    )
+                                    Text(
+                                        text = serverName,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                    )
+                                }
+                            }
+                        }
+                        item { HorizontalDivider() }
+                        item {
+                            AccountAction(
+                                icon = Icons.Rounded.Settings,
+                                label = stringResource(R.string.viewer_preferences),
+                                isTv = isTv,
+                                modifier = Modifier.focusRequester(firstActionFocus),
+                                onClick = onPreferences,
+                            )
+                        }
+                        item {
+                            AccountAction(
+                                icon = Icons.Rounded.Person,
+                                label = stringResource(R.string.home_change_profile),
+                                isTv = isTv,
+                                onClick = onChangeProfile,
+                            )
+                        }
+                        item {
+                            AccountAction(
+                                icon = Icons.Rounded.Refresh,
+                                label = stringResource(R.string.home_refresh),
+                                isTv = isTv,
+                                onClick = onRefresh,
+                            )
+                        }
+                        item { HorizontalDivider() }
+                        item {
+                            RivuneTextButton(
+                                label = stringResource(R.string.logout),
+                                onClick = onLogout,
+                                icon = Icons.AutoMirrored.Rounded.Logout,
+                                destructive = true,
+                                isTv = isTv,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                    RivuneTextButton(
+                        label = stringResource(R.string.viewer_close),
+                        onClick = onDismiss,
+                        isTv = isTv,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
-                HorizontalDivider()
-                AccountAction(
-                    icon = Icons.Rounded.Settings,
-                    label = stringResource(R.string.viewer_preferences),
-                    isTv = isTv,
-                    onClick = onPreferences,
-                )
-                AccountAction(
-                    icon = Icons.Rounded.Person,
-                    label = stringResource(R.string.home_change_profile),
-                    isTv = isTv,
-                    onClick = onChangeProfile,
-                )
-                AccountAction(
-                    icon = Icons.Rounded.Refresh,
-                    label = stringResource(R.string.home_refresh),
-                    isTv = isTv,
-                    onClick = onRefresh,
-                )
-                HorizontalDivider()
-                RivuneTextButton(
-                    label = stringResource(R.string.logout),
-                    onClick = onLogout,
-                    icon = Icons.AutoMirrored.Rounded.Logout,
-                    destructive = true,
-                    isTv = isTv,
-                    modifier = Modifier.fillMaxWidth(),
-                )
             }
-        },
-        confirmButton = {
-            RivuneTextButton(
-                label = stringResource(R.string.viewer_close),
-                onClick = onDismiss,
-                isTv = isTv,
-            )
-        },
-    )
+        }
+    }
 }
 
 @Composable
-private fun AccountAction(icon: ImageVector, label: String, isTv: Boolean, onClick: () -> Unit) {
+private fun AccountAction(
+    icon: ImageVector,
+    label: String,
+    isTv: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
     RivuneSecondaryButton(
         label = label,
         onClick = onClick,
         icon = icon,
         isTv = isTv,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
     )
 }
 
@@ -1844,7 +2027,10 @@ private fun MediaRow(
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(RivuneSpacing.sm)) {
         SectionTitle(title, isTv)
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(ViewerCardGap)) {
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = RivuneSpacing.xxs),
+            horizontalArrangement = Arrangement.spacedBy(ViewerCardGap),
+        ) {
             items(items, key = { "${it.mediaType}:${it.id}" }) { item ->
                 MediaTile(
                     target = item,
@@ -2161,21 +2347,28 @@ private fun CalendarMonthButton(
     }
 }
 
-
 @Composable
-private fun ScreenToolbar(title: String, onBack: () -> Unit, isTv: Boolean) {
+private fun ScreenToolbar(
+    title: String,
+    onBack: () -> Unit,
+    isTv: Boolean,
+    backModifier: Modifier = Modifier,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = if (isTv) RivuneDimensions.buttonHeightTv else RivuneDimensions.fieldHeight)
-            .padding(horizontal = if (isTv) ViewerTvPadding else ViewerPhonePadding),
+            .padding(
+                horizontal = if (isTv) ViewerTvPadding else ViewerPhonePadding,
+                vertical = if (isTv) RivuneSpacing.xl else 0.dp,
+            ),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.sm),
     ) {
         val backDescription = stringResource(R.string.viewer_back)
         IconButton(
             onClick = onBack,
-            modifier = Modifier
+            modifier = backModifier
                 .size(if (isTv) ViewerTvTarget else ViewerPhoneTarget)
                 .semantics { contentDescription = backDescription },
         ) {

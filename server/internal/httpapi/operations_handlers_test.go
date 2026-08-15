@@ -72,6 +72,10 @@ func TestOperationsOverviewReturnsAdministratorStatus(t *testing.T) {
 			NextRunAt: &nextRun, LastStartedAt: &lastStarted, LastCompletedAt: &lastCompleted,
 			LastStatus: &lastStatus, LastResult: &operations.MetadataRefreshResult{Candidates: 50, Refreshed: 48, Failed: 2},
 		},
+		PostgreSQLPool:              operations.PostgreSQLPoolStatus{Acquired: 2, Idle: 3, Total: 5, Max: 10, WaitCount: 7, WaitDurationMilliseconds: 145},
+		TrackingOutbox:              operations.TrackingOutboxStatus{Pending: 12, Due: 3, OldestAgeSeconds: 420},
+		Addons:                      operations.AddonStatus{Total: 8, Enabled: 7, LatestUpdatedAt: &lastCompleted},
+		Playback:                    operations.PlaybackStatus{Active: 4, Transcoding: 2},
 		HousekeepingIntervalMinutes: 5,
 	}}
 	api := authenticatedOperationsAPI(service)
@@ -85,7 +89,9 @@ func TestOperationsOverviewReturnsAdministratorStatus(t *testing.T) {
 	}
 	var body operations.OperationsOverview
 	decodeResponse(t, response, &body)
-	if body.MetadataCache != service.overview.MetadataCache || body.HousekeepingIntervalMinutes != 5 {
+	if body.MetadataCache != service.overview.MetadataCache || body.PostgreSQLPool != service.overview.PostgreSQLPool ||
+		body.TrackingOutbox != service.overview.TrackingOutbox || body.Addons.Total != 8 || body.Addons.Enabled != 7 ||
+		body.Playback != service.overview.Playback || body.HousekeepingIntervalMinutes != 5 {
 		t.Fatalf("unexpected overview response %#v", body)
 	}
 	if body.MetadataRefresh.LastResult == nil || !reflect.DeepEqual(*body.MetadataRefresh.LastResult, *service.overview.MetadataRefresh.LastResult) {

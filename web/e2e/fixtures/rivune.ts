@@ -477,6 +477,28 @@ export class RivuneHarness {
       lastStatus: null as "succeeded" | "partial" | "failed" | null,
       lastResult: null as { candidates: number; refreshed: number; failed: number } | null,
     },
+    postgresqlPool: {
+      acquired: 2,
+      idle: 3,
+      total: 5,
+      max: 10,
+      waitCount: 7,
+      waitDurationMilliseconds: 145,
+    },
+    trackingOutbox: {
+      pending: 12,
+      due: 3,
+      oldestAgeSeconds: 420,
+    },
+    addons: {
+      total: 8,
+      enabled: 7,
+      latestUpdatedAt: createdAt,
+    },
+    playback: {
+      active: 4,
+      transcoding: 2,
+    },
     housekeepingIntervalMinutes: 15,
   };
   private readonly metadataOperationResponses: MetadataOperationResponse[] = [];

@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/moodiness/rivune/server/internal/requestwork"
 )
 
 const maximumProviderResponseBytes = 1 << 20
@@ -461,7 +463,17 @@ func (c *providerClient) request(ctx context.Context, provider, method, endpoint
 	} else if provider == "simkl" {
 		req.Header.Set("simkl-api-key", c.simkl.clientID)
 	}
+	requestwork.PropagateRequestID(req)
+	requestwork.BeginOutbound(ctx, requestwork.Now())
 	response, err := c.http.Do(req)
+	if err != nil {
+		requestwork.EndOutbound(ctx, requestwork.Now(), 0)
+	} else if response.Body == nil {
+		requestwork.EndOutbound(ctx, requestwork.Now(), 0)
+		response.Body = http.NoBody
+	} else {
+		response.Body = requestwork.ObserveBody(ctx, response.Body)
+	}
 	if err != nil {
 		return fmt.Errorf("%w: request failed", ErrProviderUnavailable)
 	}

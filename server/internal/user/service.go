@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -28,7 +29,9 @@ var (
 )
 
 type Service struct {
-	pool *pgxpool.Pool
+	pool       *pgxpool.Pool
+	notifierMu sync.RWMutex
+	notifier   func([]string)
 }
 
 type User struct {
@@ -60,6 +63,25 @@ type ProfileAccess struct {
 
 func NewService(pool *pgxpool.Pool) *Service {
 	return &Service{pool: pool}
+}
+
+func (s *Service) SetCompatibilitySessionRevocationNotifier(notifier func([]string)) {
+	if s == nil {
+		return
+	}
+	s.notifierMu.Lock()
+	s.notifier = notifier
+	s.notifierMu.Unlock()
+}
+
+func (s *Service) compatibilitySessionRevocationNotifier() func([]string) {
+	if s == nil {
+		return nil
+	}
+	s.notifierMu.RLock()
+	notifier := s.notifier
+	s.notifierMu.RUnlock()
+	return notifier
 }
 
 func (s *Service) List(ctx context.Context, principal auth.Principal) ([]User, error) {
@@ -167,6 +189,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, userID s
 		return User{}, fmt.Errorf("begin user update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	revokedCompatibilitySessionIDs := make([]string, 0)
 	if _, err := tx.Exec(ctx, "LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE"); err != nil {
 		return User{}, fmt.Errorf("lock users for update: %w", err)
 	}
@@ -217,6 +240,10 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, userID s
 		return User{}, fmt.Errorf("update user: %w", err)
 	}
 	if input.Password != nil || input.Role != nil {
+		revokedCompatibilitySessionIDs, err = lockUserCompatibilitySessionIDs(ctx, tx, current.ID, "")
+		if err != nil {
+			return User{}, fmt.Errorf("lock updated user compatibility sessions: %w", err)
+		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE auth_sessions
 			SET revoked_at = COALESCE(revoked_at, now()), revoked_reason = COALESCE(revoked_reason, 'account_updated')
@@ -228,6 +255,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, userID s
 	if err := tx.Commit(ctx); err != nil {
 		return User{}, fmt.Errorf("commit user update: %w", err)
 	}
+	notifyUserCompatibilitySessionRevocations(s.compatibilitySessionRevocationNotifier(), revokedCompatibilitySessionIDs)
 	return current, nil
 }
 
@@ -244,6 +272,7 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, userID s
 		return fmt.Errorf("begin user deletion: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	revokedCompatibilitySessionIDs := make([]string, 0)
 	if _, err := tx.Exec(ctx, "LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE"); err != nil {
 		return fmt.Errorf("lock users for deletion: %w", err)
 	}
@@ -276,6 +305,10 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, userID s
 	`, userID).Scan(&lockedCredentialCount); err != nil {
 		return fmt.Errorf("lock user Jellyfin credentials for deletion: %w", err)
 	}
+	revokedCompatibilitySessionIDs, err = lockUserCompatibilitySessionIDs(ctx, tx, userID, "")
+	if err != nil {
+		return fmt.Errorf("lock deleted user compatibility sessions: %w", err)
+	}
 	if _, err := tx.Exec(ctx, "DELETE FROM devices WHERE user_id::text = $1", userID); err != nil {
 		return fmt.Errorf("delete user devices: %w", err)
 	}
@@ -285,6 +318,7 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, userID s
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit user deletion: %w", err)
 	}
+	notifyUserCompatibilitySessionRevocations(s.compatibilitySessionRevocationNotifier(), revokedCompatibilitySessionIDs)
 	return nil
 }
 
@@ -450,6 +484,7 @@ func (s *Service) RevokeProfileAccess(ctx context.Context, principal auth.Princi
 		return fmt.Errorf("begin profile access revocation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	revokedCompatibilitySessionIDs := make([]string, 0)
 	authorized, err := auth.AuthorizeAndLockProfiles(ctx, tx, principal, []string{profileID}, true)
 	if err != nil {
 		return fmt.Errorf("authorize profile access revocation: %w", err)
@@ -458,6 +493,10 @@ func (s *Service) RevokeProfileAccess(ctx context.Context, principal auth.Princi
 		return ErrAccessNotFound
 	}
 
+	revokedCompatibilitySessionIDs, err = lockUserCompatibilitySessionIDs(ctx, tx, userID, profileID)
+	if err != nil {
+		return fmt.Errorf("lock revoked profile access compatibility sessions: %w", err)
+	}
 	command, err := tx.Exec(ctx, `
 		DELETE FROM user_profile_access
 		WHERE user_id::text = $1 AND profile_id::text = $2
@@ -475,10 +514,63 @@ func (s *Service) RevokeProfileAccess(ctx context.Context, principal auth.Princi
 	`, userID, profileID); err != nil {
 		return fmt.Errorf("clear revoked profile selections: %w", err)
 	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE jellyfin_compat_sessions compatibility
+		SET revoked_at = COALESCE(compatibility.revoked_at, now()),
+		    revoked_reason = COALESCE(compatibility.revoked_reason, 'profile_access_revoked')
+		FROM auth_sessions native
+		WHERE compatibility.auth_session_id = native.id
+		  AND native.user_id::text = $1
+		  AND compatibility.profile_id::text = $2
+	`, userID, profileID); err != nil {
+		return fmt.Errorf("revoke profile access compatibility sessions: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit profile access revocation: %w", err)
 	}
+	notifyUserCompatibilitySessionRevocations(s.compatibilitySessionRevocationNotifier(), revokedCompatibilitySessionIDs)
 	return nil
+}
+
+func lockUserCompatibilitySessionIDs(ctx context.Context, tx pgx.Tx, userID, profileID string) ([]string, error) {
+	if _, err := tx.Exec(ctx, `
+		SELECT id FROM auth_sessions
+		WHERE user_id = $1::uuid
+		  AND ($2 = '' OR active_profile_id::text = $2 OR id IN (SELECT auth_session_id FROM jellyfin_compat_sessions WHERE profile_id::text = $2))
+		ORDER BY id FOR UPDATE
+	`, userID, profileID); err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT compatibility.id::text
+		FROM jellyfin_compat_sessions compatibility
+		JOIN auth_sessions native ON native.id = compatibility.auth_session_id
+		WHERE native.user_id = $1::uuid
+		  AND ($2 = '' OR compatibility.profile_id::text = $2)
+		  AND compatibility.revoked_at IS NULL AND compatibility.expires_at > now()
+		ORDER BY compatibility.id FOR UPDATE OF compatibility
+	`, userID, profileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func notifyUserCompatibilitySessionRevocations(notifier func([]string), sessionIDs []string) {
+	if notifier == nil || len(sessionIDs) == 0 {
+		return
+	}
+	defer func() { _ = recover() }()
+	notifier(sessionIDs)
 }
 
 func ensureAnotherAdmin(ctx context.Context, tx pgx.Tx, excludedUserID string) error {

@@ -99,27 +99,33 @@ func (s *Service) ReloadLinkedPrincipal(ctx context.Context, sessionID, profileI
 		return Principal{}, fmt.Errorf("lock linked profile access: %w", err)
 	}
 
+	var refreshExpiresAt time.Time
 	if err := tx.QueryRow(ctx, `
 		SELECT id::text, authorization_scope, category_id::text,
-		       profile_grant_expires_at, profile_context_hash
+		       refresh_expires_at, profile_grant_expires_at, profile_context_hash
 		FROM auth_sessions
 		WHERE id::text = $1
 		  AND user_id::text = $2
 		  AND device_id::text = $3
 		  AND active_profile_id::text = $4
 		  AND revoked_at IS NULL
-		  AND refresh_expires_at > now()
-		  AND profile_grant_expires_at > now()
 		  AND profile_context_hash IS NOT NULL
 		FOR SHARE
 	`, sessionID, linkedUserID, linkedDeviceID, profileID).Scan(
 		&principal.SessionID, &principal.AuthorizationScope,
-		&principal.CategoryID, &principal.ProfileGrantExpiresAt,
+		&principal.CategoryID, &refreshExpiresAt, &principal.ProfileGrantExpiresAt,
 		&principal.ProfileContextHash,
 	); errors.Is(err, pgx.ErrNoRows) {
 		return Principal{}, ErrInvalidToken
 	} else if err != nil {
 		return Principal{}, fmt.Errorf("lock linked authentication session: %w", err)
+	}
+	var validatedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&validatedAt); err != nil {
+		return Principal{}, fmt.Errorf("read linked authentication validation time: %w", err)
+	}
+	if !refreshExpiresAt.After(validatedAt) || principal.ProfileGrantExpiresAt == nil || !principal.ProfileGrantExpiresAt.After(validatedAt) {
+		return Principal{}, ErrInvalidToken
 	}
 
 	scopeValid := validSessionScope(
@@ -136,6 +142,10 @@ func (s *Service) ReloadLinkedPrincipal(ctx context.Context, sessionID, profileI
 		scopeValid = false
 	}
 	if !scopeValid {
+		revokedIDs, lockErr := lockActiveCompatibilitySessionIDs(ctx, tx, principal.SessionID)
+		if lockErr != nil {
+			return Principal{}, fmt.Errorf("lock mismatched linked compatibility sessions: %w", lockErr)
+		}
 		if _, revokeErr := tx.Exec(ctx, `
 			UPDATE auth_sessions
 			SET revoked_at = COALESCE(revoked_at, now()),
@@ -147,11 +157,12 @@ func (s *Service) ReloadLinkedPrincipal(ctx context.Context, sessionID, profileI
 		if commitErr := tx.Commit(ctx); commitErr != nil {
 			return Principal{}, fmt.Errorf("commit linked session revocation: %w", commitErr)
 		}
+		notifyCompatibilitySessionRevocations(s.compatibilitySessionRevocationNotifier(), revokedIDs)
 		return Principal{}, ErrInvalidToken
 	}
 
 	access.AccessTimezone = timezone
-	if !ProfileAccessibleAt(access, time.Now().UTC()) {
+	if !ProfileAccessibleAt(access, validatedAt) {
 		return Principal{}, ErrInvalidToken
 	}
 	principal.ActiveProfileCanManage = principal.IsGlobalAdministrator() || grantedCanManage
@@ -164,12 +175,12 @@ func (s *Service) ReloadLinkedPrincipal(ctx context.Context, sessionID, profileI
 
 	command, err := tx.Exec(ctx, `
 		UPDATE auth_sessions
-		SET last_seen_at = now()
+		SET last_seen_at = clock_timestamp()
 		WHERE id = $1::uuid
 		  AND active_profile_id = $2::uuid
 		  AND revoked_at IS NULL
-		  AND refresh_expires_at > now()
-		  AND profile_grant_expires_at > now()
+		  AND refresh_expires_at > clock_timestamp()
+		  AND profile_grant_expires_at > clock_timestamp()
 	`, principal.SessionID, profileID)
 	if err != nil {
 		return Principal{}, fmt.Errorf("touch linked authentication session: %w", err)

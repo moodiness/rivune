@@ -1,4 +1,4 @@
-import { Activity, Bell, Boxes, Captions, Check, ChevronDown, ChevronUp, CircleStop, CircleUserRound, Clock3, Copy, Cpu, Database, ExternalLink, Eye, EyeOff, Film, GripVertical, HardDrive, ImagePlus, KeyRound, Languages, Layers3, LoaderCircle, MonitorSmartphone, Palette, Pencil, Plus, Radio, RefreshCw, Save, Search, Send, Server, Settings2, Shield, Sparkles, Trash2, Upload, Users, WandSparkles, Wrench, X } from "lucide-react";
+import { Activity, Bell, Boxes, Captions, Check, ChevronDown, ChevronUp, CircleStop, CircleUserRound, Clock3, Copy, Cpu, Database, ExternalLink, Eye, EyeOff, Film, GripVertical, HardDrive, ImagePlus, KeyRound, Languages, Layers3, Link, LoaderCircle, MonitorSmartphone, Palette, Pencil, Plus, Radio, RefreshCw, Save, Search, Send, Server, Settings2, Shield, Sparkles, Trash2, Upload, Users, WandSparkles, Wrench, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent } from "react";
 import { api, APIError } from "../api";
 import { useAuth } from "../auth";
@@ -509,7 +509,7 @@ function DevicesAdmin() {
   return <div className="admin-section devices-admin">
     <div className="admin-section__header">
       <div><span>{translate("admin.devices.eyebrow")}</span><h2>{translate("admin.devices.title")}</h2><p>{translate("admin.devices.description")}</p></div>
-      <CategoryFilter categories={categories} value={filter} onChange={setFilter} />
+      <div className="admin-section__actions"><a className="button button--secondary" href="/pair"><Link size={16} /> {translate("pairing.approveDevice")}</a><CategoryFilter categories={categories} value={filter} onChange={setFilter} /></div>
     </div>
     {error && <Notice>{error}</Notice>}
     {selectedDevices.length > 0 && <div className="bulk-move-bar" role="status"><strong>{translate("admin.devices.bulk.selected", { count: selectedDevices.length })}</strong><Button variant="secondary" onClick={() => openMove(selectedDevices)}><Layers3 size={16} /> {translate("admin.devices.bulk.move")}</Button></div>}
@@ -2332,6 +2332,50 @@ function OperationsAdmin() {
       </div>
     </section>
 
+    <section className="operations-panel operations-resources" aria-labelledby="operations-resources-title">
+      <header><div><span>{translate("admin.operations.resources.eyebrow")}</span><h3 id="operations-resources-title">{translate("admin.operations.resources.title")}</h3><p>{translate("admin.operations.resources.description")}</p></div></header>
+      <div className="operations-resource-grid" aria-label={translate("admin.operations.resources.label")}>
+        <OperationAggregate
+          icon={<Database />}
+          title={translate("admin.operations.resources.database.title")}
+          values={[
+            [translate("admin.operations.resources.database.acquired"), overview.postgresqlPool.acquired],
+            [translate("admin.operations.resources.database.idle"), overview.postgresqlPool.idle],
+            [translate("admin.operations.resources.database.total"), overview.postgresqlPool.total],
+            [translate("admin.operations.resources.database.maximum"), overview.postgresqlPool.max],
+            [translate("admin.operations.resources.database.waits"), overview.postgresqlPool.waitCount],
+            [translate("admin.operations.resources.database.waitTime"), formatOperationsDuration(overview.postgresqlPool.waitDurationMilliseconds)],
+          ]}
+        />
+        <OperationAggregate
+          icon={<Send />}
+          title={translate("admin.operations.resources.tracking.title")}
+          values={[
+            [translate("admin.operations.resources.tracking.pending"), overview.trackingOutbox.pending],
+            [translate("admin.operations.resources.tracking.due"), overview.trackingOutbox.due],
+            [translate("admin.operations.resources.tracking.oldest"), formatOperationsDuration(overview.trackingOutbox.oldestAgeSeconds * 1_000)],
+          ]}
+        />
+        <OperationAggregate
+          icon={<Boxes />}
+          title={translate("admin.operations.resources.addons.title")}
+          values={[
+            [translate("admin.operations.resources.addons.total"), overview.addons.total],
+            [translate("admin.operations.resources.addons.enabled"), overview.addons.enabled],
+            [translate("admin.operations.resources.addons.latestUpdate"), overview.addons.latestUpdatedAt ? formatOperationsAge(overview.addons.latestUpdatedAt) : translate("admin.operations.never")],
+          ]}
+        />
+        <OperationAggregate
+          icon={<Radio />}
+          title={translate("admin.operations.resources.playback.title")}
+          values={[
+            [translate("admin.operations.resources.playback.active"), overview.playback.active],
+            [translate("admin.operations.resources.playback.transcoding"), overview.playback.transcoding],
+          ]}
+        />
+      </div>
+    </section>
+
     <section className="operations-panel operations-schedule" aria-labelledby="operations-schedule-title">
       <header><div><span>{translate("admin.operations.schedule.eyebrow")}</span><h3 id="operations-schedule-title">{translate("admin.operations.schedule.title")}</h3><p>{translate("admin.operations.schedule.description")}</p></div><span className={`settings-save-state ${scheduleDirty ? "is-dirty" : "is-saved"}`} role="status" aria-live="polite">{savingSchedule ? <><LoaderCircle size={14} className="spin" /> {translate("common.status.saving")}</> : scheduleDirty ? <><Save size={14} /> {translate("common.status.unsavedChanges")}</> : <><Check size={14} /> {translate("common.status.saved")}</>}</span></header>
       <div className="operations-schedule__form">
@@ -2393,6 +2437,13 @@ function OperationMetric({ icon, value, label, tone = "" }: { icon: React.ReactN
   return <article className={`operation-metric ${tone ? `is-${tone}` : ""}`}><span aria-hidden="true">{icon}</span><div><strong>{value}</strong><small>{label}</small></div></article>;
 }
 
+function OperationAggregate({ icon, title, values }: { icon: React.ReactNode; title: string; values: ReadonlyArray<readonly [string, string | number]> }) {
+  return <article className="operation-aggregate" aria-label={title}>
+    <header><span aria-hidden="true">{icon}</span><h4>{title}</h4></header>
+    <dl>{values.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
+  </article>;
+}
+
 function OperationState({ label, value, tone = "" }: { label: string; value: string; tone?: "succeeded" | "partial" | "failed" | "" }) {
   return <div className={`operation-state ${tone ? `is-${tone}` : ""}`}><small>{label}</small><strong>{value}</strong></div>;
 }
@@ -2401,6 +2452,25 @@ function formatOperationsDate(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
+}
+
+function formatOperationsDuration(milliseconds: number): string {
+  const duration = Math.max(0, milliseconds);
+  const [value, unit] = duration >= 86_400_000
+    ? [duration / 86_400_000, "day"] as const
+    : duration >= 3_600_000
+      ? [duration / 3_600_000, "hour"] as const
+      : duration >= 60_000
+        ? [duration / 60_000, "minute"] as const
+        : duration >= 1_000
+          ? [duration / 1_000, "second"] as const
+          : [duration, "millisecond"] as const;
+  return new Intl.NumberFormat(locale, { style: "unit", unit, unitDisplay: "short", maximumFractionDigits: value < 10 ? 1 : 0 }).format(value);
+}
+
+function formatOperationsAge(value: string): string {
+  const timestamp = new Date(value).getTime();
+  return Number.isNaN(timestamp) ? translate("admin.operations.never") : formatOperationsDuration(Date.now() - timestamp);
 }
 
 function ActivityAdmin() {
