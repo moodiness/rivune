@@ -71,7 +71,14 @@ class BrowseContractsTest {
         try {
             val client = client(server)
             assertEquals(2, client.addonCatalogs().single().catalog.extra?.single()?.optionsLimit)
-            val search = client.searchAddonCatalogs("tv/雪", "café noir", 3, 24, listOf("genre" to "Drama", "genre" to "Sci Fi"))
+            val search = client.searchAddonCatalogs(
+                "tv/雪",
+                "café noir",
+                3,
+                24,
+                extras = listOf("genre" to "Drama", "genre" to "Sci Fi"),
+                language = "fr-FR",
+            )
             assertEquals("field", search.results.single().payload["metas"]?.jsonArray?.single()?.jsonObject?.get("nested")?.jsonObject?.get("array")?.jsonArray?.get(3)?.jsonObject?.get("future")?.jsonPrimitive?.content)
             assertEquals(9_223_372_036_854_775_000L, search.results.single().cache.maxAgeSeconds)
             assertEquals("addon_timeout", search.errors.single().code)
@@ -81,7 +88,7 @@ class BrowseContractsTest {
 
             server.takeRequest()
             assertEquals("/api/v1/addons/catalogs", server.takeRequest().path)
-            assertEquals("/api/v1/addons/catalogs/search/tv%2F%E9%9B%AA?search=caf%C3%A9%20noir&skip=3&limit=24&genre=Drama&genre=Sci%20Fi", server.takeRequest().path)
+            assertEquals("/api/v1/addons/catalogs/search/tv%2F%E9%9B%AA?search=caf%C3%A9%20noir&skip=3&limit=24&language=fr-FR&genre=Drama&genre=Sci%20Fi", server.takeRequest().path)
             assertEquals("/api/v1/addons/$addonId/resource/meta%2Fcustom/tv%2F%E9%9B%AA/id%2F%E9%9B%AA%3Fx?skip=0&limit=24&genre=Drama&genre=Sci%20Fi", server.takeRequest().path)
             assertEquals("/api/v1/addons/resources/meta%2Fcustom/tv%2F%E9%9B%AA/id%2F%E9%9B%AA%3Fx?genre=Drama&genre=Sci%20Fi", server.takeRequest().path)
         } finally {

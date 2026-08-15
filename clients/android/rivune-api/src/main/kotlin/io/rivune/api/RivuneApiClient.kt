@@ -502,9 +502,10 @@ class RivuneApiClient(
     suspend fun resolveCollectionFolderArtwork(
         collectionId: UUID,
         folderId: UUID,
+        language: String? = null,
     ): ResolvedCollectionFolder = request(
         path = "collections/$collectionId/folders/$folderId/items",
-        query = mapOf("page" to "1", "limit" to "1"),
+        query = mapOf("page" to "1", "limit" to "1", "language" to language),
         authenticated = true,
         client = collectionArtworkHttpClient,
     )
@@ -521,12 +522,14 @@ class RivuneApiClient(
         skip: Int? = null,
         limit: Int? = null,
         extras: List<Pair<String, String>> = emptyList(),
+        language: String? = null,
     ): AddonResourceBatch = requestWithQueryItems(
         path = "addons/catalogs/search/${encodePathSegment(type)}",
         query = listOfNotNull(
             "search" to search,
             skip?.let { "skip" to it.toString() },
             limit?.let { "limit" to it.toString() },
+            language?.let { "language" to it },
         ) + extras,
         authenticated = true,
     )
@@ -1275,6 +1278,7 @@ class RivuneApiClient(
         putPatch("maximumResolution", input.maximumResolution) { name, value -> put(name, value) }
         putPatch("preferDirectPlay", input.preferDirectPlay) { name, value -> put(name, value) }
         putPatch("audioLanguage", input.audioLanguage) { name, value -> put(name, value) }
+        putPatch("metadataLanguage", input.metadataLanguage) { name, value -> put(name, value) }
         putPatch("subtitleLanguage", input.subtitleLanguage) { name, value -> put(name, value) }
         putPatch("transcoding", input.transcoding) { name, value -> put(name, value) }
     }.toString()
