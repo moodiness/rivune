@@ -1,4 +1,4 @@
-# Rivune v1.6.0
+# Rivune v1.6.1
 
 ## Highlights
 
@@ -12,7 +12,7 @@
 
 ## Android installation
 
-- Download `rivune-android-1.6.0.apk` from this release and complete Android's package-installation prompt. Android 8.0 or newer is required.
+- Download `rivune-android-1.6.1.apk` from this release and complete Android's package-installation prompt. Android 8.0 or newer is required.
 - The public application ID is `io.rivune.app`.
 - `rivune-android-update.json` is the stable, Android-specific update feed. `SHA256SUMS` covers exactly the APK and that manifest.
 - Rivune never performs a silent install and contains no GitHub token. Android may require you to allow installs from the app that opens the APK before returning to Rivune.
@@ -25,10 +25,10 @@
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.6.0`
+- `ghcr.io/moodiness/rivune:1.6.1`
 - `ghcr.io/moodiness/rivune:1.6`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.5.3...v1.6.0
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.6.0...v1.6.1
