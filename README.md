@@ -64,7 +64,9 @@ The Android project includes the native Rivune application for phones, tablets, 
 
 Official Android releases provide a universal APK for phones, tablets, and Android TV. Download `rivune-android-<version>.apk` from the matching [GitHub Release](https://github.com/moodiness/rivune/releases), verify it with the published `SHA256SUMS`, and complete Android's normal package-installation prompt. The public application ID is `io.rivune.app` and Android 8.0 or newer is required.
 
-The installed app checks the dedicated `rivune-android-update.json` release asset at most once every 24 hours and also offers a manual check in preferences. It never contains a GitHub token. An update is downloaded only after consent, then its size, SHA-256, package identity, version code, and signing certificate are verified before Android shows its own installation confirmation. Silent installation is not supported; if Android blocks installs from this source, grant that system permission and return to Rivune to continue.
+The installed app checks the dedicated `rivune-android-update.json` release asset at most once every 24 hours and also offers a manual check in Settings. It never contains a GitHub token. An update is downloaded only after consent, then its size, SHA-256, package identity, version code, and signing certificate are verified before Android shows its own installation confirmation. Silent installation is not supported; if Android blocks installs from this source, grant that system permission and return to Rivune to continue.
+
+Android Settings also stores device-local startup, preferred-player, motion, language, accent, frame-rate matching, picture-format, and per-network quality choices. About shows the connected server/build details and can copy or export a bounded in-memory diagnostic report through Android's document picker; the report excludes credentials, profile/media data, URL paths, queries, and raw exception text.
 
 ```sh
 cd web && npm ci && npm run build
