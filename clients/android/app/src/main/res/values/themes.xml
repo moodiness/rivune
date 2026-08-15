@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="rivune_background">#07080B</color>
-    <color name="rivune_accent">#F29A78</color>
-    <color name="rivune_icon_background">#F29A78</color>
+    <color name="rivune_accent">#77A7FF</color>
+    <color name="rivune_icon_background">#000000</color>
 
     <style name="Theme.Rivune.Base" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/rivune_background</item>

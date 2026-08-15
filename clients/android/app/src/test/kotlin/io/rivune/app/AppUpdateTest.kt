@@ -18,6 +18,12 @@ import kotlinx.coroutines.runBlocking
 
 class AppUpdateTest {
     @Test
+    fun developmentBuildUsesUnavailableUpdateState() {
+        assertIs<AppUpdateState.Unavailable>(restingUpdateState(enabled = false))
+        assertIs<AppUpdateState.Idle>(restingUpdateState(enabled = true))
+    }
+
+    @Test
     fun parsesAndroidManifestAndIgnoresAdditionalFields() {
         val manifest = AppUpdateManifestParser.parse(validManifest(extra = ",\"future\":true"))
 

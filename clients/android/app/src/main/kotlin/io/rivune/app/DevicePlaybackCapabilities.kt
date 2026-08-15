@@ -1,5 +1,9 @@
 package io.rivune.app
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import io.rivune.api.PlaybackCapabilities
@@ -9,6 +13,12 @@ import io.rivune.api.PlaybackSubtitleMode
 
 private const val FALLBACK_MAXIMUM_VIDEO_HEIGHT = 720
 private const val FALLBACK_MAXIMUM_VIDEO_BITRATE_KBPS = 5_000
+private const val AUTOMATIC_METERED_MAXIMUM_HEIGHT = 720
+private const val AUTOMATIC_METERED_MAXIMUM_BITRATE_KBPS = 5_000
+private const val ECONOMY_MAXIMUM_HEIGHT = 480
+private const val ECONOMY_MAXIMUM_BITRATE_KBPS = 2_000
+private const val BALANCED_MAXIMUM_HEIGHT = 1_080
+private const val BALANCED_MAXIMUM_BITRATE_KBPS = 8_000
 
 private val STANDARD_VIDEO_SIZES = listOf(
     7680 to 4320,
@@ -31,6 +41,16 @@ private data class VideoSupport(
     val codec: String,
     val maximumHeight: Int,
     val maximumBitrateKbps: Int,
+)
+
+internal enum class PlaybackNetwork {
+    UNMETERED,
+    METERED,
+}
+
+internal data class PlaybackQualityLimit(
+    val maximumHeight: Int?,
+    val maximumVideoBitrateKbps: Int?,
 )
 
 internal object DevicePlaybackCapabilities {
@@ -83,6 +103,46 @@ internal object DevicePlaybackCapabilities {
             mediaProfiles = mediaProfiles,
         )
     }
+}
+
+internal fun detectPlaybackNetwork(context: Context): PlaybackNetwork = runCatching {
+    val connectivity = context.getSystemService(ConnectivityManager::class.java)
+        ?: return@runCatching PlaybackNetwork.METERED
+    val network = connectivity.activeNetwork ?: return@runCatching PlaybackNetwork.METERED
+    val capabilities = connectivity.getNetworkCapabilities(network)
+        ?: return@runCatching PlaybackNetwork.METERED
+    if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) {
+        PlaybackNetwork.UNMETERED
+    } else {
+        PlaybackNetwork.METERED
+    }
+}.getOrDefault(PlaybackNetwork.METERED)
+
+internal fun playbackQualityLimit(
+    quality: NetworkQualityPreference,
+    network: PlaybackNetwork,
+): PlaybackQualityLimit = when (quality) {
+    NetworkQualityPreference.AUTOMATIC -> if (network == PlaybackNetwork.METERED) {
+        PlaybackQualityLimit(AUTOMATIC_METERED_MAXIMUM_HEIGHT, AUTOMATIC_METERED_MAXIMUM_BITRATE_KBPS)
+    } else {
+        PlaybackQualityLimit(null, null)
+    }
+    NetworkQualityPreference.ECONOMY ->
+        PlaybackQualityLimit(ECONOMY_MAXIMUM_HEIGHT, ECONOMY_MAXIMUM_BITRATE_KBPS)
+    NetworkQualityPreference.BALANCED ->
+        PlaybackQualityLimit(BALANCED_MAXIMUM_HEIGHT, BALANCED_MAXIMUM_BITRATE_KBPS)
+    NetworkQualityPreference.MAXIMUM -> PlaybackQualityLimit(null, null)
+}
+
+internal fun PlaybackCapabilities.withQualityLimit(limit: PlaybackQualityLimit): PlaybackCapabilities = copy(
+    maximumHeight = maximumHeight.clampedTo(limit.maximumHeight),
+    maximumVideoBitrateKbps = maximumVideoBitrateKbps.clampedTo(limit.maximumVideoBitrateKbps),
+)
+
+private fun Int?.clampedTo(limit: Int?): Int? = when {
+    limit == null -> this
+    this == null -> limit
+    else -> minOf(this, limit)
 }
 
 private fun maximumDecoderSupport(decoderInfos: List<MediaCodecInfo>, mimeType: String): VideoSupport? =
