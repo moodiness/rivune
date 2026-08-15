@@ -157,8 +157,7 @@
 
 @layer components {
   .brand { display: inline-flex; align-items: center; gap: 12px; user-select: none; }
-  .brand__mark { width: 39px; aspect-ratio: 1; display: grid; place-items: center; border-radius: 13px; background: linear-gradient(145deg, #f8b090, #db7658); box-shadow: 0 9px 28px rgba(230, 126, 91, .28), inset 0 1px rgba(255, 255, 255, .38); color: #22110c; font-size: 19px; font-weight: 900; letter-spacing: -.08em; transform: rotate(-3deg); }
-  .brand__mark span { transform: rotate(3deg) translateX(-1px); }
+  .brand__mark { width: 39px; aspect-ratio: 1; display: block; flex: 0 0 auto; border-radius: 13px; }
   .brand__word { font-size: 22px; font-weight: 760; letter-spacing: -.045em; }
   .brand--compact .brand__mark { width: 36px; }
 
