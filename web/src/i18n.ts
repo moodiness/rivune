@@ -1475,7 +1475,7 @@ const en = {
 } as const;
 
 export type TranslationKey = keyof typeof en;
-export type TranslationCatalog = Partial<Record<TranslationKey, string>>;
+export type TranslationCatalog = Record<TranslationKey, string>;
 type Replacements = Record<string, string | number>;
 type LocaleModule = { default: TranslationCatalog };
 
