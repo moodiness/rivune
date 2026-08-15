@@ -43,8 +43,8 @@ Create and push one annotated tag:
 ```sh
 git switch main
 git pull --ff-only
-git tag -a v1.6.1 -m "Rivune v1.6.1"
-git push origin v1.6.1
+git tag -a v1.6.2 -m "Rivune v1.6.2"
+git push origin v1.6.2
 ```
 
 The tag push runs `Release candidate CI`. Its read-only `authorize` job resolves
@@ -90,7 +90,7 @@ docker compose -f compose.yaml -f compose.amd-intel.yaml config --format json | 
 If GitHub does not create the release-candidate run for an otherwise valid tag push, dispatch the same read-only gate without moving the tag:
 
 ```sh
-gh workflow run release-candidate.yml --ref main -f tag=v1.6.1
+gh workflow run release-candidate.yml --ref main -f tag=v1.6.2
 ```
 
 The manual path enforces the same SemVer, annotated-tag, current-`main`, and tag-target checks. Its successful `workflow_run` is eligible for the same external release-environment gate; it does not weaken artifact authorization or permit a stale or lightweight tag.
@@ -120,23 +120,23 @@ The environment response must show `moodiness` as required reviewer, `can_admins
 
 ## Published artifacts
 
-After all gates succeed, the workflow publishes one OCI manifest to `ghcr.io/moodiness/rivune` for exactly `linux/amd64` and `linux/arm64`, with provenance and an SBOM. A stable `v1.6.1` release receives:
+After all gates succeed, the workflow publishes one OCI manifest to `ghcr.io/moodiness/rivune` for exactly `linux/amd64` and `linux/arm64`, with provenance and an SBOM. A stable `v1.6.2` release receives:
 
 ```text
-1.6.1
+1.6.2
 1.6
 1
 latest
 ```
 
-The matching GitHub Release contains exactly `rivune-android-1.6.1.apk`, `rivune-android-update.json`, and `SHA256SUMS`. The JSON document is an Android-specific schema-v1 manifest with the common release metadata and one `package` object; it does not advertise unbuilt platforms. `SHA256SUMS` covers exactly the APK and JSON manifest. The APK is universal, uses application ID `io.rivune.app`, requires Android 8.0 or newer, and is signed with the certificate fingerprint recorded in the manifest.
+The matching GitHub Release contains exactly `rivune-android-1.6.2.apk`, `rivune-android-update.json`, and `SHA256SUMS`. The JSON document is an Android-specific schema-v1 manifest with the common release metadata and one `package` object; it does not advertise unbuilt platforms. `SHA256SUMS` covers exactly the APK and JSON manifest. The APK is universal, uses application ID `io.rivune.app`, requires Android 8.0 or newer, and is signed with the certificate fingerprint recorded in the manifest.
 
 A prerelease such as `v2.0.0-rc.1` receives its full SemVer tag but does not move the stable major, minor, or `latest` aliases. Its update manifest channel and GitHub prerelease flag are both `prerelease`. A stable release uses channel `stable`, becomes GitHub's latest release, and provides the stable URL `https://github.com/moodiness/rivune/releases/latest/download/rivune-android-update.json`. The workflow first publishes an unlisted OCI digest and records that exact digest in an authenticated HTML comment in the draft Release body. It validates the complete Release, promotes and verifies the exact immutable SemVer tag, publishes the Release once, then moves mutable stable aliases only while that tag is still GitHub's latest stable release. A rerun may publish a fresh unlisted build digest, but it adopts exactly one matching draft or published Release only after revalidating its metadata, curated body, digest marker, exact downloaded asset set, checksums, update-manifest references, and APK identity, signing certificate, and versions. Promotion always uses the originally recorded digest. Zero or multiple matching Releases, a different immutable image tag, or any mismatching Release data fails closed; an adopted draft is never deleted by retry cleanup.
 
 Verify the release and its OCI attestations after the workflow completes:
 
 ```sh
-image=ghcr.io/moodiness/rivune:1.6.1
+image=ghcr.io/moodiness/rivune:1.6.2
 docker buildx imagetools inspect "${image}"
 docker buildx imagetools inspect "${image}" --raw > rivune-manifest.json
 jq -e '[.manifests[] | select((.annotations // {})["vnd.docker.reference.type"] != "attestation-manifest") | [.platform.os, .platform.architecture]] | sort == [["linux", "amd64"], ["linux", "arm64"]]' rivune-manifest.json

@@ -1,4 +1,4 @@
-# Rivune v1.6.1
+# Rivune v1.6.2
 
 ## Highlights
 
@@ -9,10 +9,11 @@
 - Global administrators can export and atomically merge bounded, versioned profile archives across Rivune instances. Archives preserve explicit add-ons, collections, watch state, and non-secret tracking preferences while excluding passwords, PINs, sessions, assignment policy, tracking tokens, and integration credentials. Complete add-on transport URLs remain portable and may contain tokens, so the JSON must be protected as a credential file.
 - Native requests now receive validated or generated `X-Request-ID` correlation across completion logs and supported outbound calls. The Operations overview adds bounded PostgreSQL, tracking queue, add-on, and playback aggregates, and Jellyfin-compatible item requests honor limits above 200 through bounded internal pages.
 - Jellyfin clients can use profile-bound Quick Connect: a manager approves the code at `/pair`, and a single-use exchange creates only the selected profile session without storing an application password.
+- Every new Operations service-health label is translated across all 44 non-English interface catalogs, and complete catalog coverage is enforced at compile time.
 
 ## Android installation
 
-- Download `rivune-android-1.6.1.apk` from this release and complete Android's package-installation prompt. Android 8.0 or newer is required.
+- Download `rivune-android-1.6.2.apk` from this release and complete Android's package-installation prompt. Android 8.0 or newer is required.
 - The public application ID is `io.rivune.app`.
 - `rivune-android-update.json` is the stable, Android-specific update feed. `SHA256SUMS` covers exactly the APK and that manifest.
 - Rivune never performs a silent install and contains no GitHub token. Android may require you to allow installs from the app that opens the APK before returning to Rivune.
@@ -25,10 +26,10 @@
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.6.1`
+- `ghcr.io/moodiness/rivune:1.6.2`
 - `ghcr.io/moodiness/rivune:1.6`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.6.0...v1.6.1
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.6.0...v1.6.2

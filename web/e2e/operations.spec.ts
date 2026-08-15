@@ -1,6 +1,21 @@
 import { expect, test } from "./fixtures/rivune";
 import { selectOption } from "./helpers/select";
 
+test("Operations resource health follows the selected locale", async ({ page, rivune }) => {
+  rivune.setInterfaceLanguage("fr");
+  await page.goto("/#admin");
+  await expect(page.locator("html")).toHaveAttribute("lang", "fr");
+  await page.getByRole("button", { name: /Opérations/ }).click();
+  const serviceHealth = page.getByRole("region", { name: "État du service" });
+  await expect(serviceHealth.getByRole("heading", { name: "Pool de connexions PostgreSQL" })).toBeVisible();
+  await expect(serviceHealth).toContainText("Temps d’attente");
+  await expect(serviceHealth).toContainText("Boîte d’envoi du suivi");
+  await expect(serviceHealth).toContainText("Ancienneté de la dernière mise à jour");
+  await expect(serviceHealth).toContainText("Transcodage");
+  await expect(serviceHealth).not.toContainText("Service health");
+  await expect(serviceHealth).not.toContainText("Tracking outbox");
+});
+
 test("administrator monitors operations and runs fixed maintenance controls", async ({ page, rivune }) => {
   await page.setViewportSize({ width: 1568, height: 1000 });
   await page.goto("/#admin");
