@@ -1,26 +1,26 @@
 package io.rivune.app
 
-import android.animation.ValueAnimator
+import android.content.ActivityNotFoundException
 import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ClipDescription
+import android.content.Intent
 import android.os.Build
+import android.net.Uri
+import android.os.PersistableBundle
+import android.widget.Toast
 import android.view.HapticFeedbackConstants
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.animation.AnimatedVisibility
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -30,7 +30,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -47,26 +46,23 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Lock
-import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.SystemUpdate
-import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -79,20 +75,23 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -101,7 +100,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
-import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.stateDescription
@@ -119,6 +117,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.rivune.api.Profile
 import io.rivune.app.ui.components.RivuneArtwork
+import io.rivune.app.ui.components.RivuneCinematicBackground
+import io.rivune.app.ui.components.RivuneFunctionalSurface
 import io.rivune.app.ui.components.RivuneBrandLockup
 import io.rivune.app.ui.components.RivuneBrandMark
 import io.rivune.app.ui.components.RivuneFocusSurface
@@ -129,27 +129,80 @@ import io.rivune.app.ui.components.RivuneSkeleton
 import io.rivune.app.ui.components.RivuneTextButton
 import io.rivune.app.ui.components.RivuneTextField
 import io.rivune.app.ui.components.RivuneTestTags
+import io.rivune.app.ui.theme.LocalRivuneMotionPolicy
 import io.rivune.app.ui.theme.RivuneBreakpoints
 import io.rivune.app.ui.theme.RivuneDimensions
 import io.rivune.app.ui.theme.RivuneElevation
 import io.rivune.app.ui.theme.RivuneMotion
+import io.rivune.app.ui.theme.finiteAnimationSpec
 import io.rivune.app.ui.theme.RivuneShapes
 import io.rivune.app.ui.theme.RivuneSuccess
 import io.rivune.app.ui.theme.RivuneSpacing
 import io.rivune.app.ui.theme.RivuneTheme
-import java.util.Locale
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
-internal fun RivuneRoot(viewModel: RivuneViewModel, updates: AppUpdateCoordinator, activity: Activity) {
+internal fun RivuneRoot(
+    viewModel: RivuneViewModel,
+    updates: AppUpdateCoordinator,
+    activity: Activity,
+    systemAnimationsEnabled: Boolean,
+) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val updateState by updates.state.collectAsStateWithLifecycle()
+    val application = remember(activity) { activity.application as RivuneApplication }
+    val appPreferences by application.appPreferences.state.collectAsStateWithLifecycle()
+    val appLanguage = remember(activity) { currentAppLanguage(activity) }
+    val activityCoroutineScope = rememberCoroutineScope()
+    val diagnosticsCopied = stringResource(R.string.diagnostics_copied)
+    val diagnosticsCopyFailed = stringResource(R.string.diagnostics_copy_failed)
+    val diagnosticsExported = stringResource(R.string.diagnostics_exported)
+    val diagnosticsExportFailed = stringResource(R.string.diagnostics_export_failed)
+    val externalActionFailed = stringResource(R.string.external_action_failed)
+    var diagnosticExportRequested by rememberSaveable { mutableStateOf(false) }
+    val exportLauncher = rememberLauncherForActivityResult(diagnosticReportDocumentContract()) { uri ->
+        val shouldExport = diagnosticExportRequested
+        diagnosticExportRequested = false
+        if (uri != null && shouldExport) {
+            val input = diagnosticReportInput(
+                activity = activity,
+                state = state,
+                preferences = appPreferences,
+                events = application.diagnostics.snapshot(),
+            )
+            activityCoroutineScope.launch {
+                val exported = exportDiagnosticReport(activity.contentResolver, uri, input)
+                application.diagnostics.record(
+                    if (exported) DiagnosticEventCode.DIAGNOSTIC_EXPORT_SUCCEEDED
+                    else DiagnosticEventCode.DIAGNOSTIC_EXPORT_FAILED,
+                )
+                Toast.makeText(
+                    activity,
+                    if (exported) diagnosticsExported else diagnosticsExportFailed,
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+        }
+    }
     val inlineFailure = state.destination == AppDestination.Server ||
         state.destination == AppDestination.Pairing ||
         state.destination == AppDestination.Profiles ||
         state.pendingProfile != null
 
-    RivuneTheme {
+    fun currentDiagnosticReport(): DiagnosticReportInput = diagnosticReportInput(
+        activity = activity,
+        state = state,
+        preferences = appPreferences,
+        events = application.diagnostics.snapshot(),
+    )
+
+    RivuneTheme(
+        accentColor = appPreferences.accentColor,
+        animationPreference = appPreferences.animationPreference,
+        systemAnimationsEnabled = systemAnimationsEnabled,
+    ) {
+        val motionPolicy = LocalRivuneMotionPolicy.current
         Surface(
             modifier = Modifier.fillMaxSize(),
             color = MaterialTheme.colorScheme.background,
@@ -158,7 +211,8 @@ internal fun RivuneRoot(viewModel: RivuneViewModel, updates: AppUpdateCoordinato
                 AnimatedContent(
                     targetState = state.destination,
                     transitionSpec = {
-                        fadeIn(tween(RivuneMotion.normal)) togetherWith fadeOut(tween(RivuneMotion.fast))
+                        fadeIn(motionPolicy.finiteAnimationSpec(RivuneMotion.normal)) togetherWith
+                            fadeOut(motionPolicy.finiteAnimationSpec(RivuneMotion.fast))
                     },
                     label = "rivune-destination",
                 ) { destination ->
@@ -200,12 +254,83 @@ internal fun RivuneRoot(viewModel: RivuneViewModel, updates: AppUpdateCoordinato
                             viewModel = viewModel,
                             updateState = updateState,
                             onCheckForUpdates = updates::checkManually,
+                            appLanguage = appLanguage,
+                            onAppLanguage = { language ->
+                                if (saveAppLanguage(activity, language)) activity.recreate()
+                            },
+                            appPreferences = appPreferences,
+                            onStartupTab = application.appPreferences::setStartupTab,
+                            onPreferredPlayer = application.appPreferences::setPreferredPlayer,
+                            onAnimationPreference = application.appPreferences::setAnimationPreference,
+                            onAccentColor = application.appPreferences::setAccentColor,
+                            onFrameRateMatching = application.appPreferences::setFrameRateMatching,
+                            onVideoAspect = application.appPreferences::setVideoAspect,
+                            onWifiQuality = application.appPreferences::setWifiQuality,
+                            onMobileQuality = application.appPreferences::setMobileQuality,
+                            onChangeServer = viewModel::disconnectServer,
+                            onOpenExternalUrl = { url ->
+                                try {
+                                    activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                } catch (_: ActivityNotFoundException) {
+                                    Toast.makeText(activity, externalActionFailed, Toast.LENGTH_SHORT).show()
+                                } catch (_: SecurityException) {
+                                    Toast.makeText(activity, externalActionFailed, Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            onCopyDiagnostics = {
+                                val report = buildDiagnosticReport(currentDiagnosticReport())
+                                try {
+                                    val clipboard = activity.getSystemService(ClipboardManager::class.java)
+                                    val clip = ClipData.newPlainText("Rivune diagnostics", report)
+                                    clip.description.extras = PersistableBundle().apply {
+                                        val sensitiveKey = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                            ClipDescription.EXTRA_IS_SENSITIVE
+                                        } else {
+                                            CLIPBOARD_SENSITIVE_COMPAT_KEY
+                                        }
+                                        putBoolean(sensitiveKey, true)
+                                    }
+                                    clipboard.setPrimaryClip(clip)
+                                    Toast.makeText(activity, diagnosticsCopied, Toast.LENGTH_SHORT).show()
+                                    application.applicationScope.launch {
+                                        delay(DIAGNOSTIC_CLIPBOARD_LIFETIME_MS)
+                                        runCatching {
+                                            val current = clipboard.primaryClip
+                                            if (current?.itemCount == 1 && current.getItemAt(0).text?.toString() == report) {
+                                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                                                    clipboard.clearPrimaryClip()
+                                                } else {
+                                                    clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
+                                                }
+                                            }
+                                        }
+                                    }
+                                } catch (_: SecurityException) {
+                                    Toast.makeText(activity, diagnosticsCopyFailed, Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            onExportLogs = {
+                                diagnosticExportRequested = true
+                                try {
+                                    exportLauncher.launch(DIAGNOSTIC_REPORT_FILE_NAME)
+                                } catch (_: ActivityNotFoundException) {
+                                    diagnosticExportRequested = false
+                                    application.diagnostics.record(DiagnosticEventCode.DIAGNOSTIC_EXPORT_FAILED)
+                                    Toast.makeText(activity, diagnosticsExportFailed, Toast.LENGTH_SHORT).show()
+                                } catch (_: SecurityException) {
+                                    diagnosticExportRequested = false
+                                    application.diagnostics.record(DiagnosticEventCode.DIAGNOSTIC_EXPORT_FAILED)
+                                    Toast.makeText(activity, diagnosticsExportFailed, Toast.LENGTH_SHORT).show()
+                                }
+                            },
                         )
                     }
                 }
 
                 AnimatedVisibility(
                     visible = state.failure != null && !inlineFailure,
+                    enter = fadeIn(motionPolicy.finiteAnimationSpec(RivuneMotion.fast)),
+                    exit = fadeOut(motionPolicy.finiteAnimationSpec(RivuneMotion.fast)),
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .statusBarsPadding()
@@ -257,6 +382,53 @@ internal fun RivuneRoot(viewModel: RivuneViewModel, updates: AppUpdateCoordinato
     }
 }
 
+private const val DIAGNOSTIC_CLIPBOARD_LIFETIME_MS = 60_000L
+private const val CLIPBOARD_SENSITIVE_COMPAT_KEY = "android.content.extra.IS_SENSITIVE"
+
+private fun diagnosticReportInput(
+    activity: Activity,
+    state: RivuneUiState,
+    preferences: AppPreferencesState,
+    events: List<DiagnosticEvent>,
+): DiagnosticReportInput {
+    val metadata = collectAndroidDiagnosticMetadata(activity)
+    return DiagnosticReportInput(
+        generatedAtEpochMillis = System.currentTimeMillis(),
+        appVersionName = metadata.appVersionName,
+        appVersionCode = metadata.appVersionCode,
+        buildType = metadata.buildType,
+        serverUrl = state.serverInput,
+        serverDisplayName = state.serverName,
+        serverVersion = state.serverVersion,
+        serverProtocolVersion = state.protocolVersion,
+        sdkInt = metadata.sdkInt,
+        deviceModel = metadata.deviceModel,
+        isTelevision = metadata.isTelevision,
+        startupTab = when (preferences.startupTab) {
+            ViewerTab.HOME -> DiagnosticStartupTab.HOME
+            ViewerTab.SEARCH -> DiagnosticStartupTab.SEARCH
+            ViewerTab.LIBRARY -> DiagnosticStartupTab.LIBRARY
+            ViewerTab.CALENDAR -> DiagnosticStartupTab.CALENDAR
+        },
+        preferredPlayer = when (preferences.preferredPlayer) {
+            PreferredPlayer.Ask -> DiagnosticPreferredPlayer.ASK
+            PreferredPlayer.Rivune -> DiagnosticPreferredPlayer.RIVUNE
+            is PreferredPlayer.External -> DiagnosticPreferredPlayer.EXTERNAL
+        },
+        animationPreference = when (preferences.animationPreference) {
+            AnimationPreference.SYSTEM -> DiagnosticAnimationPreference.SYSTEM
+            AnimationPreference.FULL -> DiagnosticAnimationPreference.FULL
+            AnimationPreference.REDUCED -> DiagnosticAnimationPreference.REDUCED
+        },
+        accentColor = preferences.accentColor,
+        frameRateMatching = preferences.frameRateMatching.preferenceValue,
+        videoAspect = preferences.videoAspect.preferenceValue,
+        wifiQuality = preferences.wifiQuality.preferenceValue,
+        mobileQuality = preferences.mobileQuality.preferenceValue,
+        events = events,
+    )
+}
+
 @Composable
 private fun AppUpdateDialog(
     state: AppUpdateState,
@@ -268,6 +440,7 @@ private fun AppUpdateDialog(
     val visible = state is AppUpdateState.Available || state is AppUpdateState.Downloading ||
         state is AppUpdateState.ReadyToInstall || state is AppUpdateState.NeedsPermission ||
         state is AppUpdateState.Installing || state is AppUpdateState.Error || state is AppUpdateState.UpToDate
+    val motionPolicy = LocalRivuneMotionPolicy.current
     val confirmFocus = remember { FocusRequester() }
     LaunchedEffect(state, isTv) {
         if (isTv && visible && state !is AppUpdateState.Downloading && state !is AppUpdateState.Installing) {
@@ -296,12 +469,18 @@ private fun AppUpdateDialog(
         onDismissRequest = {
             if (state !is AppUpdateState.Downloading && state !is AppUpdateState.Installing) onDismiss()
         },
-        icon = { Icon(Icons.Rounded.SystemUpdate, contentDescription = null) },
+        icon = { Icon(Icons.Rounded.SystemUpdate, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
         title = { Text(title) },
         text = {
             Row(horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.md), verticalAlignment = Alignment.CenterVertically) {
-                if (state is AppUpdateState.Downloading || state is AppUpdateState.Installing) {
-                    CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+                if (
+                    motionPolicy.ambientAnimations &&
+                    (state is AppUpdateState.Downloading || state is AppUpdateState.Installing)
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(RivuneSpacing.xl),
+                        strokeWidth = RivuneDimensions.focusRing,
+                    )
                 }
                 Text(body)
             }
@@ -328,37 +507,28 @@ private fun AppUpdateDialog(
                 RivuneTextButton(label = stringResource(R.string.update_later), onClick = onDismiss, isTv = isTv)
             }
         },
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        shape = RivuneShapes.extraLarge,
     )
 }
 
 @Composable
 private fun LoadingScreen() {
-    val animationsEnabled = remember { ValueAnimator.areAnimatorsEnabled() }
-    val transition = rememberInfiniteTransition(label = "opening-rivune")
-    val pulse by transition.animateFloat(
-        initialValue = 0.45f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(900),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "opening-rivune-pulse",
-    )
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.safeDrawing)
-            .padding(RivuneSpacing.xl),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            RivuneBrandMark(size = 64.dp, mark = stringResource(R.string.brand_mark))
-            Spacer(Modifier.height(RivuneSpacing.xl))
+    RivuneCinematicBackground {
+        Column(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(RivuneSpacing.xl),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            RivuneBrandMark(size = RivuneDimensions.touchTarget)
+            Spacer(Modifier.height(RivuneSpacing.md))
             Text(
                 text = stringResource(R.string.loading),
                 style = MaterialTheme.typography.titleLarge,
             )
-            Spacer(Modifier.height(RivuneSpacing.md))
+            Spacer(Modifier.height(RivuneSpacing.xs))
             Row(
                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                 horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.sm),
@@ -366,8 +536,7 @@ private fun LoadingScreen() {
             ) {
                 Box(
                     Modifier
-                        .size(8.dp)
-                        .graphicsLayer { alpha = if (animationsEnabled) pulse else 1f }
+                        .size(RivuneSpacing.xs)
                         .clip(CircleShape)
                         .background(MaterialTheme.colorScheme.primary),
                 )
@@ -394,6 +563,7 @@ internal fun ServerScreen(
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
     var server by remember(serverInput) { mutableStateOf(serverInput) }
+    var editingServerOnTv by remember { mutableStateOf(false) }
     val view = LocalView.current
     val failureText = failure?.let { failureMessage(it) }
     val submit = { if (server.isNotBlank() && !isBusy) onConnect(server.trim()) }
@@ -403,23 +573,32 @@ internal fun ServerScreen(
     LaunchedEffect(isTv) {
         if (isTv) {
             keyboardController?.hide()
-            if (server.isBlank()) updateFocus.requestFocus() else submitFocus.requestFocus()
+            withFrameNanos { }
+            if (server.isBlank()) inputFocus.requestFocus() else submitFocus.requestFocus()
+        }
+    }
+    LaunchedEffect(editingServerOnTv) {
+        if (isTv && editingServerOnTv) {
+            inputFocus.requestFocus()
+            withFrameNanos { }
+            keyboardController?.show()
         }
     }
     LaunchedEffect(failure) {
         if (failure != null) performRejectHaptic(view)
     }
 
-
-
-    AuthFrame(isTv = isTv) {
-        RivuneScreenHeading(
-            eyebrow = stringResource(R.string.server_eyebrow),
-            title = stringResource(R.string.server_title),
-            body = stringResource(R.string.server_body),
-            isTv = isTv,
-        )
-        Spacer(Modifier.height(if (isTv) RivuneSpacing.xxl else RivuneSpacing.xl))
+    AuthFrame(
+        isTv = isTv,
+        heading = {
+            RivuneScreenHeading(
+                eyebrow = stringResource(R.string.server_eyebrow),
+                title = stringResource(R.string.server_title),
+                body = stringResource(R.string.server_body),
+                isTv = isTv,
+            )
+        },
+    ) {
         RivuneTextField(
             value = server,
             onValueChange = {
@@ -432,7 +611,19 @@ internal fun ServerScreen(
                 .focusRequester(inputFocus)
                 .focusProperties { down = if (server.isNotBlank()) submitFocus else updateFocus }
                 .onPreviewKeyEvent { event ->
-                    if (isTv && event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                    if (
+                        isTv &&
+                        !editingServerOnTv &&
+                        event.type == KeyEventType.KeyDown &&
+                        (
+                            event.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER ||
+                                event.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_ENTER ||
+                                event.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_NUMPAD_ENTER
+                            )
+                    ) {
+                        editingServerOnTv = true
+                        true
+                    } else if (isTv && event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
                         if (server.isNotBlank()) submitFocus.requestFocus() else updateFocus.requestFocus()
                         true
                     } else {
@@ -445,14 +636,19 @@ internal fun ServerScreen(
             enabled = !isBusy,
             isError = failure != null,
             isTv = isTv,
+            readOnly = isTv && !editingServerOnTv,
             leadingIcon = Icons.Rounded.Dns,
             keyboardOptions = KeyboardOptions(
                 keyboardType = KeyboardType.Uri,
                 imeAction = ImeAction.Go,
             ),
-            keyboardActions = KeyboardActions(onGo = { submit() }),
+            keyboardActions = KeyboardActions(onGo = {
+                editingServerOnTv = false
+                keyboardController?.hide()
+                submit()
+            }),
         )
-        Spacer(Modifier.height(RivuneSpacing.md))
+        Spacer(Modifier.height(RivuneSpacing.sm))
         RivunePrimaryButton(
             label = stringResource(
                 when {
@@ -472,7 +668,7 @@ internal fun ServerScreen(
             loading = isBusy,
             loadingDescription = stringResource(R.string.server_loading_description),
         )
-        Spacer(Modifier.height(RivuneSpacing.sm))
+        Spacer(Modifier.height(RivuneSpacing.xxs))
         RivuneTextButton(
             label = stringResource(R.string.update_check),
             onClick = onCheckForUpdates,
@@ -545,175 +741,292 @@ internal fun PairingScreen(
         }
     }
 
-    BoxWithConstraints(
-        modifier = Modifier
-            .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.safeDrawing),
-        contentAlignment = Alignment.TopCenter,
-    ) {
-        val tablet = maxWidth >= RivuneBreakpoints.compact
-        val fontScale = LocalDensity.current.fontScale
-        val tvLandscape = isTv &&
-            maxWidth >= RivuneBreakpoints.expanded &&
-            maxHeight >= 480.dp &&
-            fontScale < 1.3f
+    RivuneCinematicBackground {
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing),
+            contentAlignment = Alignment.TopCenter,
+        ) {
+            val tablet = maxWidth >= RivuneBreakpoints.medium
+            val fontScale = LocalDensity.current.fontScale
+            val tvLandscape = isTv &&
+                maxWidth >= RivuneBreakpoints.expanded &&
+                maxHeight >= 600.dp &&
+                fontScale < 1.5f
 
-        if (tvLandscape) {
-            Row(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = RivuneSpacing.display, vertical = RivuneSpacing.xxl),
-                horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.xxxl),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(
+            if (tvLandscape) {
+                Box(
                     modifier = Modifier
-                        .width(360.dp)
-                        .fillMaxHeight(),
-                    verticalArrangement = Arrangement.Center,
+                        .fillMaxSize()
+                        .padding(horizontal = RivuneSpacing.display, vertical = RivuneSpacing.xxl),
                 ) {
                     RivuneBrandLockup(
                         name = stringResource(R.string.app_name),
-                        mark = stringResource(R.string.brand_mark),
-                        tagline = stringResource(R.string.brand_tagline),
-                        markSize = 48.dp,
+                        modifier = Modifier.align(Alignment.TopCenter),
+                        markSize = RivuneSpacing.xxxl,
                     )
-                    Spacer(Modifier.height(RivuneSpacing.xxl))
-                    RivuneScreenHeading(
-                        eyebrow = stringResource(R.string.pairing_eyebrow),
-                        title = stringResource(R.string.pairing_title),
-                        body = stringResource(R.string.pairing_body),
-                        isTv = true,
-                    )
+
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .widthIn(max = 620.dp)
+                            .fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        RivuneScreenHeading(
+                            eyebrow = stringResource(R.string.pairing_eyebrow),
+                            title = stringResource(R.string.pairing_title),
+                            body = null,
+                            isTv = true,
+                            compactTitle = true,
+                            modifier = Modifier.widthIn(max = 600.dp),
+                            textAlign = TextAlign.Center,
+                        )
+                        Spacer(Modifier.height(RivuneSpacing.lg))
+                        Box(
+                            modifier = Modifier
+                                .widthIn(max = 440.dp)
+                                .fillMaxWidth(),
+                        ) {
+                            PairingStateContent(
+                                visualState = visualState,
+                                pairing = pairing,
+                                expired = expired,
+                                failure = failure,
+                                isTv = true,
+                                compactTv = true,
+                                copied = copied,
+                                onCopy = null,
+                            )
+                        }
+                        Spacer(Modifier.height(RivuneSpacing.md))
+                        Box(
+                            modifier = Modifier
+                                .widthIn(max = 440.dp)
+                                .fillMaxWidth(),
+                        ) {
+                            PairingActions(
+                                pairing = pairing,
+                                pairingAccepted = pairingAccepted,
+                                isBusy = isBusy,
+                                failure = failure,
+                                isTv = true,
+                                horizontal = true,
+                                onRestart = onRestart,
+                                onDisconnectRequest = { confirmDisconnect = true },
+                                focusRequester = pairingActionFocus,
+                            )
+                        }
+                    }
+                }
+            } else {
+                val horizontalPadding = responsiveHorizontalPadding(maxWidth, isTv)
+                val contentMaxWidth = when {
+                    isTv -> RivuneDimensions.preferencesMax
+                    tablet -> RivuneDimensions.contentMaxTablet
+                    else -> RivuneDimensions.contentMax
+                }
+                val compactHeight = maxHeight < 720.dp
+                val sectionGap = when {
+                    compactHeight -> RivuneSpacing.md
+                    tablet -> RivuneSpacing.xxl
+                    else -> RivuneSpacing.lg
                 }
 
                 Column(
                     modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
+                        .widthIn(max = contentMaxWidth)
+                        .fillMaxWidth()
+                        .heightIn(min = maxHeight)
+                        .verticalScroll(rememberScrollState())
+                        .padding(
+                            horizontal = horizontalPadding,
+                            vertical = if (compactHeight) RivuneSpacing.sm else RivuneSpacing.lg,
+                        ),
+                    verticalArrangement = if (compactHeight) Arrangement.Top else Arrangement.Center,
                 ) {
+                    RivuneBrandLockup(
+                        name = stringResource(R.string.app_name),
+                        tagline = if (tablet || isTv) stringResource(R.string.brand_tagline) else null,
+                        markSize = if (isTv) RivuneSpacing.display else RivuneSpacing.xxxl,
+                    )
+                    Spacer(Modifier.height(if (compactHeight) RivuneSpacing.md else RivuneSpacing.lg))
+                    RivuneScreenHeading(
+                        eyebrow = stringResource(R.string.pairing_eyebrow),
+                        title = stringResource(R.string.pairing_title),
+                        body = stringResource(R.string.pairing_body),
+                        isTv = isTv,
+                    )
+                    Spacer(Modifier.height(sectionGap))
                     PairingStateContent(
                         visualState = visualState,
                         pairing = pairing,
                         expired = expired,
                         failure = failure,
-                        isTv = true,
-                        compactTv = true,
+                        isTv = isTv,
+                        compactTv = false,
                         copied = copied,
-                        onCopy = null,
+                        onCopy = copyCode,
                     )
-                    Spacer(Modifier.height(RivuneSpacing.xl))
+                    Spacer(Modifier.height(sectionGap))
                     PairingActions(
                         pairing = pairing,
                         pairingAccepted = pairingAccepted,
                         isBusy = isBusy,
                         failure = failure,
-                        isTv = true,
+                        isTv = isTv,
                         onRestart = onRestart,
                         onDisconnectRequest = { confirmDisconnect = true },
                         focusRequester = pairingActionFocus,
                     )
                 }
             }
-        } else {
-            val horizontalPadding = when {
-                isTv -> RivuneSpacing.display
-                tablet -> RivuneSpacing.huge
-                else -> RivuneSpacing.xl
-            }
-            val contentMaxWidth = when {
-                isTv -> 880.dp
-                tablet -> RivuneDimensions.contentMaxTablet
-                else -> RivuneDimensions.contentMax
-            }
-            val compactHeight = maxHeight < 720.dp
-            val sectionGap = when {
-                compactHeight -> RivuneSpacing.lg
-                tablet -> RivuneSpacing.xxl
-                else -> RivuneSpacing.xl
-            }
-
-            Column(
-                modifier = Modifier
-                    .widthIn(max = contentMaxWidth)
-                    .fillMaxWidth()
-                    .heightIn(min = maxHeight)
-                    .verticalScroll(rememberScrollState())
-                    .padding(
-                        horizontal = horizontalPadding,
-                        vertical = if (compactHeight) RivuneSpacing.md else RivuneSpacing.xl,
-                    ),
-                verticalArrangement = if (compactHeight) Arrangement.Top else Arrangement.Center,
-            ) {
-                RivuneBrandLockup(
-                    name = stringResource(R.string.app_name),
-                    mark = stringResource(R.string.brand_mark),
-                    tagline = if (tablet || isTv) stringResource(R.string.brand_tagline) else null,
-                    markSize = if (isTv) 64.dp else 48.dp,
-                )
-                Spacer(Modifier.height(if (compactHeight) RivuneSpacing.lg else RivuneSpacing.xl))
-                RivuneScreenHeading(
-                    eyebrow = stringResource(R.string.pairing_eyebrow),
-                    title = stringResource(R.string.pairing_title),
-                    body = stringResource(R.string.pairing_body),
-                    isTv = isTv,
-                )
-                Spacer(Modifier.height(sectionGap))
-                PairingStateContent(
-                    visualState = visualState,
-                    pairing = pairing,
-                    expired = expired,
-                    failure = failure,
-                    isTv = isTv,
-                    compactTv = false,
-                    copied = copied,
-                    onCopy = copyCode,
-                )
-                Spacer(Modifier.height(sectionGap))
-                PairingActions(
-                    pairing = pairing,
-                    pairingAccepted = pairingAccepted,
-                    isBusy = isBusy,
-                    failure = failure,
-                    isTv = isTv,
-                    onRestart = onRestart,
-                    onDisconnectRequest = { confirmDisconnect = true },
-                    focusRequester = pairingActionFocus,
-                )
-            }
         }
     }
 
     if (confirmDisconnect) {
+        DisconnectConfirmationDialog(
+            isTv = isTv,
+            cancelFocus = cancelDisconnectFocus,
+            onDismiss = { confirmDisconnect = false },
+            onConfirm = {
+                confirmDisconnect = false
+                onDisconnect()
+            },
+        )
+    }
+}
+
+@Composable
+private fun DisconnectConfirmationDialog(
+    isTv: Boolean,
+    cancelFocus: FocusRequester,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    val title = stringResource(R.string.pairing_disconnect_confirm_title)
+    val body = stringResource(R.string.pairing_disconnect_confirm_body)
+    val disconnectLabel = stringResource(R.string.pairing_disconnect_confirm)
+    val cancelLabel = stringResource(R.string.pin_cancel)
+
+    if (!isTv) {
         AlertDialog(
-            onDismissRequest = { confirmDisconnect = false },
-            title = { Text(stringResource(R.string.pairing_disconnect_confirm_title)) },
-            text = { Text(stringResource(R.string.pairing_disconnect_confirm_body)) },
+            onDismissRequest = onDismiss,
+            icon = {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.Logout,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                )
+            },
+            title = { Text(title) },
+            text = { Text(body) },
             confirmButton = {
                 RivuneTextButton(
                     modifier = Modifier.testTag(RivuneTestTags.PairingDisconnectConfirm),
-                    label = stringResource(R.string.pairing_disconnect_confirm),
-                    onClick = {
-                        confirmDisconnect = false
-                        onDisconnect()
-                    },
+                    label = disconnectLabel,
+                    onClick = onConfirm,
                     destructive = true,
-                    isTv = isTv,
                 )
             },
             dismissButton = {
                 RivuneTextButton(
-                    modifier = Modifier.focusRequester(cancelDisconnectFocus),
-                    label = stringResource(R.string.pin_cancel),
-                    onClick = { confirmDisconnect = false },
-                    isTv = isTv,
+                    label = cancelLabel,
+                    onClick = onDismiss,
                 )
             },
             containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
             shape = RivuneShapes.large,
         )
+        return
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = RivuneSpacing.display, vertical = RivuneSpacing.xl),
+            contentAlignment = Alignment.Center,
+        ) {
+            RivuneFunctionalSurface(
+                modifier = Modifier
+                    .widthIn(max = RivuneDimensions.contentMax)
+                    .fillMaxWidth(),
+                shape = RivuneShapes.extraLarge,
+                contentPadding = PaddingValues(RivuneSpacing.xxl),
+                color = MaterialTheme.colorScheme.surface,
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.lg),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Surface(
+                            modifier = Modifier.size(RivuneDimensions.buttonHeight),
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            contentColor = MaterialTheme.colorScheme.error,
+                            tonalElevation = RivuneElevation.flat,
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.Logout,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(RivuneSpacing.xl),
+                                )
+                            }
+                        }
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            Text(
+                                text = title,
+                                style = MaterialTheme.typography.headlineMedium,
+                            )
+                            Spacer(Modifier.height(RivuneSpacing.xs))
+                            Text(
+                                text = body,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(RivuneSpacing.xxl))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.xl),
+                    ) {
+                        RivuneSecondaryButton(
+                            label = cancelLabel,
+                            onClick = onDismiss,
+                            modifier = Modifier
+                                .weight(1f)
+                                .focusRequester(cancelFocus),
+                            isTv = true,
+                            transparent = true,
+                            neutralContent = true,
+                        )
+                        RivuneSecondaryButton(
+                            label = disconnectLabel,
+                            onClick = onConfirm,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag(RivuneTestTags.PairingDisconnectConfirm),
+                            isTv = true,
+                            icon = Icons.AutoMirrored.Rounded.Logout,
+                            destructive = true,
+                            transparent = true,
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -728,10 +1041,12 @@ private fun PairingStateContent(
     copied: Boolean,
     onCopy: (() -> Unit)?,
 ) {
+    val motionPolicy = LocalRivuneMotionPolicy.current
     AnimatedContent(
         targetState = visualState to pairing,
         transitionSpec = {
-            fadeIn(tween(RivuneMotion.normal)) togetherWith fadeOut(tween(RivuneMotion.fast))
+            fadeIn(motionPolicy.finiteAnimationSpec(RivuneMotion.normal)) togetherWith
+                fadeOut(motionPolicy.finiteAnimationSpec(RivuneMotion.fast))
         },
         label = "pairing-state",
     ) { contentState ->
@@ -783,51 +1098,96 @@ private fun PairingActions(
     isBusy: Boolean,
     failure: UiFailure?,
     isTv: Boolean,
+    horizontal: Boolean = false,
     onRestart: () -> Unit,
     onDisconnectRequest: () -> Unit,
     focusRequester: FocusRequester,
 ) {
-    AnimatedVisibility(visible = !pairingAccepted) {
-        Column(modifier = Modifier.fillMaxWidth()) {
-            if (pairing == null && failure != null) {
-                RivunePrimaryButton(
-                    label = stringResource(if (isBusy) R.string.pairing_restart_loading else R.string.pairing_restart),
-                    onClick = onRestart,
-                    modifier = Modifier.fillMaxWidth().focusRequester(focusRequester).testTag(RivuneTestTags.PairingRestart),
-                    enabled = !isBusy,
-                    loading = isBusy,
-                    isTv = isTv,
-                    icon = Icons.Rounded.Refresh,
-                )
-            } else {
-                RivuneSecondaryButton(
-                    label = stringResource(if (isBusy) R.string.pairing_restart_loading else R.string.pairing_restart),
-                    onClick = onRestart,
-                    modifier = Modifier.fillMaxWidth().focusRequester(focusRequester).testTag(RivuneTestTags.PairingRestart),
-                    enabled = !isBusy,
-                    loading = isBusy,
-                    isTv = isTv,
-                    icon = Icons.Rounded.Refresh,
-                )
-            }
-            Spacer(Modifier.height(RivuneSpacing.xs))
+    val motionPolicy = LocalRivuneMotionPolicy.current
+    val restartLabel = stringResource(if (isBusy) R.string.pairing_restart_loading else R.string.pairing_restart)
+    val restartProminent = !isTv && pairing == null && failure != null
+
+    @Composable
+    fun RestartButton(modifier: Modifier) {
+        if (restartProminent) {
+            RivunePrimaryButton(
+                label = restartLabel,
+                onClick = onRestart,
+                modifier = modifier.focusRequester(focusRequester).testTag(RivuneTestTags.PairingRestart),
+                enabled = !isBusy,
+                loading = isBusy,
+                isTv = isTv,
+                icon = Icons.Rounded.Refresh,
+            )
+        } else {
+            RivuneSecondaryButton(
+                label = restartLabel,
+                onClick = onRestart,
+                modifier = modifier.focusRequester(focusRequester).testTag(RivuneTestTags.PairingRestart),
+                enabled = !isBusy,
+                loading = isBusy,
+                isTv = isTv,
+                icon = Icons.Rounded.Refresh,
+                transparent = isTv,
+                neutralContent = horizontal,
+            )
+        }
+    }
+
+    @Composable
+    fun DisconnectButton(modifier: Modifier) {
+        val actionModifier = modifier
+            .then(if (pairing == null && failure == null) Modifier.focusRequester(focusRequester) else Modifier)
+            .testTag(RivuneTestTags.PairingDisconnect)
+        if (isTv) {
+            RivuneSecondaryButton(
+                label = stringResource(R.string.pairing_disconnect_short),
+                onClick = onDisconnectRequest,
+                modifier = actionModifier,
+                enabled = !isBusy,
+                isTv = true,
+                destructive = true,
+                transparent = true,
+                icon = Icons.AutoMirrored.Rounded.Logout,
+            )
+        } else {
             RivuneTextButton(
                 label = stringResource(R.string.pairing_disconnect),
                 onClick = onDisconnectRequest,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .then(if (pairing == null && failure == null) Modifier.focusRequester(focusRequester) else Modifier)
-                    .testTag(RivuneTestTags.PairingDisconnect),
+                modifier = actionModifier,
                 enabled = !isBusy,
-                isTv = isTv,
                 destructive = true,
+                icon = Icons.AutoMirrored.Rounded.Logout,
             )
+        }
+    }
+
+    AnimatedVisibility(
+        visible = !pairingAccepted,
+        enter = fadeIn(motionPolicy.finiteAnimationSpec(RivuneMotion.fast)),
+        exit = fadeOut(motionPolicy.finiteAnimationSpec(RivuneMotion.fast)),
+    ) {
+        if (horizontal) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.xl),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RestartButton(Modifier.weight(1f))
+                DisconnectButton(Modifier.weight(1f))
+            }
+        } else {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                RestartButton(Modifier.fillMaxWidth())
+                Spacer(Modifier.height(RivuneSpacing.xs))
+                DisconnectButton(Modifier.fillMaxWidth())
+            }
         }
     }
 }
 
 @Composable
-private fun ProfilesScreen(
+internal fun ProfilesScreen(
     profiles: List<Profile>,
     isBusy: Boolean,
     isTv: Boolean,
@@ -844,98 +1204,155 @@ private fun ProfilesScreen(
     val firstFocusableIndex = profiles.indexOfFirst { it.enabled && it.accessible }
     LaunchedEffect(isTv, profiles, isBusy) {
         if (isTv && !isBusy) {
+            withFrameNanos { }
             if (firstFocusableIndex >= 0) firstProfileFocus.requestFocus() else refreshFocus.requestFocus()
         }
     }
-    BoxWithConstraints(
-        modifier = Modifier
-            .fillMaxSize()
-            .statusBarsPadding()
-            .navigationBarsPadding(),
-    ) {
-        val wide = maxWidth >= 720.dp
-        val horizontalPadding = responsiveHorizontalPadding(maxWidth, isTv)
-        val columns = when {
-            isTv && maxWidth >= 1100.dp -> 5
-            isTv -> 4
-            maxWidth >= 1100.dp -> 5
-            wide -> 4
-            else -> 2
-        }
-        Column(modifier = Modifier.fillMaxSize()) {
-            TopBar(
-                isTv = isTv,
-                actions = {
-                    ToolbarAction(
-                        label = stringResource(R.string.home_refresh),
-                        icon = Icons.Rounded.Refresh,
-                        onClick = onRefresh,
-                        enabled = !isBusy,
-                        isTv = isTv,
-                        modifier = Modifier.focusRequester(refreshFocus),
-                    )
-                    ToolbarAction(
-                        label = stringResource(R.string.logout),
-                        icon = Icons.AutoMirrored.Rounded.Logout,
-                        onClick = onLogout,
-                        enabled = !isBusy,
-                        isTv = isTv,
-                    )
-                },
-            )
-            if (failure != null) {
-                FailureBanner(
-                    message = failureMessage(failure),
-                    onDismiss = onClearFailure,
-                    isTv = isTv,
-                    modifier = Modifier.padding(horizontal = horizontalPadding),
-                )
+    RivuneCinematicBackground {
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding(),
+        ) {
+            val horizontalPadding = responsiveHorizontalPadding(maxWidth, isTv)
+            val profileSpacing = if (isTv) RivuneSpacing.md else RivuneSpacing.sm
+            val availableGridWidth = (maxWidth - horizontalPadding * 2).coerceAtLeast(0.dp)
+            val nonTvGridWidth = availableGridWidth.coerceAtMost(RivuneDimensions.preferencesMax)
+            val profileColumns = if (isTv) {
+                (((availableGridWidth + profileSpacing) / (120.dp + profileSpacing)).toInt()).coerceIn(4, 8)
+            } else {
+                (((nonTvGridWidth + profileSpacing) / (160.dp + profileSpacing)).toInt()).coerceIn(2, 5)
             }
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .padding(horizontal = horizontalPadding),
-            ) {
-                RivuneScreenHeading(
-                    eyebrow = stringResource(R.string.profiles_eyebrow),
-                    title = stringResource(R.string.profiles_title),
-                    body = stringResource(R.string.profiles_body),
+            val gridWidth = if (isTv) {
+                RivuneDimensions.profileCardWidthTv * profileColumns + profileSpacing * (profileColumns - 1)
+            } else {
+                nonTvGridWidth
+            }
+            val profileSlots = remember(profiles, profileColumns, isTv) {
+                if (isTv) centeredProfileSlots(profiles, profileColumns) else emptyList()
+            }
+            Column(modifier = Modifier.fillMaxSize()) {
+                TopBar(
                     isTv = isTv,
+                    horizontalPadding = horizontalPadding,
+                    compactTvHeight = isTv && this@BoxWithConstraints.maxHeight <= 540.dp,
+                    actions = {
+                        ToolbarAction(
+                            label = stringResource(R.string.home_refresh),
+                            icon = Icons.Rounded.Refresh,
+                            onClick = onRefresh,
+                            enabled = !isBusy,
+                            isTv = isTv,
+                            modifier = Modifier.focusRequester(refreshFocus),
+                            neutralContent = true,
+                        )
+                        ToolbarAction(
+                            label = stringResource(R.string.logout),
+                            icon = Icons.AutoMirrored.Rounded.Logout,
+                            onClick = onLogout,
+                            enabled = !isBusy,
+                            isTv = isTv,
+                            destructive = true,
+                        )
+                    },
                 )
-                Spacer(Modifier.height(if (isTv) 36.dp else 24.dp))
-                if (profiles.isEmpty()) {
-                    EmptyState(
-                        title = stringResource(R.string.profiles_empty_title),
-                        body = stringResource(R.string.profiles_empty_body),
-                        modifier = Modifier.fillMaxWidth(),
+                if (failure != null) {
+                    FailureBanner(
+                        message = failureMessage(failure),
+                        onDismiss = onClearFailure,
+                        isTv = isTv,
+                        modifier = Modifier
+                            .align(Alignment.CenterHorizontally)
+                            .padding(horizontal = horizontalPadding),
                     )
-                } else {
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(columns),
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = if (isTv) RivuneSpacing.xxl else RivuneSpacing.md),
-                        horizontalArrangement = Arrangement.spacedBy(if (isTv) 24.dp else 16.dp),
-                        verticalArrangement = Arrangement.spacedBy(if (isTv) 24.dp else 16.dp),
-                    ) {
-                        items(profiles, key = { it.id }) { profile ->
+                }
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(profileColumns),
+                    modifier = Modifier
+                        .width(gridWidth)
+                        .weight(1f)
+                        .align(Alignment.CenterHorizontally),
+                    contentPadding = PaddingValues(
+                        top = if (isTv) RivuneSpacing.xxl else RivuneSpacing.sm,
+                        bottom = RivuneSpacing.lg,
+                    ),
+                    horizontalArrangement = Arrangement.spacedBy(profileSpacing),
+                    verticalArrangement = Arrangement.spacedBy(if (isTv) RivuneSpacing.md else RivuneSpacing.lg),
+                ) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        RivuneScreenHeading(
+                            eyebrow = stringResource(R.string.profiles_eyebrow),
+                            title = stringResource(R.string.profiles_title),
+                            body = stringResource(R.string.profiles_body),
+                            isTv = isTv,
+                            modifier = Modifier.fillMaxWidth(),
+                            textAlign = if (isTv) TextAlign.Center else TextAlign.Start,
+                        )
+                        Spacer(Modifier.height(if (isTv) RivuneSpacing.xl else RivuneSpacing.lg))
+                    }
+                    if (profiles.isEmpty()) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            EmptyState(
+                                title = stringResource(R.string.profiles_empty_title),
+                                body = stringResource(R.string.profiles_empty_body),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    } else if (isTv) {
+                        itemsIndexed(
+                            profileSlots,
+                            key = { slotIndex, slot -> slot?.value?.id ?: "empty-profile-slot-$slotIndex" },
+                        ) { _, slot ->
+                            if (slot != null) {
+                                val profile = slot.value
+                                ProfileCard(
+                                    profile = profile,
+                                    imageModel = avatarData[profile.id]
+                                        ?: profile.avatar.url.takeIf { profile.avatar.kind == "preset" }?.let(resourceUrl),
+                                    enabled = profile.enabled && profile.accessible && !isBusy,
+                                    modifier = if (slot.index == firstFocusableIndex) {
+                                        Modifier.focusRequester(firstProfileFocus)
+                                    } else {
+                                        Modifier
+                                    },
+                                    isTv = true,
+                                    onClick = { onSelect(profile) },
+                                )
+                            }
+                        }
+                    } else {
+                        itemsIndexed(profiles, key = { _, profile -> profile.id }) { index, profile ->
                             ProfileCard(
                                 profile = profile,
                                 imageModel = avatarData[profile.id]
                                     ?: profile.avatar.url.takeIf { profile.avatar.kind == "preset" }?.let(resourceUrl),
                                 enabled = profile.enabled && profile.accessible && !isBusy,
-                                modifier = if (profiles.indexOf(profile) == firstFocusableIndex) {
+                                modifier = if (index == firstFocusableIndex) {
                                     Modifier.focusRequester(firstProfileFocus)
                                 } else {
                                     Modifier
                                 },
-                                isTv = isTv,
+                                isTv = false,
                                 onClick = { onSelect(profile) },
                             )
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+private fun centeredProfileSlots(profiles: List<Profile>, columns: Int): List<IndexedValue<Profile>?> {
+    require(columns > 0)
+    return profiles.withIndex().chunked(columns).flatMap { row ->
+        val emptySlots = columns - row.size
+        val leadingSlots = emptySlots / 2
+        buildList<IndexedValue<Profile>?>(columns) {
+            repeat(leadingSlots) { add(null) }
+            addAll(row)
+            repeat(emptySlots - leadingSlots) { add(null) }
         }
     }
 }
@@ -947,62 +1364,121 @@ private fun ProfilesScreen(
 private fun AuthFrame(
     isTv: Boolean,
     contentMaxWidth: Dp = RivuneDimensions.contentMax,
+    heading: @Composable ColumnScope.() -> Unit,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val fontScale = LocalDensity.current.fontScale
-    BoxWithConstraints(
-        modifier = Modifier
-            .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.safeDrawing)
-            .imePadding(),
-    ) {
-        val wide = maxWidth >= RivuneBreakpoints.expanded &&
-            maxHeight >= (if (isTv) 480.dp else 600.dp) &&
-            fontScale < 1.5f
-        Row(modifier = Modifier.fillMaxSize()) {
-            if (wide) {
-                Box(
+    RivuneCinematicBackground {
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .imePadding(),
+        ) {
+            val tvLandscape = isTv &&
+                maxWidth >= RivuneBreakpoints.expanded &&
+                maxHeight >= 600.dp &&
+                fontScale < 1.5f
+
+            if (tvLandscape) {
+                Row(
                     modifier = Modifier
-                        .weight(0.4f)
-                        .fillMaxHeight()
-                        .background(MaterialTheme.colorScheme.surfaceContainerLowest),
-                    contentAlignment = Alignment.Center,
+                        .fillMaxSize()
+                        .padding(horizontal = RivuneSpacing.display, vertical = RivuneSpacing.xxl),
+                    horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.xxxl),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    RivuneBrandLockup(
-                        name = stringResource(R.string.app_name),
-                        mark = stringResource(R.string.brand_mark),
-                        tagline = stringResource(R.string.brand_tagline),
-                        modifier = Modifier.padding(if (isTv) RivuneSpacing.display else RivuneSpacing.xxxl),
-                        markSize = if (isTv) 80.dp else 64.dp,
-                    )
-                }
-            }
-            Box(
-                modifier = Modifier
-                    .weight(if (wide) 0.6f else 1f)
-                    .fillMaxHeight()
-                    .verticalScroll(rememberScrollState())
-                    .padding(
-                        horizontal = if (isTv) RivuneSpacing.display else RivuneSpacing.xl,
-                        vertical = if (isTv) RivuneSpacing.huge else RivuneSpacing.xxl,
-                    ),
-                contentAlignment = if (wide) Alignment.Center else Alignment.TopCenter,
-            ) {
-                Column(
-                    modifier = Modifier
-                        .widthIn(max = contentMaxWidth)
-                        .fillMaxWidth(),
-                ) {
-                    if (!wide) {
+                    Column(
+                        modifier = Modifier
+                            .width(360.dp)
+                            .fillMaxHeight(),
+                        verticalArrangement = Arrangement.Center,
+                    ) {
                         RivuneBrandLockup(
                             name = stringResource(R.string.app_name),
-                            mark = stringResource(R.string.brand_mark),
-                            tagline = if (this@BoxWithConstraints.maxWidth >= RivuneBreakpoints.compact) stringResource(R.string.brand_tagline) else null,
-                            markSize = if (isTv) 64.dp else 48.dp,
+                            tagline = stringResource(R.string.brand_tagline),
+                            markSize = RivuneDimensions.touchTarget,
                         )
-                        Spacer(Modifier.height(if (isTv) RivuneSpacing.xxxl else RivuneSpacing.xxl))
+                        Spacer(Modifier.height(RivuneSpacing.xxl))
+                        heading()
                     }
-                    content()
+
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .widthIn(max = RivuneDimensions.contentMaxTablet),
+                        verticalArrangement = Arrangement.Center,
+                        content = content,
+                    )
+                }
+            } else {
+                val wide = !isTv &&
+                    maxWidth >= RivuneBreakpoints.expanded &&
+                    maxHeight >= 600.dp &&
+                    fontScale < 1.5f
+                Row(modifier = Modifier.fillMaxSize()) {
+                    if (wide) {
+                        Box(
+                            modifier = Modifier
+                                .weight(0.4f)
+                                .fillMaxHeight(),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            RivuneBrandLockup(
+                                name = stringResource(R.string.app_name),
+                                tagline = stringResource(R.string.brand_tagline),
+                                modifier = Modifier.padding(RivuneSpacing.xxxl),
+                                markSize = RivuneSpacing.huge,
+                            )
+                        }
+                    }
+                    Box(
+                        modifier = Modifier
+                            .weight(if (wide) 0.6f else 1f)
+                            .fillMaxHeight()
+                            .verticalScroll(rememberScrollState())
+                            .padding(
+                                horizontal = responsiveHorizontalPadding(this@BoxWithConstraints.maxWidth, isTv),
+                                vertical = if (isTv) RivuneSpacing.huge else RivuneSpacing.lg,
+                            ),
+                        contentAlignment = if (wide) Alignment.Center else Alignment.TopCenter,
+                    ) {
+                        if (wide) {
+                            RivuneFunctionalSurface(
+                                modifier = Modifier
+                                    .widthIn(max = contentMaxWidth)
+                                    .fillMaxWidth(),
+                                contentPadding = PaddingValues(RivuneSpacing.xl),
+                            ) {
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    heading()
+                                    Spacer(Modifier.height(RivuneSpacing.lg))
+                                    content()
+                                }
+                            }
+                        } else {
+                            Column(
+                                modifier = Modifier
+                                    .widthIn(max = contentMaxWidth)
+                                    .fillMaxWidth()
+                                    .padding(vertical = RivuneSpacing.xxs),
+                            ) {
+                                RivuneBrandLockup(
+                                    name = stringResource(R.string.app_name),
+                                    tagline = if (this@BoxWithConstraints.maxWidth >= RivuneBreakpoints.medium) {
+                                        stringResource(R.string.brand_tagline)
+                                    } else {
+                                        null
+                                    },
+                                    markSize = if (isTv) RivuneSpacing.display else RivuneSpacing.xxxl,
+                                )
+                                Spacer(Modifier.height(if (isTv) RivuneSpacing.xxxl else RivuneSpacing.xl))
+                                heading()
+                                Spacer(Modifier.height(if (isTv) RivuneSpacing.xxl else RivuneSpacing.lg))
+                                content()
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1024,7 +1500,6 @@ private fun PairingValue(
     copied: Boolean,
     onCopy: (() -> Unit)?,
 ) {
-    val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     val copyDescription = stringResource(if (copied) R.string.pairing_copied else R.string.pairing_copy)
     val semanticsModifier = Modifier.semantics {
         contentDescription = "$label, $value"
@@ -1039,84 +1514,75 @@ private fun PairingValue(
             onClick = onCopy,
         )
     }
-    Surface(
+    RivuneFunctionalSurface(
         modifier = Modifier
             .fillMaxWidth()
             .testTag(RivuneTestTags.PairingCode)
             .then(interactionModifier),
-        shape = RivuneShapes.extraLarge,
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        shape = if (compactTv) RivuneShapes.medium else RivuneShapes.large,
+        contentPadding = PaddingValues(
+            horizontal = when {
+                compactTv -> RivuneSpacing.xl
+                isTv -> RivuneSpacing.xxl
+                else -> RivuneSpacing.lg
+            },
+            vertical = when {
+                compactTv -> RivuneSpacing.lg
+                isTv -> RivuneSpacing.xxxl
+                else -> RivuneSpacing.xl
+            },
+        ),
     ) {
-        BoxWithConstraints {
-            val baseSize = when {
-                compactTv -> 54f
-                isTv -> 72f
-                maxWidth >= 520.dp -> 62f
-                else -> 43f
-            }
-            val codeSize = (baseSize / fontScale).sp
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(
-                        horizontal = if (isTv) RivuneSpacing.xxl else RivuneSpacing.xl,
-                        vertical = when {
-                            compactTv -> RivuneSpacing.xl
-                            isTv -> RivuneSpacing.xxxl
-                            else -> RivuneSpacing.xxl
-                        },
-                    ),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Box(
-                    Modifier
-                        .width(48.dp)
-                        .height(3.dp)
-                        .clip(RivuneShapes.pill)
-                        .background(MaterialTheme.colorScheme.primary),
-                )
-                Spacer(Modifier.height(RivuneSpacing.md))
-                Text(
-                    text = label,
-                    maxLines = 1,
-                    softWrap = false,
-                    color = MaterialTheme.colorScheme.primary,
-                    style = MaterialTheme.typography.labelMedium,
-                    textAlign = TextAlign.Center,
-                )
-                Spacer(Modifier.height(if (compactTv) RivuneSpacing.sm else if (isTv) RivuneSpacing.md else RivuneSpacing.sm))
-                Text(
-                    text = value,
-                    maxLines = 1,
-                    softWrap = false,
-                    modifier = Modifier.fillMaxWidth(),
-                    color = MaterialTheme.colorScheme.onSurface,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = codeSize,
-                    lineHeight = codeSize * 1.15f,
-                    letterSpacing = (if (compactTv) 3f else if (isTv) 5f else 2f).sp,
-                    textAlign = TextAlign.Center,
-                )
-                if (onCopy != null) {
-                    Spacer(Modifier.height(RivuneSpacing.md))
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.xs),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(
-                            imageVector = if (copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
-                            contentDescription = null,
-                            modifier = Modifier.size(17.dp),
-                            tint = if (copied) RivuneSuccess else MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Text(
-                            text = copyDescription,
-                            color = if (copied) RivuneSuccess else MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                    }
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                text = label,
+                maxLines = 1,
+                softWrap = false,
+                color = MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.labelMedium,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(if (isTv && !compactTv) RivuneSpacing.md else RivuneSpacing.xs))
+            Text(
+                text = value.replace("-", "-\u200B"),
+                softWrap = true,
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.onSurface,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = when {
+                    compactTv -> 46.sp
+                    isTv -> 72.sp
+                    else -> MaterialTheme.typography.displayMedium.fontSize
+                },
+                lineHeight = when {
+                    compactTv -> 54.sp
+                    isTv -> 80.sp
+                    else -> MaterialTheme.typography.displayMedium.lineHeight
+                },
+                letterSpacing = (if (compactTv) 2.5f else if (isTv) 5f else 2f).sp,
+                textAlign = TextAlign.Center,
+            )
+            if (onCopy != null) {
+                Spacer(Modifier.height(RivuneSpacing.sm))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.xs),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector = if (copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+                        contentDescription = null,
+                        modifier = Modifier.size(RivuneDimensions.iconSmall),
+                        tint = if (copied) RivuneSuccess else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = copyDescription,
+                        color = if (copied) RivuneSuccess else MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
                 }
             }
         }
@@ -1141,10 +1607,10 @@ private fun PairingLoadingState(isTv: Boolean, compactTv: Boolean) {
         RivuneSkeleton(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(if (compactTv) 160.dp else if (isTv) 210.dp else 174.dp),
-            shape = RivuneShapes.extraLarge,
+                .height(if (compactTv) 160.dp else if (isTv) 210.dp else 148.dp),
+            shape = RivuneShapes.large,
         )
-        Spacer(Modifier.height(RivuneSpacing.lg))
+        Spacer(Modifier.height(RivuneSpacing.md))
         Text(
             text = stringResource(R.string.pairing_restart_loading),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1155,10 +1621,12 @@ private fun PairingLoadingState(isTv: Boolean, compactTv: Boolean) {
 
 @Composable
 private fun PairingWaitingState(copied: Boolean, isTv: Boolean) {
+    val motionPolicy = LocalRivuneMotionPolicy.current
     AnimatedContent(
         targetState = copied,
         transitionSpec = {
-            fadeIn(tween(RivuneMotion.fast)) togetherWith fadeOut(tween(RivuneMotion.fast))
+            fadeIn(motionPolicy.finiteAnimationSpec(RivuneMotion.fast)) togetherWith
+                fadeOut(motionPolicy.finiteAnimationSpec(RivuneMotion.fast))
         },
         label = "pairing-feedback",
     ) { codeCopied ->
@@ -1176,17 +1644,6 @@ private fun PairingWaitingState(copied: Boolean, isTv: Boolean) {
                 )
             }
         } else {
-            val animationsEnabled = remember { ValueAnimator.areAnimatorsEnabled() }
-            val transition = rememberInfiniteTransition(label = "pairing-wait")
-            val pulse by transition.animateFloat(
-                initialValue = 0.55f,
-                targetValue = 1f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(1_100),
-                    repeatMode = RepeatMode.Reverse,
-                ),
-                label = "pairing-wait-pulse",
-            )
             val waitingDescription = stringResource(R.string.pairing_waiting_description)
             Row(
                 modifier = Modifier.semantics {
@@ -1198,13 +1655,7 @@ private fun PairingWaitingState(copied: Boolean, isTv: Boolean) {
             ) {
                 Box(
                     Modifier
-                        .size(if (isTv) 12.dp else 10.dp)
-                        .graphicsLayer {
-                            val scale = if (animationsEnabled) pulse else 1f
-                            scaleX = scale
-                            scaleY = scale
-                            alpha = if (animationsEnabled) pulse else 1f
-                        }
+                        .size(if (isTv) RivuneSpacing.sm else RivuneSpacing.xs)
                         .clip(CircleShape)
                         .background(MaterialTheme.colorScheme.primary),
                 )
@@ -1220,28 +1671,25 @@ private fun PairingWaitingState(copied: Boolean, isTv: Boolean) {
 
 @Composable
 private fun PairingSuccessState(isTv: Boolean) {
-    Surface(
+    RivuneFunctionalSurface(
         modifier = Modifier
             .fillMaxWidth()
             .testTag(RivuneTestTags.PairingSuccess)
             .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Assertive },
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        shape = RivuneShapes.extraLarge,
-        border = BorderStroke(1.dp, RivuneSuccess.copy(alpha = 0.45f)),
+        shape = RivuneShapes.large,
+        contentPadding = PaddingValues(if (isTv) RivuneSpacing.huge else RivuneSpacing.xl),
     ) {
         Column(
-            modifier = Modifier.padding(if (isTv) RivuneSpacing.huge else RivuneSpacing.xxl),
+            modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(RivuneSpacing.sm),
         ) {
-            Surface(shape = CircleShape, color = RivuneSuccess.copy(alpha = 0.14f)) {
-                Icon(
-                    imageVector = Icons.Rounded.Check,
-                    contentDescription = null,
-                    modifier = Modifier.padding(RivuneSpacing.md).size(if (isTv) 38.dp else 30.dp),
-                    tint = RivuneSuccess,
-                )
-            }
+            Icon(
+                imageVector = Icons.Rounded.Check,
+                contentDescription = null,
+                modifier = Modifier.size(if (isTv) RivuneSpacing.xxxl else RivuneSpacing.xxl),
+                tint = RivuneSuccess,
+            )
             Text(
                 text = stringResource(R.string.pairing_success_title),
                 style = if (isTv) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.titleLarge,
@@ -1315,6 +1763,7 @@ private fun performClickHaptic(view: android.view.View) {
     view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
 }
 
+
 @Composable
 private fun ProfileCard(
     profile: Profile,
@@ -1333,42 +1782,59 @@ private fun ProfileCard(
         onClick = onClick,
         enabled = enabled,
         isTv = isTv,
+        idleColor = MaterialTheme.colorScheme.background.copy(alpha = 0f),
         modifier = modifier
-            .fillMaxWidth()
+            .then(if (isTv) Modifier.widthIn(max = RivuneDimensions.profileCardWidthTv) else Modifier.fillMaxWidth())
             .semantics {
                 contentDescription = listOfNotNull(profile.name, status).joinToString(", ")
                 if (status != null) stateDescription = status
             },
-        shape = RivuneShapes.large,
+        shape = RivuneShapes.medium,
     ) {
         Column(
-            modifier = Modifier.padding(if (isTv) RivuneSpacing.xl else RivuneSpacing.md),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(if (isTv) RivuneSpacing.sm else RivuneSpacing.xs),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             RivuneArtwork(
                 model = imageModel,
                 fallback = profile.name.initial(),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(1f)
-                    .clip(CircleShape),
+                modifier = if (isTv) {
+                    Modifier
+                        .size(RivuneDimensions.profileAvatarTv)
+                        .clip(RivuneShapes.medium)
+                } else {
+                    Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1f)
+                        .clip(RivuneShapes.medium)
+                },
                 contentDescription = null,
             )
-            Spacer(Modifier.height(RivuneSpacing.md))
+            Spacer(Modifier.height(RivuneSpacing.sm))
             Text(
                 text = profile.name,
-                maxLines = 1,
+                modifier = Modifier.fillMaxWidth(),
+                maxLines = if (isTv) 1 else 2,
                 overflow = TextOverflow.Ellipsis,
-                style = if (isTv) MaterialTheme.typography.titleLarge else MaterialTheme.typography.titleMedium,
+                textAlign = TextAlign.Center,
+                style = MaterialTheme.typography.titleMedium,
             )
             status?.let {
                 Spacer(Modifier.height(RivuneSpacing.xxs))
                 Text(
                     text = it,
-                    color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
+                    modifier = Modifier.fillMaxWidth(),
+                    color = when {
+                        !profile.enabled || !profile.accessible -> MaterialTheme.colorScheme.error
+                        profile.hasPin -> MaterialTheme.colorScheme.primary
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    maxLines = if (isTv) 2 else 1,
                     overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.labelSmall,
                 )
             }
         }
@@ -1381,30 +1847,43 @@ private fun ProfileCard(
 @Composable
 private fun TopBar(
     isTv: Boolean,
+    horizontalPadding: Dp,
+    compactTvHeight: Boolean,
     actions: @Composable () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(
-                horizontal = if (isTv) RivuneSpacing.huge else RivuneSpacing.md,
-                vertical = if (isTv) RivuneSpacing.xxl else RivuneSpacing.sm,
-            ),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        RivuneBrandLockup(
-            name = stringResource(R.string.app_name),
-            mark = stringResource(R.string.brand_mark),
-            modifier = Modifier.weight(1f),
-            markSize = if (isTv) RivuneDimensions.touchTargetTv else RivuneDimensions.touchTarget,
-        )
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.xxs),
-            verticalArrangement = Arrangement.spacedBy(RivuneSpacing.xxs),
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(
+                    horizontal = horizontalPadding,
+                    vertical = when {
+                        compactTvHeight -> RivuneSpacing.xs
+                        isTv -> RivuneSpacing.md
+                        else -> RivuneSpacing.xs
+                    },
+                ),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            actions()
+            RivuneBrandLockup(
+                name = stringResource(R.string.app_name),
+                modifier = Modifier.weight(1f),
+                markSize = if (isTv) RivuneDimensions.touchTargetTv else RivuneSpacing.xxxl,
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(if (isTv) RivuneSpacing.md else RivuneSpacing.xxs),
+                verticalArrangement = Arrangement.spacedBy(RivuneSpacing.xxs),
+            ) {
+                actions()
+            }
         }
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(RivuneDimensions.hairline)
+                .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)),
+        )
     }
 }
 
@@ -1416,16 +1895,49 @@ private fun ToolbarAction(
     enabled: Boolean,
     isTv: Boolean,
     modifier: Modifier = Modifier,
+    neutralContent: Boolean = false,
+    destructive: Boolean = false,
 ) {
     if (isTv) {
-        RivuneTextButton(
-            label = label,
-            modifier = modifier,
+        val transparent = MaterialTheme.colorScheme.background.copy(alpha = 0f)
+        val contentColor = when {
+            !enabled -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+            destructive -> MaterialTheme.colorScheme.error
+            neutralContent -> MaterialTheme.colorScheme.onSurface
+            else -> MaterialTheme.colorScheme.primary
+        }
+        RivuneFocusSurface(
             onClick = onClick,
             enabled = enabled,
             isTv = true,
-            icon = icon,
-        )
+            idleColor = transparent,
+            focusedColor = transparent,
+            pressedColor = transparent,
+            showFocusBorder = false,
+            focusScale = RivuneMotion.tvButtonFocusScale,
+            shape = RivuneShapes.small,
+            modifier = modifier,
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = RivuneSpacing.sm, vertical = RivuneSpacing.xs),
+                horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.xs),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    modifier = Modifier.size(RivuneDimensions.iconMedium),
+                    tint = contentColor,
+                )
+                Text(
+                    text = label,
+                    color = contentColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.labelLarge,
+                )
+            }
+        }
     } else {
         RivuneFocusSurface(
             onClick = onClick,
@@ -1436,7 +1948,11 @@ private fun ToolbarAction(
                 .semantics { contentDescription = label },
         ) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Icon(imageVector = icon, contentDescription = null)
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                )
             }
         }
     }
@@ -1459,8 +1975,8 @@ private fun FailureBanner(
             },
         color = MaterialTheme.colorScheme.errorContainer,
         contentColor = MaterialTheme.colorScheme.onErrorContainer,
-        shape = RivuneShapes.large,
-        tonalElevation = RivuneElevation.raised,
+        shape = RivuneShapes.medium,
+        tonalElevation = RivuneElevation.flat,
     ) {
         Row(
             modifier = Modifier.padding(
@@ -1560,18 +2076,14 @@ private fun PinDialog(
             )
         },
         containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        shape = RivuneShapes.extraLarge,
     )
 }
 
 @Composable
 private fun EmptyState(title: String, body: String, modifier: Modifier = Modifier) {
-    Surface(
-        modifier = modifier,
-        color = MaterialTheme.colorScheme.surface,
-        shape = MaterialTheme.shapes.large,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    ) {
-        Column(modifier = Modifier.padding(RivuneSpacing.xxl)) {
+    RivuneFunctionalSurface(modifier = modifier) {
+        Column {
             Text(title, style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(RivuneSpacing.xs))
             Text(
@@ -1583,17 +2095,11 @@ private fun EmptyState(title: String, body: String, modifier: Modifier = Modifie
     }
 }
 
-@Composable
-private fun SectionLabel(label: String) {
-    Text(
-        text = label,
-        style = MaterialTheme.typography.titleLarge,
-    )
-}
 
 @Composable
 private fun BusyIndicator(modifier: Modifier = Modifier) {
     val description = stringResource(R.string.loading_in_progress)
+    val motionPolicy = LocalRivuneMotionPolicy.current
     Surface(
         modifier = modifier.semantics {
             liveRegion = LiveRegionMode.Polite
@@ -1603,11 +2109,13 @@ private fun BusyIndicator(modifier: Modifier = Modifier) {
         color = MaterialTheme.colorScheme.surfaceVariant,
         tonalElevation = RivuneElevation.raised,
     ) {
-        CircularProgressIndicator(
-            modifier = Modifier.padding(RivuneSpacing.sm).size(RivuneSpacing.xl),
-            color = MaterialTheme.colorScheme.primary,
-            strokeWidth = 2.dp,
-        )
+        if (motionPolicy.ambientAnimations) {
+            CircularProgressIndicator(
+                modifier = Modifier.padding(RivuneSpacing.sm).size(RivuneSpacing.xl),
+                color = MaterialTheme.colorScheme.primary,
+                strokeWidth = 2.dp,
+            )
+        }
     }
 }
 
@@ -1621,6 +2129,7 @@ private fun failureMessage(failure: UiFailure): String {
         UiFailure.DEVICE_LIMIT -> R.string.error_device_limit
         UiFailure.PAIRING_START -> R.string.error_pairing_start
         UiFailure.PAIRING_EXPIRED -> R.string.error_pairing_expired
+        UiFailure.PAIRING_LIMIT -> R.string.error_pairing_limit
         UiFailure.PAIRING_FAILED -> R.string.error_pairing_failed
         UiFailure.PROFILE_PIN_INVALID -> R.string.error_pin
         UiFailure.PROFILE_PIN_RATE_LIMITED -> R.string.error_pin_rate_limited
@@ -1638,9 +2147,10 @@ private fun failureMessage(failure: UiFailure): String {
 
 private fun responsiveHorizontalPadding(width: Dp, isTv: Boolean): Dp = when {
     isTv -> RivuneSpacing.display
-    width >= RivuneBreakpoints.wide -> RivuneSpacing.display
-    width >= RivuneBreakpoints.compact -> RivuneSpacing.xxxl
-    else -> RivuneSpacing.lg
+    width >= RivuneBreakpoints.wide -> RivuneSpacing.huge
+    width >= RivuneBreakpoints.expanded -> RivuneSpacing.xxl
+    width >= RivuneBreakpoints.medium -> RivuneSpacing.xl
+    else -> RivuneSpacing.md
 }
 
 private fun String.initial(): String = trim().firstOrNull()?.uppercase() ?: ""

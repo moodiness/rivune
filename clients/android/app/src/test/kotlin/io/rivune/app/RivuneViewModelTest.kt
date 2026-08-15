@@ -92,11 +92,34 @@ class RivuneViewModelTest {
         assertEquals("android", gateway.authorizationPlatform)
         assertEquals("https://media.example.com", store.value)
         assertEquals("Family server", viewModel.state.value.serverName)
+        assertEquals("20.0.0", viewModel.state.value.serverVersion)
         assertFalse(viewModel.state.value.isBusy)
 
         gateway.pairingPending = false
         advanceTimeBy(1_000)
         runCurrent()
+    }
+
+    @Test
+    fun pairingCapacityFailureExplainsWhyNoCodeWasCreated() = runTest(dispatcher) {
+        val store = FakeServerStore()
+        val gateway = FakeGateway(
+            authorizationFailure = RivuneApiException.Server(
+                429,
+                "device_code_capacity",
+                "Too many device authorizations are pending; retry later",
+            ),
+        )
+        val viewModel = viewModel(store, gateway)
+
+        viewModel.connect("media.example.com")
+        advanceUntilIdle()
+
+        val state = viewModel.state.value
+        assertIs<AppDestination.Pairing>(state.destination)
+        assertEquals(UiFailure.PAIRING_LIMIT, state.failure)
+        assertNull(state.pairing)
+        assertFalse(state.isBusy)
     }
 
     @Test
@@ -115,6 +138,7 @@ class RivuneViewModelTest {
         val state = viewModel.state.value
         assertIs<AppDestination.Server>(state.destination)
         assertEquals("", state.serverInput)
+        assertNull(state.serverVersion)
         assertNull(state.pairing)
         assertNull(store.value)
         assertFalse(state.isBusy)
@@ -178,6 +202,7 @@ class RivuneViewModelTest {
         assertIs<AppDestination.Server>(viewModel.state.value.destination)
         assertEquals(UiFailure.SETUP_REQUIRED, viewModel.state.value.failure)
         assertNull(store.value)
+        assertNull(viewModel.state.value.serverVersion)
     }
 
     @Test
@@ -199,6 +224,97 @@ class RivuneViewModelTest {
         assertEquals(profile, state.activeProfile)
         assertEquals(listOf(collection), state.collections)
         assertEquals(collection.id, state.selectedCollectionId)
+    }
+
+    @Test
+    fun continueWatchingEpisodeTitleKeepsCoordinatesInMetadataOnly() = runTest(dispatcher) {
+        val profile = profile(hasPin = false)
+        val seriesId = UUID.randomUUID()
+        val episodeId = UUID.randomUUID()
+        val seriesFixture = series(seriesId)
+        val seasonFixture = season(seriesId, listOf(episode(episodeId, seriesId, 1)))
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile, active = true),
+            collections = listOf(collection()),
+        ).apply {
+            continueWatchingPage = io.rivune.api.ContinueWatchingPage(
+                listOf(
+                    io.rivune.api.ContinueWatchingItem(
+                        titleId = episodeId,
+                        mediaType = io.rivune.api.PlaybackProgressMediaType.EPISODE,
+                        seriesId = seriesId,
+                        seasonId = UUID.randomUUID(),
+                        seasonNumber = 1,
+                        episodeNumber = 1,
+                        positionSeconds = 120,
+                        durationSeconds = 1_800,
+                        version = 1,
+                        reason = io.rivune.api.ContinueWatchingReason.RESUME,
+                        lastWatchedAt = "2026-08-15T00:00:00Z",
+                    ),
+                ),
+            )
+            seriesResult = seriesFixture
+            seasons = mapOf("season-1" to seasonFixture)
+        }
+
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+
+        val target = viewModel.state.value.viewer.continueWatching.single()
+        assertEquals("Series · Episode 1", target.title)
+        assertEquals(1, target.seasonNumber)
+        assertEquals(1, target.episodeNumber)
+    }
+
+    @Test
+    fun restoredProfileOpensConfiguredStartupTab() = runTest(dispatcher) {
+        val profile = profile(hasPin = false)
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile, active = true),
+            collections = listOf(collection()),
+        )
+        val preferences = AppPreferencesReader {
+            AppPreferencesState(startupTab = ViewerTab.SEARCH)
+        }
+
+        val viewModel = viewModel(
+            FakeServerStore("https://saved.example.com"),
+            gateway,
+            appPreferences = preferences,
+        )
+        advanceUntilIdle()
+
+        assertIs<AppDestination.Viewer>(viewModel.state.value.destination)
+        assertEquals(ViewerTab.SEARCH, viewModel.state.value.viewer.selectedTab)
+        assertTrue(viewModel.state.value.collections.isEmpty())
+        assertFalse(viewModel.state.value.isBusy)
+    }
+
+    @Test
+    fun selectedProfileOpensConfiguredStartupTab() = runTest(dispatcher) {
+        val profile = profile(hasPin = false)
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile),
+        )
+        val viewModel = viewModel(
+            FakeServerStore("https://saved.example.com"),
+            gateway,
+            appPreferences = AppPreferencesReader {
+                AppPreferencesState(startupTab = ViewerTab.LIBRARY)
+            },
+        )
+        advanceUntilIdle()
+
+        viewModel.selectProfile(profile)
+        advanceUntilIdle()
+
+        assertIs<AppDestination.Viewer>(viewModel.state.value.destination)
+        assertEquals(ViewerTab.LIBRARY, viewModel.state.value.viewer.selectedTab)
+        assertFalse(viewModel.state.value.isBusy)
     }
 
     @Test
@@ -287,6 +403,7 @@ class RivuneViewModelTest {
                 maximumResolution = "1080p",
                 preferDirectPlay = true,
                 audioLanguage = "fr",
+                metadataLanguage = "fr-FR",
                 subtitleLanguage = "en",
             ),
             sources = io.rivune.api.EffectiveSettingsSources(),
@@ -299,16 +416,17 @@ class RivuneViewModelTest {
         val loaded = assertNotNull(viewModel.state.value.viewer.preferences)
         assertTrue(loaded.canEdit)
         assertEquals("1080p", loaded.settings?.maximumResolution)
+        assertEquals("fr-FR", loaded.settings?.metadataLanguage)
 
         viewModel.updateProfilePreferences(
-            io.rivune.api.ProfileSettingsUpdate(maximumResolution = io.rivune.api.PatchField.Value("2160p")),
+            io.rivune.api.ProfileSettingsUpdate(metadataLanguage = io.rivune.api.PatchField.Value("de-DE")),
         )
         advanceUntilIdle()
         assertEquals(
-            listOf(io.rivune.api.ProfileSettingsUpdate(maximumResolution = io.rivune.api.PatchField.Value("2160p"))),
+            listOf(io.rivune.api.ProfileSettingsUpdate(metadataLanguage = io.rivune.api.PatchField.Value("de-DE"))),
             gateway.profileSettingsUpdates,
         )
-        assertEquals("2160p", viewModel.state.value.viewer.preferences?.settings?.maximumResolution)
+        assertEquals("de-DE", viewModel.state.value.viewer.preferences?.settings?.metadataLanguage)
 
         viewModel.backViewer()
         assertNull(viewModel.state.value.viewer.preferences)
@@ -425,6 +543,76 @@ class RivuneViewModelTest {
         assertIs<AppDestination.Viewer>(viewModel.state.value.destination)
     }
     @Test
+    fun selectingMultiFolderCollectionPreservesHierarchyUntilClosed() = runTest(dispatcher) {
+        val profile = profile(hasPin = false)
+        val first = folder()
+        val second = folder().copy(
+            id = UUID.fromString("88888888-8888-4888-8888-888888888888"),
+            title = "Second",
+        )
+        val collection = collection(first).copy(folders = listOf(first, second))
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile, active = true),
+            collections = listOf(collection),
+            resolvedFolders = mapOf(
+                requireNotNull(first.id) to listOf(resolvedFolder(first, 1, false, emptyList())),
+                requireNotNull(second.id) to listOf(resolvedFolder(second, 1, false, emptyList())),
+            ),
+        )
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+
+        viewModel.selectCollection(collection.id)
+
+        assertEquals(collection.id, viewModel.state.value.openedCollectionId)
+        assertNull(viewModel.state.value.resolvedFolder)
+        viewModel.closeCollection()
+        assertNull(viewModel.state.value.openedCollectionId)
+    }
+
+    @Test
+    fun libraryTypesFollowAccessibleAddonCatalogs() = runTest(dispatcher) {
+        val profile = profile(hasPin = false)
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile, active = true),
+        )
+        gateway.catalogDescriptors = listOf(
+            io.rivune.api.AddonCatalogDescriptor(
+                addonId = UUID.fromString("88888888-8888-4888-8888-888888888881"),
+                manifestId = "movies",
+                position = 0,
+                catalog = io.rivune.api.StremioManifestCatalog(type = "movie", id = "popular"),
+                addonCatalog = false,
+                searchable = true,
+            ),
+            io.rivune.api.AddonCatalogDescriptor(
+                addonId = UUID.fromString("88888888-8888-4888-8888-888888888882"),
+                manifestId = "television",
+                position = 1,
+                catalog = io.rivune.api.StremioManifestCatalog(type = "tv", id = "live"),
+                addonCatalog = false,
+                searchable = false,
+            ),
+            io.rivune.api.AddonCatalogDescriptor(
+                addonId = UUID.fromString("88888888-8888-4888-8888-888888888883"),
+                manifestId = "configuration",
+                position = 2,
+                catalog = io.rivune.api.StremioManifestCatalog(type = "series", id = "settings"),
+                addonCatalog = true,
+                searchable = false,
+            ),
+        )
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+
+        viewModel.selectViewerTab(ViewerTab.LIBRARY)
+        advanceUntilIdle()
+
+        assertEquals(setOf("movie", "tv"), viewModel.state.value.viewer.library.availableTypes)
+    }
+    @Test
     fun missingFolderArtworkIsResolvedForHome() = runTest(dispatcher) {
         val profile = profile()
         val unresolved = folder().copy(coverImageUrl = null)
@@ -517,6 +705,84 @@ class RivuneViewModelTest {
         val progress = requireNotNull(viewModel.state.value.viewer.detail).episodeProgress
         assertEquals(100, progress.values.count { it.completed })
         assertEquals(UiFailure.ACTION, viewModel.state.value.viewer.inlineFailure)
+    }
+
+    @Test
+    fun seasonRemainsVisibleWhenProgressHydrationFails() = runTest(dispatcher) {
+        val viewerProfile = profile()
+        val seriesId = UUID.fromString("88888888-8888-4888-8888-888888888888")
+        val selectedSeason = season(
+            seriesId,
+            listOf(episode(UUID.fromString("99999999-9999-4999-8999-999999999991"), seriesId, 1)),
+        )
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(viewerProfile, active = true),
+            collections = listOf(collection()),
+        )
+        gateway.resolvedTitle = io.rivune.api.TitleReference(
+            seriesId,
+            io.rivune.api.TitleMediaType.SERIES,
+            "tmdb",
+            "42",
+            "tmdb:42",
+            "Series",
+        )
+        gateway.seriesResult = series(seriesId)
+        gateway.seasons = mapOf(selectedSeason.id to selectedSeason)
+        gateway.progressBatchFailure = RivuneApiException.Server(404, "not_found", "failed")
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+
+        viewModel.openMedia(MediaTarget(id = "tmdb:42", mediaType = "series", title = "Series"))
+        advanceUntilIdle()
+        viewModel.selectSeason(selectedSeason.id)
+        advanceUntilIdle()
+
+        val viewer = viewModel.state.value.viewer
+        assertEquals(selectedSeason, viewer.detail?.season)
+        assertTrue(viewer.detail?.episodeProgress?.isEmpty() == true)
+        assertNull(viewer.loading)
+        assertEquals(UiFailure.CONTENT_LOAD, viewer.inlineFailure)
+    }
+
+    @Test
+    fun detailAndSeasonLoadMatchingTrailers() = runTest(dispatcher) {
+        val viewerProfile = profile()
+        val seriesId = UUID.fromString("88888888-8888-4888-8888-888888888888")
+        val selectedSeason = season(
+            seriesId,
+            listOf(episode(UUID.fromString("99999999-9999-4999-8999-999999999991"), seriesId, 1)),
+        )
+        val titleTrailer = io.rivune.api.Trailer("title-trailer", "Title trailer", "en", false)
+        val seasonTrailer = io.rivune.api.Trailer("season-trailer", "Season trailer", "en", false)
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(viewerProfile, active = true),
+            collections = listOf(collection()),
+        )
+        gateway.resolvedTitle = io.rivune.api.TitleReference(
+            seriesId,
+            io.rivune.api.TitleMediaType.SERIES,
+            "tmdb",
+            "42",
+            "tmdb:42",
+            "Series",
+        )
+        gateway.seriesResult = series(seriesId)
+        gateway.seasons = mapOf(selectedSeason.id to selectedSeason)
+        gateway.trailerResults = mapOf(null to listOf(titleTrailer), selectedSeason.seasonNumber to listOf(seasonTrailer))
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+
+        viewModel.openMedia(MediaTarget(id = "tmdb:42", mediaType = "series", title = "Series"))
+        advanceUntilIdle()
+        assertEquals(listOf(titleTrailer), viewModel.state.value.viewer.detail?.trailers)
+
+        viewModel.selectSeason(selectedSeason.id)
+        advanceUntilIdle()
+        assertEquals(listOf(seasonTrailer), viewModel.state.value.viewer.detail?.seasonTrailers)
+        assertEquals(listOf(seriesId to null, seriesId to selectedSeason.seasonNumber), gateway.trailerRequests)
     }
 
     @Test
@@ -648,6 +914,9 @@ class RivuneViewModelTest {
         )
         gateway.resolvedTitle = io.rivune.api.TitleReference(targetId, io.rivune.api.TitleMediaType.MOVIE, "imdb", "tt1234567", "tt1234567", "Film")
         gateway.movieResult = io.rivune.api.Movie(targetId, io.rivune.api.MediaType.MOVIE, "Film", "Film", "en", "Overview", "2026-08-12", genres = emptyList(), cast = emptyList(), voteAverage = 8.0, voteCount = 10, externalIds = mapOf("imdb" to "tt1234567"))
+        gateway.effectiveSettingsResult = gateway.effectiveSettingsResult.copy(
+            settings = io.rivune.api.SettingsValues(metadataLanguage = "fr-FR"),
+        )
         gateway.progress = io.rivune.api.PlaybackProgress(targetId, io.rivune.api.PlaybackProgressMediaType.MOVIE, 120, 3600, false, 3, "2026-08-12T00:00:00Z", "2026-08-12T00:00:00Z")
         gateway.libraryPages = mapOf(1 to io.rivune.api.LibraryPage(emptyList(), 1, 1, 0))
         gateway.sourceList = io.rivune.api.PlaybackSourceList(
@@ -671,8 +940,12 @@ class RivuneViewModelTest {
         advanceUntilIdle()
         assertEquals(targetId, viewModel.state.value.viewer.detail?.titleId)
         assertEquals("Film", viewModel.state.value.viewer.detail?.movie?.title)
+        assertEquals("fr-FR", gateway.metadataRequests.last { it.first == "movie" }.second)
 
         viewModel.playMedia()
+        advanceUntilIdle()
+        viewModel.selectPlaybackSource(requireNotNull(viewModel.state.value.viewer.sourcePicker).options.single())
+        viewModel.choosePlaybackTarget(null)
         advanceUntilIdle()
         assertEquals(playbackId, viewModel.state.value.viewer.player?.sessionId)
         assertEquals(120_000L, viewModel.state.value.viewer.player?.startPositionMs)
@@ -690,6 +963,9 @@ class RivuneViewModelTest {
         assertEquals(1, gateway.stopPlaybackCalls)
 
         viewModel.playMedia()
+        advanceUntilIdle()
+        viewModel.selectPlaybackSource(requireNotNull(viewModel.state.value.viewer.sourcePicker).options.single())
+        viewModel.choosePlaybackTarget(null)
         advanceUntilIdle()
         assertEquals(playbackId, viewModel.state.value.viewer.player?.sessionId)
         viewModel.beginTerminalOwnerDestruction()
@@ -796,7 +1072,12 @@ class RivuneViewModelTest {
                 ExternalPlayerApp("org.example.torrent", "Torrent", emptySet(), supportsMagnet = true),
             ),
         )
-        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway, externalPlaybackSupport = support)
+        val viewModel = viewModel(
+            FakeServerStore("https://saved.example.com"),
+            gateway,
+            externalPlaybackSupport = support,
+            playbackNetwork = PlaybackNetwork.METERED,
+        )
         advanceUntilIdle()
 
         viewModel.openMedia(MediaTarget("tt1234567", "movie", "Film"))
@@ -805,11 +1086,15 @@ class RivuneViewModelTest {
         advanceUntilIdle()
 
         assertEquals(listOf(EXTERNAL_VIDEO_CAPABILITY, EXTERNAL_MAGNET_CAPABILITY), gateway.lastPlaybackCapabilities?.externalPlayers)
+        assertEquals(720, gateway.lastPlaybackCapabilities?.maximumHeight)
+        assertEquals(5_000, gateway.lastPlaybackCapabilities?.maximumVideoBitrateKbps)
         assertEquals(listOf("org.example.player", "org.example.torrent"), viewModel.state.value.externalPlayers.map { it.packageName })
         assertNotNull(viewModel.state.value.viewer.sourcePicker)
         assertNull(viewModel.state.value.viewer.player)
 
-        viewModel.choosePlaybackSource(source, externalPlayer)
+        viewModel.selectPlaybackSource(source)
+        assertEquals(source, viewModel.state.value.viewer.sourcePicker?.playerSource)
+        viewModel.choosePlaybackTarget(externalPlayer)
         advanceUntilIdle()
 
         assertTrue(gateway.preparedForExternalPlayer)
@@ -840,7 +1125,8 @@ class RivuneViewModelTest {
         advanceUntilIdle()
         viewModel.playMedia()
         advanceUntilIdle()
-        viewModel.choosePlaybackSource(source, externalPlayer)
+        viewModel.selectPlaybackSource(source)
+        viewModel.choosePlaybackTarget(externalPlayer)
         advanceUntilIdle()
         assertEquals(0, viewModel.state.value.viewer.player?.durationSeconds)
 
@@ -857,7 +1143,8 @@ class RivuneViewModelTest {
         advanceUntilIdle()
         viewModel.playMedia()
         advanceUntilIdle()
-        viewModel.choosePlaybackSource(source, externalPlayer)
+        viewModel.selectPlaybackSource(source)
+        viewModel.choosePlaybackTarget(externalPlayer)
         advanceUntilIdle()
 
         viewModel.externalPlaybackFinished(null)
@@ -900,6 +1187,9 @@ class RivuneViewModelTest {
         viewModel.openMedia(MediaTarget("tt7654321", "movie", "Broken"))
         advanceUntilIdle()
         viewModel.playMedia()
+        advanceUntilIdle()
+        viewModel.selectPlaybackSource(requireNotNull(viewModel.state.value.viewer.sourcePicker).options.single())
+        viewModel.choosePlaybackTarget(null)
         advanceUntilIdle()
 
         assertEquals(playbackId, gateway.stoppedPlayback)
@@ -981,11 +1271,54 @@ class RivuneViewModelTest {
         assertEquals(addonId, result.sourceAddonId)
     }
 
+    @Test
+    fun clearingSearchInvalidatesInFlightResponse() = runTest(dispatcher) {
+        val viewerProfile = profile(hasPin = false)
+        val addonId = UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(viewerProfile, active = true),
+            collections = listOf(collection()),
+        )
+        gateway.catalogDescriptors = listOf(
+            io.rivune.api.AddonCatalogDescriptor(
+                addonId = addonId,
+                addonName = "Catalog",
+                manifestId = "org.example",
+                position = 0,
+                catalog = io.rivune.api.StremioManifestCatalog(type = "movie", id = "search"),
+                addonCatalog = false,
+                searchable = true,
+            ),
+        )
+        gateway.searchPages = mapOf(
+            0 to io.rivune.api.AddonResourceBatch(results = emptyList(), errors = emptyList()),
+        )
+        gateway.searchDelayMillis = 1_000
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+
+        viewModel.selectViewerTab(ViewerTab.SEARCH)
+        advanceUntilIdle()
+        viewModel.search("Film")
+        runCurrent()
+        viewModel.search("")
+        advanceTimeBy(1_000)
+        runCurrent()
+
+        assertEquals("", viewModel.state.value.viewer.search.query)
+        assertTrue(viewModel.state.value.viewer.search.items.isEmpty())
+        assertNull(viewModel.state.value.viewer.loading)
+    }
+
     private fun viewModel(
         store: FakeServerStore,
         gateway: FakeGateway,
         isTv: Boolean = false,
         externalPlaybackSupport: ExternalPlaybackSupport = ExternalPlaybackSupport(),
+        appPreferences: AppPreferencesReader = AppPreferencesReader { AppPreferencesState() },
+        locale: java.util.Locale = java.util.Locale.ENGLISH,
+        playbackNetwork: PlaybackNetwork = PlaybackNetwork.UNMETERED,
     ) = RivuneViewModel(
         store,
         RivuneGatewayFactory { gateway },
@@ -993,6 +1326,9 @@ class RivuneViewModelTest {
         "Test device",
         CoroutineScope(dispatcher),
         externalPlaybackSupportProvider = { externalPlaybackSupport },
+        appPreferences = appPreferences,
+        localeProvider = { locale },
+        playbackNetworkProvider = { playbackNetwork },
     ).also(viewModels::add)
 }
 
@@ -1018,6 +1354,7 @@ private class FakeGateway(
     private val selectionFailure: Throwable? = null,
     var pairingPending: Boolean = false,
     private val logoutResult: LogoutResult = LogoutResult(localCredentialsCleared = true, serverSessionClosed = true),
+    private val authorizationFailure: Throwable? = null,
 ) : RivuneGateway {
     var selectedPin: String? = null
     var exchangeCount = 0
@@ -1047,10 +1384,16 @@ private class FakeGateway(
     var stopPlaybackCalls = 0
     var progressUpdates = mutableListOf<io.rivune.api.UpdatePlaybackProgressRequest>()
     var progressByTitle = mutableMapOf<UUID, io.rivune.api.PlaybackProgress>()
+    var progressBatchFailure: Throwable? = null
     val watchedBatchRequests = mutableListOf<List<io.rivune.api.SetWatchedBatchItem>>()
     var watchedBatchFailureAtRequest: Int? = null
     val watchedRequests = mutableListOf<Pair<UUID, Long>>()
     var seasonDelayMillis: Long = 0
+    var searchDelayMillis: Long = 0
+    var trailerResults = emptyMap<Int?, List<io.rivune.api.Trailer>>()
+    var continueWatchingPage = io.rivune.api.ContinueWatchingPage(emptyList())
+    val trailerRequests = mutableListOf<Pair<UUID, Int?>>()
+    val metadataRequests = mutableListOf<Pair<String, String?>>()
     var profileAvatars = emptyMap<UUID, ByteArray>()
     var effectiveSettingsResult = io.rivune.api.EffectiveSettings(
         schemaVersion = 1,
@@ -1079,21 +1422,38 @@ private class FakeGateway(
         collectionFailure?.let { throw it }
         return collections
     }
-    override suspend fun resolveCollectionFolderArtwork(collectionId: UUID, folderId: UUID) =
-        resolveCollectionFolder(collectionId, folderId)
-    override suspend fun resolveCollectionFolder(collectionId: UUID, folderId: UUID, page: Int?): ResolvedCollectionFolder {
+    override suspend fun resolveCollectionFolderArtwork(collectionId: UUID, folderId: UUID, language: String?) =
+        resolveCollectionFolder(collectionId, folderId, language = language)
+    override suspend fun resolveCollectionFolder(collectionId: UUID, folderId: UUID, page: Int?, language: String?): ResolvedCollectionFolder {
+        metadataRequests += "collection" to language
         val requestedPage = page ?: 1
         resolvedPages += requestedPage
         return resolvedFolders.getValue(folderId).first { it.page == requestedPage }
     }
     override suspend fun addonCatalogs() = catalogDescriptors
-    override suspend fun searchAddonCatalogs(type: String, search: String, skip: Int?, limit: Int?) = searchPages.getValue(skip ?: 0)
+    override suspend fun searchAddonCatalogs(type: String, search: String, skip: Int?, limit: Int?, language: String?): io.rivune.api.AddonResourceBatch {
+        metadataRequests += "search" to language
+        if (searchDelayMillis > 0) delay(searchDelayMillis)
+        return searchPages.getValue(skip ?: 0)
+    }
     override suspend fun resolveTitle(input: io.rivune.api.TitleResolveInput) = requireNotNull(resolvedTitle)
-    override suspend fun movie(id: UUID) = requireNotNull(movieResult)
-    override suspend fun series(id: UUID, mappingProvider: io.rivune.api.SeriesMappingProvider) = requireNotNull(seriesResult)
-    override suspend fun season(id: String, mappingProvider: io.rivune.api.SeriesMappingProvider): io.rivune.api.Season {
+    override suspend fun movie(id: UUID, language: String?): io.rivune.api.Movie {
+        metadataRequests += "movie" to language
+        return requireNotNull(movieResult)
+    }
+    override suspend fun series(id: UUID, mappingProvider: io.rivune.api.SeriesMappingProvider, language: String?): io.rivune.api.Series {
+        metadataRequests += "series" to language
+        return requireNotNull(seriesResult)
+    }
+    override suspend fun season(id: String, mappingProvider: io.rivune.api.SeriesMappingProvider, language: String?): io.rivune.api.Season {
+        metadataRequests += "season" to language
         if (seasonDelayMillis > 0) delay(seasonDelayMillis)
         return seasons.getValue(id)
+    }
+    override suspend fun trailers(titleId: UUID, seasonNumber: Int?, language: String?): List<io.rivune.api.Trailer> {
+        metadataRequests += "trailers" to language
+        trailerRequests += titleId to seasonNumber
+        return trailerResults[seasonNumber].orEmpty()
     }
     override suspend fun library(mediaType: io.rivune.api.TitleMediaType?, page: Int?, pageSize: Int?) = libraryPages[page ?: 1]
         ?: io.rivune.api.LibraryPage(emptyList(), page ?: 1, page ?: 1, 0)
@@ -1102,11 +1462,14 @@ private class FakeGateway(
         return libraryPages.values.flatMap { it.items }.first { it.titleId == titleId }
     }
     override suspend fun removeLibraryTitle(titleId: UUID) { libraryRemoved = titleId }
-    override suspend fun continueWatching(limit: Int?) = io.rivune.api.ContinueWatchingPage(emptyList())
+    override suspend fun continueWatching(limit: Int?) = continueWatchingPage
     override suspend fun playbackProgress(titleId: UUID) = progressByTitle[titleId] ?: progress?.takeIf { it.titleId == titleId }
-    override suspend fun playbackProgressBatch(titleIds: List<UUID>) = io.rivune.api.PlaybackProgressBatch(
-        titleIds.map { titleId -> io.rivune.api.PlaybackProgressBatchItem(titleId, progressByTitle[titleId] ?: progress?.takeIf { it.titleId == titleId }) },
-    )
+    override suspend fun playbackProgressBatch(titleIds: List<UUID>): io.rivune.api.PlaybackProgressBatch {
+        progressBatchFailure?.let { throw it }
+        return io.rivune.api.PlaybackProgressBatch(
+            titleIds.map { titleId -> io.rivune.api.PlaybackProgressBatchItem(titleId, progressByTitle[titleId] ?: progress?.takeIf { it.titleId == titleId }) },
+        )
+    }
     override suspend fun setTitlesWatchedBatch(items: List<io.rivune.api.SetWatchedBatchItem>): io.rivune.api.SetWatchedBatchResult {
         watchedBatchRequests += items
         if (watchedBatchFailureAtRequest == watchedBatchRequests.size) {
@@ -1163,6 +1526,7 @@ private class FakeGateway(
             maximumResolution = input.maximumResolution.applyTo(current.maximumResolution),
             preferDirectPlay = input.preferDirectPlay.applyTo(current.preferDirectPlay),
             audioLanguage = input.audioLanguage.applyTo(current.audioLanguage),
+            metadataLanguage = input.metadataLanguage.applyTo(current.metadataLanguage),
             subtitleLanguage = input.subtitleLanguage.applyTo(current.subtitleLanguage),
             transcoding = input.transcoding.applyTo(current.transcoding),
         )
@@ -1191,8 +1555,12 @@ private class FakeGateway(
         playbackEvents += "progress:${input.positionSeconds}"
         return requireNotNull(progress).copy(positionSeconds = input.positionSeconds, durationSeconds = input.durationSeconds, completed = input.completed, version = input.expectedVersion + 1)
     }
-    override suspend fun calendar(from: String, to: String, language: String?) = calendarEvents
+    override suspend fun calendar(from: String, to: String, language: String?): List<io.rivune.api.CalendarEvent> {
+        metadataRequests += "calendar" to language
+        return calendarEvents
+    }
     override suspend fun beginDeviceAuthorization(deviceName: String, platform: String): DeviceAuthorizationResponse {
+        authorizationFailure?.let { throw it }
         authorizationPlatform = platform
         return DeviceAuthorizationResponse(
             deviceCode = "device-code",

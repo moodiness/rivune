@@ -8,6 +8,7 @@ import io.rivune.api.PlaybackSourceOption
 import io.rivune.api.Series
 import io.rivune.api.SettingsValues
 import io.rivune.api.Season
+import io.rivune.api.Trailer
 import java.util.UUID
 
 enum class ViewerTab {
@@ -71,6 +72,8 @@ data class MediaDetailState(
     val season: Season? = null,
     val progress: PlaybackProgress? = null,
     val episodeProgress: Map<UUID, PlaybackProgress> = emptyMap(),
+    val trailers: List<Trailer> = emptyList(),
+    val seasonTrailers: List<Trailer> = emptyList(),
     val inLibrary: Boolean = false,
 )
 
@@ -88,6 +91,7 @@ data class LibraryState(
     val totalPages: Int = 0,
     val totalResults: Int = 0,
     val mediaType: String? = null,
+    val availableTypes: Set<String> = emptySet(),
 )
 
 data class SourcePickerState(
@@ -96,6 +100,7 @@ data class SourcePickerState(
     val progress: PlaybackProgress?,
     val options: List<PlaybackSourceOption>,
     val partial: Boolean,
+    val playerSource: PlaybackSourceOption? = null,
 )
 
 data class PlayerSubtitlePresentation(

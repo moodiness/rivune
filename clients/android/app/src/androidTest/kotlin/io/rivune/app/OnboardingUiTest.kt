@@ -1,31 +1,50 @@
 package io.rivune.app
 
 import androidx.annotation.StringRes
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.InputMode
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalInputModeManager
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performImeAction
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Density
 import androidx.test.platform.app.InstrumentationRegistry
+import io.rivune.api.CategoryRef
+import io.rivune.api.Profile
+import io.rivune.api.ProfileAvatar
 import io.rivune.app.ui.components.RivuneTestTags
 import io.rivune.app.ui.theme.RivuneTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import java.util.UUID
 
 class OnboardingUiTest {
     @get:Rule
@@ -52,6 +71,75 @@ class OnboardingUiTest {
         composeRule.onNodeWithTag(RivuneTestTags.ServerInput).performImeAction()
 
         composeRule.runOnIdle { assertEquals("media.example.com", submitted) }
+    }
+
+    @Test
+    @OptIn(ExperimentalTestApi::class)
+    fun tvServerAddressEntersEditingAfterRemoteConfirmation() {
+        setRivuneContent {
+            ServerScreen(
+                serverInput = "",
+                isBusy = false,
+                failure = null,
+                isTv = true,
+                onConnect = {},
+                onClearFailure = {},
+            )
+        }
+
+        composeRule.onNodeWithTag(RivuneTestTags.ServerInput)
+            .assertIsFocused()
+            .performKeyInput {
+                keyDown(Key.DirectionCenter)
+                keyUp(Key.DirectionCenter)
+            }
+            .performTextInput("http://localhost:8080")
+
+        composeRule.onNodeWithTag(RivuneTestTags.ServerInput)
+            .assertTextContains("http://localhost:8080")
+        composeRule.onNodeWithTag(RivuneTestTags.ServerSubmit).assertIsEnabled()
+    }
+
+    @Test
+    @OptIn(ExperimentalTestApi::class)
+    fun tvProfilesAdaptColumnsAndKeepRowsNavigable() {
+        val profiles = (1..12).map(::testProfile)
+        var requestKeyboardInput = { false }
+        setRivuneContent {
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 1f)) {
+                val inputModeManager = LocalInputModeManager.current
+                requestKeyboardInput = { inputModeManager.requestInputMode(InputMode.Keyboard) }
+                Box(Modifier.requiredSize(width = 960.dp, height = 540.dp)) {
+                    ProfilesScreen(
+                        profiles = profiles,
+                        isBusy = false,
+                        isTv = true,
+                        failure = null,
+                        resourceUrl = { it },
+                        avatarData = emptyMap(),
+                        onSelect = {},
+                        onLogout = {},
+                        onRefresh = {},
+                        onClearFailure = {},
+                    )
+                }
+            }
+        }
+        composeRule.runOnIdle { assertTrue(requestKeyboardInput()) }
+
+        (1..6).forEach { index ->
+            composeRule.onNodeWithContentDescription("Profile $index").assertIsDisplayed()
+        }
+        composeRule.onNodeWithContentDescription("Profile 1")
+            .performSemanticsAction(SemanticsActions.RequestFocus)
+            .assertIsFocused()
+            .performKeyInput {
+                keyDown(Key.DirectionDown)
+                keyUp(Key.DirectionDown)
+            }
+        composeRule.onNodeWithContentDescription("Profile 7")
+            .assertIsFocused()
+            .assertIsDisplayed()
     }
 
     @Test
@@ -203,4 +291,25 @@ class OnboardingUiTest {
 
     private fun string(@StringRes resource: Int): String =
         InstrumentationRegistry.getInstrumentation().targetContext.getString(resource)
+}
+
+private fun testProfile(index: Int): Profile {
+    val categoryId = UUID(0, 100)
+    return Profile(
+        id = UUID(0, index.toLong()),
+        name = "Profile $index",
+        categoryId = categoryId,
+        category = CategoryRef(categoryId, "Home", null, null),
+        isChild = false,
+        hasPin = false,
+        canManage = false,
+        enabled = true,
+        availableFrom = null,
+        availableUntil = null,
+        accessStartTime = null,
+        accessEndTime = null,
+        accessTimezone = "UTC",
+        accessible = true,
+        avatar = ProfileAvatar(kind = "custom", url = ""),
+    )
 }

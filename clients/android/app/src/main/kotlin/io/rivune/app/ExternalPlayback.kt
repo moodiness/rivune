@@ -63,6 +63,31 @@ data class ExternalPlaybackSupport(
     }
 }
 
+internal sealed interface PreferredPlaybackTarget {
+    data object Ask : PreferredPlaybackTarget
+    data object Rivune : PreferredPlaybackTarget
+    data class External(val player: ExternalPlayerApp) : PreferredPlaybackTarget
+}
+
+internal fun preferredPlaybackTarget(
+    preference: PreferredPlayer,
+    source: io.rivune.api.PlaybackSourceOption,
+    support: ExternalPlaybackSupport,
+): PreferredPlaybackTarget {
+    val players = support.playersFor(source.mode, source.protocol, source.container)
+    return when (preference) {
+        PreferredPlayer.Ask -> PreferredPlaybackTarget.Ask
+        PreferredPlayer.Rivune -> if (source.mode == PlaybackMode.EXTERNAL) {
+            PreferredPlaybackTarget.Ask
+        } else {
+            PreferredPlaybackTarget.Rivune
+        }
+        is PreferredPlayer.External -> players.firstOrNull { it.packageName == preference.packageName }
+            ?.let(PreferredPlaybackTarget::External)
+            ?: PreferredPlaybackTarget.Ask
+    }
+}
+
 data class ExternalPlaybackResult(
     val positionMs: Long?,
     val durationMs: Long?,

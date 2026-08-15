@@ -32,6 +32,7 @@ import okhttp3.Request
 
 internal sealed interface AppUpdateState {
     data object Idle : AppUpdateState
+    data object Unavailable : AppUpdateState
     data class Checking(val manual: Boolean) : AppUpdateState
     data class UpToDate(val currentVersion: String) : AppUpdateState
     data class Available(val manifest: AppUpdateManifest, val packageInfo: AndroidUpdatePackage) : AppUpdateState
@@ -147,6 +148,7 @@ internal class AppUpdateCoordinator(
         .build(),
     private val inspector: UpdateApkInspector = AndroidUpdateApkInspector(context),
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+    private val diagnostics: DiagnosticsBuffer = DiagnosticsBuffer(),
 ) {
     private val manifestClient = AppUpdateManifestClient(manifestUrl, cache, httpClient)
     private val downloadHttpClient = httpClient.newBuilder()
@@ -156,7 +158,7 @@ internal class AppUpdateCoordinator(
     private var resumedActivity = WeakReference<Activity>(null)
     private var pendingConfirmation: Pair<Int, Intent>? = null
     private val operation = Mutex()
-    private val _state = MutableStateFlow<AppUpdateState>(AppUpdateState.Idle)
+    private val _state = MutableStateFlow<AppUpdateState>(restingUpdateState(enabled))
     val state: StateFlow<AppUpdateState> = _state.asStateFlow()
 
     init {
@@ -180,7 +182,7 @@ internal class AppUpdateCoordinator(
             context.packageManager.packageInstaller.getSessionInfo(sessionId) == null
         ) {
             installState.clear(sessionId)
-            _state.value = AppUpdateState.Idle
+            _state.value = restingUpdateState(enabled)
         }
         launchPendingConfirmation()
     }
@@ -199,7 +201,7 @@ internal class AppUpdateCoordinator(
             _state.value is AppUpdateState.Installing
         ) return
         if (!enabled) {
-            _state.value = AppUpdateState.Error("Updates are not available in this build")
+            _state.value = AppUpdateState.Unavailable
             return
         }
         scope.launch { check(manual = true) }
@@ -207,21 +209,34 @@ internal class AppUpdateCoordinator(
 
     private suspend fun check(manual: Boolean) = operation.withLock {
         _state.value = AppUpdateState.Checking(manual)
+        diagnostics.record(DiagnosticEventCode.UPDATE_CHECK_STARTED)
         try {
             when (val result = manifestClient.fetch(manual)) {
-                ManifestFetchResult.Throttled -> _state.value = AppUpdateState.Idle
+                ManifestFetchResult.Throttled -> {
+                    _state.value = restingUpdateState(enabled)
+                    diagnostics.record(DiagnosticEventCode.UPDATE_UP_TO_DATE)
+                }
                 is ManifestFetchResult.Manifest -> {
-                    _state.value = resolveUpdateManifest(
+                    val resolved = resolveUpdateManifest(
                         manifest = result.value,
                         applicationId = BuildConfig.APPLICATION_ID,
                         currentVersionCode = BuildConfig.VERSION_CODE.toLong(),
                         currentVersionName = BuildConfig.VERSION_NAME,
                         manual = manual,
                     )
+                    _state.value = resolved
+                    diagnostics.record(
+                        if (resolved is AppUpdateState.Available) {
+                            DiagnosticEventCode.UPDATE_AVAILABLE
+                        } else {
+                            DiagnosticEventCode.UPDATE_UP_TO_DATE
+                        },
+                    )
                 }
             }
         } catch (error: Exception) {
-            _state.value = if (manual) AppUpdateState.Error(error.safeUpdateMessage()) else AppUpdateState.Idle
+            _state.value = if (manual) AppUpdateState.Error(error.safeUpdateMessage()) else restingUpdateState(enabled)
+            diagnostics.record(DiagnosticEventCode.UPDATE_CHECK_FAILED)
         }
     }
 
@@ -296,9 +311,9 @@ internal class AppUpdateCoordinator(
     fun dismiss() {
         when (val current = _state.value) {
             is AppUpdateState.Downloading, AppUpdateState.Installing -> Unit
-            is AppUpdateState.ReadyToInstall -> { current.file.delete(); _state.value = AppUpdateState.Idle }
-            is AppUpdateState.NeedsPermission -> { current.file.delete(); _state.value = AppUpdateState.Idle }
-            else -> _state.value = AppUpdateState.Idle
+            is AppUpdateState.ReadyToInstall -> { current.file.delete(); _state.value = restingUpdateState(enabled) }
+            is AppUpdateState.NeedsPermission -> { current.file.delete(); _state.value = restingUpdateState(enabled) }
+            else -> _state.value = restingUpdateState(enabled)
         }
     }
 
@@ -306,7 +321,7 @@ internal class AppUpdateCoordinator(
         if (!installState.clear(sessionId)) return
         pendingConfirmation = null
         _state.value = when (status) {
-            PackageInstaller.STATUS_SUCCESS -> AppUpdateState.Idle
+            PackageInstaller.STATUS_SUCCESS -> restingUpdateState(enabled)
             else -> AppUpdateState.Error(message?.takeIf { it.isNotBlank() } ?: "Android could not install the update")
         }
     }
@@ -398,6 +413,9 @@ internal class AppUpdateCoordinator(
 
     private fun updateDirectory(): File = context.cacheDir.resolve("app_updates").also(File::mkdirs)
 }
+
+internal fun restingUpdateState(enabled: Boolean): AppUpdateState =
+    if (enabled) AppUpdateState.Idle else AppUpdateState.Unavailable
 
 internal fun resolveUpdateManifest(
     manifest: AppUpdateManifest,

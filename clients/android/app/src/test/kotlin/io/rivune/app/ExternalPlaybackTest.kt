@@ -37,6 +37,65 @@ class ExternalPlaybackTest {
     }
 
     @Test
+    fun preferredTargetFallsBackToAskWithoutMutatingPreference() {
+        val installed = ExternalPlayerApp(
+            "org.example.installed",
+            "Installed",
+            setOf("video/*"),
+            supportsMagnet = false,
+        )
+        val support = ExternalPlaybackSupport(listOf(installed))
+        val source = io.rivune.api.PlaybackSourceOption(
+            id = "source",
+            sourceRef = "ref",
+            addonId = java.util.UUID.randomUUID(),
+            manifestId = "addon",
+            streamIndex = 0,
+            name = "Direct",
+            protocol = "http",
+            mode = PlaybackMode.DIRECT,
+            expiresAt = "2099-01-01T00:00:00Z",
+        )
+
+        assertEquals(
+            PreferredPlaybackTarget.Ask,
+            preferredPlaybackTarget(PreferredPlayer.Ask, source, support),
+        )
+        assertEquals(
+            PreferredPlaybackTarget.Rivune,
+            preferredPlaybackTarget(PreferredPlayer.Rivune, source, support),
+        )
+        assertEquals(
+            PreferredPlaybackTarget.External(installed),
+            preferredPlaybackTarget(PreferredPlayer.External(installed.packageName), source, support),
+        )
+        assertEquals(
+            PreferredPlaybackTarget.Ask,
+            preferredPlaybackTarget(PreferredPlayer.External("org.example.missing"), source, support),
+        )
+    }
+
+    @Test
+    fun externalOnlySourceNeverFallsBackToInternalPlayer() {
+        val source = io.rivune.api.PlaybackSourceOption(
+            id = "external",
+            sourceRef = "ref",
+            addonId = java.util.UUID.randomUUID(),
+            manifestId = "addon",
+            streamIndex = 0,
+            name = "Torrent",
+            protocol = "external",
+            mode = PlaybackMode.EXTERNAL,
+            expiresAt = "2099-01-01T00:00:00Z",
+        )
+
+        assertEquals(
+            PreferredPlaybackTarget.Ask,
+            preferredPlaybackTarget(PreferredPlayer.Rivune, source, ExternalPlaybackSupport()),
+        )
+    }
+
+    @Test
     fun externalResultParsesSupportedDialectsAndRejectsInvalidData() {
         assertEquals(
             ExternalPlaybackResult(61_000L, 120_000L, completed = false),

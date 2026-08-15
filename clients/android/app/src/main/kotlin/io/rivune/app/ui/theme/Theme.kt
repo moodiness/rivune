@@ -1,22 +1,35 @@
 package io.rivune.app.ui.theme
 
+import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
+import io.rivune.app.AnimationPreference
+import io.rivune.app.DEFAULT_ACCENT_COLOR
+
+private val DefaultAccentColors = rivuneAccentColors(DEFAULT_ACCENT_COLOR)
 
 private val RivuneDarkColors = darkColorScheme(
-    primary = RivuneAccent,
-    onPrimary = RivuneAccentInk,
-    primaryContainer = RivuneAccentSubtle,
-    onPrimaryContainer = RivuneAccentStrong,
+    primary = DefaultAccentColors.primary,
+    onPrimary = DefaultAccentColors.onPrimary,
+    primaryContainer = DefaultAccentColors.primaryContainer,
+    onPrimaryContainer = DefaultAccentColors.onPrimaryContainer,
     secondary = RivuneTextSoft,
     onSecondary = RivuneBackground,
+    tertiary = RivuneSuccess,
+    onTertiary = RivuneBackground,
     background = RivuneBackground,
     onBackground = RivuneText,
     surface = RivuneSurface,
@@ -34,52 +47,90 @@ private val RivuneDarkColors = darkColorScheme(
     onError = RivuneBackground,
     errorContainer = RivuneDangerContainer,
     onErrorContainer = RivuneDangerText,
+    inverseSurface = RivuneText,
+    inverseOnSurface = RivuneBackground,
+    inversePrimary = DefaultAccentColors.pressed,
+    scrim = RivuneScrim,
+    surfaceTint = DefaultAccentColors.primary,
 )
+
+@Immutable
+internal data class RivuneMotionPolicy(
+    val finiteAnimations: Boolean,
+    val ambientAnimations: Boolean,
+    val imageCrossfade: Boolean,
+    val playerControllerAnimations: Boolean,
+)
+
+internal fun motionPolicy(
+    preference: AnimationPreference,
+    systemEnabled: Boolean,
+): RivuneMotionPolicy {
+    val enabled = when (preference) {
+        AnimationPreference.SYSTEM -> systemEnabled
+        AnimationPreference.FULL -> true
+        AnimationPreference.REDUCED -> false
+    }
+    return RivuneMotionPolicy(
+        finiteAnimations = enabled,
+        ambientAnimations = enabled,
+        imageCrossfade = enabled,
+        playerControllerAnimations = enabled,
+    )
+}
+
+internal fun <T> RivuneMotionPolicy.finiteAnimationSpec(durationMillis: Int): FiniteAnimationSpec<T> =
+    if (finiteAnimations) tween(durationMillis) else snap()
+
+internal val LocalRivuneMotionPolicy = staticCompositionLocalOf {
+    motionPolicy(AnimationPreference.SYSTEM, systemEnabled = true)
+}
 
 private val RivuneTypography = Typography(
     displayLarge = TextStyle(
-        fontFamily = FontFamily.Serif,
-        fontWeight = FontWeight.Medium,
-        fontSize = 54.sp,
-        lineHeight = 58.sp,
-        letterSpacing = (-1.1).sp,
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Bold,
+        fontSize = 52.sp,
+        lineHeight = 56.sp,
+        letterSpacing = (-1.4).sp,
     ),
     displayMedium = TextStyle(
-        fontFamily = FontFamily.Serif,
-        fontWeight = FontWeight.Medium,
-        fontSize = 46.sp,
-        lineHeight = 50.sp,
-        letterSpacing = (-0.8).sp,
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Bold,
+        fontSize = 44.sp,
+        lineHeight = 48.sp,
+        letterSpacing = (-1.0).sp,
     ),
     headlineLarge = TextStyle(
-        fontFamily = FontFamily.Serif,
-        fontWeight = FontWeight.Medium,
-        fontSize = 38.sp,
-        lineHeight = 42.sp,
-        letterSpacing = (-0.5).sp,
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Bold,
+        fontSize = 34.sp,
+        lineHeight = 38.sp,
+        letterSpacing = (-0.6).sp,
     ),
     headlineMedium = TextStyle(
-        fontFamily = FontFamily.Serif,
-        fontWeight = FontWeight.Medium,
-        fontSize = 30.sp,
-        lineHeight = 36.sp,
-        letterSpacing = (-0.2).sp,
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Bold,
+        fontSize = 27.sp,
+        lineHeight = 32.sp,
+        letterSpacing = (-0.35).sp,
     ),
     headlineSmall = TextStyle(
-        fontFamily = FontFamily.Serif,
-        fontWeight = FontWeight.Medium,
-        fontSize = 25.sp,
-        lineHeight = 31.sp,
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 23.sp,
+        lineHeight = 28.sp,
+        letterSpacing = (-0.15).sp,
     ),
-    titleLarge = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 21.sp, lineHeight = 27.sp),
-    titleMedium = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 16.sp, lineHeight = 22.sp),
-    titleSmall = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 14.sp, lineHeight = 20.sp),
-    bodyLarge = TextStyle(fontSize = 16.sp, lineHeight = 25.sp),
-    bodyMedium = TextStyle(fontSize = 14.sp, lineHeight = 21.sp),
-    bodySmall = TextStyle(fontSize = 12.sp, lineHeight = 18.sp),
-    labelLarge = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 14.sp, lineHeight = 20.sp, letterSpacing = 0.1.sp),
-    labelMedium = TextStyle(fontWeight = FontWeight.Bold, fontSize = 12.sp, lineHeight = 17.sp, letterSpacing = 0.8.sp),
-    labelSmall = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 11.sp, lineHeight = 16.sp, letterSpacing = 0.5.sp),
+    titleLarge = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Bold, fontSize = 20.sp, lineHeight = 25.sp, letterSpacing = (-0.15).sp),
+    titleMedium = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, lineHeight = 21.sp),
+    titleSmall = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, lineHeight = 19.sp),
+    bodyLarge = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 16.sp, lineHeight = 23.sp),
+    bodyMedium = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 14.sp, lineHeight = 20.sp),
+    bodySmall = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 12.sp, lineHeight = 17.sp),
+    labelLarge = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, lineHeight = 19.sp, letterSpacing = 0.1.sp),
+    labelMedium = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Bold, fontSize = 12.sp, lineHeight = 16.sp, letterSpacing = 0.65.sp),
+    labelSmall = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.SemiBold, fontSize = 11.sp, lineHeight = 15.sp, letterSpacing = 0.35.sp),
 )
 
 private val MaterialShapes = Shapes(
@@ -91,11 +142,32 @@ private val MaterialShapes = Shapes(
 )
 
 @Composable
-fun RivuneTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = RivuneDarkColors,
-        typography = RivuneTypography,
-        shapes = MaterialShapes,
-        content = content,
-    )
+internal fun RivuneTheme(
+    accentColor: Int = DEFAULT_ACCENT_COLOR,
+    animationPreference: AnimationPreference = AnimationPreference.SYSTEM,
+    systemAnimationsEnabled: Boolean = true,
+    content: @Composable () -> Unit,
+) {
+    val colors = remember(accentColor) {
+        val accent = rivuneAccentColors(accentColor)
+        RivuneDarkColors.copy(
+            primary = accent.primary,
+            onPrimary = accent.onPrimary,
+            primaryContainer = accent.primaryContainer,
+            onPrimaryContainer = accent.onPrimaryContainer,
+            inversePrimary = accent.pressed,
+            surfaceTint = accent.primary,
+        )
+    }
+    val policy = remember(animationPreference, systemAnimationsEnabled) {
+        motionPolicy(animationPreference, systemAnimationsEnabled)
+    }
+    CompositionLocalProvider(LocalRivuneMotionPolicy provides policy) {
+        MaterialTheme(
+            colorScheme = colors,
+            typography = RivuneTypography,
+            shapes = MaterialShapes,
+            content = content,
+        )
+    }
 }
