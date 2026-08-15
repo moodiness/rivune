@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/moodiness/rivune/server/internal/requestwork"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -328,8 +330,10 @@ func TestNormalizeTransportURL(t *testing.T) {
 
 func TestHTTPTransportEncodesOpaqueResourceAndPreservesPayload(t *testing.T) {
 	var requestedURI string
+	var propagatedRequestID string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestedURI = r.RequestURI
+		propagatedRequestID = r.Header.Get(requestwork.RequestIDHeader)
 		w.Header().Set("Cache-Control", "max-age=300, stale-while-revalidate=60")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"streams":[{"infoHash":"ABCDEF","fileIdx":7,"behaviorHints":{"bingeGroup":"custom-group","proxyHeaders":{"request":{"Authorization":"secret"}},"futureHint":true}}],"futureResponseField":{"kept":true},"staleError":900}`))
@@ -337,7 +341,8 @@ func TestHTTPTransportEncodesOpaqueResourceAndPreservesPayload(t *testing.T) {
 	defer server.Close()
 
 	transport := NewHTTPTransport(server.Client())
-	payload, cache, err := transport.Resource(context.Background(), server.URL+"/configured/token/manifest.json?key=value", ResourcePath{
+	requestContext, requestID := requestwork.WithRequestID(context.Background(), "transport-correlation-4")
+	payload, cache, err := transport.Resource(requestContext, server.URL+"/configured/token/manifest.json?key=value", ResourcePath{
 		Resource: "stream",
 		Type:     "anime-special",
 		ID:       "kitsu:anime/42 ?",
@@ -352,6 +357,9 @@ func TestHTTPTransportEncodesOpaqueResourceAndPreservesPayload(t *testing.T) {
 	wantURI := "/configured/token/stream/anime-special/kitsu%3Aanime%2F42%20%3F/genre=Sci%20Fi&genre=Drama%2FAction.json?key=value"
 	if requestedURI != wantURI {
 		t.Fatalf("request URI = %q, want %q", requestedURI, wantURI)
+	}
+	if propagatedRequestID != requestID {
+		t.Fatalf("propagated request ID = %q, want %q", propagatedRequestID, requestID)
 	}
 	if !strings.Contains(string(payload), `"futureHint":true`) || !strings.Contains(string(payload), `"futureResponseField":{"kept":true}`) {
 		t.Fatalf("response fields were not preserved: %s", payload)

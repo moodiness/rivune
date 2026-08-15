@@ -13,6 +13,7 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/collection"
+	"github.com/moodiness/rivune/server/internal/requestwork"
 )
 
 const (
@@ -86,7 +87,17 @@ func (client *Client) ResolveCollectionSource(ctx context.Context, source collec
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("trakt-api-key", client.clientID)
 	request.Header.Set("trakt-api-version", "2")
+	requestwork.PropagateRequestID(request)
+	requestwork.BeginOutbound(ctx, requestwork.Now())
 	response, err := client.httpClient.Do(request)
+	if err != nil {
+		requestwork.EndOutbound(ctx, requestwork.Now(), 0)
+	} else if response.Body == nil {
+		requestwork.EndOutbound(ctx, requestwork.Now(), 0)
+		response.Body = http.NoBody
+	} else {
+		response.Body = requestwork.ObserveBody(ctx, response.Body)
+	}
 	if err != nil {
 		return collection.SourcePage{}, fmt.Errorf("request Trakt list: %w", err)
 	}

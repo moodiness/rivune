@@ -119,6 +119,51 @@ class RivuneViewModelTest {
         assertNull(store.value)
         assertFalse(state.isBusy)
         assertEquals(0, gateway.exchangeCount)
+        assertTrue(gateway.loggedOut)
+    }
+
+    @Test
+    fun disconnectKeepsServerWhenLocalCredentialsCannotBeCleared() = runTest(dispatcher) {
+        val store = FakeServerStore()
+        val gateway = FakeGateway(
+            pairingPending = true,
+            logoutResult = LogoutResult(localCredentialsCleared = false, serverSessionClosed = true),
+        )
+        val viewModel = viewModel(store, gateway)
+
+        viewModel.connect("media.example.com")
+        runCurrent()
+        viewModel.disconnectServer()
+        advanceUntilIdle()
+
+        val state = viewModel.state.value
+        assertIs<AppDestination.Pairing>(state.destination)
+        assertEquals(UiFailure.LOGOUT_FAILED, state.failure)
+        assertEquals("https://media.example.com", store.value)
+        assertFalse(state.isBusy)
+        assertTrue(gateway.loggedOut)
+    }
+
+    @Test
+    fun disconnectForgetsServerAfterRemoteRevocationFailure() = runTest(dispatcher) {
+        val store = FakeServerStore()
+        val gateway = FakeGateway(
+            pairingPending = true,
+            logoutResult = LogoutResult(localCredentialsCleared = true, serverSessionClosed = false),
+        )
+        val viewModel = viewModel(store, gateway)
+
+        viewModel.connect("media.example.com")
+        runCurrent()
+        viewModel.disconnectServer()
+        advanceUntilIdle()
+
+        val state = viewModel.state.value
+        assertIs<AppDestination.Server>(state.destination)
+        assertEquals(UiFailure.LOGOUT_FAILED, state.failure)
+        assertNull(store.value)
+        assertFalse(state.isBusy)
+        assertTrue(gateway.loggedOut)
     }
 
     @Test

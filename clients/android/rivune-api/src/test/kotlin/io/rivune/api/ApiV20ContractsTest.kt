@@ -74,6 +74,72 @@ class ApiV20ContractsTest {
     }
 
     @Test
+    fun discoveryCapabilitiesAreNormalizedAndQueryable() = runBlocking {
+        assertEquals("bounded-aggregate-resources", DiscoveryCapability.BOUNDED_AGGREGATE_RESOURCES.identifier)
+        assertEquals("profile-archives-v1", DiscoveryCapability.PROFILE_ARCHIVES_V1.identifier)
+        assertEquals("request-correlation", DiscoveryCapability.REQUEST_CORRELATION.identifier)
+        val server = MockWebServer()
+        server.enqueue(discoveryResponse())
+        server.enqueue(
+            discoveryResponse(
+                capabilities = """["profile-archives-v1","future-capability","profile-archives-v1","","Uppercase","-leading","trailing-",42,null,{},"${"a".repeat(65)}"]""",
+            ),
+        )
+        server.start()
+        try {
+            val serverUrl = server.loopbackUrl("/").toString()
+            val client = RivuneApiClient(serverUrl, V20CredentialStore(serverUrl, tokenPair()))
+
+            val omitted = client.discover()
+            assertEquals(emptyList(), omitted.capabilities)
+            assertEquals(false, omitted.supportsProfileArchives)
+
+            val normalized = client.discover()
+            assertEquals(listOf("profile-archives-v1", "future-capability"), normalized.capabilities)
+            assertEquals(true, normalized.supportsProfileArchives)
+            assertEquals(true, normalized.supportsCapability(DiscoveryCapability.PROFILE_ARCHIVES_V1))
+            assertEquals(false, normalized.supportsCapability(DiscoveryCapability.REQUEST_CORRELATION))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun discoveryModelDecoderUsesTheSameDefensiveCapabilityNormalization() {
+        val normalized = json.decodeFromString<Discovery>(
+            discoveryJson(
+                capabilities = """["profile-archives-v1","future-capability","profile-archives-v1","bad--identifier",false,null,{}]""",
+            ),
+        )
+        assertEquals(listOf("profile-archives-v1", "future-capability"), normalized.capabilities)
+        assertEquals(true, normalized.supportsProfileArchives)
+
+        assertEquals(emptyList(), json.decodeFromString<Discovery>(discoveryJson()).capabilities)
+        assertEquals(emptyList(), json.decodeFromString<Discovery>(discoveryJson(capabilities = "null")).capabilities)
+        assertEquals(
+            emptyList(),
+            json.decodeFromString<Discovery>(discoveryJson(capabilities = """{"unexpected":true}""")).capabilities,
+        )
+    }
+
+    @Test
+    fun discoveryCapabilitiesRetainOnlyTheFirst64SafeUniqueIdentifiers() = runBlocking {
+        val identifiers = (0..69).map { "capability-$it" }
+        val capabilities = identifiers.joinToString(prefix = "[", postfix = "]") { "\"$it\"" }
+        val server = MockWebServer()
+        server.enqueue(discoveryResponse(capabilities = capabilities))
+        server.start()
+        try {
+            val serverUrl = server.loopbackUrl("/").toString()
+            val discovery = RivuneApiClient(serverUrl, V20CredentialStore(serverUrl, tokenPair())).discover()
+
+            assertEquals(identifiers.take(64), discovery.capabilities)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun playbackMediaInspectionTreatsLegacyNullTrackArraysAsEmpty() {
         val inspection = json.decodeFromString<PlaybackMediaInspection>(
             """{"container":"mp4","videoTracks":[{"index":0,"type":"video","codec":"h264"}],"audioTracks":[{"index":1,"type":"audio","codec":"aac"}],"subtitleTracks":null}""",
@@ -188,9 +254,17 @@ class ApiV20ContractsTest {
         }
     }
 
-    private fun discoveryResponse(setupCompleted: Boolean = true, demoAvailable: Boolean = true) = jsonResponse(
-        """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"setupCompleted":$setupCompleted,"demoAvailable":$demoAvailable,"timezone":"UTC","interfaceLanguage":"en"}""",
-    )
+    private fun discoveryResponse(
+        setupCompleted: Boolean = true,
+        demoAvailable: Boolean = true,
+        capabilities: String? = null,
+    ) = jsonResponse(discoveryJson(setupCompleted, demoAvailable, capabilities))
+
+    private fun discoveryJson(
+        setupCompleted: Boolean = true,
+        demoAvailable: Boolean = true,
+        capabilities: String? = null,
+    ) = """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"setupCompleted":$setupCompleted,"demoAvailable":$demoAvailable${capabilities?.let { ",\"capabilities\":$it" }.orEmpty()},"timezone":"UTC","interfaceLanguage":"en"}"""
 
     private fun seriesFixture() =
         """{"id":"$seriesId","mediaType":"series","name":"Series","originalName":"Series","originalLanguage":"en","overview":"Overview","genres":[],"cast":[{"id":"42","name":"Actor"}],"voteAverage":8.0,"voteCount":10,"seasons":[],"aliases":[],"episodeOrders":[{"id":"84","name":"Aired","type":"official","isDefault":true}],"selectedEpisodeOrderId":"84","mappingProvider":"tvdb","externalIds":{"tvdb":"123"}}"""

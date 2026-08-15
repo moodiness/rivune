@@ -13,6 +13,17 @@ test("administrator monitors operations and runs fixed maintenance controls", as
   const streamMetrics = page.getByLabel("Live stream activity metrics");
   await expect(streamMetrics.locator(".operation-metric").filter({ hasText: "Active sessions" })).toContainText("2");
   await expect(streamMetrics.locator(".operation-metric").filter({ hasText: "Temporary media" })).toContainText("12 MB");
+  const serviceHealth = page.getByRole("region", { name: "Service health" });
+  const databaseAggregate = serviceHealth.locator(".operation-aggregate").filter({ has: page.getByRole("heading", { name: "PostgreSQL pool" }) });
+  await expect(databaseAggregate.locator("dl > div")).toHaveText(["Acquired2", "Idle3", "Total5", "Maximum10", "Waits7", "Wait time145 ms"]);
+  const trackingAggregate = serviceHealth.locator(".operation-aggregate").filter({ has: page.getByRole("heading", { name: "Tracking outbox" }) });
+  await expect(trackingAggregate.locator("dl > div")).toHaveText(["Pending12", "Due3", "Oldest age7 min"]);
+  const addonAggregate = serviceHealth.locator(".operation-aggregate").filter({ has: page.getByRole("heading", { name: "Addons", exact: true }) });
+  await expect(addonAggregate.locator("dl > div").nth(0)).toHaveText("Installed8");
+  await expect(addonAggregate.locator("dl > div").nth(1)).toHaveText("Enabled7");
+  await expect(addonAggregate.locator("dl > div").nth(2)).toHaveText(/Latest update age.*\d/);
+  const playbackAggregate = serviceHealth.locator(".operation-aggregate").filter({ has: page.getByRole("heading", { name: "Playback", exact: true }) });
+  await expect(playbackAggregate.locator("dl > div")).toHaveText(["Active4", "Transcoding2"]);
 
   const notifications = page.getByRole("region", { name: "Device notifications" });
   await expect(notifications).toBeVisible();
@@ -72,6 +83,11 @@ test("administrator monitors operations and runs fixed maintenance controls", as
   }
 
   await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await expect.poll(async () => serviceHealth.locator(".operation-aggregate").evaluateAll((aggregates) => aggregates.every((aggregate) => {
+    const bounds = aggregate.getBoundingClientRect();
+    return bounds.left >= 0 && bounds.right <= window.innerWidth;
+  }))).toBe(true);
   const mobileGeometry = await actionCards.evaluateAll((cards) => cards.map((card) => {
     const cardRect = card.getBoundingClientRect();
     const scopeRect = card.querySelector(".operation-action-card__scope")!.getBoundingClientRect();

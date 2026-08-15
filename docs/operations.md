@@ -2,6 +2,36 @@
 
 The supported container deployment is the root [`compose.yaml`](../compose.yaml), which runs Rivune with PostgreSQL 18. Put it behind Pangolin/Newt or an operator-managed reverse proxy for public HTTPS. Run the commands in this document from the repository root. The supplied shell scripts explicitly target Linux with Bash, OpenSSL, Docker Engine, Docker Compose v2, and `set -euo pipefail`; CI runs the same scripts on Linux.
 
+## Root operator command
+
+For the standard Linux Compose deployment, use the repository-root command instead of reconstructing Docker arguments:
+
+```sh
+./rivune setup --public-url https://media.example.com --version 1.6.1
+./rivune up
+./rivune status
+./rivune logs rivune
+./rivune doctor
+```
+
+`setup` requires OpenSSL, validates a complete HTTPS origin and stable numeric image version, generates the three database passwords, setup token, and encryption key independently, and atomically creates a mode-0600 `.env`. It refuses every existing file or symlink. Lifecycle commands explicitly select `.env` and `compose.yaml`; backup, verification, and restore preserve their existing positional and trust arguments. Run `./rivune help` for the complete command surface.
+
+`doctor` fails on the first broken invariant: required tools and Compose plugin, private `.env` ownership/mode, required and distinct database secrets, Compose rendering, both healthy containers, PostgreSQL readiness, loopback `/ready`, then the configured public HTTPS `/ready`. It never prints secret values.
+
+## Request correlation and bounded diagnostics
+
+Every native HTTP response carries `X-Request-ID`. Rivune accepts a caller ID only when it is a single 1–128-byte ASCII token from the documented allowlist; otherwise it generates a cryptographically random 128-bit hexadecimal ID. The same value is propagated to supported outbound provider requests and written to completion and panic logs with the matched route, method, status, duration, response bytes, database call count/duration, outbound call count/duration, and upstream bytes. Do not put credentials or media identifiers in caller-supplied IDs.
+
+The global-administrator `GET /api/v1/operations` response adds bounded PostgreSQL pool, tracking-outbox, add-on, and active/transcoding-playback aggregates to the existing metadata and housekeeping status. These fields intentionally contain no profile, title, URL, token, or credential identifiers.
+
+## Portable profile archives
+
+`GET /api/v1/profiles/{profileId}/archive` exports a strict version-1 JSON document. `POST /api/v1/profiles/{profileId}/archive/import` validates and atomically merges it into the target profile. Both routes require a global administrator and revalidate the administrator plus target-profile management authority inside the database transaction.
+
+The archive preserves profile settings, explicitly assigned add-ons and ordering, assignment-free collections, stable title identities, library/progress/favorite/user-data state, and tracking preferences. Import creates target-local resource identities, never imports source UUIDs or category/cross-profile grants, does not delete target data absent from the document, and is idempotent when the same document is merged repeatedly. Passwords, PINs, sessions, tracking tokens, Jellyfin credentials, and instance integration credentials are excluded.
+
+Add-on transport URLs are included because they are required to reconstruct configured add-ons and may themselves contain tokens in path or query components. Treat the response as a credential file: transfer it over the authenticated HTTPS API, retain the `Cache-Control: no-store` behavior, store it with mode 0600 or an equivalent secret-store policy, and delete unneeded copies. The structured import report separates created, updated, and unchanged records; any validation, identity conflict, authorization failure, or database error rolls back the whole document.
+
 ## HTTPS behind a reverse proxy
 
 Create the private `.env` file before entering any secrets:
@@ -20,7 +50,7 @@ login used only by the restore scripts.
 
 ```dotenv
 RIVUNE_PUBLIC_URL=https://media.example.com
-RIVUNE_VERSION=1.5.3
+RIVUNE_VERSION=1.6.1
 RIVUNE_POSTGRES_SUPERUSER_PASSWORD=<output of: openssl rand -hex 32>
 RIVUNE_DATABASE_PASSWORD=<different output of: openssl rand -hex 32>
 RIVUNE_RESTORE_PASSWORD=<different output of: openssl rand -hex 32>
@@ -313,9 +343,9 @@ The subshell and its `EXIT` trap discard the exported secrets even when migratio
 After exporting the signing and verification key paths, lineage, and trusted state path described below, update to a stable release by changing `RIVUNE_VERSION` to an exact released version, backing up first, recording the printed backup ID outside the repository, and recreating only the application:
 
 ```sh
-COMPOSE_FILE=compose.yaml ./scripts/postgres-backup.sh backups/rivune-before-1.5.3.dump
-./scripts/postgres-verify-backup.sh --expect-backup-id '<recorded ID>' backups/rivune-before-1.5.3.dump
-# edit RIVUNE_VERSION=1.5.3 in .env
+COMPOSE_FILE=compose.yaml ./scripts/postgres-backup.sh backups/rivune-before-1.6.1.dump
+./scripts/postgres-verify-backup.sh --expect-backup-id '<recorded ID>' backups/rivune-before-1.6.1.dump
+# edit RIVUNE_VERSION=1.6.1 in .env
 docker compose --env-file .env -f compose.yaml pull rivune
 docker compose --env-file .env -f compose.yaml up -d rivune
 curl --fail --show-error https://media.example.com/ready
@@ -636,12 +666,12 @@ Early development builds of the profile-credential cutover could remove the old 
 Clients may use either the exact Jellyfin-style root paths or one lowercase `/emby` prefix. For example, public discovery is available at `/System/Info/Public` and `/emby/System/Info/Public`; nested prefixes, case variants, path normalization, and implicit method fallbacks are rejected. The bounded compatibility contract covers:
 
 - public server identity and availability probes;
-- credential login, the credential-bound user, session/capability projection, logout, and bounded WebSocket liveness;
+- profile-credential login, enabled profile-bound Quick Connect initiation/poll/exchange, the credential-bound user, session/capability projection, logout, and bounded WebSocket liveness;
 - library views, items, movie/series hierarchy, enabled metadata and add-on catalog search, item artwork, and deterministic profile avatars;
 - lazy multi-source `PlaybackInfo`, direct/remux/transcode delivery through Rivune's existing playback pipeline, byte ranges, seeking, opaque HLS child requests, and capability-scoped WebVTT subtitles;
 - playing/progress/stopped events, played state, favorites, resume items, and next-up.
 
-Private provider URLs, headers, native playback tokens, and source references remain server-side. Query authentication is accepted for Jellyfin protocol compatibility, but Rivune-generated playback URLs contain only an owner/item/source/TTL-bound capability and never the profile credential. Use HTTPS for every non-loopback deployment. Quick Connect is explicitly disabled, plugin and package lists are empty, and unknown paths or methods return `404`. The exact request/response schemas, limits, and status codes are in [`protocol/jellyfin-compat-openapi.yaml`](../protocol/jellyfin-compat-openapi.yaml).
+Private provider URLs, headers, native playback tokens, and source references remain server-side. Query authentication is accepted for Jellyfin protocol compatibility, but Rivune-generated playback URLs contain only an owner/item/source/TTL-bound capability and never the profile credential. Use HTTPS for every non-loopback deployment. When the adapter is enabled, `GET /QuickConnect/Enabled` reports the wired profile-bound flow: initiation requires stable client-device metadata, creates a 10-minute code, and directs a signed-in manager to `/pair`; polling is non-consuming and bound to the initiating device; exchange is single-use and creates no password fallback. Approval revalidates the manager's active manageable profile and binds the compatibility session to exactly that profile and its category. Plugin and package lists are empty, and unknown paths or methods return `404`. The exact request/response schemas, limits, and status codes are in [`protocol/jellyfin-compat-openapi.yaml`](../protocol/jellyfin-compat-openapi.yaml).
 
 Jellyfin Media Player/Desktop is incompatible with this adapter because it loads the server-hosted Jellyfin Web application from `/` after discovery, while Rivune intentionally serves its own web application there. A successful API probe in that desktop shell therefore does not validate the standalone application flows covered by the adapter.
 
@@ -955,16 +985,16 @@ not copy verification keys into the backup repository.
 
 ## PostgreSQL restore
 
-A restore is destructive: it replaces the current `rivune` database. Take and
-verify a new authenticated backup of the current database first. Export the
-restore password from the protected deployment secret; it is independent from
-the application and bootstrap passwords. Keep the signing/verification key,
-lineage, and state exports from the backup section. Before running the restore,
-put a protected `RIVUNE_ENCRYPTION_KEYS` recovery copy containing every version
-referenced by the selected database into `.env`; the script may restart Rivune
-after the ledger check, and encrypted rows cannot be recovered with a newer key
-alone. Select the backup ID from the separate operator-controlled record, never
-from the adjacent manifest:
+A restore replaces the current `rivune` database, but it does not destroy that
+database in place. Take and verify a new authenticated backup of the current
+database first. Export the restore password from the protected deployment secret;
+it is independent from the application and bootstrap passwords. Keep the
+signing/verification key, lineage, and state exports from the backup section.
+Before running the restore, put a protected `RIVUNE_ENCRYPTION_KEYS` recovery copy
+containing every version referenced by the selected database into `.env`; the
+script validates a staging copy and may restart Rivune after activation, and
+encrypted rows cannot be recovered with a newer key alone. Select the backup ID
+from the separate operator-controlled record, never from the adjacent manifest:
 
 ```sh
 export COMPOSE_FILE=compose.yaml
@@ -1058,20 +1088,30 @@ external ID/digest, then create a normal new backup. New output is always signed
 v2; never add an unsigned size beside an old manifest or raise the legacy cap
 merely to make an unknown archive pass.
 
-After policy authorization, the restore stops Rivune, connects as non-superuser
-`rivune_restore`, assumes non-login `rivune_owner` for restored objects, recreates
-the database, restores with `--exit-on-error`, checks the migration ledger, and
-restarts Rivune only if it was running before. The restore password is passed to
-Compose by environment-variable name, not as an argument or log value. Missing,
-unsafe, oversized, inconsistent, replayed, or incorrectly selected material
-fails before the application is stopped.
+After policy authorization, the script connects as non-superuser
+`rivune_restore`, assumes non-login `rivune_owner` for restored objects, safely
+removes only a stale fixed-name staging database, restores the archive into a new
+staging database with `--exit-on-error`, and checks its migration ledger while
+the live database and Rivune remain untouched. It then stops Rivune and atomically
+renames the live database to a retained prior name and the validated staging
+database to `rivune`. Every reserved database identifier is passed through `psql`'s
+identifier quoting (or PostgreSQL `format('%I')` for generated statements); the
+restore password is passed to Compose by environment-variable name, not as an
+argument or log value. Missing, unsafe, oversized, inconsistent, replayed,
+incorrectly selected, unrestorable, or ledger-invalid material fails before the
+application is stopped or the live database name changes.
 
-If authentication, policy, archive parsing, or service shutdown fails before
-database replacement starts, the script returns the error and restores the
-prior service state. If a drop, create, restore, or ledger check fails after
-replacement starts, Rivune deliberately remains stopped so it cannot serve a
-partial database. Repair the database or restore a known-good authenticated
-archive before starting it again. Inspect both services before accepting traffic:
+If Rivune was running before the restore, the script starts it with Compose's
+health wait after the database-name swap. Only after Compose reports it healthy
+does the script drop the retained prior database. If the swap, startup, or
+readiness check fails, it stops Rivune, atomically restores the prior database
+name, removes the inactive failed staging copy, and restores the prior running
+state. Thus no failure after archive verification destroys the prior working
+database. If automatic name rollback itself fails, the script leaves Rivune
+stopped, retains the prior database under the fixed `rivune_restore_prior` name,
+does not run destructive cleanup, returns failure, and requires operator
+attention. A prior database that was intentionally stopped remains stopped.
+Inspect both services before accepting traffic:
 
 ```sh
 export COMPOSE_FILE=compose.yaml

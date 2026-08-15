@@ -33,7 +33,7 @@ var catalogMediaTypes = map[string]struct{}{
 // ParentID is the only hierarchy selector. Recursive expands the selected
 // root(s), SearchTerm performs bounded title search in SQL, and IDs narrows the
 // result to canonical UUIDs. Offset is zero-based and Limit is bounded. SortBy
-// is empty for native catalog order or "sortname" with an explicit direction.
+// accepts the catalog sort keys normalized by the Jellyfin compatibility layer.
 type CatalogQuery struct {
 	ParentID              string
 	MediaTypes            []string
@@ -393,6 +393,10 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 			           to_char(title.release_date, 'YYYY'),
 			           CASE WHEN left(COALESCE(title.release_info, ''), 4) ~ '^[0-9]{4}$' THEN left(title.release_info, 4) END
 			       ) AS catalog_production_year_sort,
+			       CASE WHEN jsonb_typeof(metadata.payload -> 'voteAverage') = 'number'
+			                  AND length(metadata.payload ->> 'voteAverage') <= 16
+			                  AND (metadata.payload ->> 'voteAverage') ~ '^[0-9]+([.][0-9]+)?$'
+			            THEN (metadata.payload ->> 'voteAverage')::real END AS catalog_community_rating_sort,
 			       favorite.title_id IS NOT NULL AS state_favorite,
 			       progress.completed AS state_played,
 			       (progress.title_id IS NOT NULL AND progress.position_seconds > 0 AND NOT progress.completed) AS state_resumable,
@@ -466,6 +470,8 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 		), catalog_page AS MATERIALIZED (
 			SELECT * FROM catalog_candidates
 			ORDER BY
+			  CASE WHEN $10 = 'ascending' AND (string_to_array($9, ','))[1] = 'communityrating' THEN catalog_community_rating_sort END ASC NULLS LAST,
+			  CASE WHEN $10 = 'descending' AND (string_to_array($9, ','))[1] = 'communityrating' THEN catalog_community_rating_sort END DESC NULLS LAST,
 			  CASE WHEN $10 = 'ascending' THEN CASE (string_to_array($9, ','))[1]
 			      WHEN 'sortname' THEN catalog_sort_name
 			      WHEN 'datecreated' THEN catalog_date_created_sort
@@ -476,6 +482,8 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 			      WHEN 'datecreated' THEN catalog_date_created_sort
 			      WHEN 'datelastcontentadded' THEN to_char(catalog_last_content_added AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS.US')
 			      WHEN 'productionyear' THEN catalog_production_year_sort END END COLLATE "C" DESC NULLS LAST,
+			  CASE WHEN $10 = 'ascending' AND (string_to_array($9, ','))[2] = 'communityrating' THEN catalog_community_rating_sort END ASC NULLS LAST,
+			  CASE WHEN $10 = 'descending' AND (string_to_array($9, ','))[2] = 'communityrating' THEN catalog_community_rating_sort END DESC NULLS LAST,
 			  CASE WHEN $10 = 'ascending' THEN CASE (string_to_array($9, ','))[2]
 			      WHEN 'sortname' THEN catalog_sort_name
 			      WHEN 'datecreated' THEN catalog_date_created_sort
@@ -486,6 +494,8 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 			      WHEN 'datecreated' THEN catalog_date_created_sort
 			      WHEN 'datelastcontentadded' THEN to_char(catalog_last_content_added AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS.US')
 			      WHEN 'productionyear' THEN catalog_production_year_sort END END COLLATE "C" DESC NULLS LAST,
+			  CASE WHEN $10 = 'ascending' AND (string_to_array($9, ','))[3] = 'communityrating' THEN catalog_community_rating_sort END ASC NULLS LAST,
+			  CASE WHEN $10 = 'descending' AND (string_to_array($9, ','))[3] = 'communityrating' THEN catalog_community_rating_sort END DESC NULLS LAST,
 			  CASE WHEN $10 = 'ascending' THEN CASE (string_to_array($9, ','))[3]
 			      WHEN 'sortname' THEN catalog_sort_name
 			      WHEN 'datecreated' THEN catalog_date_created_sort
@@ -593,6 +603,8 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 		) metadata ON true
 		LEFT JOIN provider_ids ON provider_ids.title_id = title.id
 		ORDER BY
+		  CASE WHEN $10 = 'ascending' AND (string_to_array($9, ','))[1] = 'communityrating' THEN title.catalog_community_rating_sort END ASC NULLS LAST,
+		  CASE WHEN $10 = 'descending' AND (string_to_array($9, ','))[1] = 'communityrating' THEN title.catalog_community_rating_sort END DESC NULLS LAST,
 		  CASE WHEN $10 = 'ascending' THEN CASE (string_to_array($9, ','))[1]
 		      WHEN 'sortname' THEN title.catalog_sort_name
 		      WHEN 'datecreated' THEN title.catalog_date_created_sort
@@ -603,6 +615,8 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 		      WHEN 'datecreated' THEN title.catalog_date_created_sort
 		      WHEN 'datelastcontentadded' THEN to_char(title.catalog_last_content_added AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS.US')
 		      WHEN 'productionyear' THEN title.catalog_production_year_sort END END COLLATE "C" DESC NULLS LAST,
+		  CASE WHEN $10 = 'ascending' AND (string_to_array($9, ','))[2] = 'communityrating' THEN title.catalog_community_rating_sort END ASC NULLS LAST,
+		  CASE WHEN $10 = 'descending' AND (string_to_array($9, ','))[2] = 'communityrating' THEN title.catalog_community_rating_sort END DESC NULLS LAST,
 		  CASE WHEN $10 = 'ascending' THEN CASE (string_to_array($9, ','))[2]
 		      WHEN 'sortname' THEN title.catalog_sort_name
 		      WHEN 'datecreated' THEN title.catalog_date_created_sort
@@ -613,6 +627,8 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 		      WHEN 'datecreated' THEN title.catalog_date_created_sort
 		      WHEN 'datelastcontentadded' THEN to_char(title.catalog_last_content_added AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS.US')
 		      WHEN 'productionyear' THEN title.catalog_production_year_sort END END COLLATE "C" DESC NULLS LAST,
+		  CASE WHEN $10 = 'ascending' AND (string_to_array($9, ','))[3] = 'communityrating' THEN title.catalog_community_rating_sort END ASC NULLS LAST,
+		  CASE WHEN $10 = 'descending' AND (string_to_array($9, ','))[3] = 'communityrating' THEN title.catalog_community_rating_sort END DESC NULLS LAST,
 		  CASE WHEN $10 = 'ascending' THEN CASE (string_to_array($9, ','))[3]
 		      WHEN 'sortname' THEN title.catalog_sort_name
 		      WHEN 'datecreated' THEN title.catalog_date_created_sort
@@ -800,7 +816,7 @@ func normalizeCatalogQuery(query CatalogQuery) (CatalogQuery, error) {
 	for _, rawKey := range rawSortKeys {
 		key := strings.TrimSpace(rawKey)
 		switch key {
-		case "sortname", "datecreated", "datelastcontentadded", "productionyear":
+		case "sortname", "datecreated", "datelastcontentadded", "productionyear", "communityrating":
 			sortKeys = append(sortKeys, key)
 		default:
 			return CatalogQuery{}, fmt.Errorf("%w: unsupported catalog sort", ErrInvalidInput)

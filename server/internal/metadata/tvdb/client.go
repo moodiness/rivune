@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/moodiness/rivune/server/internal/metadata"
+	"github.com/moodiness/rivune/server/internal/requestwork"
 )
 
 const (
@@ -542,6 +543,7 @@ func (c *Client) getWithToken(ctx context.Context, endpoint string, query url.Va
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Authorization", "Bearer "+token)
+	requestwork.PropagateRequestID(request)
 	return c.do(request, destination)
 }
 
@@ -566,6 +568,7 @@ func (c *Client) token(ctx context.Context, force bool) (string, error) {
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
+	requestwork.PropagateRequestID(request)
 	var response loginResponse
 	status, err := c.do(request, &response)
 	if err != nil {
@@ -581,7 +584,17 @@ func (c *Client) token(ctx context.Context, force bool) (string, error) {
 
 func (c *Client) do(request *http.Request, destination any) (int, error) {
 	resource := request.URL.RequestURI()
+	ctx := request.Context()
+	requestwork.BeginOutbound(ctx, requestwork.Now())
 	response, err := c.httpClient.Do(request)
+	if err != nil {
+		requestwork.EndOutbound(ctx, requestwork.Now(), 0)
+	} else if response.Body == nil {
+		requestwork.EndOutbound(ctx, requestwork.Now(), 0)
+		response.Body = http.NoBody
+	} else {
+		response.Body = requestwork.ObserveBody(ctx, response.Body)
+	}
 	if err != nil {
 		return 0, metadata.NewProviderError(metadata.ErrProviderFailure, err, 0, resource)
 	}

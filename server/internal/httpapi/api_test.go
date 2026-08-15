@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,10 +18,73 @@ import (
 	"github.com/moodiness/rivune/server/internal/config"
 	"github.com/moodiness/rivune/server/internal/demo"
 	"github.com/moodiness/rivune/server/internal/instance"
+	"github.com/moodiness/rivune/server/internal/requestwork"
 	"github.com/moodiness/rivune/server/internal/runtimesettings"
 	"github.com/moodiness/rivune/server/internal/settings"
 	"github.com/moodiness/rivune/server/internal/tracking"
 )
+
+func TestNativeRequestIDIsValidatedReturnedAndLogged(t *testing.T) {
+	tests := []struct {
+		name     string
+		supplied string
+		accept   bool
+	}{
+		{name: "generated"},
+		{name: "accepted", supplied: "gateway:request-42", accept: true},
+		{name: "whitespace", supplied: "bad request"},
+		{name: "control", supplied: "bad\nrequest"},
+		{name: "oversized", supplied: strings.Repeat("a", 129)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			api := testAPI(&fakeInstanceService{})
+			api.logger = slog.New(slog.NewTextHandler(&logs, nil))
+			var contextRequestID string
+			handler := api.middleware(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				contextRequestID = requestwork.RequestID(request.Context())
+				response.WriteHeader(http.StatusNoContent)
+			}))
+			request := httptest.NewRequest(http.MethodGet, "/native", nil)
+			request.Header.Set(requestwork.RequestIDHeader, test.supplied)
+			response := httptest.NewRecorder()
+
+			handler.ServeHTTP(response, request)
+
+			returned := response.Header().Get(requestwork.RequestIDHeader)
+			if returned == "" || returned != contextRequestID || !requestwork.ValidRequestID(returned) {
+				t.Fatalf("request IDs response=%q context=%q", returned, contextRequestID)
+			}
+			if (returned == test.supplied) != test.accept {
+				t.Fatalf("supplied request ID %q reflected as %q, accept=%t", test.supplied, returned, test.accept)
+			}
+			if !strings.Contains(logs.String(), "request_id="+returned) || !strings.Contains(logs.String(), "request completed") {
+				t.Fatalf("completion log lacks correlated ID: %s", logs.String())
+			}
+		})
+	}
+}
+
+func TestPanicResponseAndBothLogsRetainRequestID(t *testing.T) {
+	var logs bytes.Buffer
+	api := testAPI(&fakeInstanceService{})
+	api.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	handler := api.middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("failure") }))
+	request := httptest.NewRequest(http.MethodGet, "/panic", nil)
+	request.Header.Set(requestwork.RequestIDHeader, "panic-correlation-9")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError || response.Header().Get(requestwork.RequestIDHeader) != "panic-correlation-9" {
+		t.Fatalf("panic response status=%d request ID=%q", response.Code, response.Header().Get(requestwork.RequestIDHeader))
+	}
+	if strings.Count(logs.String(), "request_id=panic-correlation-9") != 2 ||
+		!strings.Contains(logs.String(), "panic serving request") || !strings.Contains(logs.String(), "request completed") {
+		t.Fatalf("panic correlation logs = %s", logs.String())
+	}
+}
 
 type fakeInstanceService struct {
 	infoCalls   int
@@ -91,7 +155,7 @@ func (ping databasePingerFunc) Ping(ctx context.Context) error {
 	return ping(ctx)
 }
 
-func TestLivenessRemainsLiveWithoutDatabaseAndSuccessfulProbesAreSilent(t *testing.T) {
+func TestLivenessRemainsLiveWithoutDatabaseAndLogsCorrelation(t *testing.T) {
 	var logs bytes.Buffer
 	pingCalls := 0
 	api := testAPI(&fakeInstanceService{})
@@ -115,12 +179,12 @@ func TestLivenessRemainsLiveWithoutDatabaseAndSuccessfulProbesAreSilent(t *testi
 	if body["status"] != "ok" || body["version"] != "test" || body["database"] != "" {
 		t.Fatalf("unexpected liveness response: %+v", body)
 	}
-	if strings.Contains(logs.String(), "request completed") {
-		t.Fatalf("successful liveness probe was logged: %s", logs.String())
+	if !strings.Contains(logs.String(), "request completed") || !strings.Contains(logs.String(), "request_id=") {
+		t.Fatalf("successful liveness probe lacks correlation log: %s", logs.String())
 	}
 }
 
-func TestHealthAndReadinessCheckDatabaseWithTimeoutAndLogOnlyFailure(t *testing.T) {
+func TestHealthAndReadinessCheckDatabaseWithTimeoutAndCompletionLog(t *testing.T) {
 	for _, path := range []string{"/health", "/ready"} {
 		for _, test := range []struct {
 			name       string
@@ -159,14 +223,10 @@ func TestHealthAndReadinessCheckDatabaseWithTimeoutAndLogOnlyFailure(t *testing.
 				if body["status"] != test.wantState || body["database"] != test.wantState || body["version"] != "test" {
 					t.Fatalf("unexpected readiness response: %+v", body)
 				}
-				if test.pingErr == nil {
-					if strings.Contains(logs.String(), "request completed") {
-						t.Fatalf("successful readiness probe was logged: %s", logs.String())
-					}
-					return
+				if !strings.Contains(logs.String(), "request completed") || !strings.Contains(logs.String(), "request_id=") {
+					t.Fatalf("readiness completion log = %s", logs.String())
 				}
-				if !strings.Contains(logs.String(), "database readiness check failed") ||
-					!strings.Contains(logs.String(), "request completed") || !strings.Contains(logs.String(), "status=503") {
+				if test.pingErr != nil && (!strings.Contains(logs.String(), "database readiness check failed") || !strings.Contains(logs.String(), "status=503")) {
 					t.Fatalf("failed readiness logs = %s", logs.String())
 				}
 			})
@@ -223,16 +283,18 @@ func TestDiscoveryDescribesUnconfiguredServer(t *testing.T) {
 		t.Fatalf("expected status 200, got %d", response.Code)
 	}
 	var body struct {
-		Name              string `json:"name"`
-		ProtocolVersion   int    `json:"protocolVersion"`
-		APIBaseURL        string `json:"apiBaseUrl"`
-		SetupRequired     bool   `json:"setupRequired"`
-		Timezone          string `json:"timezone"`
-		InterfaceLanguage string `json:"interfaceLanguage"`
+		Name              string   `json:"name"`
+		ProtocolVersion   int      `json:"protocolVersion"`
+		APIBaseURL        string   `json:"apiBaseUrl"`
+		SetupRequired     bool     `json:"setupRequired"`
+		Timezone          string   `json:"timezone"`
+		InterfaceLanguage string   `json:"interfaceLanguage"`
+		Capabilities      []string `json:"capabilities"`
 	}
 	decodeResponse(t, response, &body)
 	if body.Name != "Rivune" || body.ProtocolVersion != 20 || body.APIBaseURL != "https://media.example/api/v1" ||
-		body.Timezone != "Europe/Paris" || body.InterfaceLanguage != "en" || !body.SetupRequired {
+		body.Timezone != "Europe/Paris" || body.InterfaceLanguage != "en" || !body.SetupRequired ||
+		!slices.Equal(body.Capabilities, nativeCapabilities[:]) {
 		t.Fatalf("unexpected discovery response: %+v", body)
 	}
 }

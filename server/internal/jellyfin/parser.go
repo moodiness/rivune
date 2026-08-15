@@ -79,6 +79,60 @@ func parseClientIdentity(headers http.Header) (ClientIdentity, string, error) {
 	return identity, "", nil
 }
 
+func parseQuickConnectClientIdentity(headers http.Header) (ClientIdentity, error) {
+	if !boundedCompatHeaders(headers) {
+		return ClientIdentity{}, ErrInvalidCompatAuthorization
+	}
+	parameters, found, err := collectAuthorizationParameters(headers)
+	if err != nil || !found {
+		return ClientIdentity{}, ErrInvalidCompatAuthorization
+	}
+	deviceID, ok := parameters["deviceid"]
+	if !ok {
+		return ClientIdentity{}, ErrInvalidCompatAuthorization
+	}
+	deviceID, ok = canonicalCompatDeviceID(deviceID)
+	if !ok {
+		return ClientIdentity{}, ErrInvalidCompatAuthorization
+	}
+	identity := ClientIdentity{
+		Client: parameters["client"], Device: parameters["device"], DeviceID: deviceID, Version: parameters["version"],
+	}
+	if strings.TrimSpace(identity.Client) == "" {
+		identity.Client = "Jellyfin"
+	}
+	if strings.TrimSpace(identity.Device) == "" {
+		identity.Device = "Jellyfin client"
+	}
+	if strings.TrimSpace(identity.Version) == "" {
+		identity.Version = "unknown"
+	}
+	identity, err = normalizeClientIdentity(identity)
+	if err != nil {
+		return ClientIdentity{}, ErrInvalidCompatAuthorization
+	}
+	return identity, nil
+}
+
+func parseQuickConnectDeviceIdentity(headers http.Header) (ClientIdentity, error) {
+	if !boundedCompatHeaders(headers) {
+		return ClientIdentity{}, ErrInvalidCompatAuthorization
+	}
+	parameters, found, err := collectAuthorizationParameters(headers)
+	if err != nil || !found {
+		return ClientIdentity{}, ErrInvalidCompatAuthorization
+	}
+	deviceID, ok := parameters["deviceid"]
+	if !ok {
+		return ClientIdentity{}, ErrInvalidCompatAuthorization
+	}
+	deviceID, ok = canonicalCompatDeviceID(deviceID)
+	if !ok {
+		return ClientIdentity{}, ErrInvalidCompatAuthorization
+	}
+	return ClientIdentity{DeviceID: deviceID}, nil
+}
+
 func canonicalCompatDeviceID(value string) (string, bool) {
 	value = strings.TrimSpace(value)
 	if boundedUTF8(value, 1, 128) {

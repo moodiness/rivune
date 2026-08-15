@@ -14,6 +14,7 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/metadata"
+	"github.com/moodiness/rivune/server/internal/requestwork"
 )
 
 const (
@@ -377,7 +378,17 @@ func (c *Client) get(ctx context.Context, endpoint string, query url.Values, des
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Authorization", "Bearer "+c.accessToken)
+	requestwork.PropagateRequestID(request)
+	requestwork.BeginOutbound(ctx, requestwork.Now())
 	response, err := c.httpClient.Do(request)
+	if err != nil {
+		requestwork.EndOutbound(ctx, requestwork.Now(), 0)
+	} else if response.Body == nil {
+		requestwork.EndOutbound(ctx, requestwork.Now(), 0)
+		response.Body = http.NoBody
+	} else {
+		response.Body = requestwork.ObserveBody(ctx, response.Body)
+	}
 	if err != nil {
 		return metadata.NewProviderError(metadata.ErrProviderFailure, err, 0, resource)
 	}

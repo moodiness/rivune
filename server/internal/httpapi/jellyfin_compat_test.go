@@ -18,6 +18,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/jellyfin"
 	"github.com/moodiness/rivune/server/internal/playback"
 	"github.com/moodiness/rivune/server/internal/watchstate"
+	"golang.org/x/net/websocket"
 )
 
 func TestJellyfinCompatibilityDisabledSkipsConstructionAndReservesRoutes(t *testing.T) {
@@ -369,6 +370,57 @@ func TestJellyfinCompatibilitySupervisorTogglesGenerationsAndShutsDown(t *testin
 	}
 }
 
+func TestJellyfinCompatibilityRevocationReachesRetiringGeneration(t *testing.T) {
+	profileID := "22222222-2222-4222-8222-222222222222"
+	sessionID := "33333333-3333-4333-8333-333333333333"
+	token := "rivune_jf_" + strings.Repeat("R", 43)
+	authentication := &revocableJellyfinLifecycleAuthentication{
+		token: token,
+		session: jellyfin.AuthenticatedSession{
+			ID: sessionID, ProfileID: profileID, ProfileName: "Main", ExpiresAt: time.Now().UTC().Add(time.Hour),
+			Client:    jellyfin.ClientIdentity{Client: "Test", Device: "TV", DeviceID: "replacement-device", Version: "1.0"},
+			Principal: auth.Principal{SessionID: "44444444-4444-4444-8444-444444444444", UserID: "55555555-5555-4555-8555-555555555555", DeviceID: "replacement-device", ActiveProfileID: &profileID},
+		},
+	}
+	serverID, err := jellyfin.ParseServerID("11111111-1111-4111-8111-111111111111")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := jellyfin.New(jellyfin.Dependencies{
+		ServerInfo: jellyfin.ServerInfo{ID: serverID, Name: "Rivune Home", RuntimeVersion: "test"}, Authentication: authentication,
+	})
+	if err != nil {
+		t.Fatalf("construct retiring compatibility handler: %v", err)
+	}
+	api := testAPI(&fakeInstanceService{})
+	api.jellyfinCompatibilityDesired = true
+	api.jellyfinCompatibility = handler
+	api.jellyfinCompatibilityGeneration = handler
+	api.jellyfinCompatibility = nil
+	if api.currentJellyfinCompatibility() != nil {
+		t.Fatal("replacement gap retained active routing handler")
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	connection, err := websocket.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/socket?api_key="+token+"&DeviceId=replacement-device", "", server.URL)
+	if err != nil {
+		t.Fatalf("open retiring generation socket: %v", err)
+	}
+	defer connection.Close()
+	var keepalive jellyfin.WebSocketMessageDto
+	if err := websocket.JSON.Receive(connection, &keepalive); err != nil {
+		t.Fatalf("receive retiring generation keepalive: %v", err)
+	}
+	// The durable mutation callback can arrive after routing is unpublished but
+	// before the supervisor cancels the tracked generation.
+	api.forgetJellyfinCompatibilitySessions([]string{sessionID})
+	_ = connection.SetReadDeadline(time.Now().Add(time.Second))
+	var payload []byte
+	if err := websocket.Message.Receive(connection, &payload); err == nil {
+		t.Fatalf("retiring generation socket survived committed revocation: %s", payload)
+	}
+}
+
 func TestJellyfinCompatibilityBuildFailureStaysUnpublishedAndRetries(t *testing.T) {
 	api := testAPI(&fakeInstanceService{})
 	handler := newJellyfinLifecycleHandler(t)
@@ -538,7 +590,7 @@ func TestJellyfinCompatibilityReactivationWaitsForRetiredGenerationDrain(t *test
 	}
 }
 
-func TestJellyfinCompatibilityOldTokenIsUnauthorizedAfterDisableAndReenable(t *testing.T) {
+func TestJellyfinCompatibilityFailedDisableAndReenableCannotRepublishOldGeneration(t *testing.T) {
 	profileID := "22222222-2222-4222-8222-222222222222"
 	token := "rivune_jf_" + strings.Repeat("A", 43)
 	authentication := &revocableJellyfinLifecycleAuthentication{
@@ -571,12 +623,18 @@ func TestJellyfinCompatibilityOldTokenIsUnauthorizedAfterDisableAndReenable(t *t
 			t.Fatalf("revocation reason=%q", reason)
 		}
 		revocations++
+		if revocations < 3 {
+			return errors.New("injected durable revocation failure")
+		}
 		authentication.revoke()
 		return nil
 	}
 	var builds atomic.Int32
 	api.jellyfinCompatibilityBuilder = func(context.Context) (*jellyfin.Handler, bool, error) {
 		index := int(builds.Add(1)) - 1
+		if index >= len(handlers) {
+			return nil, true, errors.New("unexpected extra generation")
+		}
 		return handlers[index], true, nil
 	}
 	started := make(chan *jellyfin.Handler, 2)
@@ -604,19 +662,36 @@ func TestJellyfinCompatibilityOldTokenIsUnauthorizedAfterDisableAndReenable(t *t
 		cancel()
 		t.Fatalf("old token before disable status=%d", response.Code)
 	}
-	if err := api.applyCanonicalJellyfinCompatibilityDesired(context.Background(), false); err != nil {
+	if err := api.applyCanonicalJellyfinCompatibilityDesired(context.Background(), false); err == nil {
 		cancel()
-		t.Fatalf("disable compatibility: %v", err)
+		t.Fatal("disable unexpectedly survived durable revocation failure")
 	}
 	select {
 	case <-cleaned:
 	case <-time.After(500 * time.Millisecond):
 		cancel()
-		t.Fatal("disabled generation did not drain")
+		t.Fatal("failed disable did not drain its published generation")
+	}
+	// A runtime publication racing the failed disable must not bypass the
+	// durable revocation fence or wake a replacement generation.
+	api.setJellyfinCompatibilityDesired(true)
+	if api.HasJellyfinCompatibility() || api.currentJellyfinCompatibility() != nil || builds.Load() != 1 {
+		cancel()
+		t.Fatalf("pending revocation accepted enable publication: desired=%t handler=%p builds=%d", api.HasJellyfinCompatibility(), api.currentJellyfinCompatibility(), builds.Load())
+	}
+	if err := api.applyCanonicalJellyfinCompatibilityDesired(context.Background(), true); err == nil {
+		cancel()
+		t.Fatal("reenable unexpectedly survived pending durable revocation failure")
+	}
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request.Clone(context.Background()))
+	if response.Code != http.StatusNotFound || api.HasJellyfinCompatibility() || builds.Load() != 1 || revocations != 2 {
+		cancel()
+		t.Fatalf("failed reenable status=%d desired=%t builds=%d revocations=%d", response.Code, api.HasJellyfinCompatibility(), builds.Load(), revocations)
 	}
 	if err := api.applyCanonicalJellyfinCompatibilityDesired(context.Background(), true); err != nil {
 		cancel()
-		t.Fatalf("reenable compatibility: %v", err)
+		t.Fatalf("reenable compatibility after durable retry: %v", err)
 	}
 	if handler := receiveJellyfinLifecycleHandler(t, started, "reenabled authenticated generation"); handler != handlers[1] {
 		cancel()
@@ -624,9 +699,16 @@ func TestJellyfinCompatibilityOldTokenIsUnauthorizedAfterDisableAndReenable(t *t
 	}
 	response = httptest.NewRecorder()
 	router.ServeHTTP(response, request.Clone(context.Background()))
-	if response.Code != http.StatusUnauthorized || revocations != 2 {
+	if response.Code != http.StatusUnauthorized || revocations != 3 || builds.Load() != 2 {
 		cancel()
-		t.Fatalf("old token after reenable status=%d revocations=%d", response.Code, revocations)
+		t.Fatalf("old token after successful retry status=%d revocations=%d builds=%d", response.Code, revocations, builds.Load())
+	}
+	api.jellyfinCompatibilityMu.Lock()
+	pending := api.jellyfinCompatibilityRevocationPending
+	api.jellyfinCompatibilityMu.Unlock()
+	if pending {
+		cancel()
+		t.Fatal("successful durable revocation left compatibility publication fenced")
 	}
 	cancel()
 	select {

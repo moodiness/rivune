@@ -32,8 +32,6 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -92,7 +90,6 @@ internal fun RivunePlayerScreen(
     val currentOnProgress by rememberUpdatedState(onProgress)
     val currentOnClose by rememberUpdatedState(onClose)
     val currentOnPlaybackError by rememberUpdatedState(onPlaybackError)
-    val closeFocusRequester = remember { FocusRequester() }
     var closeRequested by remember(presentation.key) { mutableStateOf(false) }
     var finalProgressReporter by remember(presentation.key) { mutableStateOf<(() -> Unit)?>(null) }
     var visualState by remember(presentation.key) { mutableStateOf(PlayerVisualState.Preparing) }
@@ -220,9 +217,6 @@ internal fun RivunePlayerScreen(
         }
     }
 
-    LaunchedEffect(isTv, presentation.key) {
-        if (isTv) closeFocusRequester.requestFocus()
-    }
 
     Box(
         modifier = Modifier
@@ -242,6 +236,12 @@ internal fun RivunePlayerScreen(
                     isFocusable = true
                     isFocusableInTouchMode = true
                     this.player = player
+                    if (isTv) {
+                        post {
+                            requestFocus()
+                            showController()
+                        }
+                    }
                 }
             },
             update = { playerView ->
@@ -263,7 +263,10 @@ internal fun RivunePlayerScreen(
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .windowInsetsPadding(WindowInsets.safeDrawing)
-                    .padding(RivuneSpacing.sm)
+                    .padding(
+                        horizontal = if (isTv) RivuneSpacing.huge else RivuneSpacing.sm,
+                        vertical = if (isTv) RivuneSpacing.xl else RivuneSpacing.sm,
+                    )
                     .semantics(mergeDescendants = true) {
                         liveRegion = LiveRegionMode.Polite
                     },
@@ -300,9 +303,11 @@ internal fun RivunePlayerScreen(
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(RivuneSpacing.sm)
-                .size(if (isTv) RivuneDimensions.touchTargetTv else RivuneDimensions.touchTarget)
-                .focusRequester(closeFocusRequester),
+                .padding(
+                    horizontal = if (isTv) RivuneSpacing.huge else RivuneSpacing.sm,
+                    vertical = if (isTv) RivuneSpacing.xl else RivuneSpacing.sm,
+                )
+                .size(if (isTv) RivuneDimensions.touchTargetTv else RivuneDimensions.touchTarget),
         ) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Icon(

@@ -3,10 +3,13 @@ package tracking
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/moodiness/rivune/server/internal/requestwork"
 )
 
 func TestTraktDeviceAuthorizationAndTokenExchange(t *testing.T) {
@@ -203,4 +206,28 @@ func TestClearPlaybackDeletesOnlyMappedEntry(t *testing.T) {
 	if deleted != "/sync/playback/42" {
 		t.Fatalf("unexpected playback deletion %q", deleted)
 	}
+}
+
+func TestProviderRequestEndsObservationOnTransportFailure(t *testing.T) {
+	httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		time.Sleep(time.Millisecond)
+		return nil, errors.New("transport unavailable")
+	})}
+	client := newProviderClient("client-id", "client-secret", "", httpClient)
+	ctx, counters := requestwork.WithCounters(context.Background())
+
+	err := client.request(ctx, "trakt", http.MethodGet, "https://provider.invalid/private-item?token=secret", "", nil, nil)
+	if err == nil {
+		t.Fatal("transport failure unexpectedly succeeded")
+	}
+	snapshot := counters.Snapshot()
+	if snapshot.OutboundCalls != 1 || snapshot.UpstreamBytes != 0 || snapshot.OutboundDuration <= 0 {
+		t.Fatalf("transport-failure snapshot = %+v, want one completed call and zero bytes", snapshot)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
 }

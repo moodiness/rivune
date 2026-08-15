@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Rivune API
-  version: 1.5.3
+  version: 1.6.1
   description: >
     Protocol version 20 between Rivune clients and a self-hosted Rivune Server.
     While global maintenance mode is enabled, authenticated non-admin application
@@ -22,12 +22,18 @@ paths:
         - url: /
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Server identity and compatibility information.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Discovery"
         "400":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The HTTP request was malformed.
         default:
           $ref: "#/components/responses/Error"
@@ -41,18 +47,27 @@ paths:
         - url: /
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The server and database are ready.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Health"
         "503":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The database is unavailable.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Health"
         "400":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The HTTP request was malformed.
         default:
           $ref: "#/components/responses/Error"
@@ -66,12 +81,18 @@ paths:
         - url: /
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The server process is alive.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Liveness"
         "400":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The HTTP request was malformed.
         default:
           $ref: "#/components/responses/Error"
@@ -85,18 +106,27 @@ paths:
         - url: /
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The server and database are ready.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Health"
         "503":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The database is unavailable.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Health"
         "400":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The HTTP request was malformed.
         default:
           $ref: "#/components/responses/Error"
@@ -107,6 +137,9 @@ paths:
       security: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Current setup state.
           content:
             application/json:
@@ -123,6 +156,9 @@ paths:
                     type: boolean
                     description: Whether a pre-setup demonstration session may be started. Always emitted by current servers but optional for pre-v18 compatibility.
         "400":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The HTTP request was malformed.
         default:
           $ref: "#/components/responses/Error"
@@ -140,6 +176,9 @@ paths:
               $ref: "#/components/schemas/SetupRequest"
       responses:
         "201":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The instance, administrator, and first profile were created atomically.
           content:
             application/json:
@@ -167,6 +206,8 @@ paths:
         "201":
           description: A fresh isolated demonstration session with Alex selected as the active profile.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Set-Cookie:
               description: Opaque 8-hour demonstration session cookie with HttpOnly, SameSite=Strict, and Path=/api/v1; Secure for direct or forwarded HTTPS requests.
               schema:
@@ -191,6 +232,9 @@ paths:
         - demoCookie: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The current demonstration account and session state.
           content:
             application/json:
@@ -211,6 +255,8 @@ paths:
         "204":
           description: The demonstration session was invalidated and its cookie expired.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Set-Cookie:
               description: Expired rivune_demo cookie scoped to /api/v1.
               schema:
@@ -232,6 +278,9 @@ paths:
         - demoCookie: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The reset demonstration account.
           content:
             application/json:
@@ -272,6 +321,8 @@ paths:
         "200":
           description: A complete embedded synthetic video, subtitle, or artwork asset.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Accept-Ranges:
               description: Range unit supported by video assets.
               schema:
@@ -292,6 +343,8 @@ paths:
         "206":
           description: A byte range from an embedded synthetic MP4 asset.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Accept-Ranges:
               description: Range unit supported by the asset.
               required: true
@@ -327,6 +380,8 @@ paths:
         "200":
           description: Headers for a complete embedded synthetic asset.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Accept-Ranges:
               description: Range unit supported by video assets.
               schema:
@@ -335,6 +390,8 @@ paths:
         "206":
           description: Headers for a byte range from an embedded synthetic MP4 asset.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Accept-Ranges:
               description: Range unit supported by the asset.
               required: true
@@ -373,6 +430,9 @@ paths:
               $ref: "#/components/schemas/LoginRequest"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: A new device session was created.
           content:
             application/json:
@@ -402,6 +462,9 @@ paths:
               $ref: "#/components/schemas/RefreshRequest"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Both access and refresh tokens were rotated.
           content:
             application/json:
@@ -421,6 +484,9 @@ paths:
         - bearerAuth: []
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The current session was revoked.
         "401":
           $ref: "#/components/responses/Error"
@@ -432,6 +498,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: >
             The authenticated user, immutable server-issued session scope, and accessible profiles.
             global_admin sessions receive all intended profiles; category sessions are server-filtered.
@@ -449,6 +518,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: >
             Active sessions visible to the authenticated principal. Category sessions receive only
             sessions for devices in their authoritative category; global administrators receive the intended global view.
@@ -469,6 +541,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: All access categories with current profile and device counts.
           content:
             application/json:
@@ -492,6 +567,9 @@ paths:
               $ref: "#/components/schemas/CreateCategoryRequest"
       responses:
         "201":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The category was created.
           content:
             application/json:
@@ -504,6 +582,9 @@ paths:
         "403":
           $ref: "#/components/responses/Error"
         "409":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: A category with the same normalized name already exists.
           content:
             application/json:
@@ -530,6 +611,9 @@ paths:
               $ref: "#/components/schemas/ReorderCategoriesRequest"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Categories in their updated display order.
           content:
             application/json:
@@ -562,6 +646,9 @@ paths:
               $ref: "#/components/schemas/UpdateCategoryRequest"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The category was updated.
           content:
             application/json:
@@ -576,6 +663,9 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
         "409":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: A category with the same normalized name already exists.
           content:
             application/json:
@@ -602,6 +692,9 @@ paths:
               $ref: "#/components/schemas/DeleteCategoryRequest"
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The category was deleted and positions were compacted.
         "400":
           $ref: "#/components/responses/Error"
@@ -612,6 +705,9 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
         "409":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The default or final category cannot be deleted, or referenced resources require a reassignment destination.
           content:
             application/json:
@@ -639,6 +735,9 @@ paths:
             format: uuid
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Approved devices ordered by most recent activity.
           content:
             application/json:
@@ -671,6 +770,9 @@ paths:
               $ref: "#/components/schemas/DeviceCategoryMoveRequest"
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: All devices were moved and their sessions revoked.
         "400":
           $ref: "#/components/responses/Error"
@@ -703,6 +805,9 @@ paths:
               $ref: "#/components/schemas/UpdateDeviceRequest"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The updated device.
           content:
             application/json:
@@ -731,6 +836,9 @@ paths:
         - bearerAuth: []
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The device and all of its sessions were deleted.
         "400":
           $ref: "#/components/responses/Error"
@@ -760,6 +868,9 @@ paths:
               $ref: "#/components/schemas/ProfileCategoryMoveRequest"
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: All profiles were moved and incompatible selections invalidated.
         "400":
           $ref: "#/components/responses/Error"
@@ -790,6 +901,9 @@ paths:
             default: "0"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Pending notifications addressed to the authenticated session.
           content:
             application/json:
@@ -816,6 +930,9 @@ paths:
             pattern: "^[1-9][0-9]*$"
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The notification was acknowledged for the authenticated session.
         "400":
           $ref: "#/components/responses/Error"
@@ -840,6 +957,9 @@ paths:
               $ref: "#/components/schemas/NotificationBroadcastInput"
       responses:
         "201":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The broadcast was queued, or the result of an earlier request with the same idempotency key was returned.
           content:
             application/json:
@@ -866,6 +986,9 @@ paths:
             format: uuid
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The selected session was revoked.
         "401":
           $ref: "#/components/responses/Error"
@@ -881,6 +1004,9 @@ paths:
         - $ref: "#/components/parameters/ProfileId"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Active devices currently using the managed profile.
           content:
             application/json:
@@ -906,6 +1032,9 @@ paths:
             format: uuid
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The device session was revoked and can no longer use the profile.
         "401":
           $ref: "#/components/responses/Error"
@@ -935,6 +1064,9 @@ paths:
               $ref: "#/components/schemas/SessionNotificationInput"
       responses:
         "201":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Notification queued for the active device session.
           content:
             application/json:
@@ -948,6 +1080,89 @@ paths:
           $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
+  /profiles/{profileId}/archive:
+    parameters:
+      - $ref: "#/components/parameters/ProfileId"
+    get:
+      summary: Export a portable profile archive
+      description: >
+        Global-administrator-only export of profile settings, explicit profile add-ons, portable
+        collections, stable title identities, library/progress/favorite/user-data state, and tracking
+        preferences without credentials. Add-on transport URLs are intentional user secrets and may
+        contain tokens; the response is no-store and the downloaded file must be protected like a
+        credential. Passwords, PINs, sessions, tracking/Jellyfin credentials, category policies,
+        user grants, and instance secrets are never included.
+      operationId: exportProfileArchive
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Portable profile archive version 1.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+            Cache-Control:
+              required: true
+              schema: { type: string, const: no-store }
+            Content-Disposition:
+              required: true
+              schema: { type: string, const: 'attachment; filename="rivune-profile-archive.json"' }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileArchiveDocument"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /profiles/{profileId}/archive/import:
+    parameters:
+      - $ref: "#/components/parameters/ProfileId"
+    post:
+      summary: Merge a portable profile archive
+      description: >
+        Global-administrator-only, bounded, strict version-1 merge into the profile named by the URL.
+        The server revalidates global administrator and target-profile management authority inside the
+        single database transaction. It preserves target identity and security, does not delete absent
+        data, rebinds stable portable identities to target-local UUIDs, and is idempotent. The document
+        may contain secret add-on transport URLs and must be handled as a credential file.
+      operationId: importProfileArchive
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProfileArchiveDocument"
+      responses:
+        "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          description: Atomic merge report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileArchiveImportReport"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
   /profiles/{profileId}/jellyfin-credential:
     parameters:
       - $ref: "#/components/parameters/ProfileId"
@@ -959,6 +1174,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Non-secret credential state.
           content:
             application/json:
@@ -978,6 +1196,8 @@ paths:
         "201":
           description: Newly generated one-shot Jellyfin application credential.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Cache-Control:
               required: true
               schema: { type: string, const: no-store }
@@ -1001,6 +1221,9 @@ paths:
         - bearerAuth: []
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The credential is inactive and any derived sessions are revoked.
         "401":
           $ref: "#/components/responses/Error"
@@ -1019,6 +1242,8 @@ paths:
         "200":
           description: Rotated one-shot Jellyfin application credential.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Cache-Control:
               required: true
               schema: { type: string, const: no-store }
@@ -1043,6 +1268,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Original profile avatar presets bundled with Rivune.
           content:
             application/json:
@@ -1063,6 +1291,9 @@ paths:
       security: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Immutable SVG image for a bundled profile avatar.
           content:
             image/svg+xml:
@@ -1070,6 +1301,9 @@ paths:
                 type: string
                 contentMediaType: image/svg+xml
         "404":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Unknown avatar preset.
   /profiles/{profileId}/avatar:
     parameters:
@@ -1081,6 +1315,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Normalized PNG for the profile's custom avatar.
           content:
             image/png:
@@ -1112,6 +1349,9 @@ paths:
                   description: PNG or JPEG, 64-4096 pixels, at most 2 MiB.
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Profile now using its normalized custom avatar.
           content:
             application/json:
@@ -1143,6 +1383,9 @@ paths:
               $ref: "#/components/schemas/SetProfileAvatarPresetRequest"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Profile now using the selected bundled avatar.
           content:
             application/json:
@@ -1166,6 +1409,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: >
             Profiles accessible to the authenticated principal. Category sessions are server-filtered
             by authoritative category and existing user-profile grants; global administrators receive all profiles.
@@ -1193,6 +1439,9 @@ paths:
               $ref: "#/components/schemas/CreateProfileRequest"
       responses:
         "201":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: A profile was created in the server-authorized category with the existing management grant applied.
           content:
             application/json:
@@ -1228,6 +1477,9 @@ paths:
               $ref: "#/components/schemas/UpdateProfileRequest"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The profile was updated.
           content:
             application/json:
@@ -1252,6 +1504,9 @@ paths:
         - bearerAuth: []
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The profile was deleted.
         "401":
           $ref: "#/components/responses/Error"
@@ -1275,6 +1530,9 @@ paths:
               $ref: "#/components/schemas/SelectProfileRequest"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The profile is active for the current session until the grant expires. Web clients retain the returned opaque profileContext only in the selecting tab and send it as X-Rivune-Profile-Context on subsequent authenticated requests.
           content:
             application/json:
@@ -1300,6 +1558,9 @@ paths:
         - bearerAuth: []
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The active profile was cleared from the current session.
         "401":
           $ref: "#/components/responses/Error"
@@ -1313,6 +1574,8 @@ paths:
         "200":
           description: Materialized schema-v3 instance settings and their runtime application state.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Cache-Control:
               required: true
               schema: { type: string, const: no-store }
@@ -1338,6 +1601,8 @@ paths:
         "200":
           description: Instance settings were updated and the configuration revision was incremented once.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Cache-Control:
               required: true
               schema: { type: string, const: no-store }
@@ -1366,6 +1631,8 @@ paths:
         "200":
           description: Redacted integration configuration status.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Cache-Control:
               required: true
               schema: { type: string, const: no-store }
@@ -1393,6 +1660,8 @@ paths:
         "200":
           description: Credentials were updated and the configuration revision was incremented once.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Cache-Control:
               required: true
               schema: { type: string, const: no-store }
@@ -1436,6 +1705,8 @@ paths:
         "200":
           description: Redacted configuration audit events in descending event-ID order.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Cache-Control:
               required: true
               schema: { type: string, const: no-store }
@@ -1457,6 +1728,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The current global maintenance settings.
           content:
             application/json:
@@ -1479,6 +1753,9 @@ paths:
               $ref: "#/components/schemas/MaintenanceSettingsInput"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The global maintenance settings were updated.
           content:
             application/json:
@@ -1497,13 +1774,16 @@ paths:
   /operations:
     get:
       summary: Get the administrator Operations overview
-      description: Returns metadata-cache metrics, the durable metadata-refresh schedule, and the normal housekeeping cadence. This administrator-only status request does not mutate profiles, libraries, watch progress, title identities, canonical title snapshots, or cached metadata.
+      description: Returns bounded, low-cardinality PostgreSQL pool, tracking outbox, add-on, playback, metadata-cache, durable metadata-refresh schedule, and housekeeping aggregates. This administrator-only status request exposes no profile, media, URL, credential, or secret identifiers and does not mutate state.
       operationId: getOperations
       security:
         - bearerAuth: []
       responses:
         "200":
           description: Current Operations status and schedule.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           content:
             application/json:
               schema:
@@ -1530,6 +1810,24 @@ paths:
                     candidates: 50
                     refreshed: 48
                     failed: 2
+                postgresqlPool:
+                  acquired: 2
+                  idle: 3
+                  total: 5
+                  max: 10
+                  waitCount: 7
+                  waitDurationMilliseconds: 145
+                trackingOutbox:
+                  pending: 12
+                  due: 3
+                  oldestAgeSeconds: 420
+                addons:
+                  total: 8
+                  enabled: 7
+                  latestUpdatedAt: "2026-08-13T16:30:00Z"
+                playback:
+                  active: 4
+                  transcoding: 2
                 housekeepingIntervalMinutes: 5
         "401":
           $ref: "#/components/responses/Error"
@@ -1557,6 +1855,9 @@ paths:
               batchSize: 50
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The persisted metadata-refresh schedule.
           content:
             application/json:
@@ -1605,6 +1906,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Completed maintenance action and its action-specific result.
           content:
             application/json:
@@ -1677,6 +1981,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Profile-level setting overrides.
           content:
             application/json:
@@ -1700,6 +2007,9 @@ paths:
               $ref: "#/components/schemas/SettingsPatch"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Profile settings were updated by an authorized profile manager. A global administrator is required when the patch contains `transcoding`.
           content:
             application/json:
@@ -1727,6 +2037,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Server defaults and profile overrides merged for the selected profile.
           content:
             application/json:
@@ -1755,6 +2068,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Calendar subscription status without credential material.
           content:
             application/json:
@@ -1780,12 +2096,18 @@ paths:
         - bearerAuth: []
       responses:
         "201":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: A new calendar subscription and its one-time credential URL.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/CalendarLinkCredential"
         "400":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The calendar-link request body must be empty.
           content:
             application/json:
@@ -1798,12 +2120,18 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
         "409":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: An active subscription already exists (calendar_link_exists).
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "503":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: RIVUNE_PUBLIC_URL is not configured (public_url_required).
           content:
             application/json:
@@ -1820,6 +2148,9 @@ paths:
         - bearerAuth: []
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The calendar subscription is absent and any former token is revoked.
         "401":
           $ref: "#/components/responses/Error"
@@ -1844,12 +2175,18 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The rotated subscription and its new one-time credential URL.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/CalendarLinkCredential"
         "400":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The calendar-link rotation request body must be empty.
           content:
             application/json:
@@ -1860,6 +2197,9 @@ paths:
         "403":
           $ref: "#/components/responses/Error"
         "404":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The profile is inaccessible or no active subscription exists (calendar_link_not_found).
           content:
             application/json:
@@ -1868,6 +2208,9 @@ paths:
         "409":
           $ref: "#/components/responses/Error"
         "503":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: RIVUNE_PUBLIC_URL is not configured (public_url_required).
           content:
             application/json:
@@ -1883,6 +2226,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Provider configuration, connection, toggles, and queue health without credentials.
           content:
             application/json:
@@ -1905,6 +2251,9 @@ paths:
         - bearerAuth: []
       responses:
         "201":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: A provider code to display on a TV or browser client.
           content:
             application/json:
@@ -1935,12 +2284,18 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The profile is connected.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/TrackingStatus"
         "202":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The provider is still waiting for approval.
           content:
             application/json:
@@ -1978,6 +2333,9 @@ paths:
               $ref: "#/components/schemas/TrackingPreferences"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Provider toggles were updated.
           content:
             application/json:
@@ -2005,6 +2363,9 @@ paths:
         - bearerAuth: []
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Credentials and pending work were cleared.
         "401":
           $ref: "#/components/responses/Error"
@@ -2014,7 +2375,8 @@ paths:
           $ref: "#/components/responses/MaintenanceMode"
   /auth/device-code:
     post:
-      summary: Begin device authorization
+      summary: Begin native device authorization
+      description: Creates a 10-minute native device code whose verification URI is the Rivune `/pair` page. The initiating device polls the token operation after approval.
       operationId: beginDeviceAuthorization
       security: []
       requestBody:
@@ -2025,6 +2387,9 @@ paths:
               $ref: "#/components/schemas/DeviceAuthorizationRequest"
       responses:
         "201":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: A short-lived TV or device authorization was created.
           content:
             application/json:
@@ -2036,6 +2401,8 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/DeviceAuthorizationCapacity"
   /auth/device-code/token:
     post:
       summary: Exchange device authorization
@@ -2053,6 +2420,9 @@ paths:
               $ref: "#/components/schemas/DeviceCodeTokenRequest"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Authorization completed and a device session was created.
           content:
             application/json:
@@ -2068,7 +2438,14 @@ paths:
           $ref: "#/components/responses/Error"
   /auth/device-code/approve:
     post:
-      summary: Approve device authorization
+      summary: Approve native or Jellyfin Quick Connect authorization
+      description: >
+        The shared approval body always requires categoryId. For a native device code, the authorized
+        submitted categoryId is authoritative and optional deviceName/internalNote values override the
+        initiating metadata. For a Jellyfin Quick Connect code, categoryId is only structural input:
+        the server revalidates the approver's active manageable profile, derives both the approved profile
+        and category from it, and discards deviceName/internalNote overrides. The later single-use exchange
+        is bound to exactly that approved profile and category.
       operationId: approveDeviceAuthorization
       security:
         - bearerAuth: []
@@ -2080,9 +2457,10 @@ paths:
               $ref: "#/components/schemas/DeviceCodeApprovalRequest"
       responses:
         "204":
-          description: >
-            The device was approved into the authorized category with optional name and note
-            overrides. A category-scoped approver may approve only into its own authoritative category.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          description: The authorization was approved using the purpose-conditional category, profile, name, and note rules documented for this operation.
         "400":
           $ref: "#/components/responses/Error"
         "401":
@@ -2105,6 +2483,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: All users on the instance.
           content:
             application/json:
@@ -2127,6 +2508,9 @@ paths:
               $ref: "#/components/schemas/CreateUserRequest"
       responses:
         "201":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The user was created.
           content:
             application/json:
@@ -2160,6 +2544,9 @@ paths:
               $ref: "#/components/schemas/UpdateUserRequest"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The user was updated. Password or role changes revoke all of their sessions.
           content:
             application/json:
@@ -2186,6 +2573,9 @@ paths:
         - bearerAuth: []
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The user, their sessions, and their devices were deleted.
         "401":
           $ref: "#/components/responses/Error"
@@ -2205,6 +2595,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Every profile and the selected user's explicit access.
           content:
             application/json:
@@ -2233,6 +2626,9 @@ paths:
               $ref: "#/components/schemas/UpdateProfileAccessRequest"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Profile access was granted or updated.
           content:
             application/json:
@@ -2257,6 +2653,9 @@ paths:
         - bearerAuth: []
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The user's explicit profile access was revoked.
         "401":
           $ref: "#/components/responses/Error"
@@ -2272,6 +2671,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Persisted global administrators receive add-ons in effective profile priority order with the full explicit-profile and durable-category policy; effective access is the deduplicated union for the active profile. Delegated managers receive only add-ons explicitly assigned within their scope, with categoryIds empty, and category-policy resources are excluded individually. Runtime discovery and playback continue to use effective union access.
           content:
             application/json:
@@ -2295,6 +2697,9 @@ paths:
               $ref: "#/components/schemas/InstallAddonInput"
       responses:
         "201":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The configured addon transport was installed with its explicit profile and durable category assignments.
           content:
             application/json:
@@ -2330,6 +2735,9 @@ paths:
               $ref: "#/components/schemas/InstallAddonInput"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Validated add-on manifest, declared capabilities, and unexpanded assignment snapshot.
           content:
             application/json:
@@ -2358,6 +2766,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Safe process-local add-on diagnostics for the active profile.
           content:
             application/json:
@@ -2383,6 +2794,9 @@ paths:
               $ref: "#/components/schemas/ReorderAddonsInput"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Installed addons in their new priority order.
           content:
             application/json:
@@ -2411,6 +2825,9 @@ paths:
               $ref: "#/components/schemas/UpdateAddonInput"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Updated addon descriptor.
           content:
             application/json:
@@ -2437,6 +2854,9 @@ paths:
         - bearerAuth: []
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The addon was removed from the active profile.
         "401":
           $ref: "#/components/responses/Error"
@@ -2455,6 +2875,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Addon management details, including the stored transport URL.
           content:
             application/json:
@@ -2480,6 +2903,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Refreshed addon descriptor with the latest manifest.
           content:
             application/json:
@@ -2503,6 +2929,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Catalog and addon-catalog declarations from every installed manifest.
           content:
             application/json:
@@ -2546,6 +2975,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Exposable addon payload with cache directives and server-owned artwork presentation.
           content:
             application/json:
@@ -2578,6 +3010,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Ordered successful payloads and isolated provider failures.
           content:
             application/json:
@@ -2628,6 +3063,9 @@ paths:
           description: Requested page size, sent only to catalogs that declare the limit extra.
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Search catalog responses in installed-addon and manifest order.
           content:
             application/json:
@@ -2657,6 +3095,9 @@ paths:
             type: string
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Addon catalog payloads with provenance.
           content:
             application/json:
@@ -2676,6 +3117,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Ordered collections effectively available to the active profile through an explicit profile grant or a durable grant to its current category, deduplicated by collection.
           content:
             application/json:
@@ -2701,6 +3145,9 @@ paths:
               $ref: "#/components/schemas/CollectionCreateInput"
       responses:
         "201":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Collection created with its explicit profile and durable category assignments.
           content:
             application/json:
@@ -2726,6 +3173,8 @@ paths:
         "200":
           description: Portable versioned JSON export of every collection for the active profile, available only when the caller can manage every assignment. Assignment policy is intentionally excluded from the document.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Content-Disposition:
               schema:
                 type: string
@@ -2753,6 +3202,9 @@ paths:
               $ref: "#/components/schemas/CollectionExportDocument"
       responses:
         "201":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Collections were atomically appended with only the active profile as an explicit grant and no category grants; portable documents never carry assignment policy.
           content:
             application/json:
@@ -2782,6 +3234,9 @@ paths:
               $ref: "#/components/schemas/CollectionReorderInput"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Complete collection order was replaced.
           content:
             application/json:
@@ -2821,6 +3276,9 @@ paths:
         - $ref: "#/components/parameters/Page"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: TMDB entities available to the collection editor.
           content:
             application/json:
@@ -2850,6 +3308,9 @@ paths:
         - $ref: "#/components/parameters/Language"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Localized TMDB genres for a collection source.
           content:
             application/json:
@@ -2873,6 +3334,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Collection definition for the active profile with artwork source URLs replaced by same-origin artwork proxy URLs.
           content:
             application/json:
@@ -2898,6 +3362,9 @@ paths:
               $ref: "#/components/schemas/CollectionSaveInput"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Collection atomically replaced.
           content:
             application/json:
@@ -2922,6 +3389,9 @@ paths:
         - bearerAuth: []
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Collection deleted.
         "401":
           $ref: "#/components/responses/Error"
@@ -2945,6 +3415,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Stored collection definition for the administration editor.
           content:
             application/json:
@@ -2975,6 +3448,9 @@ paths:
         - $ref: "#/components/parameters/Region"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Deduplicated folder items with source provenance and isolated failures.
           content:
             application/json:
@@ -3000,6 +3476,9 @@ paths:
         - $ref: "#/components/parameters/Language"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Localized movie metadata and canonical external identifiers.
           content:
             application/json:
@@ -3031,6 +3510,9 @@ paths:
         - $ref: "#/components/parameters/EpisodeOrder"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Localized series metadata with the selected TMDB or TVDB episode order hierarchy.
           content:
             application/json:
@@ -3061,6 +3543,9 @@ paths:
         - $ref: "#/components/parameters/SeriesMappingProvider"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Season episodes in the selected mapping hierarchy.
           content:
             application/json:
@@ -3108,6 +3593,9 @@ paths:
             maximum: 2147483647
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Effective-profile-enabled, validated skip markers. The list is empty when data is absent or IntroDB is unavailable.
           content:
             application/json:
@@ -3149,6 +3637,9 @@ paths:
             minimum: 0
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Curated movie, series, or series-season trailers.
           content:
             application/json:
@@ -3185,6 +3676,9 @@ paths:
               $ref: "#/components/schemas/TitleResolveInput"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Stable server title identity.
           content:
             application/json:
@@ -3220,6 +3714,9 @@ paths:
               $ref: "#/components/schemas/CustomSeriesResolveInput"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Stable profile-scoped internal series, season, and episode identities.
           content:
             application/json:
@@ -3255,6 +3752,8 @@ paths:
         "200":
           description: Cached JPEG, PNG, or WebP artwork.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Cache-Control:
               schema:
                 type: string
@@ -3275,6 +3774,8 @@ paths:
         "307":
           description: Cache miss fallback to the registered provider artwork URL.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Location:
               required: true
               schema:
@@ -3299,6 +3800,8 @@ paths:
         "200":
           description: Cached artwork headers.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Cache-Control:
               schema:
                 type: string
@@ -3312,6 +3815,8 @@ paths:
         "307":
           description: Cache miss fallback to the registered provider artwork URL.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Location:
               required: true
               schema:
@@ -3342,6 +3847,9 @@ paths:
               $ref: "#/components/schemas/PlaybackSourcesInput"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Selectable source references for the active profile and device capabilities.
           content:
             application/json:
@@ -3372,6 +3880,9 @@ paths:
               $ref: "#/components/schemas/PlaybackPrepareInput"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Cached playback decision for the selected source.
           content:
             application/json:
@@ -3410,6 +3921,9 @@ paths:
               $ref: "#/components/schemas/PlaybackResolveInput"
       responses:
         "201":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: A short-lived playback session for the selected source.
           content:
             application/json:
@@ -3448,6 +3962,9 @@ paths:
         - bearerAuth: []
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Playback session and media processing stopped.
         "401":
           $ref: "#/components/responses/Error"
@@ -3461,6 +3978,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Administrator playback activity and media diagnostics.
           content:
             application/json:
@@ -3485,6 +4005,9 @@ paths:
         - bearerAuth: []
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Playback session and media processing stopped.
         "401":
           $ref: "#/components/responses/Error"
@@ -3500,6 +4023,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Cleanup result and remaining media storage.
           content:
             application/json:
@@ -3537,6 +4063,9 @@ paths:
         - playbackToken: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Proxied media, subtitle, or rewritten HLS playlist.
           content:
             application/octet-stream:
@@ -3544,6 +4073,9 @@ paths:
                 type: string
                 format: binary
         "206":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Partial media response for a valid Range request.
           content:
             application/octet-stream:
@@ -3567,8 +4099,14 @@ paths:
         - playbackToken: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Playback asset headers.
         "206":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Partial playback asset headers.
         "404":
           $ref: "#/components/responses/Error"
@@ -3603,6 +4141,9 @@ paths:
         - $ref: "#/components/parameters/Language"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Calendar events in deterministic release-date order.
           content:
             application/json:
@@ -3617,6 +4158,8 @@ paths:
         "503":
           description: Calendar event capacity was exceeded; no partial result is returned.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Retry-After:
               required: true
               description: Delay in seconds before retrying the calendar request.
@@ -3647,6 +4190,8 @@ paths:
             rotation, and DTSTAMP and LAST-MODIFIED are derived from the stable titles.updated_at snapshot. Movie
             summaries are the movie title; episode summaries contain the series, SxxExx code, and episode title.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Content-Disposition:
               required: true
               description: Inline disposition with an iCalendar filename.
@@ -3667,6 +4212,9 @@ paths:
               schema:
                 type: string
         "404":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: >
             Uniform not-found response for an absent, malformed, repeated, revoked, or inaccessible token, or for
             any additional query parameter.
@@ -3677,6 +4225,8 @@ paths:
         "429":
           description: The public feed concurrency or per-source attempt budget was exceeded.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Retry-After:
               required: true
               schema:
@@ -3699,6 +4249,8 @@ paths:
         "503":
           description: Calendar event capacity was exceeded; no partial iCalendar document is returned.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Retry-After:
               required: true
               schema:
@@ -3731,6 +4283,8 @@ paths:
         "200":
           description: Calendar feed headers without a response body.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Content-Disposition:
               required: true
               description: Inline disposition with the same iCalendar filename as GET.
@@ -3752,6 +4306,9 @@ paths:
                 type: string
                 description: Representation metadata only; HEAD returns no response body.
         "404":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: >
             Uniform not-found response for an absent, malformed, repeated, revoked, or inaccessible token, or for
             any additional query parameter.
@@ -3762,6 +4319,8 @@ paths:
         "429":
           description: The public feed concurrency or per-source attempt budget was exceeded.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Retry-After:
               required: true
               schema:
@@ -3784,6 +4343,8 @@ paths:
         "503":
           description: Calendar feed validation is temporarily unavailable because capacity was exceeded.
           headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
             Retry-After:
               required: true
               schema:
@@ -3826,6 +4387,9 @@ paths:
             default: 20
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Library entries belonging to the selected profile.
           content:
             application/json:
@@ -3852,6 +4416,9 @@ paths:
               $ref: "#/components/schemas/TVLibraryMembershipRequest"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: TV identities that belong to the selected profile library.
           content:
             application/json:
@@ -3877,6 +4444,9 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Idempotently added library entry.
           content:
             application/json:
@@ -3899,6 +4469,9 @@ paths:
         - bearerAuth: []
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Library entry removed or already absent.
         "401":
           $ref: "#/components/responses/Error"
@@ -3923,6 +4496,9 @@ paths:
               $ref: "#/components/schemas/PlaybackProgressBatchRequest"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Ordered playback progress states for the selected profile.
           content:
             application/json:
@@ -3950,12 +4526,18 @@ paths:
         - bearerAuth: []
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Current playback progress for the selected profile.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/PlaybackProgress"
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The selected profile has not started this title yet.
         "401":
           $ref: "#/components/responses/Error"
@@ -3978,6 +4560,9 @@ paths:
               $ref: "#/components/schemas/UpdatePlaybackProgressRequest"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Updated playback progress with its new synchronization version.
           content:
             application/json:
@@ -4002,6 +4587,9 @@ paths:
         - $ref: "#/components/parameters/ExpectedVersion"
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Playback progress removed.
         "401":
           $ref: "#/components/responses/Error"
@@ -4026,6 +4614,9 @@ paths:
               $ref: "#/components/schemas/SetWatchedBatchRequest"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Ordered watched states with their new synchronization versions.
           content:
             application/json:
@@ -4061,6 +4652,9 @@ paths:
               $ref: "#/components/schemas/CompletionRequest"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Title marked as watched.
           content:
             application/json:
@@ -4085,6 +4679,9 @@ paths:
         - $ref: "#/components/parameters/ExpectedVersion"
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Title marked as unwatched and reset to the beginning.
           content:
             application/json:
@@ -4116,6 +4713,9 @@ paths:
             default: 20
       responses:
         "200":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: Resumable titles and suggested next episodes for the selected profile.
           content:
             application/json:
@@ -4138,6 +4738,9 @@ paths:
         - bearerAuth: []
       responses:
         "204":
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
           description: The title was removed from continue watching.
         "401":
           $ref: "#/components/responses/Error"
@@ -4148,6 +4751,15 @@ paths:
         "422":
           $ref: "#/components/responses/Error"
 components:
+  headers:
+    RequestId:
+      description: Safe request correlation token accepted from a restrictive ASCII allowlist or generated server-side from 16 cryptographically random bytes.
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9._:-]+$"
   securitySchemes:
     setupToken:
       type: http
@@ -4341,12 +4953,34 @@ components:
   responses:
     Error:
       description: Structured API error.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    DeviceAuthorizationCapacity:
+      description: Native device-code initiation admission or outstanding authorization capacity is exhausted.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
+        Retry-After:
+          required: true
+          description: Delay in seconds before retrying initiation; durable outstanding-capacity exhaustion returns 60.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 60
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
     PlaybackUnprocessable:
       description: Playback input is invalid, transcoding is disabled, or a required client processing capability was not announced.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
       content:
         application/json:
           schema:
@@ -4354,6 +4988,8 @@ components:
     PlaybackCapacity:
       description: Every server media-processing slot is occupied, or global maintenance mode blocks the playback request.
       headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
         Retry-After:
           required: true
           description: Suggested delay in seconds before retrying playback preparation or resolution.
@@ -4368,24 +5004,36 @@ components:
               - $ref: "#/components/schemas/MaintenanceModeError"
     DemoForbidden:
       description: A demonstration session attempted a route outside its exact method-and-path allowlist.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/DemoForbiddenError"
     DemoSessionInvalid:
       description: The demonstration cookie is absent, invalid, or expired.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/DemoSessionInvalidError"
     DemoSessionLimit:
       description: The global demonstration pool or the trusted client source quota is full.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/DemoSessionLimitError"
     DemoOriginRejected:
       description: A state-changing demonstration request failed its same-origin check.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
       content:
         application/json:
           schema:
@@ -4393,6 +5041,8 @@ components:
     DemoUnavailable:
       description: Server setup has completed, so demonstration mode and all demonstration sessions are unavailable.
       headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
         Set-Cookie:
           description: Expired rivune_demo cookie scoped to /api/v1.
           schema:
@@ -4403,6 +5053,9 @@ components:
             $ref: "#/components/schemas/DemoUnavailableError"
     ArtworkError:
       description: Stable plain-text artwork lookup or upstream failure.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
       content:
         text/plain:
           schema:
@@ -4410,6 +5063,8 @@ components:
     MaintenanceMode:
       description: Global maintenance mode is enabled for non-administrator application requests.
       headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
         Retry-After:
           description: Suggested delay in seconds before probing the application again.
           schema:
@@ -4422,6 +5077,8 @@ components:
     TrackingSyncCapacity:
       description: The tracking synchronization outbox is at capacity. The mutation is rolled back and the standard Error envelope has code `tracking_sync_capacity`; retry without reloading its optimistic version.
       headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
         Retry-After:
           required: true
           description: Fixed delay in seconds before retrying the watch-state mutation.
@@ -4435,6 +5092,8 @@ components:
     TrackingOperationUnavailable:
       description: Tracking provider configuration or availability failed, synchronization capacity was reached, or global maintenance mode is enabled. Capacity failures use error code `tracking_sync_capacity` and roll back the mutation.
       headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
         Retry-After:
           description: Suggested delay in seconds for synchronization capacity or global maintenance mode.
           schema:
@@ -4999,6 +5658,16 @@ components:
         demoAvailable:
           type: boolean
           description: Whether a pre-setup demonstration session may be started. Always emitted by current servers but optional for pre-v18 compatibility.
+        capabilities:
+          type: array
+          maxItems: 64
+          uniqueItems: true
+          description: Stable optional feature identifiers emitted by current servers. Clients ignore unknown identifiers and gate optional native workflows on recognized values.
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+            pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
         timezone:
           type: string
           description: IANA timezone configured by the server operator.
@@ -6068,15 +6737,61 @@ components:
           description: Root title snapshots with at least one nonblank canonical artwork reference; these snapshots are stored independently from localized payload rows.
           type: integer
           minimum: 0
+    PostgreSQLPoolStatus:
+      type: object
+      additionalProperties: false
+      required: [acquired, idle, total, max, waitCount, waitDurationMilliseconds]
+      properties:
+        acquired: { type: integer, minimum: 0 }
+        idle: { type: integer, minimum: 0 }
+        total: { type: integer, minimum: 0 }
+        max: { type: integer, minimum: 1 }
+        waitCount: { type: integer, format: int64, minimum: 0 }
+        waitDurationMilliseconds: { type: integer, format: int64, minimum: 0 }
+    TrackingOutboxStatus:
+      type: object
+      additionalProperties: false
+      required: [pending, due, oldestAgeSeconds]
+      properties:
+        pending: { type: integer, format: int64, minimum: 0 }
+        due: { type: integer, format: int64, minimum: 0 }
+        oldestAgeSeconds: { type: integer, format: int64, minimum: 0 }
+    AddonOperationsStatus:
+      type: object
+      additionalProperties: false
+      required: [total, enabled, latestUpdatedAt]
+      properties:
+        total: { type: integer, format: int64, minimum: 0 }
+        enabled: { type: integer, format: int64, minimum: 0 }
+        latestUpdatedAt:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+    PlaybackOperationsStatus:
+      type: object
+      additionalProperties: false
+      required: [active, transcoding]
+      properties:
+        active: { type: integer, format: int64, minimum: 0 }
+        transcoding: { type: integer, format: int64, minimum: 0 }
     OperationsOverview:
       type: object
       additionalProperties: false
-      required: [metadataCache, metadataRefresh, housekeepingIntervalMinutes]
+      required: [metadataCache, metadataRefresh, postgresqlPool, trackingOutbox, addons, playback, housekeepingIntervalMinutes]
       properties:
         metadataCache:
           $ref: "#/components/schemas/MetadataCacheStatus"
         metadataRefresh:
           $ref: "#/components/schemas/MetadataRefreshSchedule"
+        postgresqlPool:
+          $ref: "#/components/schemas/PostgreSQLPoolStatus"
+        trackingOutbox:
+          $ref: "#/components/schemas/TrackingOutboxStatus"
+        addons:
+          $ref: "#/components/schemas/AddonOperationsStatus"
+        playback:
+          $ref: "#/components/schemas/PlaybackOperationsStatus"
         housekeepingIntervalMinutes:
           description: Cadence of the existing maintenance runner that checks housekeeping and due metadata refreshes.
           type: integer
@@ -7004,6 +7719,11 @@ components:
       type: object
       additionalProperties: false
       required: [userCode, categoryId]
+      description: >
+        Purpose-conditional shared approval input. Native authorization uses categoryId and accepts the
+        optional deviceName/internalNote overrides. Jellyfin Quick Connect requires categoryId in the body
+        but does not trust it: approval derives the category and exact profile from the approver's active
+        manageable profile and discards both optional overrides.
       properties:
         userCode:
           type: string
@@ -7011,14 +7731,16 @@ components:
         categoryId:
           type: string
           format: uuid
-          description: Requested assignment authorized against the approver's server-owned scope.
+          description: Authoritative requested assignment for native authorization; structural but ignored in favor of the active manageable profile's category for Jellyfin Quick Connect.
         deviceName:
           type: string
           minLength: 1
           maxLength: 120
+          description: Optional native-device name override; discarded for Jellyfin Quick Connect approval.
         internalNote:
           type: [string, "null"]
           maxLength: 500
+          description: Optional native-device administrative note; discarded for Jellyfin Quick Connect approval.
     UserList:
       type: object
       required: [users]
@@ -9606,6 +10328,216 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ContinueWatchingItem"
+    PortableArchiveKey:
+      type: string
+      pattern: '^sha256:[0-9a-f]{64}$'
+    ProfileArchiveDocument:
+      type: object
+      additionalProperties: false
+      required: [version, exportedAt, settings, addons, collections, titles, library, progress, favorites, userData, trackingPreferences]
+      properties:
+        version: { type: integer, const: 1 }
+        exportedAt: { type: string, format: date-time }
+        settings:
+          $ref: "#/components/schemas/ProfileArchiveSettings"
+        addons:
+          type: array
+          maxItems: 256
+          items: { $ref: "#/components/schemas/ProfileArchiveAddon" }
+        collections:
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/ProfileArchiveCollection" }
+        titles:
+          type: array
+          maxItems: 100000
+          items: { $ref: "#/components/schemas/ProfileArchiveTitle" }
+        library:
+          type: array
+          maxItems: 100000
+          items: { $ref: "#/components/schemas/ProfileArchiveLibraryState" }
+        progress:
+          type: array
+          maxItems: 100000
+          items: { $ref: "#/components/schemas/ProfileArchiveProgressState" }
+        favorites:
+          type: array
+          maxItems: 100000
+          items: { $ref: "#/components/schemas/ProfileArchiveFavoriteState" }
+        userData:
+          type: array
+          maxItems: 100000
+          items: { $ref: "#/components/schemas/ProfileArchiveUserDataState" }
+        trackingPreferences:
+          type: array
+          maxItems: 2
+          items: { $ref: "#/components/schemas/ProfileArchiveTrackingPreference" }
+    ProfileArchiveSettings:
+      type: object
+      additionalProperties: false
+      description: Profile-layer settings only; instance runtime, Jellyfin, notification, and credential fields are forbidden.
+      properties:
+        interfaceLanguage: { $ref: "#/components/schemas/InterfaceLanguage" }
+        theme: { type: string, enum: [system, light, dark] }
+        maximumResolution: { type: string, enum: [auto, 2160p, 1080p, 720p, 480p] }
+        maximumCastMembers: { type: integer, minimum: 1, maximum: 100 }
+        maximumDirectTitles: { type: integer, minimum: 1, maximum: 100 }
+        preferDirectPlay: { type: boolean }
+        transcoding: { type: string, enum: [inherit, enabled, disabled] }
+        hideUnreleased: { type: boolean }
+        metadataLanguage: { $ref: "#/components/schemas/LanguagePreference" }
+        metadataRegion: { $ref: "#/components/schemas/RegionPreference" }
+        seriesMappingProvider: { type: string, enum: [tmdb, tvdb] }
+        audioLanguage: { $ref: "#/components/schemas/LanguagePreference" }
+        subtitleLanguage: { $ref: "#/components/schemas/LanguagePreference" }
+        forcedSubtitleLanguage: { $ref: "#/components/schemas/ForcedSubtitleLanguagePreference" }
+        autoplayNextEpisode: { type: boolean }
+        skipIntroEnabled: { type: boolean }
+        skipRecapEnabled: { type: boolean }
+        skipOutroEnabled: { type: boolean }
+        cardDensity: { type: string, enum: [comfortable, compact] }
+        animationsEnabled: { type: boolean }
+        subtitleSizePercent: { type: integer, minimum: 50, maximum: 200 }
+        subtitleTextColor: { type: string, pattern: '^#[0-9A-Fa-f]{6}$' }
+        subtitleBackgroundOpacityPercent: { type: integer, minimum: 0, maximum: 100 }
+    ProfileArchiveAddon:
+      type: object
+      additionalProperties: false
+      required: [key, transportUrl, manifest, enabled, position]
+      properties:
+        key: { $ref: "#/components/schemas/PortableArchiveKey" }
+        transportUrl:
+          type: string
+          format: uri
+          pattern: '^https?://[^/?#@\s]+(?:/[^?#\s]*)?/manifest\.json(?:\?[^#\s]*)?$'
+          maxLength: 8192
+          description: Canonical HTTP(S) manifest URL without userinfo or fragment. Path/query components may contain credentials and are exposed only inside this administrator archive.
+        manifest:
+          type: object
+          description: Complete strictly validated Stremio manifest snapshot, limited to 4 MiB and bounded nested cardinalities.
+          additionalProperties: true
+        enabled: { type: boolean }
+        position: { type: integer, minimum: 0 }
+    ProfileArchiveCollection:
+      type: object
+      additionalProperties: false
+      required: [key, value]
+      description: Collection content without assignment fields or runtime folder/source IDs. addonCatalog.addonId is a deterministic archive-local UUID reference; manifestId remains the add-on manifest identity.
+      properties:
+        key: { $ref: "#/components/schemas/PortableArchiveKey" }
+        value:
+          $ref: "#/components/schemas/PortableCollection"
+    ProfileArchiveTitle:
+      type: object
+      additionalProperties: false
+      required: [key, mediaType, externalIds]
+      properties:
+        key: { $ref: "#/components/schemas/PortableArchiveKey" }
+        mediaType: { type: string, enum: [movie, series, season, episode, tv] }
+        parentKey: { $ref: "#/components/schemas/PortableArchiveKey" }
+        ordinal: { type: integer, minimum: 0 }
+        displayTitle: { type: string, maxLength: 500 }
+        posterUrl: { type: string, format: uri-reference, maxLength: 4096 }
+        backgroundUrl: { type: string, format: uri-reference, maxLength: 4096 }
+        releaseInfo: { type: string, maxLength: 120 }
+        releaseDate: { type: string, format: date }
+        resourceId: { type: string, maxLength: 512 }
+        resourceProvider: { type: string, pattern: '^[a-z0-9][a-z0-9._-]{0,31}$' }
+        sourceAddonKey: { $ref: "#/components/schemas/PortableArchiveKey" }
+        sourceCatalogId: { type: string, maxLength: 512 }
+        sourceName: { type: string, maxLength: 500 }
+        country: { type: string, maxLength: 128 }
+        language: { type: string, maxLength: 128 }
+        category: { type: string, maxLength: 256 }
+        externalIds:
+          type: array
+          items: { $ref: "#/components/schemas/ProfileArchiveExternalId" }
+    ProfileArchiveExternalId:
+      type: object
+      additionalProperties: false
+      required: [provider, namespace, externalId, profileScoped]
+      properties:
+        provider: { type: string, pattern: '^[a-z0-9][a-z0-9._-]{0,31}$' }
+        namespace: { type: string, enum: [movie, series, season, episode, tv] }
+        externalId: { type: string, minLength: 1, maxLength: 512 }
+        profileScoped: { type: boolean }
+    ProfileArchiveLibraryState:
+      type: object
+      additionalProperties: false
+      required: [titleKey, addedAt, updatedAt]
+      properties:
+        titleKey: { $ref: "#/components/schemas/PortableArchiveKey" }
+        addedAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ProfileArchiveProgressState:
+      type: object
+      additionalProperties: false
+      required: [titleKey, positionSeconds, durationSeconds, completed, version, lastWatchedAt, updatedAt]
+      properties:
+        titleKey: { $ref: "#/components/schemas/PortableArchiveKey" }
+        positionSeconds: { type: integer, minimum: 0 }
+        durationSeconds: { type: integer, minimum: 0 }
+        completed: { type: boolean }
+        version: { type: integer, format: int64, minimum: 1 }
+        lastWatchedAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ProfileArchiveFavoriteState:
+      type: object
+      additionalProperties: false
+      required: [titleKey, createdAt, updatedAt]
+      properties:
+        titleKey: { $ref: "#/components/schemas/PortableArchiveKey" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ProfileArchiveUserDataState:
+      type: object
+      additionalProperties: false
+      required: [titleKey, ratingSet, playedPercentageSet, unplayedItemCountSet, playCountSet, likesSet, lastPlayedDateSet, updatedAt]
+      properties:
+        titleKey: { $ref: "#/components/schemas/PortableArchiveKey" }
+        rating: { type: number, minimum: 0, maximum: 10 }
+        ratingSet: { type: boolean }
+        playedPercentage: { type: number, minimum: 0, maximum: 100 }
+        playedPercentageSet: { type: boolean }
+        unplayedItemCount: { type: integer, minimum: 0 }
+        unplayedItemCountSet: { type: boolean }
+        playCount: { type: integer, minimum: 0 }
+        playCountSet: { type: boolean }
+        likes: { type: boolean }
+        likesSet: { type: boolean }
+        lastPlayedDate: { type: string, format: date-time }
+        lastPlayedDateSubmicrosecond: { type: integer, minimum: 0, maximum: 999 }
+        lastPlayedDateSet: { type: boolean }
+        updatedAt: { type: string, format: date-time }
+    ProfileArchiveTrackingPreference:
+      type: object
+      additionalProperties: false
+      required: [provider, syncWatched, syncProgress, syncLibrary]
+      properties:
+        provider: { type: string, enum: [trakt, simkl] }
+        syncWatched: { type: boolean }
+        syncProgress: { type: boolean }
+        syncLibrary: { type: boolean }
+    ProfileArchiveSectionReport:
+      type: object
+      additionalProperties: false
+      required: [section, created, updated, unchanged]
+      properties:
+        section: { type: string, enum: [settings, addons, collections, titles, library, progress, favorites, userData, trackingPreferences] }
+        created: { type: integer, minimum: 0 }
+        updated: { type: integer, minimum: 0 }
+        unchanged: { type: integer, minimum: 0 }
+    ProfileArchiveImportReport:
+      type: object
+      additionalProperties: false
+      required: [mode, profileId, sections, trackingAccountsUpdated]
+      properties:
+        mode: { type: string, const: merge }
+        profileId: { type: string, format: uuid }
+        sections:
+          type: array
+          items: { $ref: "#/components/schemas/ProfileArchiveSectionReport" }
+        trackingAccountsUpdated: { type: integer, minimum: 0, maximum: 2 }
     DemoSessionInvalidError:
       type: object
       additionalProperties: false

@@ -43,8 +43,8 @@ Create and push one annotated tag:
 ```sh
 git switch main
 git pull --ff-only
-git tag -a v1.6.0 -m "Rivune v1.6.0"
-git push origin v1.6.0
+git tag -a v1.6.1 -m "Rivune v1.6.1"
+git push origin v1.6.1
 ```
 
 The tag push runs `Release candidate CI`. Its read-only `authorize` job resolves
@@ -60,7 +60,7 @@ AMD64 container job also validates the single supported CPU-only manifest,
 `compose.yaml`, plus that manifest combined with the supported
 `compose.amd-intel.yaml` GPU overlay, using non-secret placeholders.
 
-Only a successful candidate run is authorized to proceed in `Publish release`, whose top-level permission remains `contents: read`. Its `Authorize tested release candidate` job repeats the annotated-tag and same-commit checks without write permission. The sole job attached to the protected `release` environment decodes the private keystore into an ephemeral directory, derives Android `versionName` from the tag and a monotone `versionCode` from twice the tested `main` commit count (with the stable release ranked after a prerelease on the same commit), builds and verifies the signed APK, and produces the dedicated Android manifest and checksums. Signature, certificate fingerprint, package identity, versions, file size, SHA-256, manifest contract, and exact checksum set must all pass before the OCI image can be pushed. The job then reauthorizes refs, publishes the multi-architecture image, provenance, and SBOM, and finally uploads the immutable Actions artifact. The separate `contents: write` job downloads and revalidates that artifact, reauthorizes refs, creates a draft GitHub Release with the complete asset set, verifies the remote assets, and only then makes the release visible. It intentionally has no second `environment: release` declaration, so one deliberate approval protects the ordered publication without exposing signing secrets to the release job.
+Only a successful candidate run is authorized to proceed in `Publish release`, whose top-level permission remains `contents: read`. Its `Authorize tested release candidate` job repeats the annotated-tag and tested-commit checks without write permission. Initial publication also requires that commit to remain current `main`; if exactly one matching Release already exists, authorization permits the immutable tag/run pair to continue so the downstream job can fully validate that Release before adoption. The sole job attached to the protected `release` environment decodes the private keystore into an ephemeral directory, derives Android `versionName` from the tag, and sets the monotone `versionCode` to `2,000,000,000 + github.run_number`. The workflow run number stays fixed across rerun attempts, so a retry rebuilds the same Android version. The job builds and verifies the signed APK and produces the dedicated Android manifest and checksums. Signature, certificate fingerprint, package identity, versions, file size, SHA-256, manifest contract, and exact checksum set must all pass before the OCI image can be pushed. The job then reauthorizes the immutable tag and the same initial-or-resume condition, publishes the multi-architecture image, provenance, and SBOM, and finally uploads the immutable Actions artifact. The separate `contents: write` job downloads and revalidates that artifact, reauthorizes refs, and either creates a complete draft GitHub Release or adopts the one matching draft or published Release. It intentionally has no second `environment: release` declaration, so one deliberate approval protects the ordered publication without exposing signing secrets to the release job.
 
 To reproduce the Compose policy checks locally with disposable, non-production values, run exactly:
 
@@ -90,7 +90,7 @@ docker compose -f compose.yaml -f compose.amd-intel.yaml config --format json | 
 If GitHub does not create the release-candidate run for an otherwise valid tag push, dispatch the same read-only gate without moving the tag:
 
 ```sh
-gh workflow run release-candidate.yml --ref main -f tag=v1.5.3
+gh workflow run release-candidate.yml --ref main -f tag=v1.6.1
 ```
 
 The manual path enforces the same SemVer, annotated-tag, current-`main`, and tag-target checks. Its successful `workflow_run` is eligible for the same external release-environment gate; it does not weaken artifact authorization or permit a stale or lightweight tag.
@@ -120,24 +120,23 @@ The environment response must show `moodiness` as required reviewer, `can_admins
 
 ## Published artifacts
 
-After all gates succeed, the workflow publishes one OCI manifest to `ghcr.io/moodiness/rivune` for exactly `linux/amd64` and `linux/arm64`, with provenance and an SBOM. A stable `v1.6.0` release receives:
+After all gates succeed, the workflow publishes one OCI manifest to `ghcr.io/moodiness/rivune` for exactly `linux/amd64` and `linux/arm64`, with provenance and an SBOM. A stable `v1.6.1` release receives:
 
 ```text
-1.6.0
+1.6.1
 1.6
 1
-sha-<short-commit>
 latest
 ```
 
-The matching GitHub Release contains exactly `rivune-android-1.6.0.apk`, `rivune-android-update.json`, and `SHA256SUMS`. The JSON document is an Android-specific schema-v1 manifest with the common release metadata and one `package` object; it does not advertise unbuilt platforms. `SHA256SUMS` covers exactly the APK and JSON manifest. The APK is universal, uses application ID `io.rivune.app`, requires Android 8.0 or newer, and is signed with the certificate fingerprint recorded in the manifest.
+The matching GitHub Release contains exactly `rivune-android-1.6.1.apk`, `rivune-android-update.json`, and `SHA256SUMS`. The JSON document is an Android-specific schema-v1 manifest with the common release metadata and one `package` object; it does not advertise unbuilt platforms. `SHA256SUMS` covers exactly the APK and JSON manifest. The APK is universal, uses application ID `io.rivune.app`, requires Android 8.0 or newer, and is signed with the certificate fingerprint recorded in the manifest.
 
-A prerelease such as `v2.0.0-rc.1` receives its full SemVer and SHA tags, but does not move the stable major, minor, or `latest` aliases. Its update manifest channel and GitHub prerelease flag are both `prerelease`. A stable release uses channel `stable`, becomes GitHub's latest release, and provides the stable URL `https://github.com/moodiness/rivune/releases/latest/download/rivune-android-update.json`. If APK signing, asset validation, or image publication fails, no public GitHub Release is created.
+A prerelease such as `v2.0.0-rc.1` receives its full SemVer tag but does not move the stable major, minor, or `latest` aliases. Its update manifest channel and GitHub prerelease flag are both `prerelease`. A stable release uses channel `stable`, becomes GitHub's latest release, and provides the stable URL `https://github.com/moodiness/rivune/releases/latest/download/rivune-android-update.json`. The workflow first publishes an unlisted OCI digest and records that exact digest in an authenticated HTML comment in the draft Release body. It validates the complete Release, promotes and verifies the exact immutable SemVer tag, publishes the Release once, then moves mutable stable aliases only while that tag is still GitHub's latest stable release. A rerun may publish a fresh unlisted build digest, but it adopts exactly one matching draft or published Release only after revalidating its metadata, curated body, digest marker, exact downloaded asset set, checksums, update-manifest references, and APK identity, signing certificate, and versions. Promotion always uses the originally recorded digest. Zero or multiple matching Releases, a different immutable image tag, or any mismatching Release data fails closed; an adopted draft is never deleted by retry cleanup.
 
 Verify the release and its OCI attestations after the workflow completes:
 
 ```sh
-image=ghcr.io/moodiness/rivune:1.6.0
+image=ghcr.io/moodiness/rivune:1.6.1
 docker buildx imagetools inspect "${image}"
 docker buildx imagetools inspect "${image}" --raw > rivune-manifest.json
 jq -e '[.manifests[] | select((.annotations // {})["vnd.docker.reference.type"] != "attestation-manifest") | [.platform.os, .platform.architecture]] | sort == [["linux", "amd64"], ["linux", "arm64"]]' rivune-manifest.json
@@ -150,4 +149,4 @@ The first policy assertion requires exactly the `linux/amd64` and `linux/arm64` 
 
 ## Failure and retry
 
-Fix a gate failure on `main` and create a new version tag. Never force-update a tag that may have been observed or partially published. GitHub Actions jobs may be rerun for transient infrastructure failures on the unchanged tagged commit only while it remains the current `main` HEAD; otherwise create a new version tag after the fix reaches `main`. Image tags are content-addressed and the release-note step is ordered after successful image publication.
+Fix a gate failure on `main` and create a new version tag. Never force-update a tag that may have been observed or partially published, and never replace mismatching tags, Releases, or assets. GitHub Actions jobs may be rerun for transient infrastructure failures on the unchanged annotated tag target. Before the first Release is created, authorization still requires that target to be current `main`. Once the matching draft or published Release exists, retries resume from its fully revalidated assets and recorded OCI digest rather than replacing it; promotion continues to require the immutable annotated tag target even if `main` has subsequently advanced.

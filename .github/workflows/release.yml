@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event.workflow_run.head_sha }}
+  group: release-publication
   cancel-in-progress: false
 
 env:
@@ -24,7 +24,6 @@ jobs:
     outputs:
       authorized: ${{ steps.authorize.outputs.authorized }}
       sha: ${{ steps.authorize.outputs.sha }}
-      short_sha: ${{ steps.authorize.outputs.short_sha }}
       stable: ${{ steps.authorize.outputs.stable }}
       tag: ${{ steps.authorize.outputs.tag }}
     steps:
@@ -57,9 +56,11 @@ jobs:
               [[ "${sha}" =~ ^[0-9a-f]{40}$ ]]
           }
 
-          same_approved_commit() {
-            local run_sha="$1" tag_sha="$2" main_sha="$3"
-            [[ "${run_sha}" == "${tag_sha}" && "${run_sha}" == "${main_sha}" ]]
+          release_run_is_authorized() {
+            local run_sha="$1" tag_sha="$2" main_sha="$3" release_count="$4"
+            [[ "${run_sha}" == "${tag_sha}" ]] &&
+              (( release_count <= 1 )) &&
+              { [[ "${run_sha}" == "${main_sha}" ]] || (( release_count == 1 )); }
           }
           annotated_tag_ref_is_valid() {
             jq -e '.object.type == "tag" and (.object.sha | strings | test("^[0-9a-f]{40}$"))' >/dev/null <<<"$1"
@@ -82,8 +83,11 @@ jobs:
           candidate_metadata_is_valid v1.2.3 "Release candidate v1.2.3" workflow_dispatch success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
           expect_rejection scheduled-event candidate_metadata_is_valid v1.2.3 "Release candidate v1.2.3" schedule success .github/workflows/release-candidate.yml owner/repo owner/repo "${fixture_sha}"
           expect_rejection wrong-workflow candidate_metadata_is_valid v1.2.3 "Release candidate v1.2.3" push success .github/workflows/other.yml owner/repo owner/repo "${fixture_sha}"
-          same_approved_commit "${fixture_sha}" "${fixture_sha}" "${fixture_sha}"
-          expect_rejection mismatched-commit same_approved_commit "${fixture_sha}" ffffffffffffffffffffffffffffffffffffffff "${fixture_sha}"
+          release_run_is_authorized "${fixture_sha}" "${fixture_sha}" "${fixture_sha}" 0
+          expect_rejection mismatched-commit release_run_is_authorized "${fixture_sha}" ffffffffffffffffffffffffffffffffffffffff "${fixture_sha}" 0
+          release_run_is_authorized "${fixture_sha}" "${fixture_sha}" ffffffffffffffffffffffffffffffffffffffff 1
+          expect_rejection advanced-main-without-release release_run_is_authorized "${fixture_sha}" "${fixture_sha}" ffffffffffffffffffffffffffffffffffffffff 0
+          expect_rejection multiple-releases release_run_is_authorized "${fixture_sha}" "${fixture_sha}" "${fixture_sha}" 2
           fixture_tag_object=89abcdef0123456789abcdef0123456789abcdef
           annotated_tag_ref_is_valid "{\"object\":{\"type\":\"tag\",\"sha\":\"${fixture_tag_object}\"}}"
           expect_rejection lightweight-tag-ref annotated_tag_ref_is_valid "{\"object\":{\"type\":\"commit\",\"sha\":\"${fixture_tag_object}\"}}"
@@ -114,8 +118,10 @@ jobs:
             echo "Annotated release tag must target a commit." >&2
             exit 1
           fi
-          if ! same_approved_commit "${RELEASE_SHA}" "${tag_sha}" "${main_sha}"; then
-            echo "Release tag, successful CI run, and current main HEAD must resolve to the same commit." >&2
+          release_count="$(gh api --paginate --slurp "repos/${REPOSITORY}/releases?per_page=100" |
+            jq --arg tag "${RELEASE_TAG}" '[.[][] | select(.tag_name == $tag)] | length')"
+          if ! release_run_is_authorized "${RELEASE_SHA}" "${tag_sha}" "${main_sha}" "${release_count}"; then
+            echo "The successful CI run must match the immutable tag and current main, unless exactly one matching Release already exists for full downstream validation." >&2
             exit 1
           fi
 
@@ -128,18 +134,20 @@ jobs:
           {
             echo "authorized=true"
             echo "sha=${RELEASE_SHA}"
-            echo "short_sha=${RELEASE_SHA:0:7}"
             echo "stable=${stable}"
             echo "tag=${RELEASE_TAG}"
           } >> "${GITHUB_OUTPUT}"
 
   publish:
-    name: Build assets and publish multi-architecture image
+    name: Build assets and publish multi-architecture image by digest
     if: needs.authorize.outputs.authorized == 'true'
     needs:
       - authorize
     runs-on: ubuntu-latest
     environment: release
+    outputs:
+      artifact_name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+      image_digest: ${{ steps.container.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -153,7 +161,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.6"
           cache: false
       - name: Set up Java
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
@@ -173,6 +181,7 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
           ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+          GITHUB_RELEASE_RUN_NUMBER: ${{ github.run_number }}
           RELEASE_SHA: ${{ needs.authorize.outputs.sha }}
           RELEASE_STABLE: ${{ needs.authorize.outputs.stable }}
           RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
@@ -189,21 +198,28 @@ jobs:
           done
 
           version_name="${RELEASE_TAG#v}"
-          commit_count="$(git rev-list --count HEAD)"
-          if [[ ! "${commit_count}" =~ ^[1-9][0-9]*$ ]]; then
-            echo "The main commit count is invalid: ${commit_count}" >&2
+          # github.run_number increases between releases but remains unchanged for rerun attempts.
+          # Reserve the 2,000,000,000 namespace above the former commit-count-derived codes.
+          version_code_namespace=2000000000
+          android_version_code_max=2100000000
+          if [[ ! "${GITHUB_RELEASE_RUN_NUMBER}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "The release workflow run number is invalid: ${GITHUB_RELEASE_RUN_NUMBER}" >&2
             exit 1
           fi
+          if (( ${#GITHUB_RELEASE_RUN_NUMBER} > 10 )); then
+            echo "The release workflow run number exceeds the Android versionCode namespace: ${GITHUB_RELEASE_RUN_NUMBER}" >&2
+            exit 1
+          fi
+          release_run_number=$((10#${GITHUB_RELEASE_RUN_NUMBER}))
+          if (( release_run_number > android_version_code_max - version_code_namespace )); then
+            echo "The release workflow run number exceeds the Android versionCode namespace: ${GITHUB_RELEASE_RUN_NUMBER}" >&2
+            exit 1
+          fi
+          version_code=$((version_code_namespace + release_run_number))
           if [[ "${RELEASE_STABLE}" == true ]]; then
             channel=stable
-            version_code=$((commit_count * 2 + 1))
           else
             channel=prerelease
-            version_code=$((commit_count * 2))
-          fi
-          if (( version_code > 2100000000 )); then
-            echo "The derived Android versionCode is too large: ${version_code}" >&2
-            exit 1
           fi
           published_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           asset_name="rivune-android-${version_name}.apk"
@@ -287,18 +303,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Generate release image metadata
-        id: metadata
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=semver,pattern={{version}},value=${{ needs.authorize.outputs.tag }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ needs.authorize.outputs.tag }},enable=${{ needs.authorize.outputs.stable == 'true' }}
-            type=semver,pattern={{major}},value=${{ needs.authorize.outputs.tag }},enable=${{ needs.authorize.outputs.stable == 'true' }}
-            type=raw,value=sha-${{ needs.authorize.outputs.short_sha }}
-            type=raw,value=latest,enable=${{ needs.authorize.outputs.stable == 'true' }}
-      - name: Reauthorize refs immediately before publication
+      - name: Reauthorize refs immediately before image digest publication
         env:
           APPROVED_SHA: ${{ needs.authorize.outputs.sha }}
           GH_TOKEN: ${{ github.token }}
@@ -315,36 +320,43 @@ jobs:
               "https://api.github.com/repos/${REPOSITORY}/$1"
           }
           main_sha="$(api git/ref/heads/main | jq -er '.object.sha')"
-          if ! tag_ref="$(api "git/ref/tags/${RELEASE_TAG}")" ||
-             ! tag_object_sha="$(jq -er 'select(.object.type == "tag") | .object.sha | select(test("^[0-9a-f]{40}$"))' <<<"${tag_ref}")" ||
-             ! tag_sha="$(api "git/tags/${tag_object_sha}" | jq -er 'select(.object.type == "commit") | .object.sha | select(test("^[0-9a-f]{40}$"))')"; then
+          tag_ref="$(api "git/ref/tags/${RELEASE_TAG}")" || {
             echo "Release authorization expired because the annotated tag ref is absent or invalid." >&2
             exit 1
-          fi
-          if [[ "${APPROVED_SHA}" == "${main_sha}" && "${APPROVED_SHA}" == "${tag_sha}" ]]; then
-            :
-          else
-            echo "Release authorization expired because main or the tag moved." >&2
+          }
+          tag_object_sha="$(jq -er 'select(.object.type == "tag") | .object.sha | select(test("^[0-9a-f]{40}$"))' <<<"${tag_ref}")" || {
+            echo "Release authorization expired because the annotated tag ref is absent or invalid." >&2
+            exit 1
+          }
+          tag_sha="$(api "git/tags/${tag_object_sha}" | jq -er 'select(.object.type == "commit") | .object.sha | select(test("^[0-9a-f]{40}$"))')" || {
+            echo "Release authorization expired because the annotated tag ref is absent or invalid." >&2
+            exit 1
+          }
+          release_count="$(gh api --paginate --slurp "repos/${REPOSITORY}/releases?per_page=100" |
+            jq --arg tag "${RELEASE_TAG}" '[.[][] | select(.tag_name == $tag)] | length')"
+          if [[ "${APPROVED_SHA}" != "${tag_sha}" ]] ||
+             (( release_count > 1 )) ||
+             { [[ "${APPROVED_SHA}" != "${main_sha}" ]] && (( release_count != 1 )); }; then
+            echo "Release authorization expired because the tag moved, multiple matching Releases exist, or main moved before the first matching Release was created." >&2
             exit 1
           fi
-      - name: Publish linux/amd64 and linux/arm64 image manifest
+      - name: Publish unlisted linux/amd64 and linux/arm64 image by digest
+        id: container
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           file: server/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
           build-args: |
-            VERSION=${{ steps.metadata.outputs.version }}
+            VERSION=${{ needs.authorize.outputs.tag }}
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=rivune-container
       - name: Upload immutable public release assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: release-assets-${{ needs.authorize.outputs.sha }}
+          name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}
           path: release-assets/
           if-no-files-found: error
           retention-days: 7
@@ -352,12 +364,15 @@ jobs:
           overwrite: false
 
   release:
-    name: Publish atomic GitHub release
+    name: Prepare or adopt validated GitHub release
     if: needs.authorize.outputs.authorized == 'true'
     needs:
       - authorize
       - publish
     runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.draft.outputs.release_id }}
+      image_digest: ${{ steps.draft.outputs.image_digest }}
     permissions:
       contents: write
     steps:
@@ -369,12 +384,21 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.6"
           cache: false
+      - name: Set up Java
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4
+      - name: Install Android verification tools
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
       - name: Download immutable release assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: release-assets-${{ needs.authorize.outputs.sha }}
+          name: ${{ needs.publish.outputs.artifact_name }}
           path: release-assets
       - name: Verify release assets and references
         env:
@@ -430,7 +454,7 @@ jobs:
             echo ".github/release-notes.md must start with: # Rivune ${RELEASE_TAG}" >&2
             exit 1
           fi
-      - name: Reauthorize refs immediately before release creation
+      - name: Reauthorize refs immediately before release preparation
         env:
           APPROVED_SHA: ${{ needs.authorize.outputs.sha }}
           GH_TOKEN: ${{ github.token }}
@@ -453,14 +477,20 @@ jobs:
             echo "Release authorization expired because the annotated tag ref is absent or invalid." >&2
             exit 1
           fi
-          if [[ "${APPROVED_SHA}" == "${main_sha}" && "${APPROVED_SHA}" == "${tag_sha}" ]]; then
-            :
-          else
-            echo "Release authorization expired because main or the tag moved." >&2
+          release_count="$(gh api --paginate --slurp "repos/${REPOSITORY}/releases?per_page=100" |
+            jq --arg tag "${RELEASE_TAG}" '[.[][] | select(.tag_name == $tag)] | length')"
+          if [[ "${APPROVED_SHA}" != "${tag_sha}" ]]; then
+            echo "Release authorization expired because the tag moved." >&2
             exit 1
           fi
-      - name: Create, verify, and publish draft release
+          if [[ "${release_count}" == 0 ]] && [[ "${APPROVED_SHA}" != "${main_sha}" ]]; then
+            echo "Release authorization expired before initial release creation because main moved." >&2
+            exit 1
+          fi
+      - name: Create or adopt and validate release
+        id: draft
         env:
+          CURRENT_IMAGE_DIGEST: ${{ needs.publish.outputs.image_digest }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ needs.authorize.outputs.sha }}
           RELEASE_STABLE: ${{ needs.authorize.outputs.stable }}
@@ -470,55 +500,462 @@ jobs:
         run: |
           set -euo pipefail
           release_id=""
+          created_release=false
+          digest_marker_prefix='<!-- rivune-oci-image-digest:'
+
           matching_releases() {
             gh api --paginate --slurp "repos/${REPOSITORY}/releases?per_page=100" |
-              jq "[.[][] | select(.tag_name == \"${RELEASE_TAG}\")]"
+              jq --arg tag "${RELEASE_TAG}" '[.[][] | select(.tag_name == $tag)]'
           }
-          cleanup_draft() {
-            if [[ -z "${release_id}" ]]; then
-              release_id="$(matching_releases | jq -r 'map(select(.draft == true)) | if length == 1 then .[0].id else empty end' 2>/dev/null || true)"
-            fi
-            if [[ -n "${release_id}" ]]; then
+          cleanup_created_draft() {
+            if [[ "${created_release}" == true ]] &&
+               [[ "${release_id}" =~ ^[1-9][0-9]*$ ]] &&
+               [[ "$(gh api "repos/${REPOSITORY}/releases/${release_id}" --jq '.draft' 2>/dev/null || true)" == true ]]; then
               gh api --method DELETE "repos/${REPOSITORY}/releases/${release_id}" >/dev/null 2>&1 || true
             fi
           }
-          if [[ "$(matching_releases | jq 'length')" != 0 ]]; then
-            echo "A release already exists for ${RELEASE_TAG}; refusing to replace it." >&2
+          validate_body_and_digest() {
+            local release_json="$1" body marker_mentions
+            body="$(jq -er '.body | strings' <<<"${release_json}")"
+            mapfile -t digest_markers < <(sed -nE 's/^<!-- rivune-oci-image-digest: (sha256:[0-9a-f]{64}) -->$/\1/p' <<<"${body}")
+            marker_mentions="$( (grep -oF "${digest_marker_prefix}" <<<"${body}" || true) | wc -l)"
+            if (( ${#digest_markers[@]} != 1 )) || [[ "${marker_mentions}" != 1 ]]; then
+              echo "The GitHub Release body must contain exactly one valid OCI image digest marker." >&2
+              return 1
+            fi
+            printf '%s\n\n<!-- rivune-oci-image-digest: %s -->' "$(cat .github/release-notes.md)" "${digest_markers[0]}" > expected-release-notes.md
+            if ! jq -e --rawfile expected_body expected-release-notes.md '.body == $expected_body' <<<"${release_json}" >/dev/null; then
+              echo "The GitHub Release body does not match the curated notes and recorded digest." >&2
+              return 1
+            fi
+            printf '%s' "${digest_markers[0]}"
+          }
+          validate_release_metadata() {
+            local release_json="$1" expected_prerelease=true
+            if [[ "${RELEASE_STABLE}" == true ]]; then
+              expected_prerelease=false
+            fi
+            jq -e \
+              --arg tag "${RELEASE_TAG}" \
+              --arg sha "${RELEASE_SHA}" \
+              --argjson prerelease "${expected_prerelease}" '
+                .tag_name == $tag and
+                .name == $tag and
+                .target_commitish == $sha and
+                .prerelease == $prerelease and
+                ((.draft == true and .published_at == null) or
+                 (.draft == false and (.published_at | type == "string" and length > 0)))
+              ' <<<"${release_json}" >/dev/null
+          }
+          validate_remote_assets() {
+            local release_json="$1" asset_id asset_name
+            local version_name="${RELEASE_TAG#v}"
+            local apk_name="rivune-android-${version_name}.apk"
+            local expected_assets actual_assets expected_channel expected_release_url expected_apk_url
+            expected_assets="$(printf '%s\n' SHA256SUMS rivune-android-update.json "${apk_name}" | sort)"
+            actual_assets="$(jq -r '.assets[].name' <<<"${release_json}" | sort)"
+            if [[ "${actual_assets}" != "${expected_assets}" ]]; then
+              echo "The GitHub Release asset set is incomplete or contains unexpected files." >&2
+              return 1
+            fi
+
+            rm -rf adopted-release-assets
+            mkdir adopted-release-assets
+            while IFS=$'\t' read -r asset_id asset_name; do
+              if [[ ! "${asset_id}" =~ ^[1-9][0-9]*$ ]]; then
+                echo "The GitHub Release contains an invalid asset ID." >&2
+                return 1
+              fi
+              gh api \
+                --header 'Accept: application/octet-stream' \
+                "repos/${REPOSITORY}/releases/assets/${asset_id}" > "adopted-release-assets/${asset_name}"
+            done < <(jq -r '.assets[] | [.id, .name] | @tsv' <<<"${release_json}")
+
+            local checksum_files expected_checksum_files
+            checksum_files="$(sed -nE 's/^[0-9a-f]{64}  (.+)$/\1/p' adopted-release-assets/SHA256SUMS | sort)"
+            expected_checksum_files="$(printf '%s\n' rivune-android-update.json "${apk_name}" | sort)"
+            if [[ "${checksum_files}" != "${expected_checksum_files}" ]]; then
+              echo "The adopted SHA256SUMS must contain exactly the APK and update manifest." >&2
+              return 1
+            fi
+            (
+              cd adopted-release-assets
+              sha256sum --check --strict SHA256SUMS
+            )
+
+            if [[ "${RELEASE_STABLE}" == true ]]; then
+              expected_channel=stable
+            else
+              expected_channel=prerelease
+            fi
+            expected_release_url="https://github.com/${REPOSITORY}/releases/tag/${RELEASE_TAG}"
+            expected_apk_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${apk_name}"
+            (
+              cd clients/android/update
+              go run . validate \
+                --apk "${GITHUB_WORKSPACE}/adopted-release-assets/${apk_name}" \
+                --channel "${expected_channel}" \
+                --tag-name "${RELEASE_TAG}" \
+                --release-url "${expected_release_url}" \
+                --apk-url "${expected_apk_url}" \
+                "${GITHUB_WORKSPACE}/adopted-release-assets/rivune-android-update.json"
+            )
+
+            local trusted_application_id trusted_build_version trusted_cert trusted_version_name
+            trusted_application_id="$(jq -er '.package.applicationId' release-assets/rivune-android-update.json)"
+            trusted_build_version="$(jq -er '.package.buildVersion' release-assets/rivune-android-update.json)"
+            trusted_cert="$(jq -er '.package.signingCertificateSha256' release-assets/rivune-android-update.json)"
+            trusted_version_name="$(jq -er '.version' release-assets/rivune-android-update.json)"
+            local apksigner="${ANDROID_HOME}/build-tools/36.0.0/apksigner"
+            local aapt="${ANDROID_HOME}/build-tools/36.0.0/aapt"
+            local actual_cert apksigner_output badging
+            apksigner_output="$("${apksigner}" verify --verbose --print-certs "adopted-release-assets/${apk_name}")"
+            actual_cert="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' <<<"${apksigner_output}" |
+              tr '[:upper:]' '[:lower:]')"
+            if [[ "${actual_cert}" != "${trusted_cert}" ]] ||
+               [[ "$(grep -c '^Signer #[0-9][0-9]* certificate SHA-256 digest:' <<<"${apksigner_output}")" != 1 ]]; then
+              echo "The adopted APK signing certificate differs from the trusted release artifact." >&2
+              return 1
+            fi
+            badging="$("${aapt}" dump badging "adopted-release-assets/${apk_name}" | sed -n '1p')"
+            [[ "${badging}" == *"package: name='${trusted_application_id}'"* ]] || {
+              echo "The adopted APK applicationId differs from the trusted release artifact." >&2
+              return 1
+            }
+            [[ "${badging}" == *" versionCode='${trusted_build_version}'"* ]] || {
+              echo "The adopted APK versionCode differs from the trusted release artifact." >&2
+              return 1
+            }
+            [[ "${badging}" == *" versionName='${trusted_version_name}'"* ]] || {
+              echo "The adopted APK versionName differs from the trusted release artifact." >&2
+              return 1
+            }
+            if ! jq -e --slurpfile trusted release-assets/rivune-android-update.json '
+              .version == $trusted[0].version and
+              .channel == $trusted[0].channel and
+              .tagName == $trusted[0].tagName and
+              .package.format == $trusted[0].package.format and
+              .package.architectures == $trusted[0].package.architectures and
+              .package.applicationId == $trusted[0].package.applicationId and
+              .package.buildVersion == $trusted[0].package.buildVersion and
+              .package.minimumOsVersion == $trusted[0].package.minimumOsVersion and
+              .package.fileName == $trusted[0].package.fileName and
+              .package.signingCertificateSha256 == $trusted[0].package.signingCertificateSha256
+            ' adopted-release-assets/rivune-android-update.json >/dev/null; then
+              echo "The adopted manifest identity, signing, or version differs from the trusted release artifact." >&2
+              return 1
+            fi
+          }
+
+          if [[ ! "${CURRENT_IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "The newly published OCI image digest is invalid: ${CURRENT_IMAGE_DIGEST}" >&2
             exit 1
           fi
-          release_args=(
-            --repo "${REPOSITORY}"
-            --target "${RELEASE_SHA}"
-            --title "${RELEASE_TAG}"
-            --notes-file .github/release-notes.md
-            --draft
-          )
-          if [[ "${RELEASE_STABLE}" != true ]]; then
-            release_args+=(--prerelease)
+          releases="$(matching_releases)"
+          release_count="$(jq 'length' <<<"${releases}")"
+          if [[ "${release_count}" == 0 ]]; then
+            printf '%s\n\n<!-- rivune-oci-image-digest: %s -->' "$(cat .github/release-notes.md)" "${CURRENT_IMAGE_DIGEST}" > prepared-release-notes.md
+            expected_prerelease=true
+            if [[ "${RELEASE_STABLE}" == true ]]; then
+              expected_prerelease=false
+            fi
+            release_request="$(jq -n \
+              --arg tag "${RELEASE_TAG}" \
+              --arg sha "${RELEASE_SHA}" \
+              --rawfile body prepared-release-notes.md \
+              --argjson prerelease "${expected_prerelease}" '
+                {
+                  tag_name: $tag,
+                  target_commitish: $sha,
+                  name: $tag,
+                  body: $body,
+                  draft: true,
+                  prerelease: $prerelease
+                }
+              ')"
+            trap cleanup_created_draft ERR
+            created_release_json="$(gh api --method POST "repos/${REPOSITORY}/releases" --input - <<<"${release_request}")"
+            created_release=true
+            release_id="$(jq -er '.id | select(type == "number" and . > 0)' <<<"${created_release_json}")"
+            releases="$(matching_releases)"
+            if ! jq -e --argjson id "${release_id}" 'length == 1 and .[0].id == $id' <<<"${releases}" >/dev/null; then
+              echo "Release creation did not converge to exactly the draft created by this attempt." >&2
+              exit 1
+            fi
+            gh release upload "${RELEASE_TAG}" \
+              --repo "${REPOSITORY}" \
+              release-assets/SHA256SUMS \
+              release-assets/rivune-android-update.json \
+              "release-assets/rivune-android-${RELEASE_TAG#v}.apk"
+            releases="$(matching_releases)"
+          elif [[ "${release_count}" != 1 ]]; then
+            echo "Expected zero or one GitHub Release for ${RELEASE_TAG}, found ${release_count}." >&2
+            exit 1
           fi
-          trap cleanup_draft ERR
-          gh release create "${RELEASE_TAG}" "${release_args[@]}" \
-            release-assets/SHA256SUMS \
-            release-assets/rivune-android-update.json \
-            "release-assets/rivune-android-${RELEASE_TAG#v}.apk"
 
-          release_id="$(matching_releases | jq -er 'map(select(.draft == true)) | select(length == 1) | .[0].id')"
+          release_id="$(jq -er '.[0].id | select(type == "number" and . > 0)' <<<"${releases}")"
+          release="$(gh api "repos/${REPOSITORY}/releases/${release_id}")"
+          if ! validate_release_metadata "${release}"; then
+            echo "The existing GitHub Release metadata does not match the authorized release." >&2
+            exit 1
+          fi
+          effective_image_digest="$(validate_body_and_digest "${release}")"
+          validate_remote_assets "${release}"
+          if [[ "${created_release}" == true ]] && [[ "${effective_image_digest}" != "${CURRENT_IMAGE_DIGEST}" ]]; then
+            echo "The newly created release did not record the published OCI image digest." >&2
+            exit 1
+          fi
+
+          {
+            echo "release_id=${release_id}"
+            echo "image_digest=${effective_image_digest}"
+          } >> "${GITHUB_OUTPUT}"
+          trap - ERR
+
+  promote:
+    name: Publish release and promote container tags
+    if: needs.authorize.outputs.authorized == 'true'
+    needs:
+      - authorize
+      - publish
+      - release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate immutable release image tag
+        id: version
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.authorize.outputs.tag }}
+      - name: Generate mutable stable image aliases
+        if: needs.authorize.outputs.stable == 'true'
+        id: aliases
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.authorize.outputs.tag }}
+            type=semver,pattern={{major}},value=${{ needs.authorize.outputs.tag }}
+            type=raw,value=latest
+      - name: Verify the prepared release before image promotion
+        env:
+          APPROVED_SHA: ${{ needs.authorize.outputs.sha }}
+          IMAGE_DIGEST: ${{ needs.release.outputs.image_digest }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_STABLE: ${{ needs.authorize.outputs.stable }}
+          RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          api() {
+            curl --fail-with-body --silent --show-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${REPOSITORY}/$1"
+          }
+          tag_ref="$(api "git/ref/tags/${RELEASE_TAG}")" || {
+            echo "Release authorization expired because the annotated tag ref is absent or invalid." >&2
+            exit 1
+          }
+          tag_object_sha="$(jq -er 'select(.object.type == "tag") | .object.sha | select(test("^[0-9a-f]{40}$"))' <<<"${tag_ref}")" || {
+            echo "Release authorization expired because the annotated tag ref is absent or invalid." >&2
+            exit 1
+          }
+          tag_sha="$(api "git/tags/${tag_object_sha}" | jq -er 'select(.object.type == "commit") | .object.sha | select(test("^[0-9a-f]{40}$"))')" || {
+            echo "Release authorization expired because the annotated tag ref is absent or invalid." >&2
+            exit 1
+          }
+          if [[ "${APPROVED_SHA}" != "${tag_sha}" ]]; then
+            echo "Release authorization expired because the tag moved." >&2
+            exit 1
+          fi
+
+          expected_prerelease=true
+          if [[ "${RELEASE_STABLE}" == true ]]; then
+            expected_prerelease=false
+          fi
+          release="$(api "releases/${{ needs.release.outputs.release_id }}")"
+          if ! jq -e \
+            --arg tag "${RELEASE_TAG}" \
+            --arg sha "${APPROVED_SHA}" \
+            --argjson prerelease "${expected_prerelease}" '
+              .tag_name == $tag and
+              .name == $tag and
+              .target_commitish == $sha and
+              .prerelease == $prerelease and
+              ((.draft == true and .published_at == null) or
+               (.draft == false and (.published_at | type == "string" and length > 0)))
+            ' <<<"${release}" >/dev/null; then
+            echo "The GitHub Release is neither the expected validated draft nor its published form." >&2
+            exit 1
+          fi
+          if [[ ! "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "The effective OCI image digest is invalid: ${IMAGE_DIGEST}" >&2
+            exit 1
+          fi
+          release_body="$(jq -er '.body | strings' <<<"${release}")"
+          mapfile -t recorded_digests < <(sed -nE 's/^<!-- rivune-oci-image-digest: (sha256:[0-9a-f]{64}) -->$/\1/p' <<<"${release_body}")
+          marker_mentions="$( (grep -oF '<!-- rivune-oci-image-digest:' <<<"${release_body}" || true) | wc -l)"
+          if (( ${#recorded_digests[@]} != 1 )) ||
+             [[ "${marker_mentions}" != 1 ]] ||
+             [[ "${recorded_digests[0]}" != "${IMAGE_DIGEST}" ]]; then
+            echo "The prepared GitHub Release does not record the effective OCI image digest exactly once." >&2
+            exit 1
+          fi
           expected_assets="$(printf '%s\n' SHA256SUMS rivune-android-update.json "rivune-android-${RELEASE_TAG#v}.apk" | sort)"
-          actual_assets="$(gh api --paginate "repos/${REPOSITORY}/releases/${release_id}/assets" --jq '.[].name' | sort)"
+          actual_assets="$(jq -r '.assets[].name' <<<"${release}" | sort)"
           if [[ "${actual_assets}" != "${expected_assets}" ]]; then
-            echo "Draft release asset set is incomplete or contains unexpected files." >&2
+            echo "The prepared GitHub Release asset set is incomplete or contains unexpected files." >&2
             exit 1
           fi
-
-          prerelease=false
+      - name: Promote exact image, publish release, and promote mutable aliases
+        env:
+          PUBLISHED_EXACT_IMAGE_TAGS: ${{ steps.version.outputs.tags }}
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ghcr.io/${{ github.repository }}
+          IMAGE_DIGEST: ${{ needs.release.outputs.image_digest }}
+          PUBLISHED_MUTABLE_IMAGE_TAGS: ${{ steps.aliases.outputs.tags }}
+          RELEASE_ID: ${{ needs.release.outputs.release_id }}
+          RELEASE_SHA: ${{ needs.authorize.outputs.sha }}
+          RELEASE_STABLE: ${{ needs.authorize.outputs.stable }}
+          RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_ID}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "The validated release ID is invalid: ${RELEASE_ID}" >&2
+            exit 1
+          fi
+          if [[ ! "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "The immutable multi-architecture image digest is invalid: ${IMAGE_DIGEST}" >&2
+            exit 1
+          fi
+          prepared_release="$(gh api "repos/${REPOSITORY}/releases/${RELEASE_ID}")"
+          prepared_body="$(jq -er '.body | strings' <<<"${prepared_release}")"
+          mapfile -t prepared_digests < <(sed -nE 's/^<!-- rivune-oci-image-digest: (sha256:[0-9a-f]{64}) -->$/\1/p' <<<"${prepared_body}")
+          marker_mentions="$( (grep -oF '<!-- rivune-oci-image-digest:' <<<"${prepared_body}" || true) | wc -l)"
+          if (( ${#prepared_digests[@]} != 1 )) ||
+             [[ "${marker_mentions}" != 1 ]] ||
+             [[ "${prepared_digests[0]}" != "${IMAGE_DIGEST}" ]]; then
+            echo "The GitHub Release no longer records the effective OCI image digest exactly once." >&2
+            exit 1
+          fi
+          mapfile -t exact_image_tags < <(sed '/^$/d' <<<"${PUBLISHED_EXACT_IMAGE_TAGS}")
+          mapfile -t mutable_image_tags < <(sed '/^$/d' <<<"${PUBLISHED_MUTABLE_IMAGE_TAGS:-}")
+          if (( ${#exact_image_tags[@]} != 1 )); then
+            echo "Expected exactly one immutable release-version image tag." >&2
+            exit 1
+          fi
+          expected_mutable_tag_count=0
+          prerelease=true
           make_latest=false
           if [[ "${RELEASE_STABLE}" == true ]]; then
+            expected_mutable_tag_count=3
+            prerelease=false
             make_latest=true
-          else
-            prerelease=true
           fi
-          gh api --method PATCH "repos/${REPOSITORY}/releases/${release_id}" \
-            -F draft=false \
-            -F prerelease="${prerelease}" \
-            -f make_latest="${make_latest}" >/dev/null
-          trap - ERR
+          if (( ${#mutable_image_tags[@]} != expected_mutable_tag_count )); then
+            echo "Expected mutable major, major.minor, and latest aliases only for a stable release." >&2
+            exit 1
+          fi
+
+          existing_exact_digest="$(docker buildx imagetools inspect "${exact_image_tags[0]}" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+          if [[ -n "${existing_exact_digest}" ]] && [[ "${existing_exact_digest}" != "${IMAGE_DIGEST}" ]]; then
+            echo "Immutable image tag ${exact_image_tags[0]} already resolves to a different digest." >&2
+            exit 1
+          fi
+          if [[ -z "${existing_exact_digest}" ]]; then
+            docker buildx imagetools create \
+              --tag "${exact_image_tags[0]}" \
+              "${IMAGE}@${IMAGE_DIGEST}"
+          fi
+          exact_digest="$(docker buildx imagetools inspect "${exact_image_tags[0]}" --format '{{.Manifest.Digest}}')"
+          if [[ "${exact_digest}" != "${IMAGE_DIGEST}" ]]; then
+            echo "Immutable image tag ${exact_image_tags[0]} does not resolve to ${IMAGE_DIGEST}." >&2
+            exit 1
+          fi
+
+
+          if jq -e '.draft == true' <<<"${prepared_release}" >/dev/null; then
+            published_release="$(gh api --method PATCH "repos/${REPOSITORY}/releases/${RELEASE_ID}" \
+              -F draft=false \
+              -F prerelease="${prerelease}" \
+              -f make_latest="${make_latest}")"
+          else
+            published_release="${prepared_release}"
+          fi
+          if ! jq -e \
+            --arg tag "${RELEASE_TAG}" \
+            --arg sha "${RELEASE_SHA}" \
+            --argjson prerelease "${prerelease}" '
+              .tag_name == $tag and
+              .name == $tag and
+              .target_commitish == $sha and
+              .draft == false and
+              .prerelease == $prerelease and
+              (.published_at | type == "string" and length > 0)
+            ' <<<"${published_release}" >/dev/null; then
+            echo "Published release metadata does not match the authorized release." >&2
+            exit 1
+          fi
+
+          if (( ${#mutable_image_tags[@]} > 0 )); then
+            latest_stable_tag="$(gh api "repos/${REPOSITORY}/releases/latest" --jq '.tag_name')"
+            if [[ "${latest_stable_tag}" == "${RELEASE_TAG}" ]]; then
+              create_args=()
+              for image_tag in "${mutable_image_tags[@]}"; do
+                create_args+=(--tag "${image_tag}")
+              done
+              docker buildx imagetools create "${create_args[@]}" "${IMAGE}@${IMAGE_DIGEST}"
+              for image_tag in "${mutable_image_tags[@]}"; do
+                actual_digest="$(docker buildx imagetools inspect "${image_tag}" --format '{{.Manifest.Digest}}')"
+                if [[ "${actual_digest}" != "${IMAGE_DIGEST}" ]]; then
+                  echo "Mutable image alias ${image_tag} does not resolve to ${IMAGE_DIGEST}." >&2
+                  exit 1
+                fi
+              done
+            else
+              echo "Skipping mutable aliases because ${RELEASE_TAG} is no longer the latest stable release."
+            fi
+          fi
+
+          final_release="$(gh api "repos/${REPOSITORY}/releases/${RELEASE_ID}")"
+          if ! jq -e \
+            --arg tag "${RELEASE_TAG}" \
+            --arg sha "${RELEASE_SHA}" \
+            --argjson prerelease "${prerelease}" '
+              .tag_name == $tag and
+              .name == $tag and
+              .target_commitish == $sha and
+              .draft == false and
+              .prerelease == $prerelease and
+              (.published_at | type == "string" and length > 0)
+            ' <<<"${final_release}" >/dev/null; then
+            echo "Final published release metadata does not match the authorized release." >&2
+            exit 1
+          fi
+          expected_assets="$(printf '%s\n' SHA256SUMS rivune-android-update.json "rivune-android-${RELEASE_TAG#v}.apk" | sort)"
+          actual_assets="$(jq -r '.assets[].name' <<<"${final_release}" | sort)"
+          if [[ "${actual_assets}" != "${expected_assets}" ]]; then
+            echo "Final published release asset set is incomplete or contains unexpected files." >&2
+            exit 1
+          fi

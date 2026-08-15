@@ -317,6 +317,26 @@ private struct DiscoveryEnvelope: Decodable {
     let demoAvailable: Bool?
     let timezone: String
     let interfaceLanguage: String?
+    let capabilities: [String]
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        name = try values.decode(String.self, forKey: .name)
+        serverVersion = try values.decode(String.self, forKey: .serverVersion)
+        protocolVersion = try values.decode(Int.self, forKey: .protocolVersion)
+        apiBaseUrl = try values.decode(String.self, forKey: .apiBaseUrl)
+        setupRequired = try values.decode(Bool.self, forKey: .setupRequired)
+        setupCompleted = try values.decodeIfPresent(Bool.self, forKey: .setupCompleted)
+        demoAvailable = try values.decodeIfPresent(Bool.self, forKey: .demoAvailable)
+        timezone = try values.decode(String.self, forKey: .timezone)
+        interfaceLanguage = try values.decodeIfPresent(String.self, forKey: .interfaceLanguage)
+        capabilities = Discovery.decodeCapabilities(from: values, forKey: .capabilities)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, serverVersion, protocolVersion, apiBaseUrl, setupRequired, setupCompleted
+        case demoAvailable, timezone, interfaceLanguage, capabilities
+    }
 }
 
 public enum RivuneAPIError: Error, LocalizedError, Sendable {
@@ -383,6 +403,24 @@ private struct HTTPResult {
     let data: Data
     let response: HTTPURLResponse
 }
+private final class ProfileMutationCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+
+    func check() throws {
+        lock.lock()
+        let isCancelled = cancelled
+        lock.unlock()
+        if isCancelled { throw CancellationError() }
+    }
+}
+
 
 public actor RivuneAPIClient {
     private let serverURL: URL
@@ -431,7 +469,18 @@ public actor RivuneAPIClient {
         guard let interfaceLanguage = response.interfaceLanguage else {
             throw RivuneAPIError.invalidResponse
         }
-        let discovery = Discovery(name: response.name, serverVersion: response.serverVersion, protocolVersion: response.protocolVersion, apiBaseUrl: response.apiBaseUrl, setupRequired: response.setupRequired, setupCompleted: response.setupCompleted, demoAvailable: response.demoAvailable, timezone: response.timezone, interfaceLanguage: interfaceLanguage)
+        let discovery = Discovery(
+            name: response.name,
+            serverVersion: response.serverVersion,
+            protocolVersion: response.protocolVersion,
+            apiBaseUrl: response.apiBaseUrl,
+            setupRequired: response.setupRequired,
+            setupCompleted: response.setupCompleted,
+            demoAvailable: response.demoAvailable,
+            timezone: response.timezone,
+            interfaceLanguage: interfaceLanguage,
+            capabilities: response.capabilities
+        )
         guard let resolved = URL(string: discovery.apiBaseUrl, relativeTo: serverURL)?.absoluteURL,
               try Self.canonicalServerOrigin(resolved) == serverURL else {
             throw RivuneAPIError.invalidServerURL(discovery.apiBaseUrl)
@@ -626,46 +675,156 @@ public actor RivuneAPIClient {
     }
 
     public func selectProfile(id: UUID, pin: String? = nil) async throws -> ProfileSelection {
+        try Task.checkCancellation()
         guard !profileSelectionMutationInFlight else { throw CancellationError() }
         profileSelectionMutationInFlight = true
         defer { profileSelectionMutationInFlight = false }
         let generation = authenticationGeneration
         profileSelectionGeneration += 1
         let selectionGeneration = profileSelectionGeneration
-        let selection: ProfileSelection = try await request("profiles/\(id.uuidString.lowercased())/select", method: "POST", body: SelectProfileRequest(pin: pin), authenticated: true, allowProfileSelectionMutation: true)
-        guard generation == authenticationGeneration, selectionGeneration == profileSelectionGeneration else { throw CancellationError() }
-        pendingProfileContextPersistence = PendingProfileContextPersistence(
-            authenticationGeneration: generation,
-            selectionGeneration: selectionGeneration,
-            value: selection.profileContext
-        )
-        defer {
-            if pendingProfileContextPersistence?.selectionGeneration == selectionGeneration {
-                pendingProfileContextPersistence = nil
-            }
+        if apiBaseURL == nil { _ = try await discover() }
+        try await loadCredentialsIfNeeded()
+        guard generation == authenticationGeneration,
+              selectionGeneration == profileSelectionGeneration else {
+            throw CancellationError()
         }
-        guard let tokens = credentials else { throw RivuneAPIError.notAuthenticated }
-        let stored = StoredCredentials(tokens: tokens, profileContext: selection.profileContext)
-        let saved = try await credentialStore.save(stored, for: serverURL, generation: generation)
-        guard saved, generation == authenticationGeneration, selectionGeneration == profileSelectionGeneration else { throw CancellationError() }
-        profileContext = selection.profileContext
-        profileSelectionGeneration += 1
-        return selection
+        guard let authorizationToken = credentials?.accessToken else {
+            throw RivuneAPIError.notAuthenticated
+        }
+        let url = try resolvedAPIURL(
+            path: "profiles/\(id.uuidString.lowercased())/select",
+            query: []
+        )
+        let body = try encoder.encode(SelectProfileRequest(pin: pin))
+        try Task.checkCancellation()
+        let callerCancellation = ProfileMutationCancellation()
+        return try await withTaskCancellationHandler {
+            let operation = Task.detached { [self] in
+                try await self.performAndCommitProfileSelection(
+                    url: url,
+                    body: body,
+                    authorizationToken: authorizationToken,
+                    authenticationGeneration: generation,
+                    selectionGeneration: selectionGeneration,
+                    callerCancellation: callerCancellation
+                )
+            }
+            let result = try await operation.value
+            try Task.checkCancellation()
+            return result
+        } onCancel: {
+            callerCancellation.cancel()
+        }
     }
 
     public func clearProfileSelection() async throws {
+        try Task.checkCancellation()
         guard !profileSelectionMutationInFlight else { throw CancellationError() }
         profileSelectionMutationInFlight = true
         defer { profileSelectionMutationInFlight = false }
         let generation = authenticationGeneration
         profileSelectionGeneration += 1
         let selectionGeneration = profileSelectionGeneration
-        _ = try await requestData("profiles/selection", method: "DELETE", body: Optional<Data>.none, authenticated: true, allowProfileSelectionMutation: true)
-        guard generation == authenticationGeneration, selectionGeneration == profileSelectionGeneration else { throw CancellationError() }
+        if apiBaseURL == nil { _ = try await discover() }
+        try await loadCredentialsIfNeeded()
+        guard generation == authenticationGeneration,
+              selectionGeneration == profileSelectionGeneration else {
+            throw CancellationError()
+        }
+        guard let authorizationToken = credentials?.accessToken else {
+            throw RivuneAPIError.notAuthenticated
+        }
+        let url = try resolvedAPIURL(path: "profiles/selection", query: [])
+        try Task.checkCancellation()
+        let callerCancellation = ProfileMutationCancellation()
+        try await withTaskCancellationHandler {
+            let operation = Task.detached { [self] in
+                try await self.performAndCommitProfileClear(
+                    url: url,
+                    authorizationToken: authorizationToken,
+                    authenticationGeneration: generation,
+                    selectionGeneration: selectionGeneration,
+                    callerCancellation: callerCancellation
+                )
+            }
+            try await operation.value
+            try Task.checkCancellation()
+        } onCancel: {
+            callerCancellation.cancel()
+        }
+    }
+
+    private func performAndCommitProfileSelection(
+        url: URL,
+        body: Data,
+        authorizationToken: String,
+        authenticationGeneration generation: UInt64,
+        selectionGeneration: UInt64,
+        callerCancellation: ProfileMutationCancellation
+    ) async throws -> ProfileSelection {
+        let result = try await perform(
+            url: url,
+            method: "POST",
+            body: body,
+            authorizationToken: authorizationToken,
+            retryAfterRefresh: true,
+            expectedAuthenticationGeneration: generation,
+            expectedProfileSelectionGeneration: selectionGeneration,
+            credentialBearing: true,
+            profileMutationCancellation: callerCancellation
+        )
+        let selection: ProfileSelection
+        do {
+            selection = try decoder.decode(ProfileSelection.self, from: result.data)
+        } catch {
+            throw RivuneAPIError.invalidResponse
+        }
+        try await persistProfileContext(
+            selection.profileContext,
+            authenticationGeneration: generation,
+            selectionGeneration: selectionGeneration
+        )
+        return selection
+    }
+
+    private func performAndCommitProfileClear(
+        url: URL,
+        authorizationToken: String,
+        authenticationGeneration generation: UInt64,
+        selectionGeneration: UInt64,
+        callerCancellation: ProfileMutationCancellation
+    ) async throws {
+        _ = try await perform(
+            url: url,
+            method: "DELETE",
+            body: nil,
+            authorizationToken: authorizationToken,
+            retryAfterRefresh: true,
+            expectedAuthenticationGeneration: generation,
+            expectedProfileSelectionGeneration: selectionGeneration,
+            credentialBearing: true,
+            profileMutationCancellation: callerCancellation
+        )
+        try await persistProfileContext(
+            nil,
+            authenticationGeneration: generation,
+            selectionGeneration: selectionGeneration
+        )
+    }
+
+    private func persistProfileContext(
+        _ value: String?,
+        authenticationGeneration generation: UInt64,
+        selectionGeneration: UInt64
+    ) async throws {
+        guard generation == authenticationGeneration,
+              selectionGeneration == profileSelectionGeneration else {
+            throw CancellationError()
+        }
         pendingProfileContextPersistence = PendingProfileContextPersistence(
             authenticationGeneration: generation,
             selectionGeneration: selectionGeneration,
-            value: nil
+            value: value
         )
         defer {
             if pendingProfileContextPersistence?.selectionGeneration == selectionGeneration {
@@ -673,10 +832,14 @@ public actor RivuneAPIClient {
             }
         }
         guard let tokens = credentials else { throw RivuneAPIError.notAuthenticated }
-        let stored = StoredCredentials(tokens: tokens, profileContext: nil)
+        let stored = StoredCredentials(tokens: tokens, profileContext: value)
         let saved = try await credentialStore.save(stored, for: serverURL, generation: generation)
-        guard saved, generation == authenticationGeneration, selectionGeneration == profileSelectionGeneration else { throw CancellationError() }
-        profileContext = nil
+        guard saved,
+              generation == authenticationGeneration,
+              selectionGeneration == profileSelectionGeneration else {
+            throw CancellationError()
+        }
+        profileContext = value
         profileSelectionGeneration += 1
     }
 
@@ -1113,7 +1276,8 @@ public actor RivuneAPIClient {
         retryAfterRefresh: Bool,
         expectedAuthenticationGeneration: UInt64?,
         expectedProfileSelectionGeneration: UInt64?,
-        credentialBearing: Bool
+        credentialBearing: Bool,
+        profileMutationCancellation: ProfileMutationCancellation? = nil
     ) async throws -> HTTPResult {
         guard try Self.canonicalServerOrigin(url) == serverURL else {
             throw RivuneAPIError.invalidServerURL(url.absoluteString)
@@ -1138,9 +1302,11 @@ public actor RivuneAPIClient {
         do {
             if expectedAuthenticationGeneration != nil {
                 result = try await runAuthenticationOperation {
-                    try await self.transport.data(for: transportRequest)
+                    try profileMutationCancellation?.check()
+                    return try await self.transport.data(for: transportRequest)
                 }
             } else {
+                try profileMutationCancellation?.check()
                 result = try await transport.data(for: request)
             }
         } catch {
@@ -1164,7 +1330,8 @@ public actor RivuneAPIClient {
                 retryAfterRefresh: false,
                 expectedAuthenticationGeneration: expectedAuthenticationGeneration,
                 expectedProfileSelectionGeneration: expectedProfileSelectionGeneration,
-                credentialBearing: true
+                credentialBearing: true,
+                profileMutationCancellation: profileMutationCancellation
             )
         }
         guard (200..<300).contains(response.statusCode) else {

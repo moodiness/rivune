@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/moodiness/rivune/server/internal/database"
 )
 
@@ -152,6 +155,51 @@ func TestLoginJellyfinProfileCreatesBoundCategorySessionWithoutNativePasswordOrP
 		t.Fatalf("re-enable Jellyfin profile: %v", err)
 	}
 
+	barrierPID, releaseBarrier := holdJellyfinOwnerIssuanceBarrier(t, pool, userID)
+	type loginOutcome struct {
+		result JellyfinProfileLoginResult
+		err    error
+	}
+	concurrentLogins := make(chan loginOutcome, 2)
+	for _, linkedDeviceKey := range []string{"jellyfin-concurrent-a-" + suffix, "jellyfin-concurrent-b-" + suffix} {
+		concurrentInput := loginInput
+		concurrentInput.LinkedDeviceKey = linkedDeviceKey
+		go func() {
+			result, loginErr := service.LoginJellyfinProfile(ctx, concurrentInput)
+			concurrentLogins <- loginOutcome{result: result, err: loginErr}
+		}()
+	}
+	waitForJellyfinOwnerIssuanceWaiters(t, pool, barrierPID, 2)
+	releaseBarrier()
+	concurrentDeviceIDs := make(map[string]struct{}, 2)
+	for range 2 {
+		outcome := <-concurrentLogins
+		assertNoJellyfinIssuanceDeadlock(t, outcome.err)
+		concurrentDeviceIDs[outcome.result.Tokens.DeviceID] = struct{}{}
+	}
+	if len(concurrentDeviceIDs) != 2 {
+		t.Fatalf("concurrent first-time Jellyfin logins created %d devices, want 2", len(concurrentDeviceIDs))
+	}
+	var concurrentMappings, concurrentDevices int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*), count(DISTINCT device_id)
+		FROM jellyfin_compat_devices
+		WHERE user_id = $1::uuid AND profile_id = $2::uuid
+		  AND client_device_id = ANY($3::text[])
+	`, userID, profileID, []string{"jellyfin-concurrent-a-" + suffix, "jellyfin-concurrent-b-" + suffix}).Scan(&concurrentMappings, &concurrentDevices); err != nil {
+		t.Fatalf("count concurrent Jellyfin device mappings: %v", err)
+	}
+	if concurrentMappings != 2 || concurrentDevices != 2 {
+		t.Fatalf("concurrent Jellyfin mappings=%d devices=%d, want 2 and 2", concurrentMappings, concurrentDevices)
+	}
+	var ownerDeviceCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM devices WHERE user_id = $1::uuid`, userID).Scan(&ownerDeviceCount); err != nil {
+		t.Fatalf("count concurrent Jellyfin owner devices: %v", err)
+	}
+	if ownerDeviceCount != 2 || ownerDeviceCount > maximumDevicesPerUser {
+		t.Fatalf("concurrent Jellyfin owner device count=%d, want 2 within quota %d", ownerDeviceCount, maximumDevicesPerUser)
+	}
+
 	result, err := service.LoginJellyfinProfile(ctx, loginInput)
 	if err != nil {
 		t.Fatalf("login with profile application password: %v", err)
@@ -233,9 +281,15 @@ func TestLoginJellyfinProfileCreatesBoundCategorySessionWithoutNativePasswordOrP
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO devices (user_id, name, platform, category_id, approved_at)
 		SELECT $1::uuid, 'Jellyfin quota ' || value::text || $3, 'test', $2::uuid, now()
-		FROM generate_series(1, 49) value
+		FROM generate_series(1, 47) value
 	`, userID, categoryID, suffix); err != nil {
 		t.Fatalf("fill Jellyfin credential owner device quota: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM devices WHERE user_id = $1::uuid`, userID).Scan(&ownerDeviceCount); err != nil {
+		t.Fatalf("count quota-filled Jellyfin owner devices: %v", err)
+	}
+	if ownerDeviceCount != maximumDevicesPerUser {
+		t.Fatalf("quota-filled Jellyfin owner device count=%d, want %d", ownerDeviceCount, maximumDevicesPerUser)
 	}
 	quotaInput := loginInput
 	quotaInput.LinkedDeviceKey = "jellyfin-quota-" + suffix
@@ -253,5 +307,82 @@ func TestLoginJellyfinProfileCreatesBoundCategorySessionWithoutNativePasswordOrP
 	}
 	if quotaMappingExists {
 		t.Fatal("quota-rejected Jellyfin login persisted a device mapping")
+	}
+}
+
+func holdJellyfinOwnerIssuanceBarrier(t *testing.T, pool *pgxpool.Pool, userID string) (int, func()) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin Jellyfin owner issuance barrier: %v", err)
+	}
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			_ = tx.Rollback(context.Background())
+		}
+	})
+	var blockerPID int
+	var lockedUserID string
+	if err := tx.QueryRow(ctx, `
+		SELECT pg_backend_pid(), id::text
+		FROM users
+		WHERE id = $1::uuid
+		FOR UPDATE
+	`, userID).Scan(&blockerPID, &lockedUserID); err != nil {
+		t.Fatalf("lock Jellyfin issuance owner barrier: %v", err)
+	}
+	return blockerPID, func() {
+		t.Helper()
+		if released {
+			return
+		}
+		if err := tx.Commit(context.Background()); err != nil {
+			t.Fatalf("release Jellyfin owner issuance barrier: %v", err)
+		}
+		released = true
+	}
+}
+
+func waitForJellyfinOwnerIssuanceWaiters(t *testing.T, pool *pgxpool.Pool, blockerPID, want int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var waiting int
+		if err := pool.QueryRow(context.Background(), `
+			WITH RECURSIVE blocked(pid) AS (
+				SELECT pid
+				FROM pg_stat_activity
+				WHERE datname = current_database()
+				  AND $1 = ANY(pg_blocking_pids(pid))
+				UNION
+				SELECT activity.pid
+				FROM pg_stat_activity activity
+				JOIN blocked predecessor ON predecessor.pid = ANY(pg_blocking_pids(activity.pid))
+				WHERE activity.datname = current_database()
+			)
+			SELECT count(*) FROM blocked
+		`, blockerPID).Scan(&waiting); err != nil {
+			t.Fatalf("observe Jellyfin owner issuance barrier: %v", err)
+		}
+		if waiting >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Jellyfin owner issuance barrier has %d waiters, want %d", waiting, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func assertNoJellyfinIssuanceDeadlock(t *testing.T, err error) {
+	t.Helper()
+	var postgresError *pgconn.PgError
+	if errors.As(err, &postgresError) && postgresError.Code == "40P01" {
+		t.Fatalf("concurrent Jellyfin issuance failed with SQLSTATE 40P01: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("concurrent Jellyfin issuance failed: %v", err)
 	}
 }

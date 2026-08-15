@@ -369,6 +369,29 @@ func (s *Service) CompleteDeviceAuthorization(ctx context.Context, principal aut
 	`, profileID, provider, accessEncrypted, refreshEncrypted, s.cipher.cipherVersion(), s.cipher.keyVersion(), token.ExpiresAt); err != nil {
 		return Status{}, fmt.Errorf("store tracking connection: %w", err)
 	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO profile_tracking_preferences (profile_id, provider, sync_watched, sync_progress, sync_library)
+		VALUES ($1::uuid, $2, true, true, true)
+		ON CONFLICT (profile_id, provider) DO UPDATE
+		SET sync_watched = profile_tracking_preferences.sync_watched,
+		    sync_progress = profile_tracking_preferences.sync_progress,
+		    sync_library = profile_tracking_preferences.sync_library,
+		    updated_at = now()
+	`, profileID, provider); err != nil {
+		return Status{}, fmt.Errorf("store portable tracking preferences: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE profile_tracking_accounts account
+		SET sync_watched = preferences.sync_watched,
+		    sync_progress = preferences.sync_progress,
+		    sync_library = preferences.sync_library
+		FROM profile_tracking_preferences preferences
+		WHERE account.profile_id = preferences.profile_id
+		  AND account.provider = preferences.provider
+		  AND account.profile_id = $1::uuid AND account.provider = $2
+	`, profileID, provider); err != nil {
+		return Status{}, fmt.Errorf("apply portable tracking preferences: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM profile_tracking_authorizations WHERE profile_id = $1::uuid AND provider = $2`, profileID, provider); err != nil {
 		return Status{}, fmt.Errorf("clear tracking authorization: %w", err)
 	}
@@ -498,6 +521,19 @@ func (s *Service) UpdatePreferences(ctx context.Context, principal auth.Principa
 	`, profileID, provider, input.SyncWatched, input.SyncProgress, input.SyncLibrary)
 	if err != nil {
 		return Status{}, fmt.Errorf("update tracking preferences: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO profile_tracking_preferences (profile_id, provider, sync_watched, sync_progress, sync_library)
+		SELECT profile_id, provider, sync_watched, sync_progress, sync_library
+		FROM profile_tracking_accounts
+		WHERE profile_id = $1::uuid AND provider = $2
+		ON CONFLICT (profile_id, provider) DO UPDATE
+		SET sync_watched = EXCLUDED.sync_watched,
+		    sync_progress = EXCLUDED.sync_progress,
+		    sync_library = EXCLUDED.sync_library,
+		    updated_at = now()
+	`, profileID, provider); err != nil {
+		return Status{}, fmt.Errorf("persist portable tracking preferences: %w", err)
 	}
 	if result.RowsAffected() == 0 {
 		return Status{}, ErrNotConnected

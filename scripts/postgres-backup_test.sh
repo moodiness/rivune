@@ -23,6 +23,7 @@ cat > "${TEST_DIR}/bin/docker" <<'FAKE_DOCKER'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${DOCKER_LOG}"
+invocation="$*"
 if [[ " $* " == *" pg_dump "* ]]; then
   target="$(readlink "/proc/$$/fd/1")"
   printf '%s\n%s\n%s\n' "${target}" "$(stat -c '%a' -- "${target}")" \
@@ -42,13 +43,42 @@ if [[ "$1" == "compose" && "$2" == "ps" ]]; then
   [[ "${FAKE_SERVER_RUNNING:-0}" != "1" ]] || printf 'rivune\n'
   exit 0
 fi
-if [[ "$1" == "compose" && ( "$2" == "stop" || "$2" == "up" ) ]]; then
+if [[ "$1" == "compose" && "$2" == "stop" ]]; then
+  exit 0
+fi
+if [[ "$1" == "compose" && "$2" == "up" ]]; then
+  if [[ "${FAKE_START_FAIL:-0}" == 1 ]]; then
+    exit 1
+  fi
+  if [[ "${FAKE_START_FAIL_ONCE:-0}" == 1 ]] &&
+     [[ "$(grep -c '^compose up ' "${DOCKER_LOG}")" == 1 ]]; then
+    exit 1
+  fi
   exit 0
 fi
 if [[ " $* " == *" pg_isready "* ]]; then
   exit 0
 fi
 if [[ " $* " == *" psql "* ]]; then
+  sql="$(cat)"
+  if [[ -n "${sql}" ]]; then
+    printf 'SQL %s\n' "$(printf '%s' "${sql}" | tr '\n' ' ')" >> "${DOCKER_LOG}"
+  fi
+  # rivune_owner owns the databases but is intentionally NOCREATEDB. Renames
+  # must run as rivune_restore, whose CREATEDB plus inherited ownership permits
+  # them; the mock rejects the production-invalid privilege combination.
+  if [[ "${sql}" == *'SET ROLE rivune_owner;'* &&
+        "${sql}" == *'ALTER DATABASE '* ]]; then
+    exit 1
+  fi
+  if [[ "${FAKE_SWAP_FAIL:-0}" == 1 &&
+        "${sql}" == *'ALTER DATABASE :"live_database" RENAME TO :"prior_database";'* ]]; then
+    exit 1
+  fi
+  if [[ "${FAKE_ROLLBACK_FAIL:-0}" == 1 &&
+        "${sql}" == *"format('ALTER DATABASE %I RENAME TO %I', :'live_database', :'staging_database')"* ]]; then
+    exit 1
+  fi
   printf 'verified\n'
   exit 0
 fi
@@ -351,7 +381,9 @@ if [[ -s "${DOCKER_LOG}" || -s "${DD_LOG}" || -s "${DD_METADATA_LOG}" ]]; then
 fi
 
 # The exact current generation succeeds. Restore secrets are inherited by name,
-# never expanded into Docker argv or the fake Docker audit log.
+# never expanded into Docker argv or the fake Docker audit log. The archive is
+# restored and ledger-checked in staging before Rivune stops; only then are the
+# database names swapped, readiness checked, and the retained prior copy dropped.
 : > "${DOCKER_LOG}"
 PATH="${TEST_DIR}/bin:${PATH}" \
   RIVUNE_BACKUP_VERIFY_KEY_FILE="${PUBLIC_KEY}" \
@@ -361,11 +393,26 @@ if grep -q -- 'secret-must-not-appear' "${DOCKER_LOG}"; then
   echo "restore secret appeared in Docker argv" >&2
   exit 1
 fi
-if ! grep -q -- 'pg_restore .*--username rivune_restore .*--role rivune_owner' "${DOCKER_LOG}" || \
+if ! grep -q -- 'pg_restore .*--username rivune_restore .*--role rivune_owner .*--dbname rivune_restore_staging' "${DOCKER_LOG}" || \
    grep -q -- 'pg_restore .*--username postgres' "${DOCKER_LOG}"; then
-  echo "production restore did not use the non-superuser restore role" >&2
+  echo "production restore did not stage with the non-superuser restore role" >&2
   exit 1
 fi
+staging_restore_line="$(grep -n -m1 -- 'pg_restore .*--dbname rivune_restore_staging' "${DOCKER_LOG}" | cut -d: -f1)"
+ledger_line="$(grep -n -m1 -- "psql .*--dbname rivune_restore_staging .*schema_migrations" "${DOCKER_LOG}" | cut -d: -f1)"
+stop_line="$(grep -n -m1 -- 'compose stop rivune' "${DOCKER_LOG}" | cut -d: -f1)"
+swap_line="$(grep -n -m1 -- 'SQL .*ALTER DATABASE :"live_database" RENAME TO :"prior_database"' "${DOCKER_LOG}" | cut -d: -f1)"
+drop_prior_line="$(grep -n -m1 -- 'SQL .*DROP DATABASE :"prior_database"' "${DOCKER_LOG}" | cut -d: -f1)"
+if [[ -z "${staging_restore_line}" || -z "${ledger_line}" || -z "${stop_line}" || \
+      -z "${swap_line}" || -z "${drop_prior_line}" ]] ||
+   ! (( staging_restore_line < ledger_line && ledger_line < stop_line &&
+        stop_line < swap_line && swap_line < drop_prior_line )); then
+  echo "successful restore did not validate, swap, and retire the prior database in order" >&2
+  exit 1
+fi
+
+# A restore failure before the swap leaves the running service and live database
+# untouched and removes only the inactive staging database.
 : > "${DOCKER_LOG}"
 if PATH="${TEST_DIR}/bin:${PATH}" \
   FAKE_SERVER_RUNNING=1 \
@@ -374,12 +421,64 @@ if PATH="${TEST_DIR}/bin:${PATH}" \
   RIVUNE_RESTORE_PASSWORD="failed-restore-secret" \
   "${ROOT_DIR}/scripts/postgres-restore.sh" \
   --expect-backup-id "${ID_TWO}" "${BACKUP_TWO}" >/dev/null 2>&1; then
-  echo "production restore ignored a controlled pg_restore failure" >&2
+  echo "production restore ignored a controlled staging failure" >&2
   exit 1
 fi
-if ! grep -q -- 'compose stop rivune' "${DOCKER_LOG}" || \
-   grep -q -- 'compose up -d rivune' "${DOCKER_LOG}"; then
-  echo "failed destructive restore did not leave Rivune stopped" >&2
+if grep -q -- 'compose stop rivune\|RENAME TO :"prior_database"\|compose up ' "${DOCKER_LOG}" ||
+   ! grep -q -- 'DROP DATABASE IF EXISTS :"staging_database"' "${DOCKER_LOG}"; then
+  echo "pre-swap restore failure disturbed the live database or service" >&2
+  exit 1
+fi
+
+# Readiness failure after the swap automatically restores the retained database,
+# removes the failed staging copy, and waits for the prior service to become ready.
+: > "${DOCKER_LOG}"
+if PATH="${TEST_DIR}/bin:${PATH}" \
+  FAKE_SERVER_RUNNING=1 \
+  FAKE_START_FAIL_ONCE=1 \
+  RIVUNE_BACKUP_VERIFY_KEY_FILE="${PUBLIC_KEY}" \
+  RIVUNE_RESTORE_PASSWORD="failed-start-secret" \
+  "${ROOT_DIR}/scripts/postgres-restore.sh" \
+  --expect-backup-id "${ID_TWO}" "${BACKUP_TWO}" >/dev/null 2>&1; then
+  echo "production restore ignored a controlled readiness failure" >&2
+  exit 1
+fi
+if [[ "$(grep -c '^compose up -d --wait --wait-timeout 90 rivune$' "${DOCKER_LOG}")" != 2 ]]; then
+  echo "readiness rollback did not perform the failed and recovery starts" >&2
+  exit 1
+fi
+for expected_command in \
+  "format('ALTER DATABASE %I RENAME TO %I', :'live_database', :'staging_database')" \
+  'ALTER DATABASE :"prior_database" RENAME TO :"live_database"' \
+  'DROP DATABASE IF EXISTS :"staging_database"'; do
+  if ! grep -Fq -- "${expected_command}" "${DOCKER_LOG}"; then
+    echo "readiness rollback omitted: ${expected_command}" >&2
+    exit 1
+  fi
+done
+if grep -Fq -- 'DROP DATABASE :"prior_database"' "${DOCKER_LOG}"; then
+  echo "readiness rollback dropped the retained prior database" >&2
+  exit 1
+fi
+
+# If the database-name rollback itself fails, Rivune remains stopped, the prior
+# database is retained under its reserved name, and no destructive cleanup runs.
+: > "${DOCKER_LOG}"
+if PATH="${TEST_DIR}/bin:${PATH}" \
+  FAKE_SERVER_RUNNING=1 \
+  FAKE_START_FAIL_ONCE=1 \
+  FAKE_ROLLBACK_FAIL=1 \
+  RIVUNE_BACKUP_VERIFY_KEY_FILE="${PUBLIC_KEY}" \
+  RIVUNE_RESTORE_PASSWORD="failed-rollback-secret" \
+  "${ROOT_DIR}/scripts/postgres-restore.sh" \
+  --expect-backup-id "${ID_TWO}" "${BACKUP_TWO}" >/dev/null 2>&1; then
+  echo "production restore ignored a controlled rollback failure" >&2
+  exit 1
+fi
+if [[ "$(grep -c '^compose up -d --wait --wait-timeout 90 rivune$' "${DOCKER_LOG}")" != 1 ]] ||
+   [[ "$(grep -Fc -- 'DROP DATABASE IF EXISTS :"staging_database"' "${DOCKER_LOG}")" != 1 ]] ||
+   grep -Fq -- 'DROP DATABASE :"prior_database"' "${DOCKER_LOG}"; then
+  echo "rollback failure did not retain the prior database with Rivune stopped" >&2
   exit 1
 fi
 

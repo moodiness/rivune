@@ -7,6 +7,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
@@ -25,10 +28,13 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import io.rivune.app.ui.components.RivuneSecondaryButton
 import io.rivune.app.ui.theme.RivuneDimensions
 import io.rivune.app.ui.theme.RivuneSpacing
@@ -46,6 +52,7 @@ internal fun RivuneExternalPlayerScreen(
     val currentOnLaunchFailure by rememberUpdatedState(onLaunchFailure)
     var launchRequested by rememberSaveable(presentation.key) { mutableStateOf(false) }
     val player = requireNotNull(presentation.externalPlayer)
+    val closeFocus = androidx.compose.runtime.remember { FocusRequester() }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { activityResult ->
         currentOnResult(parseExternalPlaybackResult(player.packageName, activityResult.data))
     }
@@ -62,6 +69,9 @@ internal fun RivuneExternalPlayerScreen(
         runCatching { launcher.launch(intent) }
             .onFailure { currentOnLaunchFailure() }
     }
+    LaunchedEffect(isTv, presentation.key) {
+        if (isTv) closeFocus.requestFocus()
+    }
 
     Box(
         modifier = Modifier
@@ -72,7 +82,11 @@ internal fun RivuneExternalPlayerScreen(
         Column(
             modifier = Modifier
                 .widthIn(max = RivuneDimensions.contentMax)
-                .padding(RivuneSpacing.xxl),
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(
+                    horizontal = if (isTv) RivuneSpacing.huge else RivuneSpacing.xxl,
+                    vertical = if (isTv) RivuneSpacing.xl else RivuneSpacing.xxl,
+                ),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(RivuneSpacing.lg),
         ) {
@@ -87,6 +101,8 @@ internal fun RivuneExternalPlayerScreen(
                 color = MaterialTheme.colorScheme.onSurface,
                 textAlign = TextAlign.Center,
                 style = MaterialTheme.typography.titleLarge,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
             )
             Text(
                 text = stringResource(R.string.player_external_waiting),
@@ -98,6 +114,7 @@ internal fun RivuneExternalPlayerScreen(
                 label = stringResource(R.string.player_close),
                 onClick = onClose,
                 isTv = isTv,
+                modifier = Modifier.focusRequester(closeFocus),
             )
         }
     }

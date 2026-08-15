@@ -5,9 +5,11 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -24,13 +26,14 @@ func ReloadAndLockPrincipal(
 	ctx context.Context,
 	tx pgx.Tx,
 	captured Principal,
-	now time.Time,
+	_ time.Time,
 	configuredLocation *time.Location,
 ) (Principal, bool, error) {
 	if configuredLocation == nil {
 		return Principal{}, false, fmt.Errorf("configured timezone is required")
 	}
-	return reloadAndLockPrincipal(ctx, tx, captured, now, configuredLocation, false)
+	principal, authorized, _, err := reloadAndLockPrincipal(ctx, tx, captured, configuredLocation, false)
+	return principal, authorized, err
 }
 
 // ReloadAndLockLinkedPrincipal revalidates a captured protocol-linked session
@@ -41,28 +44,28 @@ func ReloadAndLockLinkedPrincipal(
 	ctx context.Context,
 	tx pgx.Tx,
 	captured Principal,
-	now time.Time,
+	_ time.Time,
 	configuredLocation *time.Location,
 ) (Principal, bool, error) {
 	if configuredLocation == nil {
 		return Principal{}, false, fmt.Errorf("configured timezone is required")
 	}
-	return reloadAndLockPrincipal(ctx, tx, captured, now, configuredLocation, true)
+	principal, authorized, _, err := reloadAndLockPrincipal(ctx, tx, captured, configuredLocation, true)
+	return principal, authorized, err
 }
 
 func reloadAndLockPrincipal(
 	ctx context.Context,
 	tx pgx.Tx,
 	captured Principal,
-	now time.Time,
 	configuredLocation *time.Location,
 	linked bool,
-) (Principal, bool, error) {
+) (Principal, bool, time.Time, error) {
 	if configuredLocation == nil {
-		return Principal{}, false, fmt.Errorf("configured timezone is required")
+		return Principal{}, false, time.Time{}, fmt.Errorf("configured timezone is required")
 	}
 	if captured.ActiveProfileID == nil || len(captured.ProfileContextHash) == 0 {
-		return Principal{}, false, nil
+		return Principal{}, false, time.Time{}, nil
 	}
 
 	principal := Principal{UserID: captured.UserID, DeviceID: captured.DeviceID}
@@ -73,9 +76,9 @@ func reloadAndLockPrincipal(
 		FOR SHARE
 	`, captured.UserID).Scan(&principal.Username, &principal.Role); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return Principal{}, false, nil
+			return Principal{}, false, time.Time{}, nil
 		}
-		return Principal{}, false, fmt.Errorf("lock deferred authorization user: %w", err)
+		return Principal{}, false, time.Time{}, fmt.Errorf("lock deferred authorization user: %w", err)
 	}
 
 	var deviceCategoryID *string
@@ -86,9 +89,9 @@ func reloadAndLockPrincipal(
 		FOR SHARE
 	`, captured.DeviceID, captured.UserID).Scan(&deviceCategoryID, &principal.Platform); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return Principal{}, false, nil
+			return Principal{}, false, time.Time{}, nil
 		}
-		return Principal{}, false, fmt.Errorf("lock deferred authorization device: %w", err)
+		return Principal{}, false, time.Time{}, fmt.Errorf("lock deferred authorization device: %w", err)
 	}
 
 	var activeProfileCategoryID *string
@@ -107,9 +110,9 @@ func reloadAndLockPrincipal(
 		&access.AccessStartTime, &access.AccessEndTime,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return Principal{}, false, nil
+			return Principal{}, false, time.Time{}, nil
 		}
-		return Principal{}, false, fmt.Errorf("lock deferred authorization profile: %w", err)
+		return Principal{}, false, time.Time{}, fmt.Errorf("lock deferred authorization profile: %w", err)
 	}
 
 	hasProfileAccess := true
@@ -123,33 +126,45 @@ func reloadAndLockPrincipal(
 		if errors.Is(err, pgx.ErrNoRows) {
 			hasProfileAccess = false
 		} else {
-			return Principal{}, false, fmt.Errorf("lock deferred profile grant: %w", err)
+			return Principal{}, false, time.Time{}, fmt.Errorf("lock deferred profile grant: %w", err)
 		}
 	}
 
+	var accessExpiresAt, refreshExpiresAt time.Time
 	if err := tx.QueryRow(ctx, `
 		SELECT id::text, authorization_scope, category_id::text,
-		       profile_grant_expires_at, profile_context_hash
+		       profile_grant_expires_at, profile_context_hash,
+		       access_expires_at, refresh_expires_at
 		FROM auth_sessions
 		WHERE id::text = $1
 		  AND user_id::text = $2
 		  AND device_id::text = $3
 		  AND active_profile_id::text = $4
-		  AND CASE WHEN $5::boolean THEN refresh_expires_at > now() ELSE access_expires_at > now() END
 		  AND revoked_at IS NULL
 		FOR SHARE
-	`, captured.SessionID, captured.UserID, captured.DeviceID, *captured.ActiveProfileID, linked).Scan(
+	`, captured.SessionID, captured.UserID, captured.DeviceID, *captured.ActiveProfileID).Scan(
 		&principal.SessionID, &principal.AuthorizationScope,
 		&principal.CategoryID, &principal.ProfileGrantExpiresAt,
-		&principal.ProfileContextHash,
+		&principal.ProfileContextHash, &accessExpiresAt, &refreshExpiresAt,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return Principal{}, false, nil
+			return Principal{}, false, time.Time{}, nil
 		}
-		return Principal{}, false, fmt.Errorf("lock deferred authorization session: %w", err)
+		return Principal{}, false, time.Time{}, fmt.Errorf("lock deferred authorization session: %w", err)
+	}
+	var validatedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&validatedAt); err != nil {
+		return Principal{}, false, time.Time{}, fmt.Errorf("read deferred authorization time: %w", err)
+	}
+	authorityExpiresAt := accessExpiresAt
+	if linked {
+		authorityExpiresAt = refreshExpiresAt
+	}
+	if !authorityExpiresAt.After(validatedAt) {
+		return Principal{}, false, validatedAt, nil
 	}
 	if subtle.ConstantTimeCompare(principal.ProfileContextHash, captured.ProfileContextHash) != 1 {
-		return Principal{}, false, nil
+		return Principal{}, false, validatedAt, nil
 	}
 
 	scopeValid := validSessionScope(
@@ -163,16 +178,63 @@ func reloadAndLockPrincipal(
 		scopeValid = scopeValid && deviceCategoryID != nil && activeProfileCategoryID != nil && *deviceCategoryID == *activeProfileCategoryID
 	}
 	if !scopeValid || (principal.AuthorizationScope == AuthorizationScopeCategory && !hasProfileAccess) {
-		return Principal{}, false, nil
+		return Principal{}, false, validatedAt, nil
 	}
 	principal.ActiveProfileCanManage = principal.IsGlobalAdministrator() || grantedCanManage
 	access.AccessTimezone = configuredLocation.String()
 	if principal.ProfileGrantExpiresAt == nil ||
-		!principal.ProfileGrantExpiresAt.After(now) ||
-		!ProfileAccessibleAt(access, now) {
-		return Principal{}, false, nil
+		!principal.ProfileGrantExpiresAt.After(validatedAt) ||
+		!ProfileAccessibleAt(access, validatedAt) {
+		return Principal{}, false, validatedAt, nil
 	}
-	return principal, true, nil
+	return principal, true, validatedAt, nil
+}
+
+// LockActiveProfileSelection validates the captured active-profile capability
+// against its authoritative native session and holds a shared row lock through
+// the caller-owned transaction. Selection and clear update the same row, so
+// whichever transaction acquires it first establishes the authorization order.
+func LockActiveProfileSelection(ctx context.Context, tx pgx.Tx, captured Principal) (bool, error) {
+	if strings.TrimSpace(captured.SessionID) == "" ||
+		strings.TrimSpace(captured.UserID) == "" ||
+		strings.TrimSpace(captured.DeviceID) == "" ||
+		captured.ActiveProfileID == nil ||
+		strings.TrimSpace(*captured.ActiveProfileID) == "" ||
+		len(captured.ProfileContextHash) == 0 {
+		return false, nil
+	}
+
+	var authoritativeHash []byte
+	var accessExpiresAt time.Time
+	var profileGrantExpiresAt *time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT profile_context_hash, access_expires_at, profile_grant_expires_at
+		FROM auth_sessions
+		WHERE id::text = $1
+		  AND user_id::text = $2
+		  AND device_id::text = $3
+		  AND active_profile_id::text = $4
+		  AND revoked_at IS NULL
+		FOR SHARE
+	`, captured.SessionID, captured.UserID, captured.DeviceID, *captured.ActiveProfileID).Scan(
+		&authoritativeHash, &accessExpiresAt, &profileGrantExpiresAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		var databaseError *pgconn.PgError
+		if errors.As(err, &databaseError) && databaseError.Code == "40001" {
+			return false, nil
+		}
+		return false, fmt.Errorf("lock active profile selection: %w", err)
+	}
+	var validatedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&validatedAt); err != nil {
+		return false, fmt.Errorf("read active profile selection time: %w", err)
+	}
+	return accessExpiresAt.After(validatedAt) &&
+		profileGrantExpiresAt != nil && profileGrantExpiresAt.After(validatedAt) &&
+		subtle.ConstantTimeCompare(authoritativeHash, captured.ProfileContextHash) == 1, nil
 }
 
 // CanAccessProfiles reports whether the principal may access every requested profile.

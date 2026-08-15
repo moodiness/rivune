@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/runtimesettings"
 )
 
 var (
@@ -40,14 +42,41 @@ type ProfileCredential struct {
 }
 
 type CredentialStore struct {
-	pool *pgxpool.Pool
+	pool            *pgxpool.Pool
+	runtimeSettings *runtimesettings.Source
+	notifierMu      sync.RWMutex
+	notifier        func([]string)
 }
 
-func NewCredentialStore(pool *pgxpool.Pool) (*CredentialStore, error) {
+func NewCredentialStore(pool *pgxpool.Pool, runtimeSettings *runtimesettings.Source) (*CredentialStore, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("Jellyfin credential store database is required")
 	}
-	return &CredentialStore{pool: pool}, nil
+	if runtimeSettings == nil || runtimeSettings.Load().Location == nil {
+		return nil, fmt.Errorf("Jellyfin credential runtime settings are required")
+	}
+	return &CredentialStore{pool: pool, runtimeSettings: runtimeSettings}, nil
+}
+
+// SetCompatibilitySessionRevocationNotifier installs the best-effort callback
+// invoked after a committed credential mutation revokes compatibility sessions.
+func (s *CredentialStore) SetCompatibilitySessionRevocationNotifier(notifier func([]string)) {
+	if s == nil {
+		return
+	}
+	s.notifierMu.Lock()
+	s.notifier = notifier
+	s.notifierMu.Unlock()
+}
+
+func (s *CredentialStore) compatibilitySessionRevocationNotifier() func([]string) {
+	if s == nil {
+		return nil
+	}
+	s.notifierMu.RLock()
+	notifier := s.notifier
+	s.notifierMu.RUnlock()
+	return notifier
 }
 
 func (s *CredentialStore) Status(ctx context.Context, principal auth.Principal, profileID string) (CredentialStatus, error) {
@@ -56,6 +85,11 @@ func (s *CredentialStore) Status(ctx context.Context, principal auth.Principal, 
 		return CredentialStatus{}, fmt.Errorf("begin Jellyfin credential status: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	principal, err = s.reloadAndLockPrincipal(ctx, tx, principal)
+	if err != nil {
+		return CredentialStatus{}, err
+	}
 
 	profileID = strings.TrimSpace(profileID)
 	if err := authorizeCredentialProfile(ctx, tx, principal, profileID); err != nil {
@@ -85,7 +119,8 @@ func (s *CredentialStore) Create(ctx context.Context, principal auth.Principal, 
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	profileID = strings.TrimSpace(profileID)
-	if err := lockCredentialActor(ctx, tx, principal.UserID); err != nil {
+	principal, err = s.reloadAndLockPrincipal(ctx, tx, principal)
+	if err != nil {
 		return ProfileCredential{}, err
 	}
 	if err := authorizeCredentialProfile(ctx, tx, principal, profileID); err != nil {
@@ -155,9 +190,11 @@ func (s *CredentialStore) Rotate(ctx context.Context, principal auth.Principal, 
 		return ProfileCredential{}, fmt.Errorf("begin Jellyfin credential rotation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	notifyRevoked := s.compatibilitySessionRevocationNotifier()
 
 	profileID = strings.TrimSpace(profileID)
-	if err := lockCredentialActor(ctx, tx, principal.UserID); err != nil {
+	principal, err = s.reloadAndLockPrincipal(ctx, tx, principal)
+	if err != nil {
 		return ProfileCredential{}, err
 	}
 	if err := authorizeCredentialProfile(ctx, tx, principal, profileID); err != nil {
@@ -202,13 +239,15 @@ func (s *CredentialStore) Rotate(ctx context.Context, principal auth.Principal, 
 	} else if err != nil {
 		return ProfileCredential{}, fmt.Errorf("rotate Jellyfin profile credential: %w", err)
 	}
-	if err := revokeCredentialSessions(ctx, tx, current.Username, "jellyfin_profile_credential_rotated"); err != nil {
+	revokedSessionIDs, err := revokeCredentialSessions(ctx, tx, current.Username, "jellyfin_profile_credential_rotated")
+	if err != nil {
 		return ProfileCredential{}, err
 	}
 	rotated.CanIssue = true
 	if err := tx.Commit(ctx); err != nil {
 		return ProfileCredential{}, fmt.Errorf("commit Jellyfin credential rotation: %w", err)
 	}
+	notifyCompatibilitySessionRevocations(notifyRevoked, revokedSessionIDs)
 	return ProfileCredential{CredentialStatus: rotated, Password: password}, nil
 }
 
@@ -218,9 +257,11 @@ func (s *CredentialStore) Revoke(ctx context.Context, principal auth.Principal, 
 		return fmt.Errorf("begin Jellyfin credential revocation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	notifyRevoked := s.compatibilitySessionRevocationNotifier()
 
 	profileID = strings.TrimSpace(profileID)
-	if err := lockCredentialActor(ctx, tx, principal.UserID); err != nil {
+	principal, err = s.reloadAndLockPrincipal(ctx, tx, principal)
+	if err != nil {
 		return err
 	}
 	if err := authorizeCredentialProfile(ctx, tx, principal, profileID); err != nil {
@@ -252,30 +293,27 @@ func (s *CredentialStore) Revoke(ctx context.Context, principal auth.Principal, 
 	if command.RowsAffected() != 1 {
 		return ErrCredentialNotFound
 	}
-	if err := revokeCredentialSessions(ctx, tx, current.Username, "jellyfin_profile_credential_revoked"); err != nil {
+	revokedSessionIDs, err := revokeCredentialSessions(ctx, tx, current.Username, "jellyfin_profile_credential_revoked")
+	if err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit Jellyfin credential revocation: %w", err)
 	}
+	notifyCompatibilitySessionRevocations(notifyRevoked, revokedSessionIDs)
 	return nil
 }
 
-func lockCredentialActor(ctx context.Context, tx pgx.Tx, userID string) error {
-	var lockedUserID string
-	err := tx.QueryRow(ctx, `
-		SELECT id::text
-		FROM users
-		WHERE id::text = $1
-		FOR SHARE
-	`, userID).Scan(&lockedUserID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrCredentialForbidden
-	}
+func (s *CredentialStore) reloadAndLockPrincipal(ctx context.Context, tx pgx.Tx, captured auth.Principal) (auth.Principal, error) {
+	location := runtimesettings.Load(ctx, s.runtimeSettings).Location
+	principal, authorized, err := auth.ReloadAndLockPrincipal(ctx, tx, captured, time.Now().UTC(), location)
 	if err != nil {
-		return fmt.Errorf("lock Jellyfin credential actor: %w", err)
+		return auth.Principal{}, fmt.Errorf("reload Jellyfin credential principal: %w", err)
 	}
-	return nil
+	if !authorized {
+		return auth.Principal{}, ErrCredentialForbidden
+	}
+	return principal, nil
 }
 
 func lockCredentialProfileMutation(ctx context.Context, tx pgx.Tx, profileID string) error {
@@ -347,14 +385,50 @@ func credentialStatus(ctx context.Context, tx pgx.Tx, profileID string, lock boo
 	return status, err
 }
 
-func revokeCredentialSessions(ctx context.Context, tx pgx.Tx, credentialID, reason string) error {
+func revokeCredentialSessions(ctx context.Context, tx pgx.Tx, credentialID, reason string) ([]string, error) {
+	if _, err := tx.Exec(ctx, `
+		SELECT id
+		FROM auth_sessions
+		WHERE jellyfin_credential_id = $1::uuid
+		ORDER BY id
+		FOR UPDATE
+	`, credentialID); err != nil {
+		return nil, fmt.Errorf("lock Jellyfin credential native sessions: %w", err)
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT compat_session.id::text
+		FROM jellyfin_compat_sessions compat_session
+		JOIN auth_sessions native_session ON native_session.id = compat_session.auth_session_id
+		WHERE native_session.jellyfin_credential_id = $1::uuid
+		  AND compat_session.revoked_at IS NULL
+		  AND compat_session.expires_at > now()
+		ORDER BY compat_session.id
+		FOR UPDATE OF compat_session
+	`, credentialID)
+	if err != nil {
+		return nil, fmt.Errorf("lock Jellyfin credential compatibility sessions: %w", err)
+	}
+	revokedSessionIDs := make([]string, 0)
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("read Jellyfin credential compatibility session: %w", err)
+		}
+		revokedSessionIDs = append(revokedSessionIDs, sessionID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterate Jellyfin credential compatibility sessions: %w", err)
+	}
+	rows.Close()
 	if _, err := tx.Exec(ctx, `
 		UPDATE auth_sessions
 		SET revoked_at = COALESCE(revoked_at, now()),
 		    revoked_reason = COALESCE(revoked_reason, $2)
 		WHERE jellyfin_credential_id = $1::uuid
 	`, credentialID, reason); err != nil {
-		return fmt.Errorf("revoke Jellyfin credential sessions: %w", err)
+		return nil, fmt.Errorf("revoke Jellyfin credential sessions: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE jellyfin_compat_sessions compat_session
@@ -364,7 +438,15 @@ func revokeCredentialSessions(ctx context.Context, tx pgx.Tx, credentialID, reas
 		WHERE compat_session.auth_session_id = native_session.id
 		  AND native_session.jellyfin_credential_id = $1::uuid
 	`, credentialID, reason); err != nil {
-		return fmt.Errorf("revoke Jellyfin compatibility sessions: %w", err)
+		return nil, fmt.Errorf("revoke Jellyfin compatibility sessions: %w", err)
 	}
-	return nil
+	return revokedSessionIDs, nil
+}
+
+func notifyCompatibilitySessionRevocations(notifier func([]string), sessionIDs []string) {
+	if notifier == nil || len(sessionIDs) == 0 {
+		return
+	}
+	defer func() { _ = recover() }()
+	notifier(sessionIDs)
 }

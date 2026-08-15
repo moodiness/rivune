@@ -8,6 +8,116 @@ public static class RivuneProtocol
     public const int Version = 20;
 }
 
+public static class DiscoveryCapabilityIdentifiers
+{
+    public const string BoundedAggregateResources = "bounded-aggregate-resources";
+    public const string ProfileArchivesV1 = "profile-archives-v1";
+    public const string RequestCorrelation = "request-correlation";
+}
+
+public enum DiscoveryCapability
+{
+    BoundedAggregateResources,
+    ProfileArchivesV1,
+    RequestCorrelation,
+}
+
+internal sealed class DiscoveryCapabilitiesJsonConverter : JsonConverter<IReadOnlyList<string>>
+{
+    private const int MaximumCapabilities = 64;
+    private const int MaximumCapabilityLength = 64;
+
+    public DiscoveryCapabilitiesJsonConverter()
+    {
+    }
+
+    public override bool HandleNull => true;
+
+    public override IReadOnlyList<string> Read(
+        ref Utf8JsonReader reader,
+        Type typeToConvert,
+        JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.Null)
+        {
+            return [];
+        }
+        if (reader.TokenType != JsonTokenType.StartArray)
+        {
+            reader.Skip();
+            return [];
+        }
+
+        List<string>? normalized = null;
+        HashSet<string>? seen = null;
+        while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+        {
+            if (reader.TokenType != JsonTokenType.String || normalized?.Count == MaximumCapabilities)
+            {
+                reader.Skip();
+                continue;
+            }
+
+            var identifier = reader.GetString();
+            if (identifier is null || !IsSafeIdentifier(identifier))
+            {
+                continue;
+            }
+
+            seen ??= new HashSet<string>(StringComparer.Ordinal);
+            if (!seen.Add(identifier))
+            {
+                continue;
+            }
+
+            normalized ??= new List<string>(MaximumCapabilities);
+            normalized.Add(identifier);
+        }
+        return normalized ?? [];
+    }
+
+    public override void Write(
+        Utf8JsonWriter writer,
+        IReadOnlyList<string> value,
+        JsonSerializerOptions options)
+    {
+        writer.WriteStartArray();
+        foreach (var identifier in value)
+        {
+            writer.WriteStringValue(identifier);
+        }
+        writer.WriteEndArray();
+    }
+
+    private static bool IsSafeIdentifier(string identifier)
+    {
+        if (identifier.Length is < 1 or > MaximumCapabilityLength)
+        {
+            return false;
+        }
+
+        var previousWasHyphen = true;
+        foreach (var character in identifier)
+        {
+            if (character == '-')
+            {
+                if (previousWasHyphen)
+                {
+                    return false;
+                }
+                previousWasHyphen = true;
+                continue;
+            }
+            if (character is not (>= 'a' and <= 'z') and not (>= '0' and <= '9'))
+            {
+                return false;
+            }
+            previousWasHyphen = false;
+        }
+        return !previousWasHyphen;
+    }
+}
+
 public sealed record Discovery
 {
     public required string Name { get; init; }
@@ -19,6 +129,34 @@ public sealed record Discovery
     public bool? DemoAvailable { get; init; }
     public required string Timezone { get; init; }
     public required string InterfaceLanguage { get; init; }
+    [JsonConverter(typeof(DiscoveryCapabilitiesJsonConverter))]
+    public IReadOnlyList<string> Capabilities { get; init; } = [];
+
+    public bool Supports(DiscoveryCapability capability)
+    {
+        var identifier = capability switch
+        {
+            DiscoveryCapability.BoundedAggregateResources => DiscoveryCapabilityIdentifiers.BoundedAggregateResources,
+            DiscoveryCapability.ProfileArchivesV1 => DiscoveryCapabilityIdentifiers.ProfileArchivesV1,
+            DiscoveryCapability.RequestCorrelation => DiscoveryCapabilityIdentifiers.RequestCorrelation,
+            _ => null,
+        };
+        if (identifier is null || Capabilities is null)
+        {
+            return false;
+        }
+
+        foreach (var advertised in Capabilities)
+        {
+            if (StringComparer.Ordinal.Equals(advertised, identifier))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public bool SupportsProfileArchivesV1 => Supports(DiscoveryCapability.ProfileArchivesV1);
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<AuthorizationScope>))]

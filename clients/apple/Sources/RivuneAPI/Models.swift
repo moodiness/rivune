@@ -4,6 +4,12 @@ public enum RivuneProtocol {
     public static let version = 20
 }
 
+public enum DiscoveryCapability: String, Codable, CaseIterable, Sendable, Equatable {
+    case boundedAggregateResources = "bounded-aggregate-resources"
+    case profileArchivesV1 = "profile-archives-v1"
+    case requestCorrelation = "request-correlation"
+}
+
 public struct Discovery: Codable, Sendable, Equatable {
     public let name: String
     public let serverVersion: String
@@ -14,6 +20,102 @@ public struct Discovery: Codable, Sendable, Equatable {
     public let demoAvailable: Bool?
     public let timezone: String
     public let interfaceLanguage: String
+    public let capabilities: [String]
+
+    public func supports(_ capability: DiscoveryCapability) -> Bool {
+        capabilities.contains(capability.rawValue)
+    }
+
+    public var supportsProfileArchives: Bool {
+        supports(.profileArchivesV1)
+    }
+
+    init(
+        name: String,
+        serverVersion: String,
+        protocolVersion: Int,
+        apiBaseUrl: String,
+        setupRequired: Bool,
+        setupCompleted: Bool?,
+        demoAvailable: Bool?,
+        timezone: String,
+        interfaceLanguage: String,
+        capabilities: [String]
+    ) {
+        self.name = name
+        self.serverVersion = serverVersion
+        self.protocolVersion = protocolVersion
+        self.apiBaseUrl = apiBaseUrl
+        self.setupRequired = setupRequired
+        self.setupCompleted = setupCompleted
+        self.demoAvailable = demoAvailable
+        self.timezone = timezone
+        self.interfaceLanguage = interfaceLanguage
+        self.capabilities = Self.normalizeCapabilities(capabilities)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        name = try values.decode(String.self, forKey: .name)
+        serverVersion = try values.decode(String.self, forKey: .serverVersion)
+        protocolVersion = try values.decode(Int.self, forKey: .protocolVersion)
+        apiBaseUrl = try values.decode(String.self, forKey: .apiBaseUrl)
+        setupRequired = try values.decode(Bool.self, forKey: .setupRequired)
+        setupCompleted = try values.decodeIfPresent(Bool.self, forKey: .setupCompleted)
+        demoAvailable = try values.decodeIfPresent(Bool.self, forKey: .demoAvailable)
+        timezone = try values.decode(String.self, forKey: .timezone)
+        interfaceLanguage = try values.decode(String.self, forKey: .interfaceLanguage)
+        capabilities = Self.decodeCapabilities(from: values, forKey: .capabilities)
+    }
+
+    static func decodeCapabilities<Key: CodingKey>(
+        from values: KeyedDecodingContainer<Key>,
+        forKey key: Key
+    ) -> [String] {
+        guard let rawValues = try? values.decode([JSONValue].self, forKey: key) else {
+            return []
+        }
+        return normalizeCapabilities(rawValues.compactMap { value in
+            guard case .string(let identifier) = value else { return nil }
+            return identifier
+        })
+    }
+
+    static func normalizeCapabilities(_ capabilities: [String]) -> [String] {
+        var normalized: [String] = []
+        normalized.reserveCapacity(min(capabilities.count, 64))
+        var seen = Set<String>()
+
+        for capability in capabilities where isSafeCapabilityIdentifier(capability) {
+            guard seen.insert(capability).inserted else { continue }
+            normalized.append(capability)
+            if normalized.count == 64 { break }
+        }
+        return normalized
+    }
+
+    private static func isSafeCapabilityIdentifier(_ identifier: String) -> Bool {
+        let bytes = identifier.utf8
+        guard (1...64).contains(bytes.count) else { return false }
+
+        var previousWasHyphen = true
+        for byte in bytes {
+            switch byte {
+            case 97...122, 48...57:
+                previousWasHyphen = false
+            case 45 where !previousWasHyphen:
+                previousWasHyphen = true
+            default:
+                return false
+            }
+        }
+        return !previousWasHyphen
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name, serverVersion, protocolVersion, apiBaseUrl, setupRequired, setupCompleted
+        case demoAvailable, timezone, interfaceLanguage, capabilities
+    }
 }
 
 public enum AuthorizationScope: String, Codable, Sendable, Equatable {

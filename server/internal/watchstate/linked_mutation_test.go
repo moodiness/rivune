@@ -120,7 +120,7 @@ func TestLinkedMutationsRevalidateAfterProviderWorkAndSerializeRevocationThrough
 			authorization_scope, category_id, active_profile_id, profile_grant_expires_at,
 			profile_context_hash
 		) VALUES (
-			$1, $2, $3, now() - interval '1 minute', now() + interval '2 hours',
+			$1, $2, $3, now() + interval '2 hours', now() + interval '2 hours',
 			'category', $4, $5, now() + interval '2 hours', $6
 		) RETURNING id::text
 	`, userID, deviceID, accessHash[:], categoryID, profileID, contextHash[:]).Scan(&sessionID); err != nil {

@@ -24,14 +24,15 @@ import (
 const redacted = "[REDACTED]"
 
 var snapshotResponseHeaders = map[string]struct{}{
-	"Accept-Ranges":  {},
-	"Cache-Control":  {},
-	"Content-Length": {},
-	"Content-Range":  {},
-	"Content-Type":   {},
-	"Etag":           {},
-	"Last-Modified":  {},
-	"Location":       {},
+	"Accept-Ranges":    {},
+	"Cache-Control":    {},
+	"Content-Length":   {},
+	"Content-Range":    {},
+	"Content-Type":     {},
+	"Etag":             {},
+	"Last-Modified":    {},
+	"Location":         {},
+	"Www-Authenticate": {},
 }
 
 type targetSpec struct {

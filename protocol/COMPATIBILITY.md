@@ -2,6 +2,8 @@
 
 The current Rivune wire protocol is **version 20**. The HTTP namespace remains `/api/v1`; the namespace and protocol version are independent. Clients must discover a server through `GET /.well-known/rivune` before using authenticated API routes and must compare the returned `protocolVersion` with the version they implement.
 
+Current servers also emit the optional discovery `capabilities` list. Official clients gate optional workflows on recognized identifiers and ignore unknown identifiers: `profile-archives-v1`, `request-correlation`, and `bounded-aggregate-resources`. The protocol integer remains the compatibility boundary for required behavior.
+
 ## Version 20 cutover
 
 Version 20 is a clean cutover. A v19 client is not compatible with a v20 server, and a v20 client must not silently continue against another protocol version.
@@ -10,6 +12,7 @@ Version 20 is a clean cutover. A v19 client is not compatible with a v20 server,
 - **Application secrets are one-shot credentials.** A newly issued Jellyfin application secret is shown only once and cannot be recovered afterward.
 - **Credential changes revoke Jellyfin sessions.** Rotating or revoking a profile's Jellyfin application secret invalidates every Jellyfin session for that profile.
 - **There is no authentication fallback.** Jellyfin authentication never falls back to a Rivune account password, administrator password, or profile PIN.
+- **Jellyfin Quick Connect is profile-bound.** A Jellyfin client initiates with a stable device identifier, an authenticated manager approves the code at `/pair` under the manager's active manageable profile, and the single-use exchange creates a compatibility session for exactly that profile. Secrets expire after 10 minutes, remain hashed at rest, and never create a persistent profile application password.
 
 Version 20 retains every v19 contract described below.
 

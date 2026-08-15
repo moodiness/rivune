@@ -83,7 +83,104 @@ func (handler *Handler) handleQuickConnectEnabled(response http.ResponseWriter, 
 		writeCompatError(response, http.StatusServiceUnavailable, "ServiceUnavailable", "The compatibility service is unavailable")
 		return
 	}
-	writeJSON(response, http.StatusOK, false)
+	writeJSON(response, http.StatusOK, handler.quickConnect != nil)
+}
+
+func (handler *Handler) handleQuickConnectInitiate(response http.ResponseWriter, request *http.Request) {
+	if handler.quickConnect == nil {
+		writeCompatError(response, http.StatusServiceUnavailable, "ServiceUnavailable", "The compatibility service is unavailable")
+		return
+	}
+	var payload *struct{}
+	if err := decodeCompatJSON(response, request, &payload); err != nil || payload == nil {
+		writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The request body is invalid")
+		return
+	}
+	client, err := parseQuickConnectClientIdentity(request.Header)
+	if err != nil {
+		writeCompatLoginFailure(response)
+		return
+	}
+	status, err := handler.quickConnect.BeginQuickConnect(request.Context(), client)
+	if err != nil {
+		handler.writeQuickConnectError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, quickConnectResult(status))
+}
+
+func (handler *Handler) handleQuickConnectConnect(response http.ResponseWriter, request *http.Request) {
+	if handler.quickConnect == nil {
+		writeCompatError(response, http.StatusServiceUnavailable, "ServiceUnavailable", "The compatibility service is unavailable")
+		return
+	}
+	if err := validateQueryBudget(request.URL.Query()); err != nil {
+		writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The Quick Connect request is invalid")
+		return
+	}
+	secret, found, err := queryScalar(request.URL.Query(), "Secret")
+	if err != nil || !found || !validQuickConnectSecret(secret) || len(request.URL.Query()) != 1 {
+		writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The Quick Connect request is invalid")
+		return
+	}
+	client, err := parseQuickConnectClientIdentity(request.Header)
+	if err != nil {
+		writeCompatLoginFailure(response)
+		return
+	}
+	status, err := handler.quickConnect.PollQuickConnect(request.Context(), secret, client)
+	if err != nil {
+		handler.writeQuickConnectError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, quickConnectResult(status))
+}
+
+func (handler *Handler) handleAuthenticateWithQuickConnect(response http.ResponseWriter, request *http.Request) {
+	if handler.quickConnect == nil {
+		writeCompatError(response, http.StatusServiceUnavailable, "ServiceUnavailable", "The compatibility service is unavailable")
+		return
+	}
+	var payload AuthenticateWithQuickConnect
+	if err := decodeCompatJSON(response, request, &payload); err != nil || !validQuickConnectSecret(payload.Secret) {
+		writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The request body is invalid")
+		return
+	}
+	client, err := parseQuickConnectDeviceIdentity(request.Header)
+	if err != nil {
+		writeCompatLoginFailure(response)
+		return
+	}
+	result, err := handler.quickConnect.LoginQuickConnect(request.Context(), payload.Secret, client)
+	if err != nil {
+		handler.writeQuickConnectError(response, err)
+		return
+	}
+	handler.writeLoginResult(response, request, result, result.Client)
+}
+
+func (handler *Handler) writeQuickConnectError(response http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, nativeauth.ErrDeviceAuthorizationCapacity):
+		response.Header().Set("Retry-After", "60")
+		writeCompatError(response, http.StatusTooManyRequests, "ResourceLimitExceeded", "Too many Quick Connect requests are pending; retry later")
+	case errors.Is(err, nativeauth.ErrInvalidInput), errors.Is(err, ErrInvalidClientIdentity):
+		writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The Quick Connect request is invalid")
+	case errors.Is(err, nativeauth.ErrInvalidDeviceCode), errors.Is(err, nativeauth.ErrDeviceAuthorizationExpired),
+		errors.Is(err, nativeauth.ErrDeviceAuthorizationPending), errors.Is(err, ErrInvalidCompatLogin),
+		errors.Is(err, ErrInvalidCompatCredential):
+		writeCompatLoginFailure(response)
+	default:
+		writeCompatError(response, http.StatusInternalServerError, "InternalError", "The request could not be completed")
+	}
+}
+
+func quickConnectResult(status QuickConnectStatus) QuickConnectResult {
+	return QuickConnectResult{
+		Authenticated: status.Authenticated, Secret: status.Secret, Code: status.Code,
+		DateAdded: status.DateAdded, DeviceID: status.DeviceID, DeviceName: status.DeviceName,
+		AppName: status.AppName, AppVersion: status.AppVersion,
+	}
 }
 
 func (handler *Handler) handleAuthenticateByName(response http.ResponseWriter, request *http.Request) {
@@ -145,6 +242,10 @@ func (handler *Handler) handleAuthenticateByName(response http.ResponseWriter, r
 		}
 		return
 	}
+	handler.writeLoginResult(response, request, result, client)
+}
+
+func (handler *Handler) writeLoginResult(response http.ResponseWriter, request *http.Request, result LoginResult, client ClientIdentity) {
 	if !validLoginResult(result) {
 		handler.logCompatLoginRejection(compatLoginStagePostLoginBinding)
 		writeCompatError(response, http.StatusInternalServerError, "InternalError", "The request could not be completed")

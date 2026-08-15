@@ -472,6 +472,7 @@ func (transport *HTTPTransport) getWithBudget(ctx context.Context, target string
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", "Rivune/1 StremioAddonClient")
+	requestwork.PropagateRequestID(request)
 	client := transport.publicClient
 	if isPrivateNetworkTransportURL(target) {
 		client = transport.privateLiteralClient

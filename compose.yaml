@@ -1,6 +1,6 @@
 services:
   rivune:
-    image: ghcr.io/moodiness/rivune:${RIVUNE_VERSION:-latest}
+    image: ghcr.io/moodiness/rivune:${RIVUNE_VERSION:-1.6.1}
     restart: unless-stopped
     init: true
     security_opt:

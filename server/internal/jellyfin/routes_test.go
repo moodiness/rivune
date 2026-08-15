@@ -484,6 +484,7 @@ func TestCompleteRealDependenciesInstallEveryBuiltInRoute(t *testing.T) {
 	handler, err := New(Dependencies{
 		ServerInfo:     ServerInfo{ID: serverID, Name: "Rivune", RuntimeVersion: "test"},
 		Authentication: &stateAuthentication{},
+		QuickConnect:   routeQuickConnectAuthentication{},
 		Catalog:        &stateCatalog{},
 		Artwork:        &artworkDelivery{},
 		Playback:       &statePlaybackDelivery{},
@@ -523,6 +524,20 @@ func routeTestPath(definition RouteSpec) string {
 	path = strings.ReplaceAll(path, "{index}", "0")
 	path = strings.ReplaceAll(path, "{container}", "mp4")
 	return path
+}
+
+type routeQuickConnectAuthentication struct{}
+
+func (routeQuickConnectAuthentication) BeginQuickConnect(context.Context, ClientIdentity) (QuickConnectStatus, error) {
+	return QuickConnectStatus{}, ErrInvalidCompatLogin
+}
+
+func (routeQuickConnectAuthentication) PollQuickConnect(context.Context, string, ClientIdentity) (QuickConnectStatus, error) {
+	return QuickConnectStatus{}, ErrInvalidCompatLogin
+}
+
+func (routeQuickConnectAuthentication) LoginQuickConnect(context.Context, string, ClientIdentity) (LoginResult, error) {
+	return LoginResult{}, ErrInvalidCompatLogin
 }
 
 type routeCountingAuthentication struct {

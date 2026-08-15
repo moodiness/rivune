@@ -1,7 +1,9 @@
 package collection
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"os"
 	"testing"
@@ -37,6 +39,12 @@ func TestCollectionCategoryAccessTracksProfilesAndKeepsExplicitAccessAdditive(t 
 		profileAID      = "7c000000-0000-4000-8000-000000000005"
 		profileBID      = "7c000000-0000-4000-8000-000000000006"
 		profileFutureID = "7c000000-0000-4000-8000-000000000007"
+		adminDeviceID   = "7c000000-0000-4000-8000-000000000010"
+		memberDeviceID  = "7c000000-0000-4000-8000-000000000011"
+		profileASession = "7c000000-0000-4000-8000-000000000012"
+		profileBSession = "7c000000-0000-4000-8000-000000000013"
+		futureSession   = "7c000000-0000-4000-8000-000000000014"
+		memberSession   = "7c000000-0000-4000-8000-000000000015"
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -44,6 +52,8 @@ func TestCollectionCategoryAccessTracksProfilesAndKeepsExplicitAccessAdditive(t 
 		cleanupCtx := context.Background()
 		profileIDs := []string{profileAID, profileBID, profileFutureID}
 		categoryIDs := []string{categoryAID, categoryBID, categoryCID}
+		sessionIDs := []string{profileASession, profileBSession, futureSession, memberSession}
+		deviceIDs := []string{adminDeviceID, memberDeviceID}
 		_, _ = pool.Exec(cleanupCtx, `
 			DELETE FROM profile_addons
 			WHERE id = $1::uuid OR profile_id = ANY($2::uuid[])
@@ -58,6 +68,8 @@ func TestCollectionCategoryAccessTracksProfilesAndKeepsExplicitAccessAdditive(t 
 			   OR pc.title LIKE 'Category limit %'
 			   OR pc.title LIKE 'Empty category limit %'
 		`, profileIDs, categoryIDs)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM auth_sessions WHERE id = ANY($1::uuid[])`, sessionIDs)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM devices WHERE id = ANY($1::uuid[])`, deviceIDs)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM profiles WHERE id = ANY($1::uuid[])`, profileIDs)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM users WHERE id = ANY($1::uuid[])`, []string{adminUserID, memberUserID})
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM access_categories WHERE id = ANY($1::uuid[])`, categoryIDs)
@@ -77,7 +89,18 @@ func TestCollectionCategoryAccessTracksProfilesAndKeepsExplicitAccessAdditive(t 
 		INSERT INTO user_profile_access (user_id, profile_id, can_manage) VALUES
 			($4::uuid, $5::uuid, true),
 			($4::uuid, $6::uuid, true);
-	`, pgx.QueryExecModeSimpleProtocol, categoryAID, categoryBID, adminUserID, memberUserID, profileAID, profileBID); err != nil {
+		INSERT INTO devices (id, user_id, name, platform, category_id, approved_at) VALUES
+			($7::uuid, $3::uuid, 'Collection category admin device', 'test', $1::uuid, now()),
+			($8::uuid, $4::uuid, 'Collection category member device', 'test', $1::uuid, now());
+		INSERT INTO auth_sessions (
+			id, user_id, device_id, access_token_hash, access_expires_at, refresh_expires_at,
+			authorization_scope, category_id, active_profile_id, profile_grant_expires_at, profile_context_hash
+		) VALUES
+			($9::uuid, $3::uuid, $7::uuid, decode(repeat('a1', 32), 'hex'), now() + interval '1 hour', now() + interval '2 hours', 'global_admin', NULL, $5::uuid, now() + interval '1 hour', decode(repeat('b1', 32), 'hex')),
+			($10::uuid, $3::uuid, $7::uuid, decode(repeat('a2', 32), 'hex'), now() + interval '1 hour', now() + interval '2 hours', 'global_admin', NULL, $6::uuid, now() + interval '1 hour', decode(repeat('b2', 32), 'hex')),
+			($11::uuid, $4::uuid, $8::uuid, decode(repeat('a3', 32), 'hex'), now() + interval '1 hour', now() + interval '2 hours', 'category', $1::uuid, $5::uuid, now() + interval '1 hour', decode(repeat('b3', 32), 'hex'));
+	`, pgx.QueryExecModeSimpleProtocol, categoryAID, categoryBID, adminUserID, memberUserID, profileAID, profileBID,
+		adminDeviceID, memberDeviceID, profileASession, profileBSession, memberSession); err != nil {
 		t.Fatalf("seed collection category access fixtures: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -89,9 +112,20 @@ func TestCollectionCategoryAccessTracksProfilesAndKeepsExplicitAccessAdditive(t 
 
 	expiresAt := time.Now().UTC().Add(time.Hour)
 	principalFor := func(profileID string) auth.Principal {
+		sessionID := profileASession
+		hashByte := byte(0xb1)
+		if profileID == profileBID {
+			sessionID = profileBSession
+			hashByte = 0xb2
+		} else if profileID == profileFutureID {
+			sessionID = futureSession
+			hashByte = 0xb4
+		}
 		return auth.Principal{
-			UserID: adminUserID, Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
+			SessionID: sessionID, UserID: adminUserID, DeviceID: adminDeviceID,
+			Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
 			ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt,
+			ProfileContextHash: bytes.Repeat([]byte{hashByte}, sha256.Size),
 		}
 	}
 	input := func(title string) SaveInput {
@@ -121,6 +155,17 @@ func TestCollectionCategoryAccessTracksProfilesAndKeepsExplicitAccessAdditive(t 
 
 	if _, err := pool.Exec(ctx, `INSERT INTO profiles (id, category_id, name) VALUES ($1::uuid, $2::uuid, 'Future category profile')`, profileFutureID, categoryAID); err != nil {
 		t.Fatalf("insert future category profile: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO auth_sessions (
+			id, user_id, device_id, access_token_hash, access_expires_at, refresh_expires_at,
+			authorization_scope, category_id, active_profile_id, profile_grant_expires_at, profile_context_hash
+		) VALUES (
+			$1::uuid, $2::uuid, $3::uuid, decode(repeat('a4', 32), 'hex'), now() + interval '1 hour',
+			now() + interval '2 hours', 'global_admin', NULL, $4::uuid, now() + interval '1 hour', decode(repeat('b4', 32), 'hex')
+		)
+	`, futureSession, adminUserID, adminDeviceID, profileFutureID); err != nil {
+		t.Fatalf("seed future profile selection: %v", err)
 	}
 	visible, err = service.List(ctx, principalFor(profileFutureID))
 	if err != nil || len(visible) != 1 || visible[0].ID != first.ID {
@@ -179,8 +224,10 @@ func TestCollectionCategoryAccessTracksProfilesAndKeepsExplicitAccessAdditive(t 
 	category := categoryAID
 	active := profileAID
 	member := auth.Principal{
-		UserID: memberUserID, Role: "member", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &category,
+		SessionID: memberSession, UserID: memberUserID, DeviceID: memberDeviceID,
+		Role: "member", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &category,
 		ActiveProfileID: &active, ProfileGrantExpiresAt: &expiresAt,
+		ProfileContextHash: bytes.Repeat([]byte{0xb3}, sha256.Size),
 	}
 	if _, err := service.Management(ctx, member, first.ID); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("category policy management error = %v, want %v", err, ErrForbidden)

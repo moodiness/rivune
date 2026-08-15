@@ -70,6 +70,24 @@ func TestDeviceQuotaExactLimitOwnershipAndDeviceCodeExchange(t *testing.T) {
 		t.Fatal("quota-rejected device authorization was consumed")
 	}
 	assertDeviceCount(t, pool, fixture.userID, maximumDevicesPerUser)
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE device_authorizations SET consumed_at = now()
+		WHERE device_code_hash = $1
+	`, tokenDigest(deviceCode)); err != nil {
+		t.Fatalf("mark quota authorization consumed: %v", err)
+	}
+	if _, err := service.ExchangeDeviceAuthorization(context.Background(), deviceCode); !errors.Is(err, ErrInvalidDeviceCode) {
+		t.Fatalf("consumed exchange at quota error = %v, want %v", err, ErrInvalidDeviceCode)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE device_authorizations SET consumed_at = NULL, expires_at = now() - interval '1 second'
+		WHERE device_code_hash = $1
+	`, tokenDigest(deviceCode)); err != nil {
+		t.Fatalf("expire quota authorization: %v", err)
+	}
+	if _, err := service.ExchangeDeviceAuthorization(context.Background(), deviceCode); !errors.Is(err, ErrDeviceAuthorizationExpired) {
+		t.Fatalf("expired exchange at quota error = %v, want %v", err, ErrDeviceAuthorizationExpired)
+	}
 }
 
 func TestDeviceQuotaSerializesLoginAndDeviceCodeAcrossServices(t *testing.T) {

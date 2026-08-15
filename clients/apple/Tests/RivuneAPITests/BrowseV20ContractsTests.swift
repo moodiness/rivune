@@ -141,6 +141,91 @@ final class BrowseV20ContractsTests: XCTestCase {
         XCTAssertNil(clearedRequest.value(forHTTPHeaderField: "X-Rivune-Profile-Context"))
     }
 
+    func testProfileMutationCancelledBeforeTransportDoesNotReachServer() async throws {
+        let transport = BrowseTransport()
+        let client = try makeClient(transport)
+
+        let select = Task { try await client.selectProfile(id: folderId) }
+        select.cancel()
+        do {
+            _ = try await select.value
+            XCTFail("A select cancelled before transport must not be sent")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        XCTAssertFalse(transport.apiRequests().contains { $0.url?.path.hasSuffix("/select") == true })
+    }
+
+    func testCancelledSelectReconcilesProfileContextAfterSuccessfulResponse() async throws {
+        let server = URL(string: "https://example.test")!
+        let store = BrowseCredentials(token: BrowseTransport.token(access: "access"))
+        let transport = BrowseTransport()
+        let client = try RivuneAPIClient(serverURL: server, transport: transport, credentialStore: store)
+        transport.blockNextResponse(pathSuffix: "/select")
+
+        let select = Task { try await client.selectProfile(id: folderId) }
+        await transport.waitUntilResponseBlocked()
+        select.cancel()
+        transport.releaseBlockedResponse()
+
+        do {
+            _ = try await select.value
+            XCTFail("Cancellation after a successful select response must be surfaced")
+        } catch is CancellationError {
+            // Expected after the committed profile context is reconciled.
+        }
+
+        let persistedSelection = try await store.load(for: server)
+        XCTAssertEqual(persistedSelection?.profileContext, "opaque-profile-context")
+        _ = try await client.collections()
+        let nextRequest = try XCTUnwrap(transport.apiRequests().last { $0.url?.path.hasSuffix("/collections") == true })
+        XCTAssertEqual(nextRequest.value(forHTTPHeaderField: "X-Rivune-Profile-Context"), "opaque-profile-context")
+
+        let restoredTransport = BrowseTransport()
+        let restoredClient = try RivuneAPIClient(serverURL: server, transport: restoredTransport, credentialStore: store)
+        let didRestoreSelection = try await restoredClient.restoreSession()
+        XCTAssertTrue(didRestoreSelection)
+        _ = try await restoredClient.collections()
+        let restoredRequest = try XCTUnwrap(restoredTransport.apiRequests().last { $0.url?.path.hasSuffix("/collections") == true })
+        XCTAssertEqual(restoredRequest.value(forHTTPHeaderField: "X-Rivune-Profile-Context"), "opaque-profile-context")
+    }
+
+    func testCancelledClearReconcilesProfileContextAfterSuccessfulResponse() async throws {
+        let server = URL(string: "https://example.test")!
+        let store = BrowseCredentials(token: BrowseTransport.token(access: "access"))
+        let transport = BrowseTransport()
+        let client = try RivuneAPIClient(serverURL: server, transport: transport, credentialStore: store)
+        _ = try await client.selectProfile(id: folderId)
+        transport.blockNextResponse(pathSuffix: "/profiles/selection")
+
+        let clear = Task { try await client.clearProfileSelection() }
+        await transport.waitUntilResponseBlocked()
+        clear.cancel()
+        transport.releaseBlockedResponse()
+
+        do {
+            try await clear.value
+            XCTFail("Cancellation after a successful clear response must be surfaced")
+        } catch is CancellationError {
+            // Expected after the cleared profile context is reconciled.
+        }
+
+        let persistedClear = try await store.load(for: server)
+        XCTAssertNil(persistedClear?.profileContext)
+        _ = try await client.collections()
+        let nextRequest = try XCTUnwrap(transport.apiRequests().last { $0.url?.path.hasSuffix("/collections") == true })
+        XCTAssertNil(nextRequest.value(forHTTPHeaderField: "X-Rivune-Profile-Context"))
+
+        let restoredTransport = BrowseTransport()
+        let restoredClient = try RivuneAPIClient(serverURL: server, transport: restoredTransport, credentialStore: store)
+        let didRestoreClear = try await restoredClient.restoreSession()
+        XCTAssertTrue(didRestoreClear)
+        _ = try await restoredClient.collections()
+        let restoredRequest = try XCTUnwrap(restoredTransport.apiRequests().last { $0.url?.path.hasSuffix("/collections") == true })
+        XCTAssertNil(restoredRequest.value(forHTTPHeaderField: "X-Rivune-Profile-Context"))
+    }
+
     func testAuthenticatedResponseCannotCrossProfileClear() async throws {
         let transport = BrowseTransport()
         let client = try makeClient(transport)
@@ -242,6 +327,10 @@ private final class BrowseTransport: HTTPTransport, @unchecked Sendable {
     private var requestIsBlocked = false
     private var blockedRequestContinuation: CheckedContinuation<Void, Never>?
     private var blockedRequestWaiters: [CheckedContinuation<Void, Never>] = []
+    private var blockedResponsePathSuffix: String?
+    private var responseIsBlocked = false
+    private var blockedResponseContinuation: CheckedContinuation<Void, Never>?
+    private var blockedResponseWaiters: [CheckedContinuation<Void, Never>] = []
 
     static func token(access: String) -> TokenPair {
         TokenPair(tokenType: "Bearer", accessToken: access, accessTokenExpiresAt: "2026-08-12T12:00:00Z", refreshToken: "refresh", refreshTokenExpiresAt: "2026-09-12T12:00:00Z", sessionId: UUID(uuidString: "88888888-8888-4888-8888-888888888888")!, deviceId: UUID(uuidString: "99999999-9999-4999-8999-999999999999")!, authorizationScope: .globalAdministrator, category: nil)
@@ -278,6 +367,30 @@ private final class BrowseTransport: HTTPTransport, @unchecked Sendable {
         }
         continuation?.resume()
     }
+    func blockNextResponse(pathSuffix: String) {
+        lock.withLock { blockedResponsePathSuffix = pathSuffix }
+    }
+
+    func waitUntilResponseBlocked() async {
+        if lock.withLock({ responseIsBlocked }) { return }
+        await withCheckedContinuation { continuation in
+            let resumeImmediately = lock.withLock { () -> Bool in
+                if responseIsBlocked { return true }
+                blockedResponseWaiters.append(continuation)
+                return false
+            }
+            if resumeImmediately { continuation.resume() }
+        }
+    }
+
+    func releaseBlockedResponse() {
+        let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            responseIsBlocked = false
+            defer { blockedResponseContinuation = nil }
+            return blockedResponseContinuation
+        }
+        continuation?.resume()
+    }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let path = request.url!.path
@@ -308,8 +421,16 @@ private final class BrowseTransport: HTTPTransport, @unchecked Sendable {
             return response(request, body: Data(BrowseV20ContractsTests.collectionJSON.utf8))
         }
         if path.hasSuffix("/auth/refresh") { return response(request, body: Data(Self.tokenJSON(access: "refreshed").utf8)) }
-        if path.hasSuffix("/select") { return response(request, body: Data(profileSelection.utf8)) }
-        if path.hasSuffix("/selection") || request.httpMethod == "DELETE" { return response(request, status: 204, body: Data()) }
+        if path.hasSuffix("/select") {
+            let result = response(request, body: Data(profileSelection.utf8))
+            await holdResponseIfNeeded(path: path)
+            return result
+        }
+        if path.hasSuffix("/selection") || request.httpMethod == "DELETE" {
+            let result = response(request, status: 204, body: Data())
+            await holdResponseIfNeeded(path: path)
+            return result
+        }
         if path.contains("/folders/") { return response(request, body: Data(BrowseV20ContractsTests.folderJSON.utf8)) }
         if path.contains("/addons/") { return response(request, body: path.contains("/resources/") || path.contains("/search/") ? Data("{\"results\":[],\"errors\":[]}".utf8) : Data(BrowseV20ContractsTests.resourceJSON.utf8)) }
         if path.hasSuffix("/titles/resolve") { return response(request, body: Data("{\"titleId\":\"44444444-4444-4444-8444-444444444444\",\"mediaType\":\"tv\",\"provider\":\"addon\",\"externalId\":\"33333333-3333-4333-8333-333333333333:channel/1\",\"resourceId\":\"channel/1\",\"title\":\"News\"}".utf8)) }
@@ -318,6 +439,24 @@ private final class BrowseTransport: HTTPTransport, @unchecked Sendable {
         if path.contains("/library/") { return response(request, body: Data("{\"titleId\":\"44444444-4444-4444-8444-444444444444\",\"mediaType\":\"tv\",\"available\":true,\"addedAt\":\"2026-08-12T00:00:00Z\",\"updatedAt\":\"2026-08-12T00:00:00Z\"}".utf8)) }
         if path.hasSuffix("/notifications") { return response(request, body: Data("{\"notifications\":[{\"id\":\"9007199254740993\",\"message\":\"hello\",\"senderUsername\":\"admin\",\"createdAt\":\"2026-08-12T00:00:00Z\"}]}".utf8)) }
         return response(request, body: Data("{\"results\":[],\"errors\":[]}".utf8))
+    }
+
+    private func holdResponseIfNeeded(path: String) async {
+        let shouldBlock = lock.withLock { () -> Bool in
+            guard let blockedResponsePathSuffix, path.hasSuffix(blockedResponsePathSuffix) else { return false }
+            self.blockedResponsePathSuffix = nil
+            return true
+        }
+        guard shouldBlock else { return }
+        await withCheckedContinuation { continuation in
+            let waiters = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+                blockedResponseContinuation = continuation
+                responseIsBlocked = true
+                defer { blockedResponseWaiters.removeAll() }
+                return blockedResponseWaiters
+            }
+            waiters.forEach { $0.resume() }
+        }
     }
 
     private var profileSelection: String {

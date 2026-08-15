@@ -139,7 +139,7 @@ func (handler *Handler) writeLatestItems(response http.ResponseWriter, request *
 	if parentID != "" && handler.collections != nil {
 		value, collectionErr := handler.resolveCollectionView(request.Context(), session.Principal, parentID)
 		if collectionErr == nil {
-			items, _ := handler.collectionFolderPage(request.Context(), session.Principal, value, latestItemQuery(query))
+			items, _ := handler.collectionFolderPage(request.Context(), session.Principal, value, requestedItemQuery(query))
 			handler.writeJSON(response, http.StatusOK, items)
 			return
 		}
@@ -150,7 +150,7 @@ func (handler *Handler) writeLatestItems(response http.ResponseWriter, request *
 		value, folder, folderErr := handler.findCollectionFolder(request.Context(), session.Principal, parentID)
 		if folderErr == nil {
 			value.Folders = []collection.Folder{folder}
-			page, itemErr := handler.collectionItemPage(request.Context(), session.Principal, latestItemQuery(query), mediaTypes, value, sortBy, sortOrder)
+			page, itemErr := handler.collectionItemPage(request.Context(), session.Principal, requestedItemQuery(query), mediaTypes, value, sortBy, sortOrder)
 			if itemErr != nil {
 				handler.writeCollectionItemError(response, itemErr)
 				return
@@ -164,7 +164,7 @@ func (handler *Handler) writeLatestItems(response http.ResponseWriter, request *
 		}
 	}
 	if parentID != "" {
-		if projected, ok := handler.virtualCollectionPage(request.Context(), session.Principal, latestItemQuery(query), parentID, mediaTypes, sortBy, sortOrder); ok {
+		if projected, ok := handler.virtualCollectionPage(request.Context(), session.Principal, requestedItemQuery(query), parentID, mediaTypes, sortBy, sortOrder); ok {
 			handler.writeJSON(response, http.StatusOK, projected.Items)
 			return
 		}
@@ -201,12 +201,6 @@ func (handler *Handler) writeLatestItems(response http.ResponseWriter, request *
 	}
 	handler.writeJSON(response, http.StatusOK, items)
 }
-
-func latestItemQuery(query ItemQuery) ItemQuery {
-	query.Limit = query.RequestedLimit
-	return query
-}
-
 func (handler *Handler) listLatestCatalogItems(ctx context.Context, principal auth.Principal, query watchstate.CatalogQuery, requested int) ([]watchstate.CatalogTitle, error) {
 	requested = min(max(requested, 0), MaximumLatestQueryLimit)
 	items := make([]watchstate.CatalogTitle, 0, requested)
@@ -225,6 +219,43 @@ func (handler *Handler) listLatestCatalogItems(ctx context.Context, principal au
 		}
 	}
 	return items, nil
+}
+
+func (handler *Handler) listCatalogItems(ctx context.Context, principal auth.Principal, query watchstate.CatalogQuery, requested int) (watchstate.CatalogPage, error) {
+	if err := ctx.Err(); err != nil {
+		return watchstate.CatalogPage{}, err
+	}
+	if requested <= MaximumQueryLimit {
+		return handler.catalog.ListCatalogItems(ctx, principal, query)
+	}
+	requested = min(requested, MaximumLatestQueryLimit)
+	initialOffset := query.Offset
+	items := make([]watchstate.CatalogTitle, 0, requested)
+	total := 0
+	for len(items) < requested {
+		if err := ctx.Err(); err != nil {
+			return watchstate.CatalogPage{}, err
+		}
+		query.Offset = initialOffset + len(items)
+		query.Limit = min(MaximumQueryLimit, requested-len(items))
+		page, err := handler.catalog.ListCatalogItems(ctx, principal, query)
+		if err != nil {
+			return watchstate.CatalogPage{}, err
+		}
+		if err := ctx.Err(); err != nil {
+			return watchstate.CatalogPage{}, err
+		}
+		if len(items) == 0 {
+			total = max(page.Total, 0)
+		}
+		remainingTotal := max(total-query.Offset, 0)
+		available := min(len(page.Items), query.Limit, requested-len(items), remainingTotal)
+		items = append(items, page.Items[:available]...)
+		if available == 0 || len(page.Items) < query.Limit || initialOffset+len(items) >= total {
+			break
+		}
+	}
+	return watchstate.CatalogPage{Items: items, Offset: initialOffset, Limit: requested, Total: total}, nil
 }
 
 func (handler *Handler) handleItem(response http.ResponseWriter, request *http.Request) {
@@ -746,6 +777,7 @@ func (handler *Handler) writeItems(response http.ResponseWriter, request *http.R
 		handler.writeCompatError(response, http.StatusBadRequest, "BadRequest", "Invalid query")
 		return
 	}
+	parsed = requestedItemQuery(parsed)
 	mediaTypes, err := catalogMediaTypes(parsed.IncludeItemTypes)
 	if err != nil {
 		handler.logCompatCatalogEvent(compatCatalogRejectedMessage, "include_item_types")
@@ -859,7 +891,7 @@ func (handler *Handler) writeItems(response http.ResponseWriter, request *http.R
 		handler.writeJSON(response, http.StatusOK, QueryResult[BaseItemDto]{Items: []BaseItemDto{}, TotalRecordCount: 0, StartIndex: parsed.StartIndex})
 		return
 	}
-	catalogLimit := parsed.Limit
+	catalogLimit := min(parsed.Limit, MaximumQueryLimit)
 	countOnly := catalogLimit == 0
 	if countOnly {
 		catalogLimit = 1
@@ -880,7 +912,7 @@ func (handler *Handler) writeItems(response http.ResponseWriter, request *http.R
 		handler.writeCatalogError(response, err)
 		return
 	}
-	page, err := handler.catalog.ListCatalogItems(request.Context(), session.Principal, catalogQuery)
+	page, err := handler.listCatalogItems(request.Context(), session.Principal, catalogQuery, parsed.RequestedLimit)
 	if err != nil {
 		if request.Context().Err() != nil {
 			return
@@ -2165,6 +2197,8 @@ func catalogSort(query ItemQuery, _ *http.Request) (string, string, error) {
 			key = "datelastcontentadded"
 		case strings.EqualFold(value, "ProductionYear"):
 			key = "productionyear"
+		case strings.EqualFold(value, "CommunityRating"):
+			key = "communityrating"
 		default:
 			continue
 		}

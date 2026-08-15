@@ -962,6 +962,46 @@ func (registry *playSessionRegistry) closeSession(ctx context.Context, session A
 	return nil
 }
 
+func (registry *playSessionRegistry) closeCompatibilitySessions(ctx context.Context, sessionIDs []string) {
+	if registry == nil || len(sessionIDs) == 0 {
+		return
+	}
+	revoked := make(map[string]struct{}, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		if sessionID != "" {
+			revoked[sessionID] = struct{}{}
+		}
+	}
+	if len(revoked) == 0 {
+		return
+	}
+	now := registry.now().UTC()
+	revokedUntil := now.Add(registry.absoluteTTL)
+	if registry.absoluteTTL <= 0 {
+		revokedUntil = now.Add(defaultPlaySessionAbsoluteTTL)
+	}
+	entries := make([]*playSessionEntry, 0)
+	registry.mu.Lock()
+	for sessionID := range revoked {
+		if current := registry.revokedSessions[sessionID]; !current.After(revokedUntil) {
+			registry.revokedSessions[sessionID] = revokedUntil
+		}
+		delete(registry.deviceProfiles, sessionID)
+	}
+	for playID, entry := range registry.entries {
+		if _, matched := revoked[entry.compatSessionID]; !matched {
+			continue
+		}
+		delete(registry.entries, playID)
+		entries = append(entries, entry)
+		if current := registry.revokedSessions[entry.compatSessionID]; entry.expiresAt.After(current) {
+			registry.revokedSessions[entry.compatSessionID] = entry.expiresAt
+		}
+	}
+	registry.mu.Unlock()
+	registry.closeEntries(ctx, entries)
+}
+
 func (registry *playSessionRegistry) run(ctx context.Context) {
 	if registry == nil {
 		return

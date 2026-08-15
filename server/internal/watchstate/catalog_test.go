@@ -60,6 +60,10 @@ func TestNormalizeCatalogQueryBoundsAndTypes(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(defaults.MediaTypes, []string{"episode", "movie", "season", "series", "video"}) {
 		t.Fatalf("unexpected default catalog media types: %+v error %v", defaults, err)
 	}
+	ratingSort, err := normalizeCatalogQuery(CatalogQuery{SortBy: "communityrating", SortOrder: "descending", Limit: 20})
+	if err != nil || ratingSort.SortBy != "communityrating" || ratingSort.SortOrder != "descending" {
+		t.Fatalf("unexpected community rating sort: %+v error %v", ratingSort, err)
+	}
 	for _, invalid := range []CatalogQuery{
 		{Limit: 0},
 		{Limit: MaximumCatalogPageSize + 1},
@@ -69,7 +73,6 @@ func TestNormalizeCatalogQueryBoundsAndTypes(t *testing.T) {
 		{MediaTypes: []string{"tv"}, Limit: 20},
 		{MinCommunityRating: float64Pointer(-0.1), Limit: 20},
 		{MinCommunityRating: float64Pointer(10.1), Limit: 20},
-		{SortBy: "communityrating", SortOrder: "ascending", Limit: 20},
 		{SortBy: "sortname,productionyear,datecreated,sortname", SortOrder: "ascending", Limit: 20},
 	} {
 		if _, err := normalizeCatalogQuery(invalid); !errors.Is(err, ErrInvalidInput) {
@@ -278,15 +281,12 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 
 	profileOneID := "11111111-1111-4111-8111-111111111111"
 	profileTwoID := "22222222-2222-4222-8222-222222222222"
-	expiresAt := time.Now().UTC().Add(time.Hour)
-	profileOne := auth.Principal{
+	profileOne := captureActiveProfileTestSession(t, ctx, pool, auth.Principal{
 		Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
-		ActiveProfileID: &profileOneID, ProfileGrantExpiresAt: &expiresAt,
-	}
-	profileTwo := auth.Principal{
+	}, profileOneID)
+	profileTwo := captureActiveProfileTestSession(t, ctx, pool, auth.Principal{
 		Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
-		ActiveProfileID: &profileTwoID, ProfileGrantExpiresAt: &expiresAt,
-	}
+	}, profileTwoID)
 	service := NewService(pool, time.UTC)
 
 	var beforeCount int

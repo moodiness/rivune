@@ -169,11 +169,78 @@ paths:
   /QuickConnect/Enabled:
     get:
       tags: [Discovery]
-      summary: Report Quick Connect as unsupported
+      summary: Report whether real Quick Connect is wired
       operationId: getJellyfinQuickConnectEnabled
       security: []
       responses:
-        "200": { $ref: "#/components/responses/QuickConnectDisabled" }
+        "200": { $ref: "#/components/responses/QuickConnectEnabled" }
+        "404": { $ref: "#/components/responses/CompatibilityNotRegistered" }
+        default: { $ref: "#/components/responses/CompatError" }
+  /QuickConnect/Initiate:
+    post:
+      tags: [Authentication]
+      summary: Initiate a profile-bound Quick Connect request
+      description: Requires a stable DeviceId in MediaBrowser client metadata. The returned profile-bound code expires after 10 minutes and is approved by a signed-in manager at the Rivune `/pair` page. This local HTTP contract does not claim validation by a named client application.
+      operationId: initiateJellyfinQuickConnect
+      security: []
+      parameters:
+        - { $ref: "#/components/parameters/ClientAuthorization" }
+        - { $ref: "#/components/parameters/XEmbyClientAuthorization" }
+        - { $ref: "#/components/parameters/XMediaBrowserClientAuthorization" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, maxProperties: 0 }
+      responses:
+        "200": { $ref: "#/components/responses/QuickConnectResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/CompatibilityNotRegistered" }
+        "429": { $ref: "#/components/responses/QuickConnectCapacity" }
+        default: { $ref: "#/components/responses/CompatError" }
+  /QuickConnect/Connect:
+    get:
+      tags: [Authentication]
+      summary: Poll a Quick Connect request without consuming it
+      description: The initiating DeviceId must be repeated. AppVersion is owned by initiation and returned from persisted status; polling metadata cannot replace it. Malformed or out-of-bounds secrets return 400, while an unknown well-formed secret uses the same opaque 401 response as other unavailable authorization state.
+      operationId: pollJellyfinQuickConnect
+      security: []
+      parameters:
+        - { $ref: "#/components/parameters/ClientAuthorization" }
+        - { $ref: "#/components/parameters/XEmbyClientAuthorization" }
+        - { $ref: "#/components/parameters/XMediaBrowserClientAuthorization" }
+        - name: secret
+          in: query
+          required: true
+          schema: { type: string, pattern: "^rivune_dc_[A-Za-z0-9_-]+$", maxLength: 128 }
+          description: Exact bounded Quick Connect secret syntax. Malformed or oversized values are rejected before lookup.
+      responses:
+        "200": { $ref: "#/components/responses/QuickConnectResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/CompatibilityNotRegistered" }
+        default: { $ref: "#/components/responses/CompatError" }
+  /Users/AuthenticateWithQuickConnect:
+    post:
+      tags: [Authentication]
+      summary: Consume an approved Quick Connect request
+      description: Single-use exchange bound to the initiating DeviceId. Malformed or out-of-bounds secrets return 400, while unknown well-formed, pending, expired, consumed, or wrong-device state shares the opaque 401 response. A successful exchange creates a category-scoped native session bound to the approved manageable profile and then an audience-specific compatibility session; no persistent profile application password is created. This local HTTP contract does not claim validation by a named client application.
+      operationId: authenticateJellyfinWithQuickConnect
+      security: []
+      parameters:
+        - { $ref: "#/components/parameters/ClientAuthorization" }
+        - { $ref: "#/components/parameters/XEmbyClientAuthorization" }
+        - { $ref: "#/components/parameters/XMediaBrowserClientAuthorization" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AuthenticateWithQuickConnect" }
+      responses:
+        "200": { $ref: "#/components/responses/AuthenticationResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/CompatibilityNotRegistered" }
         default: { $ref: "#/components/responses/CompatError" }
   /Users/AuthenticateByName:
@@ -381,6 +448,7 @@ paths:
       security: []
       responses:
         "200": { $ref: "#/components/responses/BrandingConfiguration" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         default: { $ref: "#/components/responses/CompatError" }
   /Branding/Splashscreen:
     get:
@@ -390,6 +458,7 @@ paths:
       security: []
       responses:
         "204": { $ref: "#/components/responses/NoContent" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         default: { $ref: "#/components/responses/CompatError" }
   /DisplayPreferences/{displayPreferencesId}:
     parameters:
@@ -767,7 +836,7 @@ paths:
       description: Serves registered local bytes without redirecting upstream. A valid opaque tag may be used as an anonymous bearer capability so Jellyfin clients that omit credentials on image requests can load projected artwork; tagless requests and requests carrying invalid credentials remain unauthorized. Anonymous tagged delivery intentionally proxies the registered original bytes and ignores transform hints, matching compatible servers for remote artwork, including WebP. Authenticated width/fill/max/quality transforms remain bounded and deterministic.
       operationId: getJellyfinImage
       security:
-        - {}
+        - ArtworkTagCapability: []
         - XEmbyToken: []
         - XMediaBrowserToken: []
         - AuthorizationToken: []
@@ -801,7 +870,7 @@ paths:
       summary: Inspect original artwork
       operationId: headJellyfinImage
       security:
-        - {}
+        - ArtworkTagCapability: []
         - XEmbyToken: []
         - XMediaBrowserToken: []
         - AuthorizationToken: []
@@ -841,7 +910,7 @@ paths:
       description: Index zero follows the same authenticated-or-opaque-tag bearer contract as the non-indexed image route.
       operationId: getJellyfinIndexedImage
       security:
-        - {}
+        - ArtworkTagCapability: []
         - XEmbyToken: []
         - XMediaBrowserToken: []
         - AuthorizationToken: []
@@ -876,7 +945,7 @@ paths:
       description: Index zero follows the same authenticated-or-opaque-tag bearer contract as the non-indexed image route.
       operationId: headJellyfinIndexedImage
       security:
-        - {}
+        - ArtworkTagCapability: []
         - XEmbyToken: []
         - XMediaBrowserToken: []
         - AuthorizationToken: []
@@ -2036,6 +2105,13 @@ components:
       description: >
         Optionally `MediaBrowser`/`Emby`-prefixed authorization parameters containing
         the compatibility `Token`, with optional bounded client metadata.
+    ArtworkTagCapability:
+      type: apiKey
+      in: query
+      name: tag
+      description: >
+        Registered opaque artwork capability accepted without a compatibility credential.
+        Missing, unknown, stale, or foreign tags fail closed.
     ApiKeyQuery:
       type: apiKey
       in: query
@@ -2061,8 +2137,10 @@ components:
       in: header
       required: false
       description: >
-        One MediaBrowser/Emby client-metadata header is required for login. Multiple
-        transports must carry identical parameter sets.
+        One MediaBrowser/Emby client-metadata header is required. AuthenticateByName
+        requires Client, Device, DeviceId, and Version; Quick Connect requires stable
+        DeviceId and accepts the other fields when supplied. Multiple transports must
+        carry identical parameter sets.
       schema: { type: string, maxLength: 2048 }
     XEmbyClientAuthorization:
       name: X-Emby-Authorization
@@ -2164,7 +2242,12 @@ components:
       name: Limit
       in: query
       required: false
-      schema: { type: integer, minimum: 0, maximum: 1008, default: 100, description: Values through 1008 are accepted for pinned clients. General catalogue pages remain capped at 200; Items/Latest fulfills the requested window through bounded internal pages of at most 200. Zero returns an empty result. }
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 1008
+        default: 100
+        description: "Values through 1008 are honored by /Items, /Users/{userId}/Items, and /Items/Latest through bounded internal pages of at most 200. Other routes may impose a tighter route-specific cap. Zero returns an empty result where supported."
     StateLimit:
       name: Limit
       in: query
@@ -2377,7 +2460,7 @@ components:
       name: tag
       in: query
       required: false
-      description: Optional registered 64-hex cache selector; it must match the authenticated profile's requested item and image type and never replaces authentication.
+      description: Registered 64-hex cache selector. Without another credential it is required and acts as an opaque artwork capability; with a credential it must match the requested item and image type.
       schema: { type: string, pattern: "^[0-9a-f]{64}$" }
     ImageWidth:
       name: width
@@ -2790,7 +2873,7 @@ components:
       schema: { type: integer, const: 5 }
   responses:
     CompatibilityNotRegistered:
-      description: The feature-gated compatibility adapter is disabled, so the exact route is not registered.
+      description: The feature-gated compatibility adapter is disabled or the optional operation is unavailable, so the exact route is not registered.
       content:
         text/plain:
           schema: { type: string }
@@ -2813,11 +2896,26 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/SystemEndpointInfo" }
-    QuickConnectDisabled:
-      description: Quick Connect is not implemented.
+    QuickConnectEnabled:
+      description: True only when initiation, approval, polling, and single-use exchange are wired.
       content:
         application/json:
-          schema: { type: boolean, const: false }
+          schema: { type: boolean }
+    QuickConnectResult:
+      description: Non-consuming profile-bound Quick Connect status using bounded Jellyfin client metadata fields; this response shape is a local protocol contract, not named-client validation.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/QuickConnectResult" }
+    QuickConnectCapacity:
+      description: The bounded outstanding Quick Connect request capacity is exhausted.
+      headers:
+        Retry-After:
+          required: true
+          description: Fixed delay in seconds before retrying initiation.
+          schema: { type: integer, const: 60 }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/CompatErrorResponse" }
     AuthenticationResult:
       description: Bound profile, session metadata, and newly issued compatibility credential.
       content:
@@ -3181,9 +3279,67 @@ components:
         Content-Length: { $ref: "#/components/headers/ContentLength" }
         Cache-Control: { schema: { type: string, const: "private, no-cache" } }
     WebSocketUpgrade:
-      description: WebSocket protocol switch with no HTTP response body, followed by bounded profile-authorized realtime frames.
-      x-websocket-message-schema: { $ref: "#/components/schemas/WebSocketMessageDto" }
-      x-websocket-input-schema: { $ref: "#/components/schemas/WebSocketInputDto" }
+      description: WebSocket protocol switch with no HTTP response body, followed by bounded profile-authorized realtime frames. The extension fields below define the accepted client and emitted server frame contracts inline.
+      x-websocket-message-schema:
+        oneOf:
+          - type: object
+            additionalProperties: false
+            required: [MessageType, MessageId, Data]
+            properties:
+              MessageType: { type: string, const: ForceKeepAlive }
+              MessageId: { $ref: "#/components/schemas/UUID" }
+              Data: { type: integer, const: 60 }
+          - type: object
+            additionalProperties: false
+            required: [MessageType, MessageId]
+            properties:
+              MessageType: { type: string, const: KeepAlive }
+              MessageId: { $ref: "#/components/schemas/UUID" }
+          - type: object
+            additionalProperties: false
+            required: [MessageType, MessageId, Data]
+            properties:
+              MessageType: { type: string, const: Sessions }
+              MessageId: { $ref: "#/components/schemas/UUID" }
+              Data: { type: array, maxItems: 16, items: { $ref: "#/components/schemas/SessionInfoDto" } }
+          - type: object
+            additionalProperties: false
+            required: [MessageType, MessageId, Data]
+            properties:
+              MessageType: { type: string, const: UserDataChanged }
+              MessageId: { $ref: "#/components/schemas/UUID" }
+              Data:
+                type: object
+                additionalProperties: false
+                required: [UserId, UserDataList]
+                properties:
+                  UserId: { $ref: "#/components/schemas/UUID" }
+                  UserDataList:
+                    type: array
+                    minItems: 1
+                    maxItems: 1
+                    items: { $ref: "#/components/schemas/UserItemDataDto" }
+      x-websocket-input-schema:
+        oneOf:
+          - type: object
+            additionalProperties: false
+            required: [MessageType]
+            properties:
+              MessageType: { type: string, const: KeepAlive }
+              MessageId: { type: string, maxLength: 128 }
+          - type: object
+            additionalProperties: false
+            required: [MessageType]
+            properties:
+              MessageType: { type: string, const: SessionsStart }
+              MessageId: { type: string, maxLength: 128 }
+              Data: { type: string, pattern: "^[0-9]{1,5},[0-9]{4,5}$", description: "Optional initial delay and repeat interval in milliseconds, each runtime-bounded to at most 60 seconds." }
+          - type: object
+            additionalProperties: false
+            required: [MessageType]
+            properties:
+              MessageType: { type: string, const: SessionsStop }
+              MessageId: { type: string, maxLength: 128 }
     GroupingOptions:
       description: Typed empty list; Rivune exposes no grouping plugins or special views.
       content:
@@ -3342,6 +3498,30 @@ components:
       description: >
         If both aliases in a pair are sent they must be identical. The JSON body is
         limited to 16 KiB and unknown properties or multiple JSON values are rejected.
+    AuthenticateWithQuickConnect:
+      type: object
+      additionalProperties: false
+      required: [Secret]
+      properties:
+        Secret:
+          type: string
+          pattern: "^rivune_dc_[A-Za-z0-9_-]+$"
+          maxLength: 128
+          writeOnly: true
+          description: Exact bounded Quick Connect secret syntax; malformed or oversized values are rejected before lookup.
+    QuickConnectResult:
+      type: object
+      additionalProperties: false
+      required: [Authenticated, Secret, Code, DateAdded, DeviceId, DeviceName, AppName, AppVersion]
+      properties:
+        Authenticated: { type: boolean }
+        Secret: { type: string, pattern: "^rivune_dc_[A-Za-z0-9_-]+$", maxLength: 128 }
+        Code: { type: string, pattern: "^[A-Z2-9]{4}-[A-Z2-9]{4}$" }
+        DateAdded: { type: string, format: date-time }
+        DeviceId: { type: string, minLength: 1, maxLength: 128 }
+        DeviceName: { type: string, minLength: 1, maxLength: 120 }
+        AppName: { type: string, minLength: 1, maxLength: 32 }
+        AppVersion: { type: string, minLength: 1, maxLength: 32, description: Normalized version persisted at initiation; later polling metadata cannot replace it. }
     AuthenticationResult:
       type: object
       additionalProperties: false
@@ -3478,17 +3658,6 @@ components:
         SubtitleStreamIndex: { type: integer, minimum: -1, maximum: 2047 }
         MediaSourceId: { type: string, minLength: 1, maxLength: 256 }
         PlayMethod: { type: string, enum: [DirectPlay, DirectStream, Transcode] }
-    UserDataChangeInfo:
-      type: object
-      additionalProperties: false
-      required: [UserId, UserDataList]
-      properties:
-        UserId: { $ref: "#/components/schemas/UUID" }
-        UserDataList:
-          type: array
-          minItems: 1
-          maxItems: 1
-          items: { $ref: "#/components/schemas/UserItemDataDto" }
     ClientCapabilitiesDto:
       type: object
       additionalProperties: false
@@ -3640,6 +3809,7 @@ components:
         ImageTag: { type: string, pattern: "^[0-9a-f]{64}$" }
         Width: { type: integer, minimum: 1, maximum: 16384 }
         Height: { type: integer, minimum: 1, maximum: 16384 }
+        Size: { type: integer, format: int64, minimum: 1, maximum: 12582912 }
     UserItemDataDto:
       type: object
       additionalProperties: false
@@ -3964,56 +4134,6 @@ components:
         ShowSidebar: { type: boolean }
         Client: { type: string, maxLength: 64 }
       description: Missing fields take stable zero defaults; Id and Client are canonicalized from the selectors. The JSON body is limited to 16 KiB and preferences are stored without changing global Rivune behavior.
-    WebSocketMessageDto:
-      oneOf:
-        - type: object
-          additionalProperties: false
-          required: [MessageType, MessageId, Data]
-          properties:
-            MessageType: { type: string, const: ForceKeepAlive }
-            MessageId: { $ref: "#/components/schemas/UUID" }
-            Data: { type: integer, const: 60 }
-        - type: object
-          additionalProperties: false
-          required: [MessageType, MessageId]
-          properties:
-            MessageType: { type: string, const: KeepAlive }
-            MessageId: { $ref: "#/components/schemas/UUID" }
-        - type: object
-          additionalProperties: false
-          required: [MessageType, MessageId, Data]
-          properties:
-            MessageType: { type: string, const: Sessions }
-            MessageId: { $ref: "#/components/schemas/UUID" }
-            Data: { type: array, maxItems: 16, items: { $ref: "#/components/schemas/SessionInfoDto" } }
-        - type: object
-          additionalProperties: false
-          required: [MessageType, MessageId, Data]
-          properties:
-            MessageType: { type: string, const: UserDataChanged }
-            MessageId: { $ref: "#/components/schemas/UUID" }
-            Data: { $ref: "#/components/schemas/UserDataChangeInfo" }
-    WebSocketInputDto:
-      oneOf:
-        - type: object
-          additionalProperties: false
-          required: [MessageType]
-          properties:
-            MessageType: { type: string, const: KeepAlive }
-            MessageId: { type: string, maxLength: 128 }
-        - type: object
-          additionalProperties: false
-          required: [MessageType]
-          properties:
-            MessageType: { type: string, const: SessionsStart }
-            MessageId: { type: string, maxLength: 128 }
-            Data: { type: string, pattern: "^[0-9]{1,5},[0-9]{4,5}$", description: "Optional initial delay and repeat interval in milliseconds, each runtime-bounded to at most 60 seconds." }
-        - type: object
-          additionalProperties: false
-          required: [MessageType]
-          properties:
-            MessageType: { type: string, const: SessionsStop }
-            MessageId: { type: string, maxLength: 128 }
     QueryFiltersLegacy:
       type: object
       additionalProperties: false

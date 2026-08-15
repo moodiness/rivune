@@ -25,6 +25,12 @@ type NativeAuthentication interface {
 	LogoutLinkedSession(context.Context, auth.Principal, string) error
 }
 
+type NativeQuickConnect interface {
+	BeginJellyfinQuickConnect(context.Context, auth.JellyfinQuickConnectInput) (auth.DeviceAuthorization, error)
+	PollJellyfinQuickConnect(context.Context, string, string) (auth.JellyfinQuickConnectStatus, error)
+	ExchangeJellyfinQuickConnect(context.Context, string, string) (auth.JellyfinQuickConnectResult, error)
+}
+
 // JellyfinProfileLogin is injected by the HTTP composition root so native and
 // compatibility login share the same source and opaque-username admission budgets.
 type JellyfinProfileLogin func(context.Context, auth.JellyfinProfileLoginInput) (auth.JellyfinProfileLoginResult, error)
@@ -35,15 +41,28 @@ type CompatLoginInput struct {
 	Client   ClientIdentity
 }
 
+type QuickConnectStatus struct {
+	Secret        string
+	Code          string
+	Authenticated bool
+	DateAdded     time.Time
+	DeviceID      string
+	DeviceName    string
+	AppName       string
+	AppVersion    string
+}
+
 type LoginResult struct {
 	Credential CompatCredential
 	Profile    profile.Profile
 	Principal  auth.Principal
+	Client     ClientIdentity
 }
 
 type AuthenticationService struct {
 	login                     JellyfinProfileLogin
 	native                    NativeAuthentication
+	quickConnect              NativeQuickConnect
 	sessions                  *SessionStore
 	failedLoginCleanupTimeout time.Duration
 }
@@ -52,13 +71,15 @@ func NewAuthenticationService(login JellyfinProfileLogin, native NativeAuthentic
 	if login == nil || native == nil || sessions == nil {
 		return nil, fmt.Errorf("compatibility authentication dependencies are required")
 	}
-	return &AuthenticationService{
+	service := &AuthenticationService{
 		login: login, native: native, sessions: sessions,
 		failedLoginCleanupTimeout: defaultFailedLoginCleanupTimeout,
-	}, nil
+	}
+	service.quickConnect, _ = native.(NativeQuickConnect)
+	return service, nil
 }
 
-func (s *AuthenticationService) Login(ctx context.Context, input CompatLoginInput) (result LoginResult, resultErr error) {
+func (s *AuthenticationService) Login(ctx context.Context, input CompatLoginInput) (LoginResult, error) {
 	client, err := normalizeClientIdentity(input.Client)
 	if err != nil {
 		return LoginResult{}, ErrInvalidCompatLogin
@@ -80,7 +101,80 @@ func (s *AuthenticationService) Login(ctx context.Context, input CompatLoginInpu
 		}
 		return LoginResult{}, fmt.Errorf("compatibility profile login: %w", err)
 	}
-	tokens := login.Tokens
+	return s.bindLogin(ctx, login.Tokens, login.ProfileID, login.ProfileName, client)
+}
+
+func (s *AuthenticationService) BeginQuickConnect(ctx context.Context, client ClientIdentity) (QuickConnectStatus, error) {
+	if s.quickConnect == nil {
+		return QuickConnectStatus{}, ErrInvalidCompatLogin
+	}
+	client, err := normalizeClientIdentity(client)
+	if err != nil {
+		return QuickConnectStatus{}, ErrInvalidCompatLogin
+	}
+	platform := client.Client
+	if !boundedUTF8(platform, 1, 32) {
+		platform = "jellyfin"
+	}
+	authorization, err := s.quickConnect.BeginJellyfinQuickConnect(ctx, auth.JellyfinQuickConnectInput{
+		ClientDeviceID: client.DeviceID, DeviceName: client.Device, AppName: platform, AppVersion: client.Version,
+	})
+	if err != nil {
+		return QuickConnectStatus{}, err
+	}
+	return QuickConnectStatus{
+		Secret: authorization.DeviceCode, Code: authorization.UserCode,
+		DateAdded: authorization.CreatedAt, DeviceID: client.DeviceID,
+		DeviceName: client.Device, AppName: platform, AppVersion: client.Version,
+	}, nil
+}
+
+func (s *AuthenticationService) PollQuickConnect(ctx context.Context, secret string, client ClientIdentity) (QuickConnectStatus, error) {
+	if s.quickConnect == nil {
+		return QuickConnectStatus{}, ErrInvalidCompatLogin
+	}
+	client, err := normalizeQuickConnectDeviceIdentity(client)
+	if err != nil {
+		return QuickConnectStatus{}, ErrInvalidCompatLogin
+	}
+	status, err := s.quickConnect.PollJellyfinQuickConnect(ctx, secret, client.DeviceID)
+	if err != nil {
+		return QuickConnectStatus{}, err
+	}
+	return QuickConnectStatus{
+		Secret: status.Secret, Code: status.UserCode, Authenticated: status.Authenticated,
+		DateAdded: status.CreatedAt, DeviceID: status.DeviceID, DeviceName: status.DeviceName,
+		AppName: status.AppName, AppVersion: status.AppVersion,
+	}, nil
+}
+
+func (s *AuthenticationService) LoginQuickConnect(ctx context.Context, secret string, client ClientIdentity) (LoginResult, error) {
+	if s.quickConnect == nil {
+		return LoginResult{}, ErrInvalidCompatLogin
+	}
+	client, err := normalizeQuickConnectDeviceIdentity(client)
+	if err != nil {
+		return LoginResult{}, ErrInvalidCompatLogin
+	}
+	login, err := s.quickConnect.ExchangeJellyfinQuickConnect(ctx, secret, client.DeviceID)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	initiatingClient := ClientIdentity{
+		Client: login.AppName, Device: login.DeviceName, DeviceID: login.DeviceID, Version: login.AppVersion,
+	}
+	return s.bindLogin(ctx, login.Tokens, login.ProfileID, login.ProfileName, initiatingClient)
+}
+
+func normalizeQuickConnectDeviceIdentity(client ClientIdentity) (ClientIdentity, error) {
+	deviceID, ok := canonicalCompatDeviceID(client.DeviceID)
+	if !ok {
+		return ClientIdentity{}, ErrInvalidClientIdentity
+	}
+	return ClientIdentity{DeviceID: deviceID}, nil
+}
+
+func (s *AuthenticationService) bindLogin(ctx context.Context, tokens auth.TokenPair, profileID, profileName string, client ClientIdentity) (result LoginResult, resultErr error) {
 	keepSession := false
 	defer func() {
 		if keepSession {
@@ -88,21 +182,19 @@ func (s *AuthenticationService) Login(ctx context.Context, input CompatLoginInpu
 		}
 		cleanupErr := s.revokeFailedLoginSession(ctx, tokens.SessionID)
 		if cleanupErr != nil {
-			// The cleanup cause may contain driver details. Return only a stable,
-			// credential-free error while making the failed cleanup observable.
 			result = LoginResult{}
 			resultErr = ErrCompatLoginCleanup
 		}
 	}()
 
-	principal, err := s.native.ReloadLinkedPrincipal(ctx, tokens.SessionID, login.ProfileID)
+	principal, err := s.native.ReloadLinkedPrincipal(ctx, tokens.SessionID, profileID)
 	if err != nil {
 		if errors.Is(err, auth.ErrInvalidToken) {
 			return LoginResult{}, ErrInvalidCompatLogin
 		}
 		return LoginResult{}, fmt.Errorf("reload selected compatibility profile: %w", err)
 	}
-	credential, err := s.sessions.Issue(ctx, principal, login.ProfileID, client, tokens.RefreshExpiresAt)
+	credential, err := s.sessions.Issue(ctx, principal, profileID, client, tokens.RefreshExpiresAt)
 	if err != nil {
 		if errors.Is(err, ErrInvalidCompatCredential) {
 			return LoginResult{}, ErrInvalidCompatLogin
@@ -113,8 +205,9 @@ func (s *AuthenticationService) Login(ctx context.Context, input CompatLoginInpu
 	keepSession = true
 	return LoginResult{
 		Credential: credential,
-		Profile:    profile.Profile{ID: login.ProfileID, Name: login.ProfileName, Accessible: true},
+		Profile:    profile.Profile{ID: profileID, Name: profileName, Accessible: true},
 		Principal:  principal,
+		Client:     client,
 	}, nil
 }
 

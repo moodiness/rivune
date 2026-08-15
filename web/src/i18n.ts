@@ -1045,6 +1045,28 @@ const en = {
   "admin.operations.metadata.rootTitles": "Canonical titles",
   "admin.operations.metadata.missingTitles": "Missing payloads",
   "admin.operations.metadata.artworkSnapshots": "Artwork snapshots",
+  "admin.operations.resources.eyebrow": "Operational snapshot",
+  "admin.operations.resources.title": "Service health",
+  "admin.operations.resources.description": "Current service counts, accumulated wait time, and resource age.",
+  "admin.operations.resources.label": "Service health aggregates",
+  "admin.operations.resources.database.title": "PostgreSQL pool",
+  "admin.operations.resources.database.acquired": "Acquired",
+  "admin.operations.resources.database.idle": "Idle",
+  "admin.operations.resources.database.total": "Total",
+  "admin.operations.resources.database.maximum": "Maximum",
+  "admin.operations.resources.database.waits": "Waits",
+  "admin.operations.resources.database.waitTime": "Wait time",
+  "admin.operations.resources.tracking.title": "Tracking outbox",
+  "admin.operations.resources.tracking.pending": "Pending",
+  "admin.operations.resources.tracking.due": "Due",
+  "admin.operations.resources.tracking.oldest": "Oldest age",
+  "admin.operations.resources.addons.title": "Addons",
+  "admin.operations.resources.addons.total": "Installed",
+  "admin.operations.resources.addons.enabled": "Enabled",
+  "admin.operations.resources.addons.latestUpdate": "Latest update age",
+  "admin.operations.resources.playback.title": "Playback",
+  "admin.operations.resources.playback.active": "Active",
+  "admin.operations.resources.playback.transcoding": "Transcoding",
   "admin.operations.schedule.eyebrow": "Durable schedule",
   "admin.operations.schedule.title": "Metadata refresh",
   "admin.operations.schedule.description": "Refresh a bounded set of missing localized payloads on a durable, multi-instance-safe schedule.",
@@ -1453,7 +1475,7 @@ const en = {
 } as const;
 
 export type TranslationKey = keyof typeof en;
-export type TranslationCatalog = Record<TranslationKey, string>;
+export type TranslationCatalog = Partial<Record<TranslationKey, string>>;
 type Replacements = Record<string, string | number>;
 type LocaleModule = { default: TranslationCatalog };
 

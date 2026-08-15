@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/moodiness/rivune/server/internal/metadata"
+	"github.com/moodiness/rivune/server/internal/requestwork"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -415,7 +416,17 @@ func (c *Client) get(ctx context.Context, endpoint string, destination any) erro
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("api-key", c.apiKey)
+	requestwork.PropagateRequestID(request)
+	requestwork.BeginOutbound(ctx, requestwork.Now())
 	response, err := c.httpClient.Do(request)
+	if err != nil {
+		requestwork.EndOutbound(ctx, requestwork.Now(), 0)
+	} else if response.Body == nil {
+		requestwork.EndOutbound(ctx, requestwork.Now(), 0)
+		response.Body = http.NoBody
+	} else {
+		response.Body = requestwork.ObserveBody(ctx, response.Body)
+	}
 	if err != nil {
 		return metadata.NewProviderError(metadata.ErrProviderFailure, err, 0, endpoint)
 	}

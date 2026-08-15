@@ -226,6 +226,7 @@ func (service *Service) fetchIntroDBMarkers(ctx context.Context, input MarkerInp
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", "Rivune/1")
+	requestwork.PropagateRequestID(request)
 	started := requestwork.Now()
 	requestwork.BeginOutbound(ctx, started)
 	response, err := service.introDBClient.Do(request)

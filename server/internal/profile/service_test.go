@@ -528,6 +528,20 @@ func TestCategoryBoundariesRejectDirectAndBatchProfileTampering(t *testing.T) {
 	`, profileAID).Scan(&auditsAfter); err != nil || auditsAfter != auditsBefore {
 		t.Fatalf("equivalent category spelling emitted move audit: before=%d after=%d err=%v", auditsBefore, auditsAfter, err)
 	}
+	profileContextHash := bytes.Repeat([]byte{0xb7}, 32)
+	if err := pool.QueryRow(ctx, `
+		UPDATE auth_sessions
+		SET active_profile_id = $2::uuid,
+		    profile_grant_expires_at = now() + interval '1 hour',
+		    profile_context_hash = $3
+		WHERE id = $1::uuid
+		RETURNING profile_grant_expires_at
+	`, sessionID, profileAID, profileContextHash).Scan(&principal.ProfileGrantExpiresAt); err != nil {
+		t.Fatalf("seed authoritative boundary profile selection: %v", err)
+	}
+	principal.SessionID = sessionID
+	principal.DeviceID = deviceID
+	principal.ProfileContextHash = profileContextHash
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM profile_addons WHERE profile_id = $1::uuid`, profileAID).Scan(&addonsBefore); err != nil {
 		t.Fatalf("count profile addons: %v", err)
 	}

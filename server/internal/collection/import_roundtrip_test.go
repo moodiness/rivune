@@ -1,7 +1,9 @@
 package collection
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,8 +61,13 @@ func TestCollectionImportUsesBoundedDatabaseRoundTripsAndPreservesOrder(t *testi
 	if manyCollectionQueries != oneCollectionQueries {
 		t.Fatalf("collection import query count grew with input: one=%d many=%d", oneCollectionQueries, manyCollectionQueries)
 	}
-	if manyCollectionQueries > 12 {
-		t.Fatalf("collection import used %d database queries, want a bounded constant", manyCollectionQueries)
+	// Import validates and locks the authoritative active-profile session in both
+	// its preflight and write transactions. Each authorization now reads a fresh
+	// post-lock wall clock before accepting expiry-sensitive authority. Those fixed
+	// authorization round trips raise the bound to 15 without making it depend on
+	// the collection count.
+	if manyCollectionQueries > 15 {
+		t.Fatalf("collection import used %d database queries, want at most 15", manyCollectionQueries)
 	}
 }
 
@@ -88,11 +95,21 @@ func measureCollectionImportQueries(t *testing.T, collectionCount int) int64 {
 
 	ctx := context.Background()
 	const (
-		profileID  = "12345678-1234-4234-8234-123456789abc"
-		categoryID = "22345678-1234-4234-8234-123456789abc"
-		userID     = "32345678-1234-4234-8234-123456789abc"
+		profileID       = "12345678-1234-4234-8234-123456789abc"
+		categoryID      = "22345678-1234-4234-8234-123456789abc"
+		userID          = "32345678-1234-4234-8234-123456789abc"
+		deviceID        = "62345678-1234-4234-8234-123456789abc"
+		adminSessionID  = "72345678-1234-4234-8234-123456789abc"
+		viewerSessionID = "82345678-1234-4234-8234-123456789abc"
 	)
 	if _, err := pool.Exec(ctx, `
+		CREATE TEMPORARY TABLE users (id uuid PRIMARY KEY);
+		CREATE TEMPORARY TABLE devices (id uuid PRIMARY KEY, user_id uuid NOT NULL);
+		CREATE TEMPORARY TABLE auth_sessions (
+			id uuid PRIMARY KEY, user_id uuid NOT NULL, device_id uuid NOT NULL,
+			access_expires_at timestamptz NOT NULL, active_profile_id uuid,
+			profile_grant_expires_at timestamptz, profile_context_hash bytea, revoked_at timestamptz
+		);
 		CREATE TEMPORARY TABLE profiles (
 			id uuid PRIMARY KEY, category_id uuid, name text NOT NULL DEFAULT ''
 		);
@@ -136,10 +153,18 @@ func measureCollectionImportQueries(t *testing.T, collectionCount int) int64 {
 			addon_id uuid NOT NULL, profile_id uuid NOT NULL, position integer NOT NULL,
 			PRIMARY KEY (addon_id, profile_id)
 		);
+		INSERT INTO users (id) VALUES ($3::uuid);
+		INSERT INTO devices (id, user_id) VALUES ($4::uuid, $3::uuid);
 		INSERT INTO profiles (id, category_id, name) VALUES ($1::uuid, $2::uuid, 'Import owner');
 		INSERT INTO user_profile_access (user_id, profile_id, can_manage)
-		VALUES ($3::uuid, $1::uuid, false)
-	`, pgx.QueryExecModeSimpleProtocol, profileID, categoryID, userID); err != nil {
+		VALUES ($3::uuid, $1::uuid, false);
+		INSERT INTO auth_sessions (
+			id, user_id, device_id, access_expires_at, active_profile_id,
+			profile_grant_expires_at, profile_context_hash
+		) VALUES
+			($5::uuid, $3::uuid, $4::uuid, now() + interval '1 hour', $1::uuid, now() + interval '1 hour', decode(repeat('e1', 32), 'hex')),
+			($6::uuid, $3::uuid, $4::uuid, now() + interval '1 hour', $1::uuid, now() + interval '1 hour', decode(repeat('e2', 32), 'hex'))
+	`, pgx.QueryExecModeSimpleProtocol, profileID, categoryID, userID, deviceID, adminSessionID, viewerSessionID); err != nil {
 		t.Fatalf("create collection import fixtures: %v", err)
 	}
 
@@ -159,12 +184,16 @@ func measureCollectionImportQueries(t *testing.T, collectionCount int) int64 {
 	activeProfileID := profileID
 	viewerCategoryID := categoryID
 	principal := auth.Principal{
+		SessionID: adminSessionID, UserID: userID, DeviceID: deviceID,
 		Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
 		ActiveProfileID: &activeProfileID, ProfileGrantExpiresAt: &expiresAt,
+		ProfileContextHash: bytes.Repeat([]byte{0xe1}, sha256.Size),
 	}
 	viewerPrincipal := auth.Principal{
-		UserID: userID, Role: "member", AuthorizationScope: auth.AuthorizationScopeCategory,
+		SessionID: viewerSessionID, UserID: userID, DeviceID: deviceID,
+		Role: "member", AuthorizationScope: auth.AuthorizationScopeCategory,
 		CategoryID: &viewerCategoryID, ActiveProfileID: &activeProfileID, ProfileGrantExpiresAt: &expiresAt,
+		ProfileContextHash: bytes.Repeat([]byte{0xe2}, sha256.Size),
 	}
 	viewerArtwork := &collectionImportArtworkGate{}
 	viewerService := NewService(pool, nil, nil, nil, nil)
@@ -286,9 +315,19 @@ func TestCollectionImportRoundTripRebindsLegacyAddonCatalog(t *testing.T) {
 		categoryID      = "22345678-1234-4234-8234-123456789abc"
 		currentAddonID  = "42345678-1234-4234-8234-123456789abc"
 		staleAddonID    = "52345678-1234-4234-8234-123456789abc"
+		userID          = "92345678-1234-4234-8234-123456789abc"
+		deviceID        = "a2345678-1234-4234-8234-123456789abc"
+		sessionID       = "b2345678-1234-4234-8234-123456789abc"
 		currentManifest = "org.example.current"
 	)
 	if _, err := pool.Exec(ctx, `
+		CREATE TEMPORARY TABLE users (id uuid PRIMARY KEY);
+		CREATE TEMPORARY TABLE devices (id uuid PRIMARY KEY, user_id uuid NOT NULL);
+		CREATE TEMPORARY TABLE auth_sessions (
+			id uuid PRIMARY KEY, user_id uuid NOT NULL, device_id uuid NOT NULL,
+			access_expires_at timestamptz NOT NULL, active_profile_id uuid,
+			profile_grant_expires_at timestamptz, profile_context_hash bytea, revoked_at timestamptz
+		);
 		CREATE TEMPORARY TABLE profiles (
 			id uuid PRIMARY KEY, category_id uuid, name text NOT NULL DEFAULT ''
 		);
@@ -332,21 +371,32 @@ func TestCollectionImportRoundTripRebindsLegacyAddonCatalog(t *testing.T) {
 			addon_id uuid NOT NULL, profile_id uuid NOT NULL, position integer NOT NULL,
 			PRIMARY KEY (addon_id, profile_id)
 		);
+		INSERT INTO users (id) VALUES ($5::uuid);
+		INSERT INTO devices (id, user_id) VALUES ($6::uuid, $5::uuid);
 		INSERT INTO profiles (id, category_id, name) VALUES ($1::uuid, $2::uuid, 'Import owner');
 		INSERT INTO profile_addons (id, manifest_id, manifest) VALUES (
 			$3::uuid, $4,
 			'{"id":"org.example.current","version":"1.0.0","name":"Current metadata","types":["movie"],"resources":["catalog"],"catalogs":[{"type":"movie","id":"popular"}]}'::jsonb
 		);
 		INSERT INTO addon_profile_access (addon_id, profile_id, position) VALUES ($3::uuid, $1::uuid, 0);
-	`, pgx.QueryExecModeSimpleProtocol, profileID, categoryID, currentAddonID, currentManifest); err != nil {
+		INSERT INTO auth_sessions (
+			id, user_id, device_id, access_expires_at, active_profile_id,
+			profile_grant_expires_at, profile_context_hash
+		) VALUES (
+			$7::uuid, $5::uuid, $6::uuid, now() + interval '1 hour', $1::uuid,
+			now() + interval '1 hour', decode(repeat('f1', 32), 'hex')
+		)
+	`, pgx.QueryExecModeSimpleProtocol, profileID, categoryID, currentAddonID, currentManifest, userID, deviceID, sessionID); err != nil {
 		t.Fatalf("create legacy addon import fixtures: %v", err)
 	}
 
 	activeProfileID := profileID
 	expiresAt := time.Now().UTC().Add(time.Hour)
 	principal := auth.Principal{
+		SessionID: sessionID, UserID: userID, DeviceID: deviceID,
 		Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
 		ActiveProfileID: &activeProfileID, ProfileGrantExpiresAt: &expiresAt,
+		ProfileContextHash: bytes.Repeat([]byte{0xf1}, sha256.Size),
 	}
 	result, err := NewService(pool, nil, nil, nil, nil).Import(ctx, principal, ExportDocument{
 		SchemaVersion: 1,

@@ -8,6 +8,7 @@ export type Discovery = {
   setupRequired: boolean;
   setupCompleted?: boolean;
   demoAvailable?: boolean;
+  capabilities?: string[];
   timezone: string;
   interfaceLanguage: InterfaceLanguage;
 };
@@ -709,9 +710,35 @@ export type MetadataCacheStatus = {
   missingTitles: number;
   artworkSnapshots: number;
 };
+export type PostgreSQLPoolStatus = {
+  acquired: number;
+  idle: number;
+  total: number;
+  max: number;
+  waitCount: number;
+  waitDurationMilliseconds: number;
+};
+export type TrackingOutboxStatus = {
+  pending: number;
+  due: number;
+  oldestAgeSeconds: number;
+};
+export type AddonOperationsStatus = {
+  total: number;
+  enabled: number;
+  latestUpdatedAt: string | null;
+};
+export type PlaybackOperationsStatus = {
+  active: number;
+  transcoding: number;
+};
 export type OperationsOverview = {
   metadataCache: MetadataCacheStatus;
   metadataRefresh: MetadataRefreshSchedule;
+  postgresqlPool: PostgreSQLPoolStatus;
+  trackingOutbox: TrackingOutboxStatus;
+  addons: AddonOperationsStatus;
+  playback: PlaybackOperationsStatus;
   housekeepingIntervalMinutes: number;
 };
 export type OperationRun = {

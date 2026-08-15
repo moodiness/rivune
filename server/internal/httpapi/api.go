@@ -36,6 +36,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/netguard"
 	"github.com/moodiness/rivune/server/internal/operations"
 	"github.com/moodiness/rivune/server/internal/playback"
+	"github.com/moodiness/rivune/server/internal/portable"
 	"github.com/moodiness/rivune/server/internal/profile"
 	"github.com/moodiness/rivune/server/internal/providers"
 	"github.com/moodiness/rivune/server/internal/requestwork"
@@ -48,6 +49,12 @@ import (
 )
 
 const protocolVersion = 20
+
+var nativeCapabilities = [...]string{
+	"bounded-aggregate-resources",
+	"profile-archives-v1",
+	"request-correlation",
+}
 
 type instanceService interface {
 	Info(context.Context) (instance.Info, error)
@@ -253,6 +260,11 @@ type databasePinger interface {
 	Ping(context.Context) error
 }
 
+type portableService interface {
+	Export(context.Context, auth.Principal, string) (portable.Document, error)
+	Import(context.Context, auth.Principal, string, portable.Document) (portable.ImportReport, error)
+}
+
 type API struct {
 	config                                  config.Config
 	addons                                  addonService
@@ -267,6 +279,7 @@ type API struct {
 	demo                                    *demo.Service
 	jellyfinCredentials                     jellyfinCredentialService
 	jellyfinCompatibility                   *jellyfin.Handler
+	jellyfinCompatibilityGeneration         *jellyfin.Handler
 	jellyfinCompatibilityMu                 sync.Mutex
 	jellyfinCompatibilityDesired            bool
 	jellyfinCompatibilityRevision           uint64
@@ -291,6 +304,7 @@ type API struct {
 	playback                                playbackService
 	playbackMaintenance                     playbackMaintenanceService
 	operations                              operationsService
+	portable                                portableService
 	settings                                settingsService
 	integrationConfiguration                integrationSettingsService
 	runtimeSettings                         *runtimeSettingsCoordinator
@@ -436,11 +450,13 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 	watchstateService := watchstate.NewServiceWithRuntimeSettings(pool, runtimeSource, providerRuntime, trackingService)
 	profileManager := profile.NewServiceWithRuntimeSettings(pool, cfg.ProfileGrantTTL, runtimeSource)
 	instanceManager := instance.NewServiceWithRuntimeSettings(pool, cfg.SetupToken, runtimeSource)
+	portableService := portable.NewService(pool, runtimeSource)
+	userManager := user.NewService(pool)
 	runtimeCoordinator := newRuntimeSettingsCoordinator(runtimeSource, settingsManager, artworkService, playbackService)
 	operationsService := operations.NewService(
 		pool, metadataService, authService, playbackService, maintenanceInterval, logger,
 	)
-	jellyfinCredentials, err := jellyfin.NewCredentialStore(pool)
+	jellyfinCredentials, err := jellyfin.NewCredentialStore(pool, runtimeSource)
 	if err != nil {
 		return nil, fmt.Errorf("initialize Jellyfin profile credentials: %w", err)
 	}
@@ -467,9 +483,10 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 		settings:                 settingsManager,
 		integrationConfiguration: settingsManager,
 		runtimeSettings:          runtimeCoordinator,
-		users:                    user.NewService(pool),
+		users:                    userManager,
 		metadata:                 metadataService,
 		operations:               operationsService,
+		portable:                 portableService,
 		version:                  version,
 		tracking:                 trackingService,
 		watchstate:               watchstateService,
@@ -478,6 +495,11 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 		deviceCodeAdmission:      newDeviceCodeAdmission(),
 		calendarFeedAdmission:    newCalendarFeedAdmission(),
 	}
+	compatibilitySessionRevoked := api.forgetJellyfinCompatibilitySessions
+	jellyfinCredentials.SetCompatibilitySessionRevocationNotifier(compatibilitySessionRevoked)
+	profileManager.SetCompatibilitySessionRevocationNotifier(compatibilitySessionRevoked)
+	authService.SetCompatibilitySessionRevocationNotifier(compatibilitySessionRevoked)
+	userManager.SetCompatibilitySessionRevocationNotifier(compatibilitySessionRevoked)
 	api.jellyfinCompatibilityDesired = runtimeSnapshot.JellyfinEnabled
 	api.jellyfinCompatibilityReconciler = func(reconcileContext context.Context) (bool, error) {
 		layer, readErr := settingsManager.Instance(reconcileContext)
@@ -492,11 +514,7 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 	api.initializeJellyfinCompatibility(pool, authService, watchstateService, collectionService, artworkService, playbackService, instanceManager, metadataService, addonService, runtimeSource)
 	runtimeCoordinator.onReconciled = func(previous, current runtimesettings.Snapshot) {
 		if previous.JellyfinEnabled != current.JellyfinEnabled {
-			if current.JellyfinEnabled {
-				api.setJellyfinCompatibilityDesired(true)
-				return
-			}
-			if err := api.applyCanonicalJellyfinCompatibilityDesired(context.Background(), false); err != nil {
+			if err := api.applyCanonicalJellyfinCompatibilityDesired(context.Background(), current.JellyfinEnabled); err != nil {
 				api.logger.Error("reconcile Jellyfin compatibility after runtime publication", "error", err)
 				api.requestJellyfinCompatibilityReconciliation()
 			}
@@ -507,6 +525,22 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 		}
 	}
 	return api, nil
+}
+
+func (a *API) forgetJellyfinCompatibilitySessions(sessionIDs []string) {
+	if a == nil || len(sessionIDs) == 0 {
+		return
+	}
+	a.jellyfinCompatibilityMu.Lock()
+	defer a.jellyfinCompatibilityMu.Unlock()
+	active := a.jellyfinCompatibility
+	generation := a.jellyfinCompatibilityGeneration
+	if active != nil {
+		active.ForgetCompatibilitySessions(sessionIDs)
+	}
+	if generation != nil && generation != active {
+		generation.ForgetCompatibilitySessions(sessionIDs)
+	}
 }
 
 func (a *API) Handler() http.Handler {
@@ -557,6 +591,8 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("POST /api/v1/profiles/{profileId}/jellyfin-credential/rotate", a.requireAuthentication(a.rotateJellyfinCredential))
 	mux.Handle("DELETE /api/v1/profiles/{profileId}/jellyfin-credential", a.requireAuthentication(a.revokeJellyfinCredential))
 	mux.Handle("PUT /api/v1/profiles/{profileId}/avatar/preset", a.requireAuthentication(a.setProfileAvatarPreset))
+	mux.Handle("GET /api/v1/profiles/{profileId}/archive", a.requireAuthentication(a.exportProfileArchive))
+	mux.Handle("POST /api/v1/profiles/{profileId}/archive/import", a.requireAuthentication(a.importProfileArchive))
 	mux.Handle("GET /api/v1/settings", a.requireAuthentication(a.instanceSettings))
 	mux.Handle("PATCH /api/v1/settings", a.requireAuthentication(a.updateInstanceSettings))
 	mux.Handle("GET /api/v1/settings/integrations", a.requireAuthentication(a.integrationSettings))
@@ -722,6 +758,7 @@ func (a *API) discovery(w http.ResponseWriter, r *http.Request) {
 		"serverVersion":     a.version,
 		"protocolVersion":   protocolVersion,
 		"apiBaseUrl":        apiBaseURL,
+		"capabilities":      nativeCapabilities,
 		"setupRequired":     info.SetupRequired,
 		"setupCompleted":    !info.SetupRequired,
 		"demoAvailable":     info.SetupRequired,
@@ -799,7 +836,12 @@ func (a *API) setup(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestContext := auth.WithClientIP(r.Context(), requestClientIP(r, a.config.TrustedProxies))
+		suppliedRequestID := ""
+		if values := r.Header.Values(requestwork.RequestIDHeader); len(values) == 1 {
+			suppliedRequestID = values[0]
+		}
+		requestContext, requestID := requestwork.WithRequestID(r.Context(), suppliedRequestID)
+		requestContext = auth.WithClientIP(requestContext, requestClientIP(r, a.config.TrustedProxies))
 		if a.runtimeSettings != nil {
 			requestContext = runtimesettings.Pin(requestContext, a.runtimeSettings.source)
 		}
@@ -807,16 +849,15 @@ func (a *API) middleware(next http.Handler) http.Handler {
 		r = r.WithContext(requestContext)
 		started := time.Now()
 		observed := &nativeObservedResponseWriter{ResponseWriter: w}
+		observed.Header().Set(requestwork.RequestIDHeader, requestID)
 		observed.Header().Set("Cache-Control", "no-store")
 		observed.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
 		observed.Header().Set("Referrer-Policy", "no-referrer")
 		observed.Header().Set("X-Content-Type-Options", "nosniff")
 
 		defer func() {
-			panicked := false
 			if recovered := recover(); recovered != nil {
-				panicked = true
-				a.logger.Error("panic serving request", "method", r.Method, "route", nativeRequestRoute(r), "committed", observed.Committed())
+				a.logger.Error("panic serving request", "request_id", requestID, "method", r.Method, "route", nativeRequestRoute(r), "committed", observed.Committed())
 				if !observed.Committed() {
 					writeError(observed, http.StatusInternalServerError, "internal_error", "An internal error occurred")
 				}
@@ -825,11 +866,9 @@ func (a *API) middleware(next http.Handler) http.Handler {
 			if status == 0 {
 				status = http.StatusOK
 			}
-			if !panicked && successfulHealthProbe(r, status) {
-				return
-			}
 			work := counters.Snapshot()
 			a.logger.LogAttrs(context.Background(), slog.LevelInfo, "request completed",
+				slog.String("request_id", requestID),
 				slog.String("route", nativeRequestRoute(r)),
 				slog.String("method", r.Method),
 				slog.Int("status", status),
@@ -844,13 +883,6 @@ func (a *API) middleware(next http.Handler) http.Handler {
 		}()
 		next.ServeHTTP(observed, r)
 	})
-}
-
-func successfulHealthProbe(r *http.Request, status int) bool {
-	if r == nil || r.Method != http.MethodGet || status < http.StatusOK || status >= http.StatusMultipleChoices {
-		return false
-	}
-	return r.Pattern == "GET /health" || r.Pattern == "GET /live" || r.Pattern == "GET /ready"
 }
 
 func nativeRequestRoute(r *http.Request) string {

@@ -56,6 +56,7 @@ type bootstrapRegistry struct {
 	mu                 sync.Mutex
 	sessions           map[string]*bootstrapSessionState
 	sockets            map[uint64]*compatSocketLease
+	retired            bool
 	nextSocketID       uint64
 	sessionLimit       int
 	ownerSessionLimit  int
@@ -85,6 +86,9 @@ func (registry *bootstrapRegistry) observe(session AuthenticatedSession) bool {
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
+	if registry.retired {
+		return false
+	}
 	registry.pruneLocked(now)
 	if current := registry.sessions[session.ID]; current != nil {
 		if !sameAuthenticatedSessionOwner(current.session, session) {
@@ -331,6 +335,9 @@ func (registry *bootstrapRegistry) acquireSocket(session AuthenticatedSession) (
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
+	if registry.retired {
+		return nil, false
+	}
 	registry.pruneLocked(registry.now().UTC())
 	if len(registry.sockets) >= registry.positiveLimit(registry.socketLimit, defaultCompatSocketLimit) {
 		return nil, false
@@ -370,6 +377,32 @@ func (registry *bootstrapRegistry) forget(session AuthenticatedSession) {
 	if current := registry.sessions[session.ID]; current != nil && sameAuthenticatedSessionOwner(current.session, session) {
 		registry.removeSessionLocked(session.ID)
 	}
+	registry.mu.Unlock()
+}
+
+func (registry *bootstrapRegistry) forgetSessionIDs(sessionIDs []string) {
+	if registry == nil || len(sessionIDs) == 0 {
+		return
+	}
+	registry.mu.Lock()
+	for _, sessionID := range sessionIDs {
+		if sessionID != "" {
+			registry.removeSessionLocked(sessionID)
+		}
+	}
+	registry.mu.Unlock()
+}
+
+func (registry *bootstrapRegistry) closeAll() {
+	if registry == nil {
+		return
+	}
+	registry.mu.Lock()
+	registry.retired = true
+	for _, lease := range registry.sockets {
+		registry.removeSocketLocked(lease)
+	}
+	clear(registry.sessions)
 	registry.mu.Unlock()
 }
 

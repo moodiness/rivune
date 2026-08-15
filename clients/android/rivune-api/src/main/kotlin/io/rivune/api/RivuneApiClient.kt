@@ -6,6 +6,9 @@ import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -67,6 +70,8 @@ private data class DiscoveryEnvelope(
     val setupRequired: Boolean,
     val setupCompleted: Boolean? = null,
     val demoAvailable: Boolean? = null,
+    @Serializable(with = DiscoveryCapabilitiesSerializer::class)
+    val capabilities: List<String> = emptyList(),
     val timezone: String,
     val interfaceLanguage: String? = null,
 )
@@ -157,15 +162,16 @@ class RivuneApiClient(
         }
         val interfaceLanguage = response.interfaceLanguage ?: throw RivuneApiException.InvalidResponse()
         val discovery = Discovery(
-            response.name,
-            response.serverVersion,
-            response.protocolVersion,
-            response.apiBaseUrl,
-            response.setupRequired,
-            response.setupCompleted,
-            response.demoAvailable,
-            response.timezone,
-            interfaceLanguage,
+            name = response.name,
+            serverVersion = response.serverVersion,
+            protocolVersion = response.protocolVersion,
+            apiBaseUrl = response.apiBaseUrl,
+            setupRequired = response.setupRequired,
+            setupCompleted = response.setupCompleted,
+            demoAvailable = response.demoAvailable,
+            timezone = response.timezone,
+            interfaceLanguage = interfaceLanguage,
+            capabilities = response.capabilities,
         )
         val resolved = serverUrl.resolve(discovery.apiBaseUrl)
             ?.takeIf(::isCredentialTransportAllowed)
@@ -338,14 +344,28 @@ class RivuneApiClient(
     suspend fun selectProfile(id: UUID, pin: String? = null): ProfileSelection = profileSelectionMutex.withLock {
         val state = reserveProfileMutation()
         try {
-            val selection: ProfileSelection = request(
-                path = "profiles/$id/select",
-                method = "POST",
-                body = requestJson.encodeToString(SelectProfileRequest(pin)),
-                authenticated = true,
-                expectedProfileMutation = state,
-            )
-            commitProfileContext(selection.profileContext, state)
+            val url = endpoint("profiles/$id/select", emptyMap())
+            val body = requestJson.encodeToString(SelectProfileRequest(pin))
+            loadCredentialsIfNeeded()
+            val authentication = authenticationSnapshot(state)
+            val requestCancellationJob = currentCoroutineContext()[Job]
+            currentCoroutineContext().ensureActive()
+            val selection = withContext(NonCancellable) {
+                val responseData = executeData(
+                    url = url,
+                    method = "POST",
+                    body = body,
+                    authenticated = true,
+                    retryAfterRefresh = true,
+                    expectedAuthentication = authentication,
+                    expectedProfileMutation = state,
+                    requestCancellationJob = requestCancellationJob,
+                )
+                val response: ProfileSelection = decodeResponse(responseData.body)
+                commitProfileContext(response.profileContext, state)
+                response
+            }
+            currentCoroutineContext().ensureActive()
             selection
         } finally {
             finishProfileMutation()
@@ -355,8 +375,25 @@ class RivuneApiClient(
     suspend fun clearProfileSelection() = profileSelectionMutex.withLock {
         val state = reserveProfileMutation()
         try {
-            requestUnit("profiles/selection", "DELETE", authenticated = true, expectedProfileMutation = state)
-            commitProfileContext(null, state)
+            val url = endpoint("profiles/selection", emptyMap())
+            loadCredentialsIfNeeded()
+            val authentication = authenticationSnapshot(state)
+            val requestCancellationJob = currentCoroutineContext()[Job]
+            currentCoroutineContext().ensureActive()
+            withContext(NonCancellable) {
+                executeData(
+                    url = url,
+                    method = "DELETE",
+                    body = null,
+                    authenticated = true,
+                    retryAfterRefresh = true,
+                    expectedAuthentication = authentication,
+                    expectedProfileMutation = state,
+                    requestCancellationJob = requestCancellationJob,
+                )
+                commitProfileContext(null, state)
+            }
+            currentCoroutineContext().ensureActive()
         } finally {
             finishProfileMutation()
         }
@@ -818,6 +855,7 @@ class RivuneApiClient(
         explicitAccessToken: String? = null,
         expectedAuthentication: AuthenticationSnapshot? = null,
         expectedProfileMutation: AuthenticationState? = null,
+        requestCancellationJob: Job? = null,
         client: OkHttpClient = httpClient,
     ): ResponseData {
         requireServerDestination(url)
@@ -844,6 +882,7 @@ class RivuneApiClient(
 
         val responseData = try {
             withContext(Dispatchers.IO) {
+                requestCancellationJob?.ensureActive()
                 client.newCall(request).execute().use { response ->
                     requireServerDestination(response.request.url)
                     if (response.code in 300..399) throw decodeServerError(response.code, "")
@@ -869,6 +908,7 @@ class RivuneApiClient(
                 retryAfterRefresh = false,
                 expectedAuthentication = authentication.copy(tokens = refreshed),
                 expectedProfileMutation = expectedProfileMutation,
+                requestCancellationJob = requestCancellationJob,
                 client = client,
             )
         }
@@ -1037,17 +1077,19 @@ class RivuneApiClient(
     }
 
     private suspend fun commitProfileContext(value: String?, expectedState: AuthenticationState) =
-        authenticationMutex.withLock {
-            requireAuthenticationState(expectedState)
-            val currentCredentials = credentials ?: throw RivuneApiException.NotAuthenticated()
-            val saved = credentialStore.save(
-                StoredCredentials(credentialIssuer, currentCredentials, value),
-                expectedState.authenticationGeneration,
-            )
-            if (!saved) throw staleAuthentication()
-            requireAuthenticationState(expectedState)
-            profileContext = value
-            profileContextGeneration += 1
+        withContext(NonCancellable) {
+            authenticationMutex.withLock {
+                requireAuthenticationState(expectedState)
+                val currentCredentials = credentials ?: throw RivuneApiException.NotAuthenticated()
+                val saved = credentialStore.save(
+                    StoredCredentials(credentialIssuer, currentCredentials, value),
+                    expectedState.authenticationGeneration,
+                )
+                if (!saved) throw staleAuthentication()
+                requireAuthenticationState(expectedState)
+                profileContext = value
+                profileContextGeneration += 1
+            }
         }
 
     private suspend fun loadCredentialsIfNeeded() {

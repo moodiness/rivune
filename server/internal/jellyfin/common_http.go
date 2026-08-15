@@ -57,6 +57,30 @@ func (authentication *policyAuthentication) Login(ctx context.Context, input Com
 	return authentication.next.Login(ctx, input)
 }
 
+func (authentication *policyAuthentication) BeginQuickConnect(ctx context.Context, client ClientIdentity) (QuickConnectStatus, error) {
+	quickConnect, ok := authentication.next.(QuickConnectAuthentication)
+	if !ok {
+		return QuickConnectStatus{}, ErrInvalidCompatLogin
+	}
+	return quickConnect.BeginQuickConnect(ctx, client)
+}
+
+func (authentication *policyAuthentication) PollQuickConnect(ctx context.Context, secret string, client ClientIdentity) (QuickConnectStatus, error) {
+	quickConnect, ok := authentication.next.(QuickConnectAuthentication)
+	if !ok {
+		return QuickConnectStatus{}, ErrInvalidCompatLogin
+	}
+	return quickConnect.PollQuickConnect(ctx, secret, client)
+}
+
+func (authentication *policyAuthentication) LoginQuickConnect(ctx context.Context, secret string, client ClientIdentity) (LoginResult, error) {
+	quickConnect, ok := authentication.next.(QuickConnectAuthentication)
+	if !ok {
+		return LoginResult{}, ErrInvalidCompatLogin
+	}
+	return quickConnect.LoginQuickConnect(ctx, secret, client)
+}
+
 func (authentication *policyAuthentication) Authenticate(ctx context.Context, token string) (AuthenticatedSession, error) {
 	session, err := authentication.next.Authenticate(ctx, token)
 	if err != nil {

@@ -883,6 +883,17 @@ func compareCatalogTitleSortKey(left, right watchstate.CatalogTitle, key string)
 			comparison = 1
 		}
 		return comparison, leftYear == 0, rightYear == 0
+	case "communityrating":
+		if left.CommunityRating == nil || right.CommunityRating == nil {
+			return 0, left.CommunityRating == nil, right.CommunityRating == nil
+		}
+		switch {
+		case *left.CommunityRating < *right.CommunityRating:
+			comparison = -1
+		case *left.CommunityRating > *right.CommunityRating:
+			comparison = 1
+		}
+		return comparison, false, false
 	default:
 		return 0, true, true
 	}

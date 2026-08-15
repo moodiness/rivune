@@ -1,6 +1,7 @@
 package jellyfin
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -18,6 +19,9 @@ const (
 	RouteSystemPingPost           Route = "system-ping-post"
 	RouteSystemEndpoint           Route = "system-endpoint"
 	RouteQuickConnectEnabled      Route = "quick-connect-enabled"
+	RouteQuickConnectInitiate     Route = "quick-connect-initiate"
+	RouteQuickConnectConnect      Route = "quick-connect-connect"
+	RouteQuickConnectAuthenticate Route = "quick-connect-authenticate"
 	RouteAuthenticateByName       Route = "authenticate-by-name"
 	RoutePublicUsers              Route = "public-users"
 	RouteSystemInfo               Route = "system-info"
@@ -155,6 +159,9 @@ var routeDefinitions = []RouteSpec{
 	{RouteSystemPingPost, http.MethodPost, "/System/Ping"},
 	{RouteSystemEndpoint, http.MethodGet, "/System/Endpoint"},
 	{RouteQuickConnectEnabled, http.MethodGet, "/QuickConnect/Enabled"},
+	{RouteQuickConnectInitiate, http.MethodPost, "/QuickConnect/Initiate"},
+	{RouteQuickConnectConnect, http.MethodGet, "/QuickConnect/Connect"},
+	{RouteQuickConnectAuthenticate, http.MethodPost, "/Users/AuthenticateWithQuickConnect"},
 	{RouteAuthenticateByName, http.MethodPost, "/Users/AuthenticateByName"},
 	{RoutePublicUsers, http.MethodGet, "/Users/Public"},
 	{RouteSystemInfo, http.MethodGet, "/System/Info"},
@@ -274,6 +281,7 @@ var routeDefinitions = []RouteSpec{
 type Dependencies struct {
 	ServerInfo          ServerInfo
 	Authentication      Authentication
+	QuickConnect        QuickConnectAuthentication
 	AuthenticatedPolicy AuthenticatedRequestPolicy
 	Catalog             CatalogReader
 	Collections         CollectionReader
@@ -293,6 +301,7 @@ type Dependencies struct {
 type Handler struct {
 	serverInfo         ServerInfo
 	authentication     Authentication
+	quickConnect       QuickConnectAuthentication
 	catalog            CatalogReader
 	collections        CollectionReader
 	artwork            ArtworkDelivery
@@ -322,6 +331,7 @@ func New(dependencies Dependencies) (*Handler, error) {
 	handler := &Handler{
 		serverInfo:         dependencies.ServerInfo,
 		authentication:     newPolicyAuthentication(dependencies.Authentication, dependencies.AuthenticatedPolicy),
+		quickConnect:       dependencies.QuickConnect,
 		catalog:            dependencies.Catalog,
 		collections:        dependencies.Collections,
 		artwork:            dependencies.Artwork,
@@ -355,6 +365,29 @@ func New(dependencies Dependencies) (*Handler, error) {
 	}
 	return handler, nil
 }
+
+// ForgetCompatibilitySessions immediately retires in-memory state for the
+// exact durable compatibility session IDs revoked by a committed mutation.
+func (handler *Handler) ForgetCompatibilitySessions(sessionIDs []string) {
+	if handler == nil || len(sessionIDs) == 0 {
+		return
+	}
+	if handler.bootstrap != nil {
+		handler.bootstrap.forgetSessionIDs(sessionIDs)
+	}
+	if handler.playSessions != nil {
+		handler.playSessions.closeCompatibilitySessions(context.Background(), sessionIDs)
+	}
+}
+
+// CloseCompatibilitySockets retires every socket lease owned by this handler
+// generation without affecting durable compatibility sessions.
+func (handler *Handler) CloseCompatibilitySockets() {
+	if handler != nil && handler.bootstrap != nil {
+		handler.bootstrap.closeAll()
+	}
+}
+
 func (handler *Handler) installBuiltInHandlers() {
 	_, serverReady := handler.publicSystemInfo()
 	if serverReady {
@@ -362,6 +395,11 @@ func (handler *Handler) installBuiltInHandlers() {
 		handler.handlers[RouteSystemPing] = http.HandlerFunc(handler.handleSystemPing)
 		handler.handlers[RouteSystemPingPost] = http.HandlerFunc(handler.handleSystemPing)
 		handler.handlers[RouteQuickConnectEnabled] = http.HandlerFunc(handler.handleQuickConnectEnabled)
+		if handler.quickConnect != nil {
+			handler.handlers[RouteQuickConnectInitiate] = http.HandlerFunc(handler.handleQuickConnectInitiate)
+			handler.handlers[RouteQuickConnectConnect] = http.HandlerFunc(handler.handleQuickConnectConnect)
+			handler.handlers[RouteQuickConnectAuthenticate] = http.HandlerFunc(handler.handleAuthenticateWithQuickConnect)
+		}
 		handler.handlers[RoutePublicUsers] = http.HandlerFunc(handler.handlePublicUsers)
 		handler.handlers[RouteBrandingConfiguration] = http.HandlerFunc(handler.handleBrandingConfiguration)
 		handler.handlers[RouteBrandingSplashscreen] = http.HandlerFunc(handler.handleBrandingSplashscreen)

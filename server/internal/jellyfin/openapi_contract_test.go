@@ -12,6 +12,7 @@ import (
 	"github.com/pb33f/libopenapi"
 	oasvalidator "github.com/pb33f/libopenapi-validator"
 
+	artworkdomain "github.com/moodiness/rivune/server/internal/artwork"
 	"github.com/moodiness/rivune/server/internal/watchstate"
 )
 
@@ -77,6 +78,50 @@ func TestCompatibilityOpenAPIMatchesEveryRegisteredRoute(t *testing.T) {
 	}
 }
 
+func TestArtworkOpenAPIRequiresTagOrCredential(t *testing.T) {
+	specification, err := os.ReadFile("../../../protocol/jellyfin-compat-openapi.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := libopenapi.NewDocument(specification)
+	if err != nil {
+		t.Fatalf("parse compatibility OpenAPI: %v", err)
+	}
+	validator, validationErrors := oasvalidator.NewValidator(document)
+	if len(validationErrors) != 0 {
+		t.Fatalf("initialize compatibility OpenAPI validator: %v", errors.Join(validationErrors...))
+	}
+
+	tag := strings.Repeat("a", 64)
+	for _, target := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/Items/" + artworkItemOne + "/Images/Primary"},
+		{method: http.MethodHead, path: "/Items/" + artworkItemOne + "/Images/Primary"},
+		{method: http.MethodGet, path: "/Items/" + artworkItemOne + "/Images/Primary/0"},
+		{method: http.MethodHead, path: "/Items/" + artworkItemOne + "/Images/Primary/0"},
+	} {
+		t.Run(target.method+" "+target.path, func(t *testing.T) {
+			anonymous := httptest.NewRequest(target.method, target.path, nil)
+			if valid, _ := validator.ValidateHttpRequest(anonymous); valid {
+				t.Fatal("OpenAPI accepted anonymous artwork without a tag")
+			}
+
+			tagged := httptest.NewRequest(target.method, target.path+"?tag="+tag, nil)
+			if valid, failures := validator.ValidateHttpRequest(tagged); !valid {
+				t.Fatalf("OpenAPI rejected anonymous tagged artwork: %v", failures)
+			}
+
+			authenticated := httptest.NewRequest(target.method, target.path, nil)
+			authenticated.Header.Set("X-Emby-Token", artworkTokenOne)
+			if valid, failures := validator.ValidateHttpRequest(authenticated); !valid {
+				t.Fatalf("OpenAPI rejected authenticated tagless artwork: %v", failures)
+			}
+		})
+	}
+}
+
 func TestImageInfosRuntimeResponseMatchesOpenAPIAndRejectsPrivateFields(t *testing.T) {
 	specification, err := os.ReadFile("../../../protocol/jellyfin-compat-openapi.yaml")
 	if err != nil {
@@ -91,15 +136,21 @@ func TestImageInfosRuntimeResponseMatchesOpenAPIAndRejectsPrivateFields(t *testi
 		t.Fatalf("initialize compatibility OpenAPI validator: %v", errors.Join(validationErrors...))
 	}
 	primaryTag := strings.Repeat("a", 64)
-	handler, _, _ := newArtworkHandler(t, map[string]map[string]watchstate.CatalogTitle{
+	handler, _, delivery := newArtworkHandler(t, map[string]map[string]watchstate.CatalogTitle{
 		artworkProfileOne: {
 			artworkItemOne: {ID: artworkItemOne, MediaType: "movie", PosterURL: localizedArtworkPrefix + primaryTag},
 		},
 	}, map[string]string{localizedArtworkPrefix + primaryTag: primaryTag})
+	delivery.metadata = map[string]artworkdomain.ImageMetadata{
+		primaryTag: {Width: 1200, Height: 1800, Size: 8192},
+	}
 	request := httptest.NewRequest(http.MethodGet, "/Items/"+artworkItemOne+"/Images", nil)
 	request.Header.Set("X-Emby-Token", artworkTokenOne)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
+	if !strings.Contains(response.Body.String(), `"Size":8192`) {
+		t.Fatalf("runtime image infos omitted Size: %s", response.Body.String())
+	}
 	if valid, failures := validator.ValidateHttpResponse(request, response.Result()); !valid {
 		t.Fatalf("runtime image infos violate OpenAPI: %v body=%s", failures, response.Body.String())
 	}

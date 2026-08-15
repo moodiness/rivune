@@ -1532,6 +1532,19 @@
   .operation-metric strong { overflow: hidden; font-size: 17px; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
   .operation-metric small { overflow: hidden; color: var(--text-muted); font-size: 8px; font-weight: 720; letter-spacing: .04em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
   .operations-metrics--stream { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .operations-resource-grid { min-width: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); padding: 0 var(--space-4) var(--space-4); }
+  .operation-aggregate { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-interactive); }
+  .operation-aggregate > header { min-width: 0; display: flex; align-items: center; gap: var(--space-2); padding: var(--space-3); border-bottom: 1px solid var(--line); }
+  .operation-aggregate > header > span { width: var(--space-7); height: var(--space-7); flex: 0 0 auto; display: grid; place-items: center; border-radius: var(--radius-sm); color: var(--accent); background: var(--surface-accent); }
+  .operation-aggregate > header svg { width: var(--space-4); }
+  .operation-aggregate h4 { min-width: 0; margin: 0; overflow-wrap: anywhere; font-size: var(--font-size-sm); }
+  .operation-aggregate dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; }
+  .operation-aggregate dl > div { min-width: 0; display: grid; gap: var(--space-1); padding: var(--space-3); border-block-end: 1px solid var(--line); }
+  .operation-aggregate dl > div:nth-child(odd) { border-inline-end: 1px solid var(--line); }
+  .operation-aggregate dl > div:nth-last-child(-n + 2):nth-child(odd), .operation-aggregate dl > div:last-child { border-block-end: 0; }
+  .operation-aggregate dl > div:last-child:nth-child(odd) { grid-column: 1 / -1; border-inline-end: 0; }
+  .operation-aggregate dt { min-width: 0; color: var(--text-muted); font-size: var(--font-size-xs); font-weight: 720; line-height: 1.35; overflow-wrap: anywhere; text-transform: uppercase; }
+  .operation-aggregate dd { min-width: 0; margin: 0; color: var(--text); font-size: var(--font-size-md); font-variant-numeric: tabular-nums; font-weight: 760; line-height: 1.2; overflow-wrap: anywhere; }
   .operations-schedule__form { display: grid; grid-template-columns: 1.3fr repeat(3, minmax(0, 1fr)); align-items: start; gap: var(--space-3); padding-inline: var(--space-5); }
   .operations-schedule__form .setting-control--toggle { min-height: 74px; align-items: center; }
   .operations-notifications { border-style: dashed; border-color: color-mix(in srgb, var(--warning) 30%, var(--line)); background: color-mix(in srgb, var(--warning) 4%, var(--surface-subtle)); }
@@ -1970,6 +1983,7 @@
     .settings-groups--preferences, .tracking-provider-grid { grid-template-columns: minmax(0, 1fr); }
     .operations-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-2); }
     .operations-metrics--stream, .operations-schedule__form, .operations-schedule__state, .operations-notifications__form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .operations-resource-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .operation-metric, .operation-metric:first-child, .operation-metric:last-child { border-radius: var(--radius-sm); }
     .details-hero__inner { grid-template-columns: clamp(180px, 22vw, 230px) minmax(0, 1fr); gap: 32px; padding-inline: 34px; }
     .details-hero--episode .details-hero__inner { grid-template-columns: minmax(300px, 44vw) minmax(0, 1fr); }
@@ -2181,8 +2195,8 @@
     .activity-session__time { width: min(100%, 280px); }
     .activity-session__copy > span:not(.activity-session__providers), .activity-session__copy > small { overflow: visible; white-space: normal; }
     .operations-panel > header { align-items: start; flex-direction: column; padding: var(--space-4); }
-    .operations-metrics, .operations-metrics--stream, .operations-schedule__form, .operations-schedule__state, .operations-notifications__form, .operations-action-grid { grid-template-columns: minmax(0, 1fr); }
-    .operations-metrics, .operations-schedule__form, .operations-schedule__state, .operations-notifications__form { padding-inline: var(--space-4); }
+    .operations-metrics, .operations-metrics--stream, .operations-resource-grid, .operations-schedule__form, .operations-schedule__state, .operations-notifications__form, .operations-action-grid { grid-template-columns: minmax(0, 1fr); }
+    .operations-metrics, .operations-resource-grid, .operations-schedule__form, .operations-schedule__state, .operations-notifications__form { padding-inline: var(--space-4); }
     .operations-panel > footer { grid-template-columns: minmax(0, 1fr); padding: var(--space-3) var(--space-4); }
     .operations-panel > footer .button { width: 100%; }
     .operation-action-card { padding: var(--space-4); }
