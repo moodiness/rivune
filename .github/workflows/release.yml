@@ -501,17 +501,111 @@ jobs:
           set -euo pipefail
           release_id=""
           created_release=false
+          created_release_json='{}'
           digest_marker_prefix='<!-- rivune-oci-image-digest:'
 
           matching_releases() {
             gh api --paginate --slurp "repos/${REPOSITORY}/releases?per_page=100" |
               jq --arg tag "${RELEASE_TAG}" '[.[][] | select(.tag_name == $tag)]'
           }
+          observe_matching_releases() {
+            local candidate='[]' candidate_id='' releases release_count release_id attempt
+            for attempt in {1..12}; do
+              releases="$(matching_releases)"
+              release_count="$(jq 'length' <<<"${releases}")"
+              if (( release_count > 1 )); then
+                echo "Expected zero or one GitHub Release for ${RELEASE_TAG}, found ${release_count}." >&2
+                return 1
+              fi
+              if (( release_count == 1 )); then
+                release_id="$(jq -er '.[0].id | select(type == "number" and . > 0)' <<<"${releases}")"
+                if [[ -n "${candidate_id}" ]] && [[ "${release_id}" != "${candidate_id}" ]]; then
+                  echo "The matching GitHub Release changed during the bounded observation window." >&2
+                  return 1
+                fi
+                candidate_id="${release_id}"
+                candidate="${releases}"
+              fi
+              if (( attempt < 12 )); then
+                sleep 1
+              fi
+            done
+            printf '%s' "${candidate}"
+          }
+          wait_for_created_release() {
+            local expected_id="$1" candidate='' releases release_count attempt
+            for attempt in {1..12}; do
+              releases="$(matching_releases)"
+              release_count="$(jq 'length' <<<"${releases}")"
+              if (( release_count > 0 )); then
+                if ! jq -e --argjson id "${expected_id}" 'length == 1 and .[0].id == $id' <<<"${releases}" >/dev/null; then
+                  echo "Release creation converged to a different or duplicate release." >&2
+                  return 1
+                fi
+                candidate="${releases}"
+              fi
+              if (( attempt < 12 )); then
+                sleep 1
+              fi
+            done
+            if [[ -z "${candidate}" ]]; then
+              echo "The created GitHub Release was not visible after the bounded convergence wait." >&2
+              return 1
+            fi
+            printf '%s' "${candidate}"
+          }
           cleanup_created_draft() {
+            local status=$? attempt current_release
+            if (( status == 0 )); then
+              return 0
+            fi
             if [[ "${created_release}" == true ]] &&
                [[ "${release_id}" =~ ^[1-9][0-9]*$ ]] &&
-               [[ "$(gh api "repos/${REPOSITORY}/releases/${release_id}" --jq '.draft' 2>/dev/null || true)" == true ]]; then
-              gh api --method DELETE "repos/${REPOSITORY}/releases/${release_id}" >/dev/null 2>&1 || true
+               validate_release_metadata "${created_release_json}" &&
+               jq -e --argjson id "${release_id}" '.id == $id and .draft == true' <<<"${created_release_json}" >/dev/null 2>&1; then
+              for attempt in {1..12}; do
+                current_release="$(gh api "repos/${REPOSITORY}/releases/${release_id}" 2>/dev/null || true)"
+                if [[ -n "${current_release}" ]]; then
+                  if ! validate_release_metadata "${current_release}" ||
+                     ! jq -e --argjson id "${release_id}" --argjson created "${created_release_json}" \
+                       '.id == $id and .draft == true and .body == $created.body' <<<"${current_release}" >/dev/null 2>&1; then
+                    echo "::warning::Refusing to delete a release that is no longer the draft created by this attempt." >&2
+                    return 0
+                  fi
+                  if gh api --method DELETE "repos/${REPOSITORY}/releases/${release_id}" >/dev/null 2>&1; then
+                    return 0
+                  fi
+                fi
+                if (( attempt < 12 )); then
+                  sleep 1
+                fi
+              done
+              echo "::warning::The draft created by this attempt could not be deleted after bounded retries." >&2
+            fi
+          }
+          upload_release_asset() {
+            local asset_path="$1" content_type="$2" asset_name expected_size response
+            asset_name="${asset_path##*/}"
+            expected_size="$(stat -c '%s' "${asset_path}")"
+            response="$(curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              --header "Content-Type: ${content_type}" \
+              --url-query "name=${asset_name}" \
+              --data-binary "@${asset_path}" \
+              "${upload_url}")"
+            if ! jq -e --arg name "${asset_name}" --argjson size "${expected_size}" '
+              .id as $id |
+              ($id | type == "number") and
+              ($id > 0) and
+              .name == $name and
+              .size == $size and
+              .state == "uploaded"
+            ' <<<"${response}" >/dev/null; then
+              echo "The uploaded GitHub Release asset response is invalid for ${asset_name}." >&2
+              return 1
             fi
           }
           validate_body_and_digest() {
@@ -651,7 +745,7 @@ jobs:
             echo "The newly published OCI image digest is invalid: ${CURRENT_IMAGE_DIGEST}" >&2
             exit 1
           fi
-          releases="$(matching_releases)"
+          releases="$(observe_matching_releases)"
           release_count="$(jq 'length' <<<"${releases}")"
           if [[ "${release_count}" == 0 ]]; then
             printf '%s\n\n<!-- rivune-oci-image-digest: %s -->' "$(cat .github/release-notes.md)" "${CURRENT_IMAGE_DIGEST}" > prepared-release-notes.md
@@ -673,21 +767,32 @@ jobs:
                   prerelease: $prerelease
                 }
               ')"
-            trap cleanup_created_draft ERR
+            trap cleanup_created_draft EXIT
             created_release_json="$(gh api --method POST "repos/${REPOSITORY}/releases" --input - <<<"${release_request}")"
             created_release=true
             release_id="$(jq -er '.id | select(type == "number" and . > 0)' <<<"${created_release_json}")"
-            releases="$(matching_releases)"
-            if ! jq -e --argjson id "${release_id}" 'length == 1 and .[0].id == $id' <<<"${releases}" >/dev/null; then
-              echo "Release creation did not converge to exactly the draft created by this attempt." >&2
+            if ! validate_release_metadata "${created_release_json}" ||
+               ! jq -e '.assets | type == "array" and length == 0' <<<"${created_release_json}" >/dev/null; then
+              echo "The created GitHub Release response does not match the authorized empty draft." >&2
               exit 1
             fi
-            gh release upload "${RELEASE_TAG}" \
-              --repo "${REPOSITORY}" \
-              release-assets/SHA256SUMS \
-              release-assets/rivune-android-update.json \
-              "release-assets/rivune-android-${RELEASE_TAG#v}.apk"
-            releases="$(matching_releases)"
+            created_image_digest="$(validate_body_and_digest "${created_release_json}")"
+            if [[ "${created_image_digest}" != "${CURRENT_IMAGE_DIGEST}" ]]; then
+              echo "The created GitHub Release did not record the published OCI image digest." >&2
+              exit 1
+            fi
+            upload_url="$(jq -er '.upload_url | strings' <<<"${created_release_json}")"
+            expected_upload_url="https://uploads.github.com/repos/${REPOSITORY}/releases/${release_id}/assets{?name,label}"
+            if [[ "${upload_url}" != "${expected_upload_url}" ]]; then
+              echo "The created GitHub Release returned an unexpected asset upload URL." >&2
+              exit 1
+            fi
+            upload_url="${upload_url%%\{*}"
+            releases="$(wait_for_created_release "${release_id}")"
+            upload_release_asset release-assets/SHA256SUMS text/plain
+            upload_release_asset release-assets/rivune-android-update.json application/json
+            upload_release_asset "release-assets/rivune-android-${RELEASE_TAG#v}.apk" application/vnd.android.package-archive
+            releases="$(wait_for_created_release "${release_id}")"
           elif [[ "${release_count}" != 1 ]]; then
             echo "Expected zero or one GitHub Release for ${RELEASE_TAG}, found ${release_count}." >&2
             exit 1
@@ -710,7 +815,7 @@ jobs:
             echo "release_id=${release_id}"
             echo "image_digest=${effective_image_digest}"
           } >> "${GITHUB_OUTPUT}"
-          trap - ERR
+          trap - EXIT
 
   promote:
     name: Publish release and promote container tags
