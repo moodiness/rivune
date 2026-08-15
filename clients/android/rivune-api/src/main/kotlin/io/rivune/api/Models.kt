@@ -381,12 +381,14 @@ data class SettingsValues(
     val preferDirectPlay: Boolean? = null,
     val audioLanguage: String? = null,
     val subtitleLanguage: String? = null,
+    val metadataLanguage: String? = null,
 )
 
 data class ProfileSettingsUpdate(
     val maximumResolution: PatchField<String> = PatchField.Omitted,
     val preferDirectPlay: PatchField<Boolean> = PatchField.Omitted,
     val audioLanguage: PatchField<String> = PatchField.Omitted,
+    val metadataLanguage: PatchField<String> = PatchField.Omitted,
     val subtitleLanguage: PatchField<String> = PatchField.Omitted,
     val transcoding: PatchField<String> = PatchField.Omitted,
 )
@@ -403,6 +405,7 @@ data class EffectiveSettingsSources(
     val allowTranscoding: String? = null,
     val transcoding: String? = null,
     val maximumCastMembers: String? = null,
+    val metadataLanguage: String? = null,
 )
 
 @Serializable

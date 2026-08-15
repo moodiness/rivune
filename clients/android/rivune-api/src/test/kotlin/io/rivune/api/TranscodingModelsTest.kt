@@ -123,6 +123,7 @@ class TranscodingModelsTest {
         assertNull(values.allowTranscoding)
         assertNull(values.transcoding)
         assertNull(values.maximumCastMembers)
+        assertNull(values.metadataLanguage)
 
         val inherited = json.decodeFromString<SettingsValues>("""{"maximumCastMembers":null}""")
         assertNull(inherited.maximumCastMembers)

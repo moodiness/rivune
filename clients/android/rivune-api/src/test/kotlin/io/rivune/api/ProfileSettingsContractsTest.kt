@@ -42,6 +42,8 @@ class ProfileSettingsContractsTest {
             val effective = client.effectiveProfileSettings(profileId)
             assertEquals("1080p", effective.settings.maximumResolution)
             assertEquals(true, effective.settings.preferDirectPlay)
+            assertEquals("fr-FR", effective.settings.metadataLanguage)
+            assertEquals("profile", effective.sources.metadataLanguage)
             assertEquals("fr", effective.settings.audioLanguage)
             assertEquals("en", effective.settings.subtitleLanguage)
 
@@ -51,12 +53,14 @@ class ProfileSettingsContractsTest {
                     maximumResolution = PatchField.Value("2160p"),
                     preferDirectPlay = PatchField.Value(false),
                     audioLanguage = PatchField.Value("en"),
+                    metadataLanguage = PatchField.Value("de-DE"),
                     subtitleLanguage = PatchField.Value("fr"),
                     transcoding = PatchField.Value("disabled"),
                 ),
             )
             assertEquals("2160p", updated.settings.maximumResolution)
             assertEquals(false, updated.settings.preferDirectPlay)
+            assertEquals("de-DE", updated.settings.metadataLanguage)
             assertEquals("en", updated.settings.audioLanguage)
             assertEquals("fr", updated.settings.subtitleLanguage)
             assertEquals("disabled", updated.settings.transcoding)
@@ -67,13 +71,14 @@ class ProfileSettingsContractsTest {
                     maximumResolution = PatchField.Null,
                     preferDirectPlay = PatchField.Null,
                     audioLanguage = PatchField.Null,
+                    metadataLanguage = PatchField.Null,
                     subtitleLanguage = PatchField.Null,
                     transcoding = PatchField.Null,
                 ),
             )
             client.updateProfileSettings(
                 profileId,
-                ProfileSettingsUpdate(audioLanguage = PatchField.Value("de")),
+                ProfileSettingsUpdate(metadataLanguage = PatchField.Value("es-ES")),
             )
 
             assertEquals("/.well-known/rivune", server.takeRequest().path)
@@ -89,18 +94,18 @@ class ProfileSettingsContractsTest {
             assertEquals("Bearer settings-access", patch.getHeader("Authorization"))
             assertEquals("profile-context", patch.getHeader("X-Rivune-Profile-Context"))
             assertEquals(
-                """{"maximumResolution":"2160p","preferDirectPlay":false,"audioLanguage":"en","subtitleLanguage":"fr","transcoding":"disabled"}""",
+                """{"maximumResolution":"2160p","preferDirectPlay":false,"audioLanguage":"en","metadataLanguage":"de-DE","subtitleLanguage":"fr","transcoding":"disabled"}""",
                 patch.body.readUtf8(),
             )
             val resetPatch = server.takeRequest()
             assertEquals("PATCH", resetPatch.method)
             assertEquals(
-                """{"maximumResolution":null,"preferDirectPlay":null,"audioLanguage":null,"subtitleLanguage":null,"transcoding":null}""",
+                """{"maximumResolution":null,"preferDirectPlay":null,"audioLanguage":null,"metadataLanguage":null,"subtitleLanguage":null,"transcoding":null}""",
                 resetPatch.body.readUtf8(),
             )
             val partialPatch = server.takeRequest()
             assertEquals("PATCH", partialPatch.method)
-            assertEquals("""{"audioLanguage":"de"}""", partialPatch.body.readUtf8())
+            assertEquals("""{"metadataLanguage":"es-ES"}""", partialPatch.body.readUtf8())
             assertEquals(5, server.requestCount)
         } finally {
             server.shutdown()
@@ -194,10 +199,10 @@ class ProfileSettingsContractsTest {
 
 
     private fun effectiveSettingsFixture() =
-        """{"schemaVersion":1,"settings":{"maximumResolution":"1080p","preferDirectPlay":true,"audioLanguage":"fr","subtitleLanguage":"en"},"sources":{"maximumResolution":"profile","preferDirectPlay":"profile","audioLanguage":"profile","subtitleLanguage":"profile"}}"""
+        """{"schemaVersion":1,"settings":{"maximumResolution":"1080p","preferDirectPlay":true,"audioLanguage":"fr","subtitleLanguage":"en","metadataLanguage":"fr-FR"},"sources":{"maximumResolution":"profile","preferDirectPlay":"profile","audioLanguage":"profile","subtitleLanguage":"profile","metadataLanguage":"profile"}}"""
 
     private fun settingsLayerFixture() =
-        """{"schemaVersion":1,"settings":{"maximumResolution":"2160p","preferDirectPlay":false,"audioLanguage":"en","subtitleLanguage":"fr","transcoding":"disabled"},"updatedAt":"2026-08-13T12:00:00Z"}"""
+        """{"schemaVersion":1,"settings":{"maximumResolution":"2160p","preferDirectPlay":false,"audioLanguage":"en","subtitleLanguage":"fr","metadataLanguage":"de-DE","transcoding":"disabled"},"updatedAt":"2026-08-13T12:00:00Z"}"""
 
     private fun jsonResponse(body: String) = MockResponse()
         .setHeader("Content-Type", "application/json")
