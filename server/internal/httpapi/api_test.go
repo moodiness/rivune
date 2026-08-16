@@ -86,6 +86,30 @@ func TestPanicResponseAndBothLogsRetainRequestID(t *testing.T) {
 	}
 }
 
+func TestMiddlewareRethrowsHTTPAbortHandler(t *testing.T) {
+	var logs bytes.Buffer
+	api := testAPI(&fakeInstanceService{})
+	api.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	handler := api.middleware(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusOK)
+		_, _ = response.Write([]byte("subtitle prefix"))
+		panic(http.ErrAbortHandler)
+	}))
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/subtitle.vtt", nil))
+	}()
+
+	if recovered != http.ErrAbortHandler {
+		t.Fatalf("middleware recovered panic = %v, want http.ErrAbortHandler", recovered)
+	}
+	if strings.Contains(logs.String(), "panic serving request") {
+		t.Fatalf("connection abort was logged as an application panic: %s", logs.String())
+	}
+}
+
 type fakeInstanceService struct {
 	infoCalls   int
 	info        instance.Info

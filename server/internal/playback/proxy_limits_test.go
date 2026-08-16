@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -272,5 +273,259 @@ func TestDefaultPlaybackTransportBoundsPerHostConnections(t *testing.T) {
 		transport.MaxIdleConnsPerHost != maximumDirectStreamsPerHost ||
 		transport.MaxIdleConns != maximumDirectStreamsGlobal {
 		t.Fatalf("playback transport connection bounds: max=%d per-host=%d idle-per-host=%d", transport.MaxIdleConns, transport.MaxConnsPerHost, transport.MaxIdleConnsPerHost)
+	}
+}
+
+type zeroProxyReader struct{}
+
+func (zeroProxyReader) Read(destination []byte) (int, error) {
+	for index := range destination {
+		destination[index] = 's'
+	}
+	return len(destination), nil
+}
+
+type trackedProxyBody struct {
+	reader io.Reader
+	closed atomic.Bool
+	reads  atomic.Int64
+}
+
+func (body *trackedProxyBody) Read(destination []byte) (int, error) {
+	body.reads.Add(1)
+	return body.reader.Read(destination)
+}
+
+func (body *trackedProxyBody) Close() error {
+	body.closed.Store(true)
+	return nil
+}
+
+type countingProxyResponseWriter struct {
+	header  http.Header
+	status  int
+	written int64
+	wrote   chan struct{}
+	once    sync.Once
+}
+
+func (writer *countingProxyResponseWriter) Header() http.Header {
+	if writer.header == nil {
+		writer.header = make(http.Header)
+	}
+	return writer.header
+}
+
+func (writer *countingProxyResponseWriter) WriteHeader(status int) {
+	if writer.status == 0 {
+		writer.status = status
+	}
+}
+
+func (writer *countingProxyResponseWriter) Write(contents []byte) (int, error) {
+	if writer.status == 0 {
+		writer.status = http.StatusOK
+	}
+	writer.written += int64(len(contents))
+	if writer.wrote != nil {
+		writer.once.Do(func() { close(writer.wrote) })
+	}
+	return len(contents), nil
+}
+
+func directProxyResponse(body io.ReadCloser) *http.Response {
+	return &http.Response{
+		StatusCode:    http.StatusOK,
+		Header:        make(http.Header),
+		Body:          body,
+		ContentLength: -1,
+	}
+}
+
+func recoveredProxyPanic(run func()) (recovered any) {
+	defer func() { recovered = recover() }()
+	run()
+	return nil
+}
+
+func TestDirectSubtitleProxyAcceptsExactlyMaximumBytes(t *testing.T) {
+	body := &trackedProxyBody{reader: io.LimitReader(zeroProxyReader{}, maximumConvertedSubtitleBytes)}
+	response := directProxyResponse(body)
+	response.ContentLength = maximumConvertedSubtitleBytes
+	response.Header.Set("Content-Length", strconv.Itoa(maximumConvertedSubtitleBytes))
+	response.Header.Set("Content-Type", "text/vtt; charset=utf-8")
+	writer := &countingProxyResponseWriter{}
+	request := httptest.NewRequest(http.MethodGet, "/external.vtt", nil)
+
+	if err := writeDirectProxyAsset(writer, request, storedAsset{Kind: "subtitle"}, response, "https://provider.example/external.vtt"); err != nil {
+		t.Fatalf("proxy subtitle at limit: %v", err)
+	}
+	if writer.status != http.StatusOK || writer.written != maximumConvertedSubtitleBytes || !body.closed.Load() {
+		t.Fatalf("subtitle boundary status=%d bytes=%d closed=%t", writer.status, writer.written, body.closed.Load())
+	}
+}
+
+func TestDirectSubtitleProxyAbortsBeforeWritingBytePastMaximum(t *testing.T) {
+	body := &trackedProxyBody{reader: io.LimitReader(zeroProxyReader{}, maximumConvertedSubtitleBytes+1)}
+	writer := &countingProxyResponseWriter{}
+	request := httptest.NewRequest(http.MethodGet, "/external.vtt", nil)
+
+	recovered := recoveredProxyPanic(func() {
+		_ = writeDirectProxyAsset(writer, request, storedAsset{Kind: "subtitle"}, directProxyResponse(body), "https://provider.example/external.vtt")
+	})
+	if recovered != http.ErrAbortHandler {
+		t.Fatalf("overflow panic = %v, want http.ErrAbortHandler", recovered)
+	}
+	if writer.written != maximumConvertedSubtitleBytes || !body.closed.Load() {
+		t.Fatalf("overflow bytes=%d closed=%t, want %d/true", writer.written, body.closed.Load(), maximumConvertedSubtitleBytes)
+	}
+}
+
+func TestDirectSubtitleProxyStopsNeverEndingUpstream(t *testing.T) {
+	upstream := &trackedProxyBody{reader: zeroProxyReader{}}
+	requestContext, cancel := context.WithCancel(context.Background())
+	var released atomic.Bool
+	body := newReadIdleBody(context.Background(), upstream, cancel, func() { released.Store(true) }, time.Hour)
+	writer := &countingProxyResponseWriter{}
+	request := httptest.NewRequest(http.MethodGet, "/external.vtt", nil)
+
+	done := make(chan any, 1)
+	go func() {
+		done <- recoveredProxyPanic(func() {
+			_ = writeDirectProxyAsset(writer, request, storedAsset{Kind: "subtitle"}, directProxyResponse(body), "https://provider.example/external.vtt")
+		})
+	}()
+	select {
+	case recovered := <-done:
+		if recovered != http.ErrAbortHandler {
+			t.Fatalf("never-ending upstream panic = %v, want http.ErrAbortHandler", recovered)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("never-ending subtitle upstream was not terminated")
+	}
+	select {
+	case <-requestContext.Done():
+	default:
+		t.Fatal("overflow did not cancel the upstream request context")
+	}
+	if writer.written != maximumConvertedSubtitleBytes || !upstream.closed.Load() || !released.Load() {
+		t.Fatalf("never-ending bytes=%d closed=%t released=%t, want %d/true/true", writer.written, upstream.closed.Load(), released.Load(), maximumConvertedSubtitleBytes)
+	}
+}
+
+func TestDirectSubtitleProxyRejectsKnownOversizeBeforeCommit(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		header http.Header
+		length int64
+	}{
+		{name: "content length", status: http.StatusOK, header: http.Header{"Content-Length": []string{"16777217"}}, length: maximumConvertedSubtitleBytes + 1},
+		{name: "content range total", status: http.StatusPartialContent, header: http.Header{"Content-Length": []string{"1"}, "Content-Range": []string{"bytes 0-0/16777217"}}, length: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := &trackedProxyBody{reader: zeroProxyReader{}}
+			response := directProxyResponse(body)
+			response.StatusCode = test.status
+			response.Header = test.header
+			response.ContentLength = test.length
+			writer := &countingProxyResponseWriter{}
+			err := writeDirectProxyAsset(writer, httptest.NewRequest(http.MethodGet, "/external.vtt", nil), storedAsset{Kind: "subtitle"}, response, "https://provider.example/external.vtt")
+			if !errors.Is(err, ErrMediaSourceFailed) {
+				t.Fatalf("known oversize error = %v, want ErrMediaSourceFailed", err)
+			}
+			if writer.status != 0 || writer.written != 0 || body.reads.Load() != 0 || !body.closed.Load() {
+				t.Fatalf("known oversize committed=%d bytes=%d reads=%d closed=%t", writer.status, writer.written, body.reads.Load(), body.closed.Load())
+			}
+		})
+	}
+}
+
+func TestDirectSubtitleProxyPreservesValidRange(t *testing.T) {
+	body := &trackedProxyBody{reader: strings.NewReader("cue")}
+	response := directProxyResponse(body)
+	response.StatusCode = http.StatusPartialContent
+	response.ContentLength = 3
+	response.Header.Set("Content-Length", "3")
+	response.Header.Set("Content-Range", "bytes 4-6/7")
+	writer := &countingProxyResponseWriter{}
+
+	err := writeDirectProxyAsset(writer, httptest.NewRequest(http.MethodGet, "/external.vtt", nil), storedAsset{Kind: "subtitle"}, response, "https://provider.example/external.vtt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writer.status != http.StatusPartialContent || writer.written != 3 || writer.Header().Get("Content-Range") != "bytes 4-6/7" {
+		t.Fatalf("range response status=%d bytes=%d headers=%v", writer.status, writer.written, writer.Header())
+	}
+}
+
+func TestDirectProxyLimitUsesStoredAssetKind(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/misleading.vtt", nil)
+	body := &trackedProxyBody{reader: io.LimitReader(zeroProxyReader{}, maximumConvertedSubtitleBytes+1)}
+	response := directProxyResponse(body)
+	response.Header.Set("Content-Type", "text/vtt")
+	writer := &countingProxyResponseWriter{}
+
+	if err := writeDirectProxyAsset(writer, request, storedAsset{Kind: "stream"}, response, "https://provider.example/misleading.vtt"); err != nil {
+		t.Fatalf("media asset with subtitle metadata was bounded: %v", err)
+	}
+	if writer.written != maximumConvertedSubtitleBytes+1 || !body.closed.Load() {
+		t.Fatalf("media bytes=%d closed=%t, want %d/true", writer.written, body.closed.Load(), maximumConvertedSubtitleBytes+1)
+	}
+
+	boundedBody := &trackedProxyBody{reader: io.LimitReader(zeroProxyReader{}, maximumConvertedSubtitleBytes+1)}
+	boundedResponse := directProxyResponse(boundedBody)
+	boundedResponse.Header.Set("Content-Type", "video/mp4")
+	boundedWriter := &countingProxyResponseWriter{}
+	recovered := recoveredProxyPanic(func() {
+		_ = writeDirectProxyAsset(boundedWriter, request, storedAsset{Kind: "subtitle"}, boundedResponse, "https://provider.example/misleading.mp4")
+	})
+	if recovered != http.ErrAbortHandler || boundedWriter.written != maximumConvertedSubtitleBytes {
+		t.Fatalf("stored subtitle with media metadata panic=%v bytes=%d", recovered, boundedWriter.written)
+	}
+}
+
+type gatedMediaProxyBody struct {
+	release chan struct{}
+	read    int
+	closed  atomic.Bool
+}
+
+func (body *gatedMediaProxyBody) Read(destination []byte) (int, error) {
+	body.read++
+	if body.read == 1 {
+		return copy(destination, "first"), nil
+	}
+	<-body.release
+	return copy(destination, "second"), io.EOF
+}
+
+func (body *gatedMediaProxyBody) Close() error {
+	body.closed.Store(true)
+	return nil
+}
+
+func TestDirectMediaProxyStillStreamsBeforeUpstreamEOF(t *testing.T) {
+	body := &gatedMediaProxyBody{release: make(chan struct{})}
+	writer := &countingProxyResponseWriter{wrote: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		done <- writeDirectProxyAsset(writer, httptest.NewRequest(http.MethodGet, "/movie.mp4", nil), storedAsset{Kind: "stream"}, directProxyResponse(body), "https://provider.example/movie.mp4")
+	}()
+	select {
+	case <-writer.wrote:
+		if writer.written != int64(len("first")) {
+			t.Fatalf("media bytes before upstream continuation = %d", writer.written)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("media proxy buffered instead of streaming the first chunk")
+	}
+	close(body.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if writer.written != int64(len("firstsecond")) || !body.closed.Load() {
+		t.Fatalf("media result bytes=%d closed=%t", writer.written, body.closed.Load())
 	}
 }

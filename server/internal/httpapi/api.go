@@ -857,6 +857,9 @@ func (a *API) middleware(next http.Handler) http.Handler {
 
 		defer func() {
 			if recovered := recover(); recovered != nil {
+				if recovered == http.ErrAbortHandler {
+					panic(recovered)
+				}
 				a.logger.Error("panic serving request", "request_id", requestID, "method", r.Method, "route", nativeRequestRoute(r), "committed", observed.Committed())
 				if !observed.Committed() {
 					writeError(observed, http.StatusInternalServerError, "internal_error", "An internal error occurred")

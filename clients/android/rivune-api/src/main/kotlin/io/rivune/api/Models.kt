@@ -381,6 +381,11 @@ data class SettingsValues(
     val preferDirectPlay: Boolean? = null,
     val audioLanguage: String? = null,
     val subtitleLanguage: String? = null,
+    val forcedSubtitleLanguage: String? = null,
+    val autoplayNextEpisode: Boolean? = null,
+    val skipIntroEnabled: Boolean? = null,
+    val skipRecapEnabled: Boolean? = null,
+    val skipOutroEnabled: Boolean? = null,
     val metadataLanguage: String? = null,
 )
 
@@ -390,6 +395,11 @@ data class ProfileSettingsUpdate(
     val audioLanguage: PatchField<String> = PatchField.Omitted,
     val metadataLanguage: PatchField<String> = PatchField.Omitted,
     val subtitleLanguage: PatchField<String> = PatchField.Omitted,
+    val forcedSubtitleLanguage: PatchField<String> = PatchField.Omitted,
+    val autoplayNextEpisode: PatchField<Boolean> = PatchField.Omitted,
+    val skipIntroEnabled: PatchField<Boolean> = PatchField.Omitted,
+    val skipRecapEnabled: PatchField<Boolean> = PatchField.Omitted,
+    val skipOutroEnabled: PatchField<Boolean> = PatchField.Omitted,
     val transcoding: PatchField<String> = PatchField.Omitted,
 )
 
@@ -405,6 +415,15 @@ data class EffectiveSettingsSources(
     val allowTranscoding: String? = null,
     val transcoding: String? = null,
     val maximumCastMembers: String? = null,
+    val maximumResolution: String? = null,
+    val preferDirectPlay: String? = null,
+    val audioLanguage: String? = null,
+    val subtitleLanguage: String? = null,
+    val forcedSubtitleLanguage: String? = null,
+    val autoplayNextEpisode: String? = null,
+    val skipIntroEnabled: String? = null,
+    val skipRecapEnabled: String? = null,
+    val skipOutroEnabled: String? = null,
     val metadataLanguage: String? = null,
 )
 

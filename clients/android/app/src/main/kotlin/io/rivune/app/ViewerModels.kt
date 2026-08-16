@@ -6,6 +6,8 @@ import io.rivune.api.Movie
 import io.rivune.api.PlaybackProgress
 import io.rivune.api.PlaybackSourceOption
 import io.rivune.api.Series
+import io.rivune.api.EffectiveSettings
+import io.rivune.api.EffectiveSettingsSources
 import io.rivune.api.SettingsValues
 import io.rivune.api.Season
 import io.rivune.api.Trailer
@@ -62,6 +64,9 @@ data class MediaTarget(
     val seasonId: String? = null,
     val seasonNumber: Int? = null,
     val episodeNumber: Int? = null,
+    val seriesImdbId: String? = null,
+    val runtimeMinutes: Int? = null,
+    val rating: Double? = null,
 )
 
 data class MediaDetailState(
@@ -94,6 +99,12 @@ data class LibraryState(
     val availableTypes: Set<String> = emptySet(),
 )
 
+data class PlaybackMarkerRequest(
+    val imdbId: String,
+    val season: Int,
+    val episode: Int,
+)
+
 data class SourcePickerState(
     val target: MediaTarget,
     val titleId: UUID,
@@ -101,6 +112,8 @@ data class SourcePickerState(
     val options: List<PlaybackSourceOption>,
     val partial: Boolean,
     val playerSource: PlaybackSourceOption? = null,
+    val nextEpisode: MediaTarget? = null,
+    val markerRequest: PlaybackMarkerRequest? = null,
 )
 
 data class PlayerSubtitlePresentation(
@@ -111,6 +124,22 @@ data class PlayerSubtitlePresentation(
     val selected: Boolean = false,
 )
 
+enum class EmbeddedPlayerEngine {
+    MEDIA3,
+    MPV,
+}
+
+enum class EmbeddedPlayerPreference {
+    AUTOMATIC,
+    MEDIA3,
+    MPV,
+}
+
+data class PlayerEngineFailure(
+    val positionMs: Long,
+    val fallbackEligible: Boolean,
+)
+
 data class PlayerPresentation(
     val key: String,
     val sessionId: UUID,
@@ -119,24 +148,59 @@ data class PlayerPresentation(
     val mediaUrl: String,
     val protocol: String,
     val container: String?,
+    val mediaTimeline: io.rivune.api.PlaybackMediaTimeline?,
     val startPositionMs: Long,
+    val timelineStartPositionMs: Long,
     val durationSeconds: Int,
     val expectedProgressVersion: Long,
+    val engine: EmbeddedPlayerEngine,
+    val fallbackAllowed: Boolean,
     val subtitles: List<PlayerSubtitlePresentation> = emptyList(),
     val externalPlayer: ExternalPlayerApp? = null,
-)
-data class ProfilePreferencesState(
-    val settings: SettingsValues? = null,
-    val canEdit: Boolean = false,
+    val nextEpisode: MediaTarget? = null,
+    val markers: List<io.rivune.api.PlaybackMarker> = emptyList(),
 )
 
+internal fun PlayerPresentation.fallbackToMpv(
+    failure: PlayerEngineFailure,
+    newKey: String,
+): PlayerPresentation? = takeIf {
+    it.externalPlayer == null &&
+        it.engine == EmbeddedPlayerEngine.MEDIA3 &&
+        it.fallbackAllowed &&
+        failure.fallbackEligible
+}?.copy(
+    key = newKey,
+    engine = EmbeddedPlayerEngine.MPV,
+    fallbackAllowed = false,
+    startPositionMs = failure.positionMs.coerceAtLeast(0L),
+    externalPlayer = null,
+)
+data class ProfilePreferencesState(
+    val effective: EffectiveSettings? = null,
+    val canEdit: Boolean = false,
+) {
+    val settings: SettingsValues?
+        get() = effective?.settings
+    val sources: EffectiveSettingsSources?
+        get() = effective?.sources
+}
+
+
+data class HomeHeroSlide(
+    val item: io.rivune.api.CollectionItem,
+    val fallbackBackdropUrl: String?,
+    val fallbackLogoUrl: String?,
+)
 
 data class ViewerState(
     val selectedTab: ViewerTab = ViewerTab.HOME,
     val continueWatching: List<MediaTarget> = emptyList(),
+    val heroSlides: List<HomeHeroSlide> = emptyList(),
     val search: SearchState = SearchState(),
     val library: LibraryState = LibraryState(),
     val detail: MediaDetailState? = null,
+    val detailHistory: List<MediaDetailState> = emptyList(),
     val sourcePicker: SourcePickerState? = null,
     val player: PlayerPresentation? = null,
     val preferences: ProfilePreferencesState? = null,
@@ -165,8 +229,31 @@ internal fun Episode.toMediaTarget(series: Series, fallback: MediaTarget): Media
         releaseInfo = airDate,
         released = airDate,
         seriesId = series.id,
+        seriesImdbId = series.externalIds["imdb"],
         seasonId = seasonId,
         seasonNumber = seasonNumber,
         episodeNumber = episodeNumber,
+        runtimeMinutes = runtimeMinutes,
+        rating = voteAverage.takeIf { it > 0.0 },
     )
+}
+
+internal suspend fun resolveNextEpisodeTarget(
+    series: Series,
+    currentSeason: Season,
+    currentEpisodeId: UUID,
+    fallback: MediaTarget,
+    loadSeason: suspend (String) -> Season,
+): MediaTarget? {
+    val currentIndex = currentSeason.episodes.indexOfFirst { it.id == currentEpisodeId }
+    if (currentIndex < 0) return null
+    currentSeason.episodes.getOrNull(currentIndex + 1)?.let { return it.toMediaTarget(series, fallback) }
+
+    val orderedSeasons = series.seasons.sortedWith(compareBy({ it.seasonNumber }, { it.id }))
+    val seasonIndex = orderedSeasons.indexOfFirst { it.id == currentSeason.id }
+    if (seasonIndex < 0) return null
+    for (summary in orderedSeasons.drop(seasonIndex + 1).filter { it.episodeCount > 0 }) {
+        loadSeason(summary.id).episodes.firstOrNull()?.let { return it.toMediaTarget(series, fallback) }
+    }
+    return null
 }

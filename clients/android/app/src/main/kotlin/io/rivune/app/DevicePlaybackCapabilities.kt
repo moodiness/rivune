@@ -44,8 +44,8 @@ private data class VideoSupport(
 )
 
 internal enum class PlaybackNetwork {
-    UNMETERED,
-    METERED,
+    WIFI_OR_ETHERNET,
+    MOBILE_OR_METERED,
 }
 
 internal data class PlaybackQualityLimit(
@@ -105,24 +105,63 @@ internal object DevicePlaybackCapabilities {
     }
 }
 
+internal val MpvPlaybackCapabilities = PlaybackCapabilities(
+    streamingProtocols = listOf("http", "hls", "dash"),
+    containers = listOf("mp4", "mkv", "matroska", "avi", "mov", "flv", "ts", "m2ts", "mpegts", "webm", "ogv", "ogg", "3gp", "mpeg"),
+    videoCodecs = listOf("h264", "hevc", "h265", "mpeg4", "divx", "xvid", "wmv", "vc1", "vp8", "vp9", "av1", "mpeg", "mpeg2video", "theora"),
+    audioCodecs = listOf("aac", "mp3", "mp2", "flac", "opus", "vorbis", "ac3", "eac3", "dts", "truehd", "alac", "wma"),
+    hdrFormats = listOf("sdr", "hdr10", "hlg", "dolby_vision"),
+    processingModes = listOf(
+        PlaybackProcessingMode.REMUX,
+        PlaybackProcessingMode.TRANSCODE_AUDIO,
+        PlaybackProcessingMode.TRANSCODE,
+    ),
+    maximumAudioChannels = 8,
+    subtitleModes = listOf(PlaybackSubtitleMode.EXTERNAL, PlaybackSubtitleMode.BURN),
+)
+
+internal fun playbackCapabilitiesFor(
+    preferredPlayer: PreferredPlayer,
+    embeddedPreference: EmbeddedPlayerPreference,
+    media3Capabilities: PlaybackCapabilities = DevicePlaybackCapabilities.value,
+): PlaybackCapabilities = when {
+    preferredPlayer == PreferredPlayer.Ask -> media3Capabilities
+    preferredPlayer == PreferredPlayer.Rivune && embeddedPreference == EmbeddedPlayerPreference.MEDIA3 -> media3Capabilities
+    else -> MpvPlaybackCapabilities
+}
+
 internal fun detectPlaybackNetwork(context: Context): PlaybackNetwork = runCatching {
     val connectivity = context.getSystemService(ConnectivityManager::class.java)
-        ?: return@runCatching PlaybackNetwork.METERED
-    val network = connectivity.activeNetwork ?: return@runCatching PlaybackNetwork.METERED
+        ?: return@runCatching PlaybackNetwork.MOBILE_OR_METERED
+    val network = connectivity.activeNetwork
+        ?: return@runCatching PlaybackNetwork.MOBILE_OR_METERED
     val capabilities = connectivity.getNetworkCapabilities(network)
-        ?: return@runCatching PlaybackNetwork.METERED
-    if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) {
-        PlaybackNetwork.UNMETERED
-    } else {
-        PlaybackNetwork.METERED
-    }
-}.getOrDefault(PlaybackNetwork.METERED)
+        ?: return@runCatching PlaybackNetwork.MOBILE_OR_METERED
+    classifyPlaybackNetwork(
+        hasWifi = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI),
+        hasEthernet = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET),
+        hasCellular = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR),
+        isMetered = !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED),
+    )
+}.getOrDefault(PlaybackNetwork.MOBILE_OR_METERED)
+
+internal fun classifyPlaybackNetwork(
+    hasWifi: Boolean,
+    hasEthernet: Boolean,
+    hasCellular: Boolean,
+    isMetered: Boolean,
+): PlaybackNetwork = when {
+    hasWifi || hasEthernet -> PlaybackNetwork.WIFI_OR_ETHERNET
+    hasCellular -> PlaybackNetwork.MOBILE_OR_METERED
+    !isMetered -> PlaybackNetwork.WIFI_OR_ETHERNET
+    else -> PlaybackNetwork.MOBILE_OR_METERED
+}
 
 internal fun playbackQualityLimit(
     quality: NetworkQualityPreference,
     network: PlaybackNetwork,
 ): PlaybackQualityLimit = when (quality) {
-    NetworkQualityPreference.AUTOMATIC -> if (network == PlaybackNetwork.METERED) {
+    NetworkQualityPreference.AUTOMATIC -> if (network == PlaybackNetwork.MOBILE_OR_METERED) {
         PlaybackQualityLimit(AUTOMATIC_METERED_MAXIMUM_HEIGHT, AUTOMATIC_METERED_MAXIMUM_BITRATE_KBPS)
     } else {
         PlaybackQualityLimit(null, null)
@@ -151,6 +190,7 @@ private fun maximumDecoderSupport(decoderInfos: List<MediaCodecInfo>, mimeType: 
             ?: return@mapNotNull null
         runCatching {
             val videoCapabilities = info.getCapabilitiesForType(supportedType).videoCapabilities
+                ?: return@runCatching null
             val maximumHeight = STANDARD_VIDEO_SIZES.firstOrNull { (width, height) ->
                 videoCapabilities.isSizeSupported(width, height)
             }?.second ?: return@runCatching null

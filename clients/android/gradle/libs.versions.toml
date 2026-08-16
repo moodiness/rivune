@@ -1,0 +1,5 @@
+[versions]
+libmpv = "1.0.0"
+
+[libraries]
+libmpv = { module = "dev.jdtech.mpv:libmpv", version.ref = "libmpv" }

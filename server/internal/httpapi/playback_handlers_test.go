@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -304,6 +305,34 @@ func TestPlaybackAssetDoesNotAppendJSONAfterStreamCommit(t *testing.T) {
 		if strings.Contains(logs.String(), secret) {
 			t.Fatalf("committed stream log exposed %q: %s", secret, logs.String())
 		}
+	}
+}
+
+func TestPlaybackAssetOverflowAbortsConnectionWithoutErrorSuffix(t *testing.T) {
+	const prefix = "bounded-subtitle-prefix"
+	service := &fakePlaybackService{proxy: func(response http.ResponseWriter, _ *http.Request) error {
+		response.Header().Set("Content-Type", "text/vtt")
+		response.WriteHeader(http.StatusOK)
+		_, _ = response.Write([]byte(prefix))
+		response.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	}}
+	api := testAPI(&fakeInstanceService{})
+	api.playback = service
+	server := httptest.NewServer(api.Handler())
+	defer server.Close()
+
+	response, err := server.Client().Get(server.URL + "/api/v1/playback/sessions/session-id/assets/subtitle-id?token=opaque-token")
+	if err != nil {
+		t.Fatalf("read committed subtitle response headers: %v", err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if readErr == nil {
+		t.Fatal("overflowed subtitle response ended as a successful complete response")
+	}
+	if string(body) != prefix || strings.Contains(string(body), "internal_error") || strings.Contains(string(body), "playback_") {
+		t.Fatalf("overflowed subtitle body = %q, read error = %v", body, readErr)
 	}
 }
 

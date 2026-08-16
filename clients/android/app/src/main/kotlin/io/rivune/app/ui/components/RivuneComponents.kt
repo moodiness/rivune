@@ -740,6 +740,7 @@ internal fun RivuneArtwork(
     modifier: Modifier = Modifier,
     contentDescription: String? = null,
     contentScale: ContentScale = ContentScale.Crop,
+    alignment: Alignment = Alignment.Center,
 ) {
     val context = LocalContext.current
     val motionPolicy = LocalRivuneMotionPolicy.current
@@ -778,6 +779,7 @@ internal fun RivuneArtwork(
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = contentScale,
+                alignment = alignment,
                 onError = { failed = true },
             )
         }

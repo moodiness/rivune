@@ -25,6 +25,7 @@ import io.rivune.api.Movie
 import io.rivune.api.PlaybackCapabilities
 import io.rivune.api.PlaybackPreparation
 import io.rivune.api.PlaybackProgress
+import io.rivune.api.PlaybackMarkerList
 import io.rivune.api.PlaybackProgressBatch
 import io.rivune.api.PlaybackSession
 import io.rivune.api.PlaybackSourceList
@@ -52,6 +53,7 @@ import java.time.format.DateTimeParseException
 import java.util.Locale
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -84,6 +86,16 @@ private data class PlayerProgressSnapshot(
     val positionSeconds: Int,
     val durationSeconds: Int,
     val completed: Boolean,
+)
+private data class HomeResolution(
+    val collections: List<Collection>,
+    val heroSlides: List<HomeHeroSlide>,
+)
+
+
+private data class EpisodePlaybackContext(
+    val nextEpisode: MediaTarget? = null,
+    val markerRequest: PlaybackMarkerRequest? = null,
 )
 data class PairingInfo(
     val userCode: String,
@@ -123,7 +135,7 @@ data class RivuneUiState(
     val profiles: List<Profile> = emptyList(),
     val profileAvatarData: Map<UUID, ByteArray> = emptyMap(),
     val pendingProfile: Profile? = null,
-    val effectiveSettings: SettingsValues? = null,
+    val effectiveSettings: EffectiveSettings? = null,
     val activeProfile: Profile? = null,
     val collections: List<Collection> = emptyList(),
     val selectedCollectionId: UUID? = null,
@@ -172,6 +184,7 @@ internal interface RivuneGateway {
     suspend fun updateProfileSettings(id: UUID, input: ProfileSettingsUpdate): SettingsLayer
     suspend fun playbackSources(mediaType: String, resourceId: String, capabilities: PlaybackCapabilities, addonId: UUID? = null): PlaybackSourceList
     suspend fun preparePlayback(sourceRef: String, startSeconds: Int? = null, externalPlayer: Boolean = false): PlaybackPreparation
+    suspend fun playbackMarkers(imdbId: String, season: Int, episode: Int): PlaybackMarkerList
     suspend fun resolvePlayback(sourceRef: String, titleId: String? = null, startSeconds: Int? = null, externalPlayer: Boolean = false): PlaybackSession
     suspend fun stopPlayback(sessionId: UUID)
     suspend fun updatePlaybackProgress(titleId: UUID, input: UpdatePlaybackProgressRequest): PlaybackProgress
@@ -236,6 +249,8 @@ private class DefaultRivuneGateway(
         client.playbackSources(mediaType, resourceId, capabilities, addonId)
     override suspend fun preparePlayback(sourceRef: String, startSeconds: Int?, externalPlayer: Boolean) =
         client.preparePlayback(sourceRef, startSeconds, externalPlayer)
+    override suspend fun playbackMarkers(imdbId: String, season: Int, episode: Int) =
+        client.playbackMarkers(imdbId, season, episode)
     override suspend fun resolvePlayback(sourceRef: String, titleId: String?, startSeconds: Int?, externalPlayer: Boolean) =
         client.resolvePlayback(sourceRef, titleId = titleId, startSeconds = startSeconds, externalPlayer = externalPlayer)
     override suspend fun stopPlayback(sessionId: UUID) = client.stopPlayback(sessionId)
@@ -285,7 +300,7 @@ class RivuneViewModel internal constructor(
     private val terminalCleanupScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val externalPlaybackSupportProvider: () -> ExternalPlaybackSupport = { ExternalPlaybackSupport() },
     private val appPreferences: AppPreferencesReader = AppPreferencesReader { AppPreferencesState() },
-    private val playbackNetworkProvider: () -> PlaybackNetwork = { PlaybackNetwork.UNMETERED },
+    private val playbackNetworkProvider: () -> PlaybackNetwork = { PlaybackNetwork.WIFI_OR_ETHERNET },
     private val localeProvider: () -> Locale = Locale::getDefault,
     private val diagnostics: DiagnosticsBuffer = DiagnosticsBuffer(),
 ) : ViewModel() {
@@ -301,6 +316,8 @@ class RivuneViewModel internal constructor(
 
     private var terminalOwnerDestructionPending = false
     private var lastPlayerProgress: PlayerProgressSnapshot? = null
+    private var lastPersistedPlayerProgress: PlayerProgressSnapshot? = null
+    private var advancingPlayerSessionId: UUID? = null
     private var folderRequestGeneration = 0L
     private var viewerRequestGeneration = 0L
     private var searchDescriptors: List<AddonCatalogDescriptor> = emptyList()
@@ -702,10 +719,11 @@ class RivuneViewModel internal constructor(
         mutableState.value = mutableState.value.copy(
             viewer = mutableState.value.viewer.copy(
                 preferences = ProfilePreferencesState(
-                    settings = mutableState.value.effectiveSettings,
+                    effective = mutableState.value.effectiveSettings,
                     canEdit = profile.canManage,
                 ),
                 detail = null,
+                detailHistory = emptyList(),
                 sourcePicker = null,
                 loading = ViewerLoading.PREFERENCES,
                 inlineFailure = null,
@@ -716,10 +734,10 @@ class RivuneViewModel internal constructor(
                 val previousLanguage = metadataLanguage()
                 val effective = currentGateway.effectiveProfileSettings(profile.id)
                 if (!viewerRequestCurrent(operationGeneration, requestGeneration)) return@launch
-                updateEffectiveSettings(effective.settings)
+                updateEffectiveSettings(effective)
                 mutableState.value = mutableState.value.copy(
                     viewer = mutableState.value.viewer.copy(
-                        preferences = ProfilePreferencesState(settings = effective.settings, canEdit = profile.canManage),
+                        preferences = ProfilePreferencesState(effective = effective, canEdit = profile.canManage),
                         loading = null,
                         inlineFailure = null,
                     ),
@@ -762,10 +780,10 @@ class RivuneViewModel internal constructor(
                 currentGateway.updateProfileSettings(profile.id, input)
                 val effective = currentGateway.effectiveProfileSettings(profile.id)
                 if (!viewerRequestCurrent(operationGeneration, requestGeneration)) return@launch
-                updateEffectiveSettings(effective.settings)
+                updateEffectiveSettings(effective)
                 mutableState.value = mutableState.value.copy(
                     viewer = mutableState.value.viewer.copy(
-                        preferences = ProfilePreferencesState(settings = effective.settings, canEdit = true),
+                        preferences = ProfilePreferencesState(effective = effective, canEdit = true),
                         loading = null,
                         inlineFailure = null,
                     ),
@@ -787,6 +805,7 @@ class RivuneViewModel internal constructor(
             viewer = mutableState.value.viewer.copy(
                 selectedTab = tab,
                 detail = null,
+                detailHistory = emptyList(),
                 sourcePicker = null,
                 preferences = null,
                 inlineFailure = null,
@@ -804,16 +823,34 @@ class RivuneViewModel internal constructor(
 
     fun openLibraryItem(item: LibraryItem) = openMedia(item.toMediaTarget())
 
-    fun openMedia(target: MediaTarget) {
+    fun openMedia(target: MediaTarget) = loadMedia(target, parentDetail = null)
+
+    fun openAndPlayMedia(target: MediaTarget) {
+        if (target.mediaType != "series") loadMedia(target, parentDetail = null, playWhenReady = true)
+    }
+
+    fun openEpisode(target: MediaTarget) = loadMedia(target, parentDetail = mutableState.value.viewer.detail)
+
+    private fun loadMedia(
+        target: MediaTarget,
+        parentDetail: MediaDetailState?,
+        playWhenReady: Boolean = false,
+    ) {
         if (!target.available) return
         val currentGateway = gateway ?: return
         val operationGeneration = generation
         val language = metadataLanguage()
         val requestGeneration = ++viewerRequestGeneration
+        val detailHistory = if (parentDetail == null) {
+            emptyList()
+        } else {
+            mutableState.value.viewer.detailHistory + parentDetail
+        }
         mutableState.value = mutableState.value.copy(
             viewer = mutableState.value.viewer.copy(
                 loading = ViewerLoading.DETAIL,
-                detail = null,
+                detail = parentDetail,
+                detailHistory = if (parentDetail == null) emptyList() else mutableState.value.viewer.detailHistory,
                 sourcePicker = null,
                 preferences = null,
                 inlineFailure = null,
@@ -847,8 +884,14 @@ class RivuneViewModel internal constructor(
                     inLibrary = library?.items?.any { it.titleId == titleId } == true,
                 )
                 mutableState.value = mutableState.value.copy(
-                    viewer = mutableState.value.viewer.copy(detail = detail, loading = null, inlineFailure = null),
+                    viewer = mutableState.value.viewer.copy(
+                        detail = detail,
+                        detailHistory = detailHistory,
+                        loading = null,
+                        inlineFailure = null,
+                    ),
                 )
+                if (playWhenReady) loadPlaybackSources(canonical, titleId, progress)
             } catch (cause: CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
@@ -863,11 +906,23 @@ class RivuneViewModel internal constructor(
             viewer.player != null -> closePlayer()
             viewer.sourcePicker != null -> dismissSourcePicker()
             viewer.preferences != null -> closeProfilePreferences()
+            viewer.detailHistory.isNotEmpty() -> {
+                viewerRequestGeneration += 1
+                mutableState.value = mutableState.value.copy(
+                    viewer = viewer.copy(
+                        detail = viewer.detailHistory.last(),
+                        detailHistory = viewer.detailHistory.dropLast(1),
+                        loading = null,
+                        inlineFailure = null,
+                    ),
+                )
+            }
             viewer.detail?.season != null -> {
                 viewerRequestGeneration += 1
                 mutableState.value = mutableState.value.copy(
                     viewer = viewer.copy(
-                        detail = viewer.detail.copy(season = null),
+                        detail = viewer.detail.copy(season = null, seasonTrailers = emptyList(), episodeProgress = emptyMap()),
+                        detailHistory = emptyList(),
                         loading = null,
                         inlineFailure = null,
                     ),
@@ -876,7 +931,12 @@ class RivuneViewModel internal constructor(
             viewer.detail != null -> {
                 viewerRequestGeneration += 1
                 mutableState.value = mutableState.value.copy(
-                    viewer = viewer.copy(detail = null, loading = null, inlineFailure = null),
+                    viewer = viewer.copy(
+                        detail = null,
+                        detailHistory = emptyList(),
+                        loading = null,
+                        inlineFailure = null,
+                    ),
                 )
             }
             mutableState.value.resolvedFolder != null -> closeFolder()
@@ -923,18 +983,24 @@ class RivuneViewModel internal constructor(
     fun selectSeason(seasonId: String) {
         val detail = mutableState.value.viewer.detail ?: return
         val series = detail.series ?: return
+        if (detail.season?.id == seasonId) return
         val currentGateway = gateway ?: return
         val requestGeneration = ++viewerRequestGeneration
         val operationGeneration = generation
         val language = metadataLanguage()
-        mutableState.value = mutableState.value.copy(viewer = mutableState.value.viewer.copy(loading = ViewerLoading.SEASON, inlineFailure = null))
+        mutableState.value = mutableState.value.copy(
+            viewer = mutableState.value.viewer.copy(
+                loading = ViewerLoading.SEASON,
+                inlineFailure = null,
+            ),
+        )
         viewModelScope.launch {
             try {
                 val season = currentGateway.season(seasonId, series.mappingProvider, language)
                 if (!viewerRequestCurrent(operationGeneration, requestGeneration)) return@launch
                 mutableState.value = mutableState.value.copy(
                     viewer = mutableState.value.viewer.copy(
-                        detail = detail.copy(season = season, episodeProgress = emptyMap()),
+                        detail = detail.copy(season = season, seasonTrailers = emptyList(), episodeProgress = emptyMap()),
                     ),
                 )
                 val seasonTrailers = runCatching {
@@ -978,15 +1044,22 @@ class RivuneViewModel internal constructor(
         loadPlaybackSources(resolvedTarget.copy(titleId = titleId), titleId, progress)
     }
 
+    fun refreshPlaybackSources() {
+        val picker = mutableState.value.viewer.sourcePicker ?: return
+        loadPlaybackSources(picker.target, picker.titleId, picker.progress)
+    }
+
     fun selectPlaybackSource(source: io.rivune.api.PlaybackSourceOption) {
         val picker = mutableState.value.viewer.sourcePicker ?: return
         val selectedSource = picker.options.firstOrNull {
             it.id == source.id && it.sourceRef == source.sourceRef
         } ?: return
         refreshExternalPlaybackSupport()
+        val preferences = appPreferences.snapshot()
         when (
             val target = preferredPlaybackTarget(
-                appPreferences.snapshot().preferredPlayer,
+                preferences.preferredPlayer,
+                preferences.embeddedPlayerPreference,
                 selectedSource,
                 externalPlaybackSupport,
             )
@@ -1005,24 +1078,36 @@ class RivuneViewModel internal constructor(
                     requestPlaybackTarget(picker, selectedSource)
                 }
             }
-            PreferredPlaybackTarget.Rivune -> startPlayback(picker, selectedSource, null)
-            is PreferredPlaybackTarget.External -> startPlayback(picker, selectedSource, target.player)
+            is PreferredPlaybackTarget.Embedded -> startPlayback(
+                picker,
+                selectedSource,
+                PlaybackTargetSelection.Embedded(target.preference),
+            )
+            is PreferredPlaybackTarget.External -> startPlayback(
+                picker,
+                selectedSource,
+                PlaybackTargetSelection.External(target.player),
+            )
         }
     }
 
-    fun choosePlaybackTarget(externalPlayer: ExternalPlayerApp?) {
+    fun choosePlaybackTarget(target: PlaybackTargetSelection) {
         val picker = mutableState.value.viewer.sourcePicker ?: return
         val source = picker.playerSource ?: return
         refreshExternalPlaybackSupport()
-        val selectedExternalPlayer = if (externalPlayer == null) {
-            if (source.mode == io.rivune.api.PlaybackMode.EXTERNAL) return
-            null
-        } else {
-            externalPlaybackSupport.playersFor(source.mode, source.protocol, source.container)
-                .firstOrNull { it.packageName == externalPlayer.packageName }
-                ?: return
+        val validatedTarget = when (target) {
+            is PlaybackTargetSelection.Embedded -> {
+                if (source.mode == io.rivune.api.PlaybackMode.EXTERNAL) return
+                target
+            }
+            is PlaybackTargetSelection.External -> {
+                val player = externalPlaybackSupport.playersFor(source.mode, source.protocol, source.container)
+                    .firstOrNull { it.packageName == target.player.packageName }
+                    ?: return
+                PlaybackTargetSelection.External(player)
+            }
         }
-        startPlayback(picker, source, selectedExternalPlayer)
+        startPlayback(picker, source, validatedTarget)
     }
 
     fun dismissPlaybackTarget() {
@@ -1047,7 +1132,7 @@ class RivuneViewModel internal constructor(
     private fun startPlayback(
         picker: SourcePickerState,
         source: io.rivune.api.PlaybackSourceOption,
-        selectedExternalPlayer: ExternalPlayerApp?,
+        target: PlaybackTargetSelection,
     ) {
         if (mutableState.value.viewer.sourcePicker?.titleId != picker.titleId) return
         val currentGateway = gateway ?: return
@@ -1063,8 +1148,24 @@ class RivuneViewModel internal constructor(
         )
         viewModelScope.launch {
             var createdSession: io.rivune.api.PlaybackSession? = null
+            val selectedExternalPlayer = (target as? PlaybackTargetSelection.External)?.player
+            val embedded = (target as? PlaybackTargetSelection.Embedded)
+                ?.let { embeddedPlayerSelection(it.preference) }
+                ?: EmbeddedPlayerSelection(EmbeddedPlayerEngine.MEDIA3, fallbackAllowed = false)
+            val external = selectedExternalPlayer != null
+            val markerRequest = picker.markerRequest.takeUnless { external }
+            val markerDeferred = markerRequest?.let { request ->
+                async(start = CoroutineStart.UNDISPATCHED) {
+                    try {
+                        currentGateway.playbackMarkers(request.imdbId, request.season, request.episode).markers
+                    } catch (cause: CancellationException) {
+                        throw cause
+                    } catch (_: Throwable) {
+                        emptyList()
+                    }
+                }
+            }
             try {
-                val external = selectedExternalPlayer != null
                 currentGateway.preparePlayback(source.sourceRef, start, external)
                 val session = currentGateway.resolvePlayback(source.sourceRef, picker.titleId.toString(), start, external)
                 createdSession = session
@@ -1090,7 +1191,12 @@ class RivuneViewModel internal constructor(
                     ?: picker.progress?.durationSeconds
                     ?: 0
                 lastPlayerProgress = null
-                if (!viewerRequestCurrent(operationGeneration, requestGeneration)) return@launch
+                lastPersistedPlayerProgress = null
+                advancingPlayerSessionId = null
+                if (!viewerRequestCurrent(operationGeneration, requestGeneration)) {
+                    markerDeferred?.cancel()
+                    return@launch
+                }
                 mutableState.value = mutableState.value.copy(
                     viewer = mutableState.value.viewer.copy(
                         sourcePicker = picker.copy(playerSource = source),
@@ -1102,11 +1208,16 @@ class RivuneViewModel internal constructor(
                             mediaUrl = mediaUrl,
                             protocol = selected.protocol,
                             container = selected.container,
+                            mediaTimeline = selected.mediaTimeline,
                             startPositionMs = start * 1_000L,
+                            timelineStartPositionMs = start * 1_000L,
                             durationSeconds = durationSeconds,
                             expectedProgressVersion = picker.progress?.version ?: 0,
+                            engine = embedded.engine,
+                            fallbackAllowed = embedded.fallbackAllowed,
                             subtitles = subtitles,
                             externalPlayer = selectedExternalPlayer,
+                            nextEpisode = picker.nextEpisode,
                         ),
                         loading = null,
                         inlineFailure = null,
@@ -1114,9 +1225,24 @@ class RivuneViewModel internal constructor(
                 )
                 diagnostics.record(DiagnosticEventCode.PLAYBACK_STARTED)
                 createdSession = null
+
+                val markers = markerDeferred?.await().orEmpty()
+                val currentViewer = mutableState.value.viewer
+                val currentPlayer = currentViewer.player
+                if (
+                    viewerRequestCurrent(operationGeneration, requestGeneration) &&
+                    currentPlayer?.sessionId == session.id &&
+                    currentViewer.sourcePicker?.markerRequest == markerRequest
+                ) {
+                    mutableState.value = mutableState.value.copy(
+                        viewer = currentViewer.copy(player = currentPlayer.copy(markers = markers)),
+                    )
+                }
             } catch (cause: CancellationException) {
+                markerDeferred?.cancel()
                 throw cause
             } catch (cause: Throwable) {
+                markerDeferred?.cancel()
                 diagnostics.record(DiagnosticEventCode.PLAYBACK_FAILED)
                 viewerFailure(cause, operationGeneration, requestGeneration, UiFailure.PLAYBACK)
             } finally {
@@ -1263,6 +1389,78 @@ class RivuneViewModel internal constructor(
         )
     }
 
+
+    fun playerPlaybackEnded() {
+        val player = mutableState.value.viewer.player ?: return
+        if (mutableState.value.effectiveSettings?.settings?.autoplayNextEpisode != false) {
+            advancePlayer(player.sessionId, completedWithoutDuration = player.durationSeconds <= 0)
+        }
+    }
+
+    fun playNextEpisode() {
+        val player = mutableState.value.viewer.player ?: return
+        advancePlayer(player.sessionId)
+    }
+
+    private fun advancePlayer(
+        sessionId: UUID,
+        suppliedProgress: PlayerProgressSnapshot? = null,
+        completedWithoutDuration: Boolean = false,
+        automaticallyStartNext: Boolean = true,
+    ) {
+        val player = mutableState.value.viewer.player?.takeIf { it.sessionId == sessionId } ?: return
+        val nextEpisode = player.nextEpisode ?: return
+        val nextTitleId = nextEpisode.titleId ?: return
+        if (advancingPlayerSessionId != null) return
+        val currentGateway = gateway ?: return
+        val finalProgress = suppliedProgress
+            ?: lastPlayerProgress?.takeIf { it.sessionId == player.sessionId }
+        advancingPlayerSessionId = player.sessionId
+        val operationGeneration = generation
+        val requestGeneration = ++viewerRequestGeneration
+        mutableState.value = mutableState.value.copy(
+            viewer = mutableState.value.viewer.copy(
+                player = null,
+                sourcePicker = null,
+                loading = ViewerLoading.SOURCES,
+                inlineFailure = null,
+            ),
+        )
+        diagnostics.record(DiagnosticEventCode.PLAYBACK_STOPPED)
+        viewModelScope.launch {
+            try {
+                when {
+                    finalProgress != null -> updatePlayerProgress(player, finalProgress, currentGateway)
+                    completedWithoutDuration -> markPlayerWatched(player, currentGateway)
+                }
+            } finally {
+                kotlinx.coroutines.withContext(NonCancellable) {
+                    runCatching { currentGateway.stopPlayback(player.sessionId) }
+                }
+            }
+            if (
+                advancingPlayerSessionId != player.sessionId ||
+                !viewerRequestCurrent(operationGeneration, requestGeneration)
+            ) return@launch
+            val progress = runCatching { currentGateway.playbackProgress(nextTitleId) }.getOrNull()
+            if (!viewerRequestCurrent(operationGeneration, requestGeneration)) return@launch
+            advancingPlayerSessionId = null
+            val continuationTarget = if (!automaticallyStartNext) {
+                null
+            } else {
+                player.externalPlayer
+                    ?.let { PlaybackTargetSelection.External(it) }
+                    ?: PlaybackTargetSelection.Embedded(
+                        when {
+                            player.engine == EmbeddedPlayerEngine.MPV -> EmbeddedPlayerPreference.MPV
+                            player.fallbackAllowed -> EmbeddedPlayerPreference.AUTOMATIC
+                            else -> EmbeddedPlayerPreference.MEDIA3
+                        },
+                    )
+            }
+            loadPlaybackSources(nextEpisode, nextTitleId, progress, continuationTarget)
+        }
+    }
     fun closePlayer() {
         val player = mutableState.value.viewer.player ?: return
         val currentGateway = gateway
@@ -1275,20 +1473,28 @@ class RivuneViewModel internal constructor(
         loadHomeContent()
     }
 
-    fun playerFailed() {
-        val player = mutableState.value.viewer.player ?: return
-        val currentGateway = gateway
-        mutableState.value = mutableState.value.copy(
-            viewer = mutableState.value.viewer.copy(
-                player = null,
-                loading = null,
-                inlineFailure = UiFailure.PLAYBACK,
-            ),
-        )
-        terminalCleanupScope.launch { runCatching { currentGateway?.stopPlayback(player.sessionId) } }
-        diagnostics.record(DiagnosticEventCode.PLAYBACK_FAILED)
+    fun playerFailed(failure: PlayerEngineFailure) {
+        while (true) {
+            val state = mutableState.value
+            val player = state.viewer.player ?: return
+            val fallback = player.fallbackToMpv(failure, "${player.sessionId}:mpv:${UUID.randomUUID()}")
+            if (fallback != null) {
+                val updated = state.copy(
+                    viewer = state.viewer.copy(player = fallback, loading = null, inlineFailure = null),
+                )
+                if (mutableState.compareAndSet(state, updated)) return
+                continue
+            }
+            val failed = state.copy(
+                viewer = state.viewer.copy(player = null, loading = null, inlineFailure = UiFailure.PLAYBACK),
+            )
+            if (!mutableState.compareAndSet(state, failed)) continue
+            val currentGateway = gateway
+            terminalCleanupScope.launch { runCatching { currentGateway?.stopPlayback(player.sessionId) } }
+            diagnostics.record(DiagnosticEventCode.PLAYBACK_FAILED)
+            return
+        }
     }
-
     fun externalPlaybackFinished(result: ExternalPlaybackResult?) {
         val player = mutableState.value.viewer.player?.takeIf { it.externalPlayer != null } ?: return
         val currentGateway = gateway ?: return
@@ -1310,6 +1516,15 @@ class RivuneViewModel internal constructor(
             )
         }
         val completedWithoutDuration = result?.completed == true && durationSeconds <= 0
+        if (result?.completed == true && player.nextEpisode != null) {
+            advancePlayer(
+                sessionId = player.sessionId,
+                suppliedProgress = progress,
+                completedWithoutDuration = completedWithoutDuration,
+                automaticallyStartNext = mutableState.value.effectiveSettings?.settings?.autoplayNextEpisode != false,
+            )
+            return
+        }
         viewerRequestGeneration += 1
         mutableState.value = mutableState.value.copy(
             viewer = mutableState.value.viewer.copy(player = null, sourcePicker = null, loading = null),
@@ -1384,6 +1599,7 @@ class RivuneViewModel internal constructor(
             if (currentPlayer != null && currentPlayer.sessionId != player.sessionId) return@withLock
             val active = currentPlayer ?: player
             val currentGateway = requestedGateway ?: return@withLock
+            if (lastPersistedPlayerProgress == progress) return@withLock
             try {
                 fun request(expectedVersion: Long) = UpdatePlaybackProgressRequest(
                     positionSeconds = progress.positionSeconds,
@@ -1399,6 +1615,7 @@ class RivuneViewModel internal constructor(
                     currentGateway.updatePlaybackProgress(active.titleId, request(latest.version))
                 }
                 applyPlayerProgress(active, updated)
+                lastPersistedPlayerProgress = progress
             } catch (cause: CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
@@ -1469,15 +1686,15 @@ class RivuneViewModel internal constructor(
         val operationGeneration = generation
         val requestGeneration = viewerRequestGeneration
         viewModelScope.launch {
-            val settings = try {
-                currentGateway.effectiveProfileSettings(profile.id).settings
+            val effective = try {
+                currentGateway.effectiveProfileSettings(profile.id)
             } catch (cause: CancellationException) {
                 throw cause
             } catch (_: Throwable) {
                 null
             }
             if (!viewerRequestCurrent(operationGeneration, requestGeneration)) return@launch
-            updateEffectiveSettings(settings)
+            updateEffectiveSettings(effective)
             mutableState.value = mutableState.value.copy(isBusy = false)
             when (startupTab) {
                 ViewerTab.HOME -> loadHomeContent()
@@ -1525,10 +1742,13 @@ class RivuneViewModel internal constructor(
                         openedCollectionId = mutableState.value.openedCollectionId
                             ?.takeIf { id -> collections.any { it.id == id } },
                         isBusy = false,
-                        viewer = mutableState.value.viewer.copy(loading = null, inlineFailure = null),
+                        viewer = mutableState.value.viewer.copy(
+                            heroSlides = emptyList(),
+                            inlineFailure = null,
+                        ),
                     )
-                    val artworkTask = async {
-                        resolveCollectionArtwork(currentGateway, collections, language) { collectionId, folder ->
+                    val homeResolutionTask = async {
+                        resolveHomeCollections(currentGateway, collections, language) { collectionId, folder ->
                             if (viewerRequestCurrent(operationGeneration, requestGeneration)) {
                                 replaceCollectionFolder(collectionId, folder)
                             }
@@ -1538,16 +1758,22 @@ class RivuneViewModel internal constructor(
                     val continuePage = continueTask.await()
                     val continueTargets = continuePage?.let { enrichContinueWatching(currentGateway, it, language) }.orEmpty()
                     if (!viewerRequestCurrent(operationGeneration, requestGeneration)) {
-                        artworkTask.cancel()
+                        homeResolutionTask.cancel()
                         return@coroutineScope
                     }
                     mutableState.value = mutableState.value.copy(
                         viewer = mutableState.value.viewer.copy(continueWatching = continueTargets),
                     )
 
-                    val hydratedCollections = artworkTask.await()
+                    val homeResolution = homeResolutionTask.await()
                     if (!viewerRequestCurrent(operationGeneration, requestGeneration)) return@coroutineScope
-                    mutableState.value = mutableState.value.copy(collections = hydratedCollections)
+                    mutableState.value = mutableState.value.copy(
+                        collections = homeResolution.collections,
+                        viewer = mutableState.value.viewer.copy(
+                            heroSlides = homeResolution.heroSlides,
+                            loading = null,
+                        ),
+                    )
                     diagnostics.record(DiagnosticEventCode.CATALOG_REFRESH_SUCCEEDED)
                 }
             } catch (cause: CancellationException) {
@@ -1559,35 +1785,73 @@ class RivuneViewModel internal constructor(
         }
     }
 
-    private suspend fun resolveCollectionArtwork(
+    private suspend fun resolveHomeCollections(
         currentGateway: RivuneGateway,
         collections: List<Collection>,
         language: String?,
         onResolved: ((UUID, CollectionFolder) -> Unit)? = null,
-    ): List<Collection> = coroutineScope {
+    ): HomeResolution = coroutineScope {
         val semaphore = Semaphore(COLLECTION_ARTWORK_CONCURRENCY)
         val pending = collections.map { collection ->
             collection to collection.folders.map { folder ->
                 async {
                     val folderId = folder.id
-                    if (!folder.coverImageUrl.isNullOrBlank() || folderId == null) {
-                        folder
+                    val needsHeroItems = collection.heroEnabled
+                    val needsArtwork = folder.coverImageUrl.isNullOrBlank()
+                    if (folderId == null || (!needsHeroItems && !needsArtwork)) {
+                        null
                     } else {
                         semaphore.withPermit {
-                            val resolved = try {
-                                currentGateway.resolveCollectionFolderArtwork(collection.id, folderId, language).folder
+                            try {
+                                if (needsHeroItems) {
+                                    currentGateway.resolveCollectionFolder(collection.id, folderId, page = 1, language = language)
+                                } else {
+                                    currentGateway.resolveCollectionFolderArtwork(collection.id, folderId, language)
+                                }.also { onResolved?.invoke(collection.id, it.folder) }
                             } catch (cause: CancellationException) {
                                 throw cause
                             } catch (_: Throwable) {
                                 null
                             }
-                            resolved?.also { onResolved?.invoke(collection.id, it) } ?: folder
                         }
                     }
                 }
             }
         }
-        pending.map { (collection, folders) -> collection.copy(folders = folders.awaitAll()) }
+        val seen = HashSet<String>()
+        val heroSlides = ArrayList<HomeHeroSlide>(HOME_HERO_SLIDE_LIMIT)
+        val hydratedCollections = pending.map { (collection, folders) ->
+            val resolvedFolders = folders.awaitAll()
+            collection.copy(folders = collection.folders.mapIndexed { index, folder ->
+                resolvedFolders[index]?.folder ?: folder
+            }).also {
+                if (collection.heroEnabled && heroSlides.size < HOME_HERO_SLIDE_LIMIT) {
+                    for (resolved in resolvedFolders) {
+                        if (resolved == null || heroSlides.size == HOME_HERO_SLIDE_LIMIT) continue
+                        for (item in resolved.items) {
+                            if (seen.add(homeHeroIdentity(item))) {
+                                heroSlides += HomeHeroSlide(
+                                    item = item,
+                                    fallbackBackdropUrl = resolved.folder.heroBackdropUrl ?: collection.backdropImageUrl,
+                                    fallbackLogoUrl = resolved.folder.titleLogoUrl,
+                                )
+                                if (heroSlides.size == HOME_HERO_SLIDE_LIMIT) break
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        HomeResolution(hydratedCollections, heroSlides)
+    }
+
+    private fun homeHeroIdentity(item: CollectionItem): String = if (
+        item.mediaType == "movie" || item.mediaType == "series" || item.mediaType == "episode"
+    ) {
+        "${item.mediaType}:${item.id}"
+    } else {
+        val addonId = item.sources.firstNotNullOfOrNull { it.addonId }?.toString().orEmpty()
+        "${item.mediaType}:$addonId:${item.id}"
     }
 
     private fun replaceCollectionFolder(collectionId: UUID, folder: CollectionFolder) {
@@ -1814,23 +2078,52 @@ class RivuneViewModel internal constructor(
         }
     }
 
-    private fun loadPlaybackSources(target: MediaTarget, titleId: UUID, progress: PlaybackProgress?) {
+    private fun loadPlaybackSources(
+        target: MediaTarget,
+        titleId: UUID,
+        progress: PlaybackProgress?,
+        continuationTarget: PlaybackTargetSelection? = null,
+    ) {
         val currentGateway = gateway ?: return
         refreshExternalPlaybackSupport()
         val support = externalPlaybackSupport
+        val detail = mutableState.value.viewer.detail
         val operationGeneration = generation
         val requestGeneration = ++viewerRequestGeneration
-        mutableState.value = mutableState.value.copy(viewer = mutableState.value.viewer.copy(loading = ViewerLoading.SOURCES, sourcePicker = null, inlineFailure = null))
+        val pendingPicker = SourcePickerState(
+            target = target,
+            titleId = titleId,
+            progress = progress,
+            options = emptyList(),
+            partial = false,
+        )
+        mutableState.value = mutableState.value.copy(
+            viewer = mutableState.value.viewer.copy(
+                loading = ViewerLoading.SOURCES,
+                sourcePicker = pendingPicker.takeIf { continuationTarget == null },
+            ),
+        )
         viewModelScope.launch {
             try {
+                val episodeContext = try {
+                    resolveEpisodePlaybackContext(currentGateway, target, titleId, detail)
+                } catch (cause: CancellationException) {
+                    throw cause
+                } catch (_: Throwable) {
+                    EpisodePlaybackContext()
+                }
                 val preferences = appPreferences.snapshot()
-                val network = runCatching(playbackNetworkProvider).getOrDefault(PlaybackNetwork.METERED)
-                val quality = if (network == PlaybackNetwork.UNMETERED) {
+                val network = runCatching(playbackNetworkProvider)
+                    .getOrDefault(PlaybackNetwork.MOBILE_OR_METERED)
+                val quality = if (network == PlaybackNetwork.WIFI_OR_ETHERNET) {
                     preferences.wifiQuality
                 } else {
                     preferences.mobileQuality
                 }
-                val capabilities = DevicePlaybackCapabilities.value
+                val capabilities = playbackCapabilitiesFor(
+                    preferences.preferredPlayer,
+                    preferences.embeddedPlayerPreference,
+                )
                     .withQualityLimit(playbackQualityLimit(quality, network))
                     .copy(externalPlayers = support.capabilityIds.ifEmpty { null })
                 val sources = currentGateway.playbackSources(
@@ -1841,17 +2134,103 @@ class RivuneViewModel internal constructor(
                 )
                 if (!viewerRequestCurrent(operationGeneration, requestGeneration)) return@launch
                 if (sources.sources.isEmpty()) throw IllegalStateException("No playback source")
-                val picker = SourcePickerState(target, titleId, progress, sources.sources, sources.providerErrors.isNotEmpty())
+                val picker = SourcePickerState(
+                    target = target,
+                    titleId = titleId,
+                    progress = progress,
+                    options = sources.sources,
+                    partial = sources.providerErrors.isNotEmpty(),
+                    nextEpisode = episodeContext.nextEpisode,
+                    markerRequest = episodeContext.markerRequest,
+                )
                 mutableState.value = mutableState.value.copy(
                     viewer = mutableState.value.viewer.copy(sourcePicker = picker, loading = null, inlineFailure = null),
                 )
-
+                continuationPlaybackSelection(continuationTarget, picker.options, support)?.let { (source, target) ->
+                    startPlayback(picker, source, target)
+                }
             } catch (cause: CancellationException) {
                 throw cause
             } catch (cause: Throwable) {
                 viewerFailure(cause, operationGeneration, requestGeneration, UiFailure.PLAYBACK)
             }
         }
+    }
+
+    private fun continuationPlaybackSelection(
+        target: PlaybackTargetSelection?,
+        sources: List<io.rivune.api.PlaybackSourceOption>,
+        support: ExternalPlaybackSupport,
+    ): Pair<io.rivune.api.PlaybackSourceOption, PlaybackTargetSelection>? {
+        target ?: return null
+        for (source in sources) {
+            when (target) {
+                is PlaybackTargetSelection.Embedded -> if (source.mode != io.rivune.api.PlaybackMode.EXTERNAL) {
+                    return source to target
+                }
+                is PlaybackTargetSelection.External -> support
+                    .playersFor(source.mode, source.protocol, source.container)
+                    .firstOrNull { it.packageName == target.player.packageName }
+                    ?.let { return source to PlaybackTargetSelection.External(it) }
+            }
+        }
+        return null
+    }
+
+    private suspend fun resolveEpisodePlaybackContext(
+        currentGateway: RivuneGateway,
+        target: MediaTarget,
+        titleId: UUID,
+        detail: MediaDetailState?,
+    ): EpisodePlaybackContext {
+        if (target.mediaType != "episode") return EpisodePlaybackContext()
+        val directMarkerRequest = markerRequest(target.seriesImdbId, target.seasonNumber, target.episodeNumber)
+        val seriesId = target.seriesId ?: return EpisodePlaybackContext(markerRequest = directMarkerRequest)
+        val language = metadataLanguage()
+        val series = try {
+            detail?.series?.takeIf { it.id == seriesId }
+                ?: try {
+                    currentGateway.series(seriesId, language = language)
+                } catch (cause: CancellationException) {
+                    throw cause
+                } catch (_: Throwable) {
+                    currentGateway.series(seriesId, SeriesMappingProvider.TVDB, language)
+                }
+        } catch (cause: CancellationException) {
+            throw cause
+        } catch (_: Throwable) {
+            return EpisodePlaybackContext(markerRequest = directMarkerRequest)
+        }
+        val markerRequest = markerRequest(
+            series.externalIds["imdb"] ?: target.seriesImdbId,
+            target.seasonNumber,
+            target.episodeNumber,
+        )
+        val nextEpisode = try {
+            val currentSeason = detail?.season?.takeIf { season ->
+                season.seriesId == seriesId && season.episodes.any { it.id == titleId }
+            } ?: run {
+                val summary = series.seasons.firstOrNull { it.id == target.seasonId }
+                    ?: series.seasons.firstOrNull { it.seasonNumber == target.seasonNumber }
+                    ?: return EpisodePlaybackContext(markerRequest = markerRequest)
+                currentGateway.season(summary.id, series.mappingProvider, language)
+            }
+            resolveNextEpisodeTarget(series, currentSeason, titleId, target) { seasonId ->
+                currentGateway.season(seasonId, series.mappingProvider, language)
+            }
+        } catch (cause: CancellationException) {
+            throw cause
+        } catch (_: Throwable) {
+            null
+        }
+        return EpisodePlaybackContext(nextEpisode, markerRequest)
+    }
+
+    private fun markerRequest(imdbId: String?, season: Int?, episode: Int?): PlaybackMarkerRequest? {
+        if (imdbId?.matches(SERIES_IMDB_ID) != true || season == null || season <= 0 || episode == null || episode <= 0) {
+            return null
+        }
+        return PlaybackMarkerRequest(imdbId, season, episode)
     }
 
     private suspend fun resolveTarget(currentGateway: RivuneGateway, target: MediaTarget): UUID {
@@ -1881,7 +2260,7 @@ class RivuneViewModel internal constructor(
                 posterUrl = target.posterUrl,
                 backgroundUrl = target.backgroundUrl,
                 releaseInfo = target.releaseInfo,
-                released = target.released?.take(10)?.takeIf { it.matches(DATE_ONLY) },
+                released = titleReleaseDate(target.released),
                 sourceAddonId = target.sourceAddonId,
                 sourceCatalogId = target.sourceCatalogId,
                 sourceName = target.sourceName,
@@ -1907,11 +2286,11 @@ class RivuneViewModel internal constructor(
 
     private fun viewerRequestCurrent(operationGeneration: Long, requestGeneration: Long): Boolean =
         isCurrent(operationGeneration) && viewerRequestGeneration == requestGeneration
-    private fun updateEffectiveSettings(settings: SettingsValues?) {
-        mutableState.value = mutableState.value.copy(effectiveSettings = settings)
+    private fun updateEffectiveSettings(effective: EffectiveSettings?) {
+        mutableState.value = mutableState.value.copy(effectiveSettings = effective)
     }
 
-    private fun metadataLanguage(settings: SettingsValues? = mutableState.value.effectiveSettings): String? {
+    private fun metadataLanguage(settings: SettingsValues? = mutableState.value.effectiveSettings?.settings): String? {
         val configured = settings?.metadataLanguage?.trim()
         if (!configured.isNullOrEmpty() && !configured.equals("auto", ignoreCase = true)) return configured
         val locale = runCatching(localeProvider).getOrNull() ?: return null
@@ -1929,6 +2308,7 @@ class RivuneViewModel internal constructor(
             viewer = viewer.copy(
                 continueWatching = emptyList(),
                 detail = null,
+                detailHistory = emptyList(),
                 sourcePicker = null,
                 search = viewer.search.copy(items = emptyList(), page = 0, hasMore = false, partial = false),
             ),
@@ -2119,11 +2499,14 @@ class RivuneViewModel internal constructor(
                 isBusy = false,
                 failure = null,
             )
-            val hydratedCollections = resolveCollectionArtwork(currentGateway, collections, metadataLanguage()) { collectionId, folder ->
+            val homeResolution = resolveHomeCollections(currentGateway, collections, metadataLanguage()) { collectionId, folder ->
                 if (viewerRequestCurrent(operationGeneration, requestGeneration)) replaceCollectionFolder(collectionId, folder)
             }
             if (viewerRequestCurrent(operationGeneration, requestGeneration)) {
-                mutableState.value = mutableState.value.copy(collections = hydratedCollections)
+                mutableState.value = mutableState.value.copy(
+                    collections = homeResolution.collections,
+                    viewer = mutableState.value.viewer.copy(heroSlides = homeResolution.heroSlides),
+                )
             }
         } catch (cause: CancellationException) {
             throw cause
@@ -2381,9 +2764,11 @@ class RivuneViewModel internal constructor(
         private const val PAIRING_SUCCESS_HOLD_MS = 550L
         private val NAMESPACED_ID = Regex("^([a-z0-9._-]+):(.+)$", RegexOption.IGNORE_CASE)
         private val IMDB_ID = Regex("^tt\\d+$", RegexOption.IGNORE_CASE)
+        private val SERIES_IMDB_ID = Regex("^tt[0-9]{7,8}$")
         private val DATE_ONLY = Regex("^\\d{4}-\\d{2}-\\d{2}$")
 
         private const val COLLECTION_ARTWORK_CONCURRENCY = 6
+        private const val HOME_HERO_SLIDE_LIMIT = 12
         fun factory(context: Context, isTv: Boolean): ViewModelProvider.Factory {
             val applicationContext = context.applicationContext
             return object : ViewModelProvider.Factory {

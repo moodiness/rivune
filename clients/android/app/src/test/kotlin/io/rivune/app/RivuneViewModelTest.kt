@@ -72,6 +72,14 @@ class RivuneViewModelTest {
     }
 
     @Test
+    fun normalizesTitleReleaseDatesForWatchState() {
+        assertEquals("2026-08-12", titleReleaseDate("2026-08-12"))
+        assertEquals("2026-08-12", titleReleaseDate("2026-08-12T15:30:45.123+02:00"))
+        assertNull(titleReleaseDate("2026"))
+        assertNull(titleReleaseDate("2026-02-30T15:30:00Z"))
+    }
+
+    @Test
     fun rejectsUnsupportedCleartextLoopbackAliases() {
         assertEquals("https://127.0.0.2:8080", normalizeServerUrl("127.0.0.2:8080"))
         assertEquals("https://[::1]:8080", normalizeServerUrl("[::1]:8080"))
@@ -269,6 +277,103 @@ class RivuneViewModelTest {
     }
 
     @Test
+    fun episodeTargetKeepsRichDetailMetadata() {
+        val seriesId = UUID.randomUUID()
+        val episode = episode(UUID.randomUUID(), seriesId, 3, seasonNumber = 2).copy(
+            runtimeMinutes = 51,
+            voteAverage = 7.4,
+        )
+        val target = episode.toMediaTarget(series(seriesId), MediaTarget("series", "series", "Series"))
+
+        assertEquals(51, target.runtimeMinutes)
+        assertEquals(7.4, target.rating)
+        assertEquals(2, target.seasonNumber)
+        assertEquals(3, target.episodeNumber)
+    }
+
+    @Test
+    fun sourceAddonFiltersUseAddonIdentityAndHideManifestFromNamedFooters() {
+        val aioId = UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        val cometId = UUID.fromString("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+        fun source(
+            id: String,
+            addonId: UUID,
+            addonName: String?,
+            manifestId: String,
+        ) = io.rivune.api.PlaybackSourceOption(
+            id = id,
+            sourceRef = "ref-$id",
+            addonId = addonId,
+            addonName = addonName,
+            manifestId = manifestId,
+            streamIndex = 0,
+            name = "Stream $id",
+            protocol = "http",
+            mode = io.rivune.api.PlaybackMode.DIRECT,
+            container = "mkv",
+            expiresAt = "2099-01-01T00:00:00Z",
+        )
+        val unnamedAio = source("aio-1", aioId, null, "aiostreams.internal.manifest")
+        val namedAio = source("aio-2", aioId, "AIOStreams", "aiostreams.internal.manifest")
+        val comet = source("comet", cometId, "Comet", "comet.internal.manifest")
+
+        assertEquals(
+            listOf(aioId to "AIOStreams", cometId to "Comet"),
+            playbackSourceAddonFilters(listOf(unnamedAio, namedAio, comet)),
+        )
+        assertEquals("aiostreams.internal.manifest", playbackSourceAddonLabel(unnamedAio))
+        assertEquals("AIOStreams · direct · HTTP · MKV", playbackSourceFooter(namedAio))
+        assertFalse(playbackSourceFooter(namedAio).contains("internal.manifest"))
+    }
+
+    @Test
+    fun nextEpisodeResolutionUsesAdjacencyCrossSeasonAndFinalBoundary() = runTest(dispatcher) {
+        val seriesId = UUID.randomUUID()
+        val firstId = UUID.randomUUID()
+        val secondId = UUID.randomUUID()
+        val thirdId = UUID.randomUUID()
+        val firstSeason = season(
+            seriesId,
+            listOf(episode(firstId, seriesId, 1), episode(secondId, seriesId, 2)),
+        )
+        val secondSeason = season(
+            seriesId,
+            listOf(episode(thirdId, seriesId, 1, seasonId = "season-3", seasonNumber = 3)),
+            id = "season-3",
+            number = 3,
+        )
+        val emptySeason = season(seriesId, emptyList(), id = "season-empty", number = 2)
+        val seriesFixture = series(seriesId).copy(
+            seasons = listOf(
+                seasonSummary(seriesId, "season-1", 1, 2),
+                seasonSummary(seriesId, "season-empty", 2, 0),
+                seasonSummary(seriesId, "season-3", 3, 1),
+            ),
+        )
+        val fallback = MediaTarget(
+            id = "current",
+            mediaType = "episode",
+            title = "Current",
+            seriesId = seriesId,
+            seasonId = "season-1",
+            seasonNumber = 1,
+            episodeNumber = 1,
+        )
+        val seasons = mapOf(secondSeason.id to secondSeason, emptySeason.id to emptySeason)
+
+        assertEquals(
+            secondId,
+            resolveNextEpisodeTarget(seriesFixture, firstSeason, firstId, fallback) { seasons.getValue(it) }?.titleId,
+        )
+        assertEquals(
+            thirdId,
+            resolveNextEpisodeTarget(seriesFixture, firstSeason, secondId, fallback) { seasons.getValue(it) }?.titleId,
+        )
+        assertNull(resolveNextEpisodeTarget(seriesFixture, secondSeason, thirdId, fallback) { seasons.getValue(it) })
+        assertNull(resolveNextEpisodeTarget(seriesFixture, firstSeason, UUID.randomUUID(), fallback) { seasons.getValue(it) })
+    }
+
+    @Test
     fun restoredProfileOpensConfiguredStartupTab() = runTest(dispatcher) {
         val profile = profile(hasPin = false)
         val gateway = FakeGateway(
@@ -405,8 +510,18 @@ class RivuneViewModelTest {
                 audioLanguage = "fr",
                 metadataLanguage = "fr-FR",
                 subtitleLanguage = "en",
+                forcedSubtitleLanguage = "es",
+                autoplayNextEpisode = false,
             ),
-            sources = io.rivune.api.EffectiveSettingsSources(),
+            sources = io.rivune.api.EffectiveSettingsSources(
+                maximumResolution = "instance",
+                preferDirectPlay = "profile",
+                audioLanguage = "profile",
+                subtitleLanguage = "instance",
+                forcedSubtitleLanguage = "profile",
+                autoplayNextEpisode = "profile",
+                metadataLanguage = "profile",
+            ),
         )
         val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
         advanceUntilIdle()
@@ -417,16 +532,32 @@ class RivuneViewModelTest {
         assertTrue(loaded.canEdit)
         assertEquals("1080p", loaded.settings?.maximumResolution)
         assertEquals("fr-FR", loaded.settings?.metadataLanguage)
+        assertEquals("instance", loaded.sources?.maximumResolution)
+        assertEquals("profile", loaded.sources?.forcedSubtitleLanguage)
+        assertEquals(false, loaded.settings?.autoplayNextEpisode)
 
         viewModel.updateProfilePreferences(
-            io.rivune.api.ProfileSettingsUpdate(metadataLanguage = io.rivune.api.PatchField.Value("de-DE")),
+            io.rivune.api.ProfileSettingsUpdate(
+                metadataLanguage = io.rivune.api.PatchField.Value("de-DE"),
+                forcedSubtitleLanguage = io.rivune.api.PatchField.Null,
+                autoplayNextEpisode = io.rivune.api.PatchField.Value(true),
+            ),
         )
         advanceUntilIdle()
         assertEquals(
-            listOf(io.rivune.api.ProfileSettingsUpdate(metadataLanguage = io.rivune.api.PatchField.Value("de-DE"))),
+            listOf(
+                io.rivune.api.ProfileSettingsUpdate(
+                    metadataLanguage = io.rivune.api.PatchField.Value("de-DE"),
+                    forcedSubtitleLanguage = io.rivune.api.PatchField.Null,
+                    autoplayNextEpisode = io.rivune.api.PatchField.Value(true),
+                ),
+            ),
             gateway.profileSettingsUpdates,
         )
         assertEquals("de-DE", viewModel.state.value.viewer.preferences?.settings?.metadataLanguage)
+        assertEquals("es", viewModel.state.value.viewer.preferences?.settings?.forcedSubtitleLanguage)
+        assertEquals("instance", viewModel.state.value.viewer.preferences?.sources?.forcedSubtitleLanguage)
+        assertEquals(true, viewModel.state.value.viewer.preferences?.settings?.autoplayNextEpisode)
 
         viewModel.backViewer()
         assertNull(viewModel.state.value.viewer.preferences)
@@ -522,7 +653,7 @@ class RivuneViewModelTest {
         val gateway = FakeGateway(
             restored = true,
             account = account(profile, active = true),
-            collections = listOf(collection(folder)),
+            collections = listOf(collection(folder).copy(heroEnabled = false)),
             resolvedFolders = mapOf(folder.id!! to listOf(first, second)),
         )
         val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
@@ -620,7 +751,7 @@ class RivuneViewModelTest {
         val gateway = FakeGateway(
             restored = true,
             account = account(profile, active = true),
-            collections = listOf(collection(unresolved)),
+            collections = listOf(collection(unresolved).copy(heroEnabled = false)),
             resolvedFolders = mapOf(
                 requireNotNull(unresolved.id) to listOf(resolvedFolder(resolved, page = 1, hasMore = false, items = emptyList())),
             ),
@@ -631,7 +762,201 @@ class RivuneViewModelTest {
 
         assertEquals("/api/v1/artwork/resolved-folder", viewModel.state.value.collections.single().folders.single().coverImageUrl)
         assertEquals(listOf(1), gateway.resolvedPages)
+        assertEquals(listOf(requireNotNull(unresolved.id)), gateway.artworkFolderRequests)
+        assertTrue(gateway.fullFolderRequests.isEmpty())
     }
+
+    @Test
+    fun heroArtworkIsResolvedEvenWhenFolderCoverAlreadyExists() = runTest(dispatcher) {
+        val profile = profile()
+        val unresolved = folder().copy(
+            sources = listOf(
+                io.rivune.api.CollectionSource(
+                    kind = io.rivune.api.CollectionSourceKind.TMDB,
+                    title = "Hero",
+                ),
+            ),
+        )
+        val resolved = unresolved.copy(
+            heroBackdropUrl = "/api/v1/artwork/hero-backdrop",
+            titleLogoUrl = "/api/v1/artwork/hero-logo",
+        )
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile, active = true),
+            collections = listOf(collection(unresolved).copy(heroEnabled = true)),
+            resolvedFolders = mapOf(
+                requireNotNull(unresolved.id) to listOf(
+                    resolvedFolder(resolved, page = 1, hasMore = false, items = emptyList()),
+                ),
+            ),
+        )
+
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+
+        val heroFolder = viewModel.state.value.collections.single().folders.single()
+        assertEquals("/api/v1/artwork/hero-backdrop", heroFolder.heroBackdropUrl)
+        assertEquals("/api/v1/artwork/hero-logo", heroFolder.titleLogoUrl)
+        assertEquals(listOf(1), gateway.resolvedPages)
+        assertEquals(listOf(requireNotNull(unresolved.id)), gateway.fullFolderRequests)
+        assertTrue(gateway.artworkFolderRequests.isEmpty())
+    }
+
+    @Test
+    fun homeHeroSlidesUseEveryEnabledFolderInOrderWithStableDedupeCapAndFallbacks() = runTest(dispatcher) {
+        val profile = profile()
+        val collectionOneId = UUID.fromString("81000000-0000-4000-8000-000000000001")
+        val collectionTwoId = UUID.fromString("81000000-0000-4000-8000-000000000002")
+        val disabledCollectionId = UUID.fromString("81000000-0000-4000-8000-000000000003")
+        val firstFolderId = UUID.fromString("82000000-0000-4000-8000-000000000001")
+        val secondFolderId = UUID.fromString("82000000-0000-4000-8000-000000000002")
+        val failedFolderId = UUID.fromString("82000000-0000-4000-8000-000000000003")
+        val disabledFolderId = UUID.fromString("82000000-0000-4000-8000-000000000004")
+        val addonOne = UUID.fromString("83000000-0000-4000-8000-000000000001")
+        val addonTwo = UUID.fromString("83000000-0000-4000-8000-000000000002")
+        val sourceOne = UUID.fromString("84000000-0000-4000-8000-000000000001")
+        val sourceTwo = UUID.fromString("84000000-0000-4000-8000-000000000002")
+        fun addonItem(id: String, addonId: UUID, sourceId: UUID) = mediaItem(id, id).copy(
+            mediaType = "custom",
+            sources = listOf(
+                io.rivune.api.CollectionSourceReference(
+                    id = sourceId,
+                    kind = io.rivune.api.CollectionSourceKind.ADDON_CATALOG,
+                    title = "Addon",
+                    addonId = addonId,
+                    catalogId = "featured",
+                ),
+            ),
+        )
+        val firstFolder = folder().copy(id = firstFolderId, title = "First", coverImageUrl = "/first")
+        val secondFolder = folder().copy(id = secondFolderId, title = "Second", coverImageUrl = "/second")
+        val failedFolder = folder().copy(id = failedFolderId, title = "Failed")
+        val disabledFolder = folder().copy(id = disabledFolderId, title = "Disabled", coverImageUrl = null)
+        val resolvedFirst = firstFolder.copy(
+            heroBackdropUrl = "/api/v1/artwork/first-backdrop",
+            titleLogoUrl = "/api/v1/artwork/first-logo",
+        )
+        val firstItems = listOf(
+            mediaItem("movie-one", "Movie One"),
+            mediaItem("movie-one", "Duplicate Movie One"),
+            addonItem("shared-resource", addonOne, sourceOne),
+            addonItem("shared-resource", addonTwo, sourceTwo),
+        )
+        val secondItems = listOf(mediaItem("movie-one", "Duplicate Across Folders")) + (1..10).map { index ->
+            mediaItem("series-$index", "Series $index").copy(mediaType = "series")
+        }
+        val collections = listOf(
+            collection().copy(
+                id = collectionOneId,
+                title = "First Collection",
+                backdropImageUrl = "/api/v1/artwork/collection-backdrop",
+                heroEnabled = true,
+                folders = listOf(firstFolder),
+            ),
+            collection().copy(
+                id = collectionTwoId,
+                title = "Second Collection",
+                backdropImageUrl = "/api/v1/artwork/collection-backdrop",
+                heroEnabled = true,
+                folders = listOf(failedFolder, secondFolder),
+            ),
+            collection().copy(
+                id = disabledCollectionId,
+                title = "Disabled Collection",
+                heroEnabled = false,
+                folders = listOf(disabledFolder),
+            ),
+        )
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile, active = true),
+            collections = collections,
+            resolvedFolders = mapOf(
+                firstFolderId to listOf(resolvedFolder(resolvedFirst, page = 1, hasMore = false, items = firstItems)),
+                secondFolderId to listOf(resolvedFolder(secondFolder, page = 1, hasMore = false, items = secondItems)),
+                disabledFolderId to listOf(
+                    resolvedFolder(disabledFolder, page = 1, hasMore = false, items = listOf(mediaItem("disabled", "Disabled"))),
+                ),
+            ),
+        )
+
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+
+        val slides = viewModel.state.value.viewer.heroSlides
+        assertEquals(12, slides.size)
+        assertEquals(
+            listOf("movie-one", "shared-resource", "shared-resource") + (1..9).map { "series-$it" },
+            slides.map { it.item.id },
+        )
+        assertEquals(firstItems.first(), slides.first().item)
+        assertEquals(listOf(addonOne, addonTwo), slides.slice(1..2).map { it.item.sources.single().addonId })
+        assertEquals("/api/v1/artwork/first-backdrop", slides.first().fallbackBackdropUrl)
+        assertEquals("/api/v1/artwork/first-logo", slides.first().fallbackLogoUrl)
+        assertEquals("/api/v1/artwork/collection-backdrop", slides[3].fallbackBackdropUrl)
+        assertNull(slides[3].fallbackLogoUrl)
+        assertFalse(slides.any { it.item.id == "disabled" })
+        assertNull(viewModel.state.value.viewer.inlineFailure)
+        assertNull(viewModel.state.value.viewer.loading)
+        assertEquals(setOf(firstFolderId, secondFolderId, failedFolderId), gateway.fullFolderRequests.toSet())
+        assertEquals(listOf(disabledFolderId), gateway.artworkFolderRequests)
+        assertEquals("/api/v1/artwork/first-backdrop", viewModel.state.value.collections.first().folders.first().heroBackdropUrl)
+
+    }
+    @Test
+    fun displayableSeasonsHideEmptyEntriesAndSortBySeasonNumber() {
+        val seriesId = UUID.fromString("88888888-8888-4888-8888-888888888888")
+        val seasonTwo = seasonSummary(seriesId, "season-2", 2, 10)
+        val emptySeason = seasonSummary(seriesId, "season-0", 0, 0)
+        val seasonOne = seasonSummary(seriesId, "season-1", 1, 8)
+
+        assertEquals(listOf("season-1", "season-2"), displayableSeasons(listOf(seasonTwo, emptySeason, seasonOne)).map { it.id })
+    }
+    @Test
+    fun episodeDetailReturnsToItsSelectedSeason() = runTest(dispatcher) {
+        val profile = profile()
+        val seriesId = UUID.fromString("88888888-8888-4888-8888-888888888888")
+        val episode = episode(UUID.fromString("99999999-9999-4999-8999-999999999991"), seriesId, 1)
+        val season = season(seriesId, listOf(episode))
+        val series = series(seriesId).copy(seasons = listOf(seasonSummary(seriesId, season.id, 1, 1)))
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile, active = true),
+            collections = listOf(collection()),
+        )
+        gateway.seriesResult = series
+        gateway.seasons = mapOf(season.id to season)
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+        val seriesTarget = MediaTarget(id = "tmdb:42", mediaType = "series", title = "Series", titleId = seriesId)
+
+        viewModel.openMedia(seriesTarget)
+        advanceUntilIdle()
+        viewModel.selectSeason(season.id)
+        advanceUntilIdle()
+        val seasonDetail = assertNotNull(viewModel.state.value.viewer.detail)
+
+        viewModel.openEpisode(episode.toMediaTarget(series, seriesTarget))
+        advanceUntilIdle()
+
+        assertEquals("episode", viewModel.state.value.viewer.detail?.target?.mediaType)
+        assertEquals(listOf(seasonDetail), viewModel.state.value.viewer.detailHistory)
+
+        viewModel.backViewer()
+
+        assertEquals("series", viewModel.state.value.viewer.detail?.target?.mediaType)
+        assertEquals(season.id, viewModel.state.value.viewer.detail?.season?.id)
+        assertTrue(viewModel.state.value.viewer.detailHistory.isEmpty())
+
+        viewModel.backViewer()
+
+        assertEquals("series", viewModel.state.value.viewer.detail?.target?.mediaType)
+        assertNull(viewModel.state.value.viewer.detail?.season)
+        assertTrue(viewModel.state.value.viewer.detailHistory.isEmpty())
+    }
+
+
 
     @Test
     fun selectedSeasonTogglesEveryEpisodeWithBatchProgress() = runTest(dispatcher) {
@@ -928,7 +1253,18 @@ class RivuneViewModelTest {
             playbackId,
             "source",
             selectedSubtitleId = "subtitle",
-            sources = listOf(io.rivune.api.PlaybackSource("source", addonId, "addon", mode = io.rivune.api.PlaybackMode.DIRECT, url = "/stream.m3u8", protocol = "hls", compatible = true)),
+            sources = listOf(
+                io.rivune.api.PlaybackSource(
+                    "source",
+                    addonId,
+                    "addon",
+                    mode = io.rivune.api.PlaybackMode.DIRECT,
+                    url = "/stream.m3u8",
+                    protocol = "hls",
+                    mediaTimeline = io.rivune.api.PlaybackMediaTimeline.RELATIVE,
+                    compatible = true,
+                ),
+            ),
             subtitles = listOf(io.rivune.api.PlaybackSubtitle("subtitle", addonId, "addon", language = "fr", url = "/subtitle.vtt")),
             providerErrors = emptyList(),
             expiresAt = "2099-01-01T00:00:00Z",
@@ -936,20 +1272,41 @@ class RivuneViewModelTest {
         val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
         advanceUntilIdle()
 
-        viewModel.openMedia(MediaTarget("tt1234567", "movie", "Film"))
+        viewModel.openMedia(
+            MediaTarget(
+                id = "tt1234567",
+                mediaType = "movie",
+                title = "Film",
+                released = "2026-08-12T15:30:45.123+02:00",
+                sourceAddonId = addonId,
+                sourceCatalogId = "catalog",
+                sourceName = "Catalog",
+                category = "Featured",
+            ),
+        )
         advanceUntilIdle()
         assertEquals(targetId, viewModel.state.value.viewer.detail?.titleId)
         assertEquals("Film", viewModel.state.value.viewer.detail?.movie?.title)
         assertEquals("fr-FR", gateway.metadataRequests.last { it.first == "movie" }.second)
+        val resolvedInput = gateway.resolvedTitleInputs.single()
+        assertEquals("2026-08-12", resolvedInput.released)
+        assertEquals(addonId, resolvedInput.sourceAddonId)
+        assertEquals("catalog", resolvedInput.sourceCatalogId)
+        assertEquals("Catalog", resolvedInput.sourceName)
+        assertEquals("Featured", resolvedInput.category)
 
         viewModel.playMedia()
+        assertTrue(requireNotNull(viewModel.state.value.viewer.sourcePicker).options.isEmpty())
+        assertEquals(ViewerLoading.SOURCES, viewModel.state.value.viewer.loading)
         advanceUntilIdle()
+        assertNull(viewModel.state.value.viewer.sourcePicker?.nextEpisode)
         viewModel.selectPlaybackSource(requireNotNull(viewModel.state.value.viewer.sourcePicker).options.single())
-        viewModel.choosePlaybackTarget(null)
+        viewModel.choosePlaybackTarget(PlaybackTargetSelection.Embedded(EmbeddedPlayerPreference.AUTOMATIC))
         advanceUntilIdle()
         assertEquals(playbackId, viewModel.state.value.viewer.player?.sessionId)
         assertEquals(120_000L, viewModel.state.value.viewer.player?.startPositionMs)
         assertEquals("hls", viewModel.state.value.viewer.player?.protocol)
+        assertEquals(io.rivune.api.PlaybackMediaTimeline.RELATIVE, viewModel.state.value.viewer.player?.mediaTimeline)
         assertEquals(true, viewModel.state.value.viewer.player?.subtitles?.single()?.selected)
 
         viewModel.reportPlayerProgress(180, 3600, false)
@@ -961,11 +1318,12 @@ class RivuneViewModelTest {
         advanceUntilIdle()
         assertEquals(playbackId, gateway.stoppedPlayback)
         assertEquals(1, gateway.stopPlaybackCalls)
+        assertTrue(gateway.markerRequests.isEmpty())
 
         viewModel.playMedia()
         advanceUntilIdle()
         viewModel.selectPlaybackSource(requireNotNull(viewModel.state.value.viewer.sourcePicker).options.single())
-        viewModel.choosePlaybackTarget(null)
+        viewModel.choosePlaybackTarget(PlaybackTargetSelection.Embedded(EmbeddedPlayerPreference.AUTOMATIC))
         advanceUntilIdle()
         assertEquals(playbackId, viewModel.state.value.viewer.player?.sessionId)
         viewModel.beginTerminalOwnerDestruction()
@@ -976,6 +1334,486 @@ class RivuneViewModelTest {
         assertEquals(240, gateway.progressUpdates.last().positionSeconds)
         assertEquals("stop", gateway.playbackEvents.last())
         assertEquals(2, gateway.stopPlaybackCalls)
+    }
+
+    @Test
+    fun featuredPlayLoadsDetailsAndOpensSources() = runTest(dispatcher) {
+        val viewerProfile = profile(hasPin = false)
+        val titleId = UUID.randomUUID()
+        val addonId = UUID.randomUUID()
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(viewerProfile, active = true),
+            collections = listOf(collection()),
+        )
+        gateway.resolvedTitle = io.rivune.api.TitleReference(
+            titleId,
+            io.rivune.api.TitleMediaType.MOVIE,
+            "imdb",
+            "tt1234567",
+            "tt1234567",
+            "Featured film",
+        )
+        gateway.progress = io.rivune.api.PlaybackProgress(
+            titleId,
+            io.rivune.api.PlaybackProgressMediaType.MOVIE,
+            90,
+            3600,
+            false,
+            1,
+            "2026-08-12T00:00:00Z",
+            "2026-08-12T00:00:00Z",
+        )
+        gateway.sourceList = io.rivune.api.PlaybackSourceList(
+            listOf(
+                io.rivune.api.PlaybackSourceOption(
+                    "source",
+                    "ref",
+                    addonId,
+                    manifestId = "addon",
+                    streamIndex = 0,
+                    name = "Direct",
+                    protocol = "http",
+                    expiresAt = "2099-01-01T00:00:00Z",
+                ),
+            ),
+            emptyList(),
+        )
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+
+        viewModel.openAndPlayMedia(MediaTarget("tt1234567", "movie", "Featured film"))
+        assertEquals(ViewerLoading.DETAIL, viewModel.state.value.viewer.loading)
+        assertNull(viewModel.state.value.viewer.detail)
+        advanceUntilIdle()
+
+        val picker = assertNotNull(viewModel.state.value.viewer.sourcePicker)
+        assertEquals(titleId, viewModel.state.value.viewer.detail?.titleId)
+        assertEquals(90, picker.progress?.positionSeconds)
+        assertEquals("source", picker.options.single().id)
+        assertEquals(titleId, viewModel.state.value.viewer.detail?.titleId)
+    }
+
+    @Test
+    fun refreshingPlaybackSourcesReloadsCurrentResourceAndKeepsPickerOpen() = runTest(dispatcher) {
+        val viewerProfile = profile(hasPin = false)
+        val titleId = UUID.randomUUID()
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(viewerProfile, active = true),
+            collections = listOf(collection()),
+        )
+        gateway.resolvedTitle = io.rivune.api.TitleReference(
+            titleId,
+            io.rivune.api.TitleMediaType.MOVIE,
+            "imdb",
+            "tt1234567",
+            "tt1234567",
+            "Film",
+        )
+        gateway.movieResult = io.rivune.api.Movie(
+            titleId,
+            io.rivune.api.MediaType.MOVIE,
+            "Film",
+            "Film",
+            "en",
+            "Overview",
+            "2026-08-12",
+            genres = emptyList(),
+            cast = emptyList(),
+            voteAverage = 8.0,
+            voteCount = 10,
+            externalIds = mapOf("imdb" to "tt1234567"),
+        )
+        gateway.configurePlayback(titleId)
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+        viewModel.openMedia(
+            MediaTarget(
+                id = "catalog-entry",
+                mediaType = "movie",
+                title = "Film",
+                resourceId = "tt1234567",
+            ),
+        )
+        advanceUntilIdle()
+        viewModel.playMedia()
+        advanceUntilIdle()
+
+        val originalPicker = assertNotNull(viewModel.state.value.viewer.sourcePicker)
+        val metadataRequestCount = gateway.metadataRequests.size
+        assertEquals(listOf("tt1234567"), gateway.playbackSourceResources)
+
+        viewModel.refreshPlaybackSources()
+
+        val pendingPicker = assertNotNull(viewModel.state.value.viewer.sourcePicker)
+        assertEquals(originalPicker.target, pendingPicker.target)
+        assertEquals(originalPicker.titleId, pendingPicker.titleId)
+        assertEquals(originalPicker.progress, pendingPicker.progress)
+        assertTrue(pendingPicker.options.isEmpty())
+        assertEquals(ViewerLoading.SOURCES, viewModel.state.value.viewer.loading)
+
+        advanceUntilIdle()
+
+        assertEquals(listOf("tt1234567", "tt1234567"), gateway.playbackSourceResources)
+        assertNotNull(viewModel.state.value.viewer.sourcePicker)
+        assertTrue(viewModel.state.value.viewer.sourcePicker!!.options.isNotEmpty())
+        assertNull(viewModel.state.value.viewer.loading)
+        assertEquals(metadataRequestCount, gateway.metadataRequests.size)
+    }
+
+    @Test
+    fun episodeFromLoadedSeriesPublishesExactMarkersWithoutReloadingSeries() = runTest(dispatcher) {
+        val seriesId = UUID.randomUUID()
+        val episodeId = UUID.randomUUID()
+        val series = series(seriesId, "tt12345678")
+        val episode = episode(episodeId, seriesId, 1)
+        val season = season(seriesId, listOf(episode))
+        val marker = io.rivune.api.PlaybackMarker(
+            io.rivune.api.PlaybackMarkerType.INTRO,
+            12.5,
+            87.25,
+            0.98,
+            14,
+        )
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile(hasPin = false), active = true),
+            collections = listOf(collection()),
+        ).apply {
+            resolvedTitle = io.rivune.api.TitleReference(
+                seriesId,
+                io.rivune.api.TitleMediaType.SERIES,
+                "tmdb",
+                "42",
+                "tmdb:42",
+                "Series",
+            )
+            seriesResult = series
+            seasons = mapOf(season.id to season)
+            markerResult = io.rivune.api.PlaybackMarkerList(listOf(marker))
+            markerDelayMillis = 1_000
+        }
+        val source = gateway.configurePlayback(episodeId)
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+
+        viewModel.openMedia(MediaTarget("tmdb:42", "series", "Series"))
+        advanceUntilIdle()
+        viewModel.selectSeason(season.id)
+        advanceUntilIdle()
+        val detail = requireNotNull(viewModel.state.value.viewer.detail)
+        val target = episode.toMediaTarget(series, detail.target)
+        assertEquals("tt12345678", target.seriesImdbId)
+        val seriesLoads = gateway.metadataRequests.count { it.first == "series" }
+
+        viewModel.playMedia(target)
+        advanceUntilIdle()
+        val picker = requireNotNull(viewModel.state.value.viewer.sourcePicker)
+        assertEquals(PlaybackMarkerRequest("tt12345678", 1, 1), picker.markerRequest)
+        assertEquals(seriesLoads, gateway.metadataRequests.count { it.first == "series" })
+
+        viewModel.selectPlaybackSource(source)
+        viewModel.choosePlaybackTarget(PlaybackTargetSelection.Embedded(EmbeddedPlayerPreference.AUTOMATIC))
+        runCurrent()
+
+        assertNotNull(viewModel.state.value.viewer.player)
+        assertTrue(viewModel.state.value.viewer.player?.markers?.isEmpty() == true)
+        assertEquals(listOf(PlaybackMarkerRequest("tt12345678", 1, 1)), gateway.markerRequests)
+
+        advanceTimeBy(1_000)
+        runCurrent()
+        assertEquals(listOf(marker), viewModel.state.value.viewer.player?.markers)
+    }
+
+    @Test
+    fun episodeEntryResolvesSeriesOnceAndMarkerFailureFailsOpen() = runTest(dispatcher) {
+        val seriesId = UUID.randomUUID()
+        val episodeId = UUID.randomUUID()
+        val series = series(seriesId, "tt7654321")
+        val episode = episode(episodeId, seriesId, 3, seasonNumber = 2)
+        val season = season(seriesId, listOf(episode), number = 2)
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile(hasPin = false), active = true),
+            collections = listOf(collection()),
+        ).apply {
+            seriesResult = series.copy(seasons = listOf(seasonSummary(seriesId, season.id, 2, 1)))
+            seasons = mapOf(season.id to season)
+            markerFailure = IllegalStateException("provider unavailable")
+        }
+        val source = gateway.configurePlayback(episodeId)
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+        viewModel.openMedia(
+            MediaTarget(
+                id = "calendar-episode",
+                mediaType = "episode",
+                title = "Episode 3",
+                titleId = episodeId,
+                seriesId = seriesId,
+                seasonId = season.id,
+                seasonNumber = 2,
+                episodeNumber = 3,
+            ),
+        )
+        advanceUntilIdle()
+
+        viewModel.playMedia()
+        advanceUntilIdle()
+        assertEquals(1, gateway.metadataRequests.count { it.first == "series" })
+        assertEquals(PlaybackMarkerRequest("tt7654321", 2, 3), viewModel.state.value.viewer.sourcePicker?.markerRequest)
+
+        viewModel.selectPlaybackSource(source)
+        viewModel.choosePlaybackTarget(PlaybackTargetSelection.Embedded(EmbeddedPlayerPreference.AUTOMATIC))
+        advanceUntilIdle()
+
+        assertNotNull(viewModel.state.value.viewer.player)
+        assertTrue(viewModel.state.value.viewer.player?.markers?.isEmpty() == true)
+        assertNull(viewModel.state.value.viewer.inlineFailure)
+        assertEquals(listOf(PlaybackMarkerRequest("tt7654321", 2, 3)), gateway.markerRequests)
+    }
+
+    @Test
+    fun externalEpisodePlaybackDoesNotRequestOrCarryMarkers() = runTest(dispatcher) {
+        val episodeId = UUID.randomUUID()
+        val externalPlayer = ExternalPlayerApp(
+            packageName = "org.example.player",
+            label = "Example Player",
+            videoMimeTypes = setOf("video/*"),
+            supportsMagnet = false,
+        )
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile(hasPin = false), active = true),
+            collections = listOf(collection()),
+        )
+        val source = gateway.configurePlayback(episodeId)
+        val viewModel = viewModel(
+            FakeServerStore("https://saved.example.com"),
+            gateway,
+            externalPlaybackSupport = ExternalPlaybackSupport(listOf(externalPlayer)),
+        )
+        advanceUntilIdle()
+        viewModel.openMedia(
+            MediaTarget(
+                id = "episode",
+                mediaType = "episode",
+                title = "Episode",
+                titleId = episodeId,
+                seriesImdbId = "tt1234567",
+                seasonNumber = 1,
+                episodeNumber = 1,
+            ),
+        )
+        advanceUntilIdle()
+        viewModel.playMedia()
+        advanceUntilIdle()
+        assertNotNull(viewModel.state.value.viewer.sourcePicker?.markerRequest)
+
+        viewModel.selectPlaybackSource(source)
+        viewModel.choosePlaybackTarget(PlaybackTargetSelection.External(externalPlayer))
+        advanceUntilIdle()
+
+        assertEquals(externalPlayer, viewModel.state.value.viewer.player?.externalPlayer)
+        assertTrue(viewModel.state.value.viewer.player?.markers?.isEmpty() == true)
+        assertTrue(gateway.markerRequests.isEmpty())
+    }
+
+    @Test
+    fun staleMarkerCompletionCannotReplaceMarkersOnNewPlayer() = runTest(dispatcher) {
+        val episodeId = UUID.randomUUID()
+        val oldSessionId = UUID.randomUUID()
+        val newSessionId = UUID.randomUUID()
+        val oldMarker = io.rivune.api.PlaybackMarker(io.rivune.api.PlaybackMarkerType.RECAP, 0.0, 45.0, 0.8, 3)
+        val newMarker = io.rivune.api.PlaybackMarker(io.rivune.api.PlaybackMarkerType.OUTRO, 1_700.0, 1_795.0, 0.9, 8)
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile(hasPin = false), active = true),
+            collections = listOf(collection()),
+        ).apply {
+            markerResultsByCall = listOf(
+                io.rivune.api.PlaybackMarkerList(listOf(oldMarker)),
+                io.rivune.api.PlaybackMarkerList(listOf(newMarker)),
+            )
+            markerDelaysByCall = listOf(1_000, 0)
+        }
+        val source = gateway.configurePlayback(episodeId, oldSessionId)
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+        viewModel.openMedia(
+            MediaTarget(
+                id = "episode",
+                mediaType = "episode",
+                title = "Episode",
+                titleId = episodeId,
+                seriesImdbId = "tt1234567",
+                seasonNumber = 1,
+                episodeNumber = 1,
+            ),
+        )
+        advanceUntilIdle()
+        viewModel.playMedia()
+        advanceUntilIdle()
+        viewModel.selectPlaybackSource(source)
+        viewModel.choosePlaybackTarget(PlaybackTargetSelection.Embedded(EmbeddedPlayerPreference.AUTOMATIC))
+        runCurrent()
+        assertEquals(oldSessionId, viewModel.state.value.viewer.player?.sessionId)
+
+        viewModel.closePlayer()
+        gateway.configurePlayback(episodeId, newSessionId)
+        viewModel.playMedia()
+        runCurrent()
+        val replacementSource = requireNotNull(viewModel.state.value.viewer.sourcePicker).options.single()
+        viewModel.selectPlaybackSource(replacementSource)
+        viewModel.choosePlaybackTarget(PlaybackTargetSelection.Embedded(EmbeddedPlayerPreference.AUTOMATIC))
+        runCurrent()
+        assertEquals(newSessionId, viewModel.state.value.viewer.player?.sessionId)
+        assertEquals(listOf(newMarker), viewModel.state.value.viewer.player?.markers)
+
+        advanceTimeBy(1_000)
+        runCurrent()
+        assertEquals(newSessionId, viewModel.state.value.viewer.player?.sessionId)
+        assertEquals(listOf(newMarker), viewModel.state.value.viewer.player?.markers)
+    }
+
+    @Test
+    fun naturalEndHonorsAutoplayAndManualNextAlwaysAdvances() = runTest(dispatcher) {
+        val profile = profile(hasPin = false)
+        val seriesId = UUID.randomUUID()
+        val firstEpisodeId = UUID.randomUUID()
+        val secondEpisodeId = UUID.randomUUID()
+        val addonId = UUID.randomUUID()
+        val firstEpisode = episode(firstEpisodeId, seriesId, 1)
+        val secondEpisode = episode(secondEpisodeId, seriesId, 2)
+        val source = io.rivune.api.PlaybackSourceOption(
+            id = "source",
+            sourceRef = "fresh-per-request",
+            addonId = addonId,
+            manifestId = "addon",
+            streamIndex = 0,
+            name = "Direct",
+            protocol = "http",
+            expiresAt = "2099-01-01T00:00:00Z",
+        )
+
+        fun scenario(autoplay: Boolean): Pair<RivuneViewModel, FakeGateway> {
+            val gateway = FakeGateway(
+                restored = true,
+                account = account(profile, active = true),
+                collections = listOf(collection()),
+            ).apply {
+                seriesResult = io.rivune.app.series(seriesId)
+                seasons = mapOf("season-1" to season(seriesId, listOf(firstEpisode, secondEpisode)))
+                progress = io.rivune.api.PlaybackProgress(
+                    firstEpisodeId,
+                    io.rivune.api.PlaybackProgressMediaType.EPISODE,
+                    0,
+                    1_000,
+                    false,
+                    0,
+                    "2026-08-12T00:00:00Z",
+                    "2026-08-12T00:00:00Z",
+                )
+                sourceList = io.rivune.api.PlaybackSourceList(listOf(source), emptyList())
+                preparation = io.rivune.api.PlaybackPreparation(
+                    source.sourceRef,
+                    io.rivune.api.PlaybackMode.DIRECT,
+                    "http",
+                    subtitleCount = 0,
+                    expiresAt = "2099-01-01T00:00:00Z",
+                )
+                playbackSession = io.rivune.api.PlaybackSession(
+                    UUID.randomUUID(),
+                    "selected",
+                    sources = listOf(
+                        io.rivune.api.PlaybackSource(
+                            "selected",
+                            addonId,
+                            "addon",
+                            mode = io.rivune.api.PlaybackMode.DIRECT,
+                            url = "https://media.example.com/episode.m3u8",
+                            protocol = "hls",
+                            compatible = true,
+                            media = io.rivune.api.PlaybackMediaInspection(durationSeconds = 1_000.0),
+                        ),
+                    ),
+                    subtitles = emptyList(),
+                    providerErrors = emptyList(),
+                    expiresAt = "2099-01-01T00:00:00Z",
+                )
+                effectiveSettingsResult = effectiveSettingsResult.copy(
+                    settings = io.rivune.api.SettingsValues(autoplayNextEpisode = autoplay),
+                )
+            }
+            return viewModel(FakeServerStore("https://saved.example.com"), gateway) to gateway
+        }
+
+        fun openFirstEpisode(viewModel: RivuneViewModel) {
+            viewModel.openMedia(
+                MediaTarget(
+                    id = "tmdb:42:1:1",
+                    resourceId = "tmdb:42:1:1",
+                    mediaType = "episode",
+                    title = "Episode 1",
+                    titleId = firstEpisodeId,
+                    seriesId = seriesId,
+                    seasonId = "season-1",
+                    seasonNumber = 1,
+                    episodeNumber = 1,
+                ),
+            )
+        }
+
+        val (enabledViewModel, enabledGateway) = scenario(autoplay = true)
+        advanceUntilIdle()
+        openFirstEpisode(enabledViewModel)
+        advanceUntilIdle()
+        enabledViewModel.playMedia()
+        advanceUntilIdle()
+        assertEquals(secondEpisodeId, enabledViewModel.state.value.viewer.sourcePicker?.nextEpisode?.titleId)
+        enabledViewModel.selectPlaybackSource(source)
+        enabledViewModel.choosePlaybackTarget(PlaybackTargetSelection.Embedded(EmbeddedPlayerPreference.AUTOMATIC))
+        advanceUntilIdle()
+        val enabledSession = requireNotNull(enabledViewModel.state.value.viewer.player).sessionId
+        enabledViewModel.reportPlayerProgress(900, 1_000, completed = true)
+        advanceUntilIdle()
+        assertEquals(enabledSession, enabledViewModel.state.value.viewer.player?.sessionId)
+        enabledViewModel.playerPlaybackEnded()
+        enabledViewModel.playerPlaybackEnded()
+        advanceUntilIdle()
+
+        assertNotNull(enabledViewModel.state.value.viewer.player)
+        assertEquals(secondEpisodeId, enabledViewModel.state.value.viewer.player?.titleId)
+        assertEquals(1, enabledGateway.stopPlaybackCalls)
+        assertEquals(listOf("tmdb:42:1:1", "tmdb:42:1:2"), enabledGateway.playbackSourceResources)
+        assertTrue(enabledGateway.playbackEvents.indexOf("progress:900") < enabledGateway.playbackEvents.indexOf("stop"))
+        assertTrue(enabledGateway.playbackEvents.indexOf("stop") < enabledGateway.playbackEvents.lastIndexOf("sources:tmdb:42:1:2"))
+
+        val (disabledViewModel, disabledGateway) = scenario(autoplay = false)
+        advanceUntilIdle()
+        openFirstEpisode(disabledViewModel)
+        advanceUntilIdle()
+        disabledViewModel.playMedia()
+        advanceUntilIdle()
+        disabledViewModel.selectPlaybackSource(source)
+        disabledViewModel.choosePlaybackTarget(PlaybackTargetSelection.Embedded(EmbeddedPlayerPreference.AUTOMATIC))
+        advanceUntilIdle()
+        val disabledSession = requireNotNull(disabledViewModel.state.value.viewer.player).sessionId
+        disabledViewModel.reportPlayerProgress(400, 1_000, completed = false)
+        disabledViewModel.playerPlaybackEnded()
+        advanceUntilIdle()
+
+        assertEquals(disabledSession, disabledViewModel.state.value.viewer.player?.sessionId)
+        assertEquals(0, disabledGateway.stopPlaybackCalls)
+
+        disabledViewModel.playNextEpisode()
+        disabledViewModel.playNextEpisode()
+        advanceUntilIdle()
+
+        assertNotNull(disabledViewModel.state.value.viewer.player)
+        assertEquals(secondEpisodeId, disabledViewModel.state.value.viewer.player?.titleId)
+        assertEquals(1, disabledGateway.stopPlaybackCalls)
     }
 
     @Test
@@ -1076,7 +1914,7 @@ class RivuneViewModelTest {
             FakeServerStore("https://saved.example.com"),
             gateway,
             externalPlaybackSupport = support,
-            playbackNetwork = PlaybackNetwork.METERED,
+            playbackNetwork = PlaybackNetwork.MOBILE_OR_METERED,
         )
         advanceUntilIdle()
 
@@ -1094,7 +1932,7 @@ class RivuneViewModelTest {
 
         viewModel.selectPlaybackSource(source)
         assertEquals(source, viewModel.state.value.viewer.sourcePicker?.playerSource)
-        viewModel.choosePlaybackTarget(externalPlayer)
+        viewModel.choosePlaybackTarget(PlaybackTargetSelection.External(externalPlayer))
         advanceUntilIdle()
 
         assertTrue(gateway.preparedForExternalPlayer)
@@ -1126,7 +1964,7 @@ class RivuneViewModelTest {
         viewModel.playMedia()
         advanceUntilIdle()
         viewModel.selectPlaybackSource(source)
-        viewModel.choosePlaybackTarget(externalPlayer)
+        viewModel.choosePlaybackTarget(PlaybackTargetSelection.External(externalPlayer))
         advanceUntilIdle()
         assertEquals(0, viewModel.state.value.viewer.player?.durationSeconds)
 
@@ -1144,7 +1982,7 @@ class RivuneViewModelTest {
         viewModel.playMedia()
         advanceUntilIdle()
         viewModel.selectPlaybackSource(source)
-        viewModel.choosePlaybackTarget(externalPlayer)
+        viewModel.choosePlaybackTarget(PlaybackTargetSelection.External(externalPlayer))
         advanceUntilIdle()
 
         viewModel.externalPlaybackFinished(null)
@@ -1153,6 +1991,129 @@ class RivuneViewModelTest {
 
         assertEquals(lifecyclePlaybackId, gateway.stoppedPlayback)
         assertEquals(3, gateway.stopPlaybackCalls)
+    }
+
+    @Test
+    fun askPreferenceOnlyOpensTargetDialogWithoutStartingExternalPlayback() = runTest(dispatcher) {
+        val titleId = UUID.randomUUID()
+        val externalPlayer = ExternalPlayerApp(
+            packageName = "org.videolan.vlc",
+            label = "VLC",
+            videoMimeTypes = setOf("video/*"),
+            supportsMagnet = false,
+        )
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile(hasPin = false), active = true),
+            collections = listOf(collection()),
+        )
+        val source = gateway.configurePlayback(titleId)
+        val viewModel = viewModel(
+            FakeServerStore("https://saved.example.com"),
+            gateway,
+            externalPlaybackSupport = ExternalPlaybackSupport(listOf(externalPlayer)),
+            appPreferences = AppPreferencesReader {
+                AppPreferencesState(
+                    preferredPlayer = PreferredPlayer.Ask,
+                    embeddedPlayerPreference = EmbeddedPlayerPreference.AUTOMATIC,
+                )
+            },
+        )
+        advanceUntilIdle()
+        viewModel.openMedia(MediaTarget("episode", "episode", "Episode", titleId = titleId))
+        advanceUntilIdle()
+        viewModel.playMedia()
+        advanceUntilIdle()
+
+        viewModel.selectPlaybackSource(source)
+        advanceUntilIdle()
+
+        assertEquals(source, viewModel.state.value.viewer.sourcePicker?.playerSource)
+        assertNull(viewModel.state.value.viewer.player)
+        assertFalse(gateway.preparedForExternalPlayer)
+        assertFalse(gateway.resolvedForExternalPlayer)
+    }
+
+    @Test
+    fun automaticMedia3FailureFallsBackInPlaceAndMpvFailureStopsOnce() = runTest(dispatcher) {
+        val titleId = UUID.randomUUID()
+        val sessionId = UUID.randomUUID()
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile(hasPin = false), active = true),
+            collections = listOf(collection()),
+        )
+        val source = gateway.configurePlayback(titleId, sessionId)
+        val viewModel = viewModel(
+            FakeServerStore("https://saved.example.com"),
+            gateway,
+            appPreferences = AppPreferencesReader {
+                AppPreferencesState(
+                    preferredPlayer = PreferredPlayer.Rivune,
+                    embeddedPlayerPreference = EmbeddedPlayerPreference.AUTOMATIC,
+                )
+            },
+        )
+        advanceUntilIdle()
+        viewModel.openMedia(MediaTarget("episode", "episode", "Episode", titleId = titleId))
+        advanceUntilIdle()
+        viewModel.playMedia()
+        advanceUntilIdle()
+        viewModel.selectPlaybackSource(source)
+        advanceUntilIdle()
+
+        val media3 = requireNotNull(viewModel.state.value.viewer.player)
+        assertEquals(EmbeddedPlayerEngine.MEDIA3, media3.engine)
+        assertTrue(media3.fallbackAllowed)
+        viewModel.playerFailed(PlayerEngineFailure(45_250L, fallbackEligible = true))
+
+        val mpv = requireNotNull(viewModel.state.value.viewer.player)
+        assertEquals(sessionId, mpv.sessionId)
+        assertTrue(mpv.key != media3.key)
+        assertEquals(EmbeddedPlayerEngine.MPV, mpv.engine)
+        assertFalse(mpv.fallbackAllowed)
+        assertEquals(45_250L, mpv.startPositionMs)
+        assertEquals(0, gateway.stopPlaybackCalls)
+
+        viewModel.playerFailed(PlayerEngineFailure(46_000L, fallbackEligible = true))
+        viewModel.playerFailed(PlayerEngineFailure(46_000L, fallbackEligible = true))
+        advanceUntilIdle()
+        assertNull(viewModel.state.value.viewer.player)
+        assertEquals(sessionId, gateway.stoppedPlayback)
+        assertEquals(1, gateway.stopPlaybackCalls)
+    }
+
+    @Test
+    fun explicitMpvStartsMpvWithoutMedia3Fallback() = runTest(dispatcher) {
+        val titleId = UUID.randomUUID()
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile(hasPin = false), active = true),
+            collections = listOf(collection()),
+        )
+        val source = gateway.configurePlayback(titleId)
+        val viewModel = viewModel(
+            FakeServerStore("https://saved.example.com"),
+            gateway,
+            appPreferences = AppPreferencesReader {
+                AppPreferencesState(
+                    preferredPlayer = PreferredPlayer.Rivune,
+                    embeddedPlayerPreference = EmbeddedPlayerPreference.MPV,
+                )
+            },
+        )
+        advanceUntilIdle()
+        viewModel.openMedia(MediaTarget("episode", "episode", "Episode", titleId = titleId))
+        advanceUntilIdle()
+        viewModel.playMedia()
+        advanceUntilIdle()
+        viewModel.selectPlaybackSource(source)
+        advanceUntilIdle()
+
+        val player = requireNotNull(viewModel.state.value.viewer.player)
+        assertEquals(EmbeddedPlayerEngine.MPV, player.engine)
+        assertFalse(player.fallbackAllowed)
+        assertEquals(0, gateway.stopPlaybackCalls)
     }
 
     @Test
@@ -1189,7 +2150,7 @@ class RivuneViewModelTest {
         viewModel.playMedia()
         advanceUntilIdle()
         viewModel.selectPlaybackSource(requireNotNull(viewModel.state.value.viewer.sourcePicker).options.single())
-        viewModel.choosePlaybackTarget(null)
+        viewModel.choosePlaybackTarget(PlaybackTargetSelection.Embedded(EmbeddedPlayerPreference.AUTOMATIC))
         advanceUntilIdle()
 
         assertEquals(playbackId, gateway.stoppedPlayback)
@@ -1318,7 +2279,7 @@ class RivuneViewModelTest {
         externalPlaybackSupport: ExternalPlaybackSupport = ExternalPlaybackSupport(),
         appPreferences: AppPreferencesReader = AppPreferencesReader { AppPreferencesState() },
         locale: java.util.Locale = java.util.Locale.ENGLISH,
-        playbackNetwork: PlaybackNetwork = PlaybackNetwork.UNMETERED,
+        playbackNetwork: PlaybackNetwork = PlaybackNetwork.WIFI_OR_ETHERNET,
     ) = RivuneViewModel(
         store,
         RivuneGatewayFactory { gateway },
@@ -1362,21 +2323,31 @@ private class FakeGateway(
     var authorizationPlatform: String? = null
     var loggedOut = false
     val resolvedPages = mutableListOf<Int>()
+    val fullFolderRequests = mutableListOf<UUID>()
+    val artworkFolderRequests = mutableListOf<UUID>()
     var catalogDescriptors = emptyList<io.rivune.api.AddonCatalogDescriptor>()
     var searchPages = emptyMap<Int, io.rivune.api.AddonResourceBatch>()
     var libraryPages = emptyMap<Int, io.rivune.api.LibraryPage>()
     var resolvedTitle: io.rivune.api.TitleReference? = null
+    val resolvedTitleInputs = mutableListOf<io.rivune.api.TitleResolveInput>()
     var movieResult: io.rivune.api.Movie? = null
     var seriesResult: io.rivune.api.Series? = null
     var seasons = emptyMap<String, io.rivune.api.Season>()
     var progress: io.rivune.api.PlaybackProgress? = null
     var sourceList: io.rivune.api.PlaybackSourceList? = null
     val playbackEvents = mutableListOf<String>()
+    val playbackSourceResources = mutableListOf<String>()
     var lastPlaybackCapabilities: io.rivune.api.PlaybackCapabilities? = null
     var preparedForExternalPlayer = false
     var resolvedForExternalPlayer = false
     var preparation: io.rivune.api.PlaybackPreparation? = null
     var playbackSession: io.rivune.api.PlaybackSession? = null
+    var markerResult = io.rivune.api.PlaybackMarkerList(emptyList())
+    var markerFailure: Throwable? = null
+    var markerDelayMillis: Long = 0
+    var markerResultsByCall = emptyList<io.rivune.api.PlaybackMarkerList>()
+    var markerDelaysByCall = emptyList<Long>()
+    val markerRequests = mutableListOf<PlaybackMarkerRequest>()
     var calendarEvents = emptyList<io.rivune.api.CalendarEvent>()
     var libraryAdded: UUID? = null
     var libraryRemoved: UUID? = null
@@ -1422,13 +2393,18 @@ private class FakeGateway(
         collectionFailure?.let { throw it }
         return collections
     }
-    override suspend fun resolveCollectionFolderArtwork(collectionId: UUID, folderId: UUID, language: String?) =
-        resolveCollectionFolder(collectionId, folderId, language = language)
+    override suspend fun resolveCollectionFolderArtwork(collectionId: UUID, folderId: UUID, language: String?): ResolvedCollectionFolder {
+        artworkFolderRequests += folderId
+        return resolvedFolderResponse(folderId, page = 1, language = language)
+    }
     override suspend fun resolveCollectionFolder(collectionId: UUID, folderId: UUID, page: Int?, language: String?): ResolvedCollectionFolder {
+        fullFolderRequests += folderId
+        return resolvedFolderResponse(folderId, page ?: 1, language)
+    }
+    private fun resolvedFolderResponse(folderId: UUID, page: Int, language: String?): ResolvedCollectionFolder {
         metadataRequests += "collection" to language
-        val requestedPage = page ?: 1
-        resolvedPages += requestedPage
-        return resolvedFolders.getValue(folderId).first { it.page == requestedPage }
+        resolvedPages += page
+        return resolvedFolders.getValue(folderId).first { it.page == page }
     }
     override suspend fun addonCatalogs() = catalogDescriptors
     override suspend fun searchAddonCatalogs(type: String, search: String, skip: Int?, limit: Int?, language: String?): io.rivune.api.AddonResourceBatch {
@@ -1436,7 +2412,10 @@ private class FakeGateway(
         if (searchDelayMillis > 0) delay(searchDelayMillis)
         return searchPages.getValue(skip ?: 0)
     }
-    override suspend fun resolveTitle(input: io.rivune.api.TitleResolveInput) = requireNotNull(resolvedTitle)
+    override suspend fun resolveTitle(input: io.rivune.api.TitleResolveInput): io.rivune.api.TitleReference {
+        resolvedTitleInputs += input
+        return requireNotNull(resolvedTitle)
+    }
     override suspend fun movie(id: UUID, language: String?): io.rivune.api.Movie {
         metadataRequests += "movie" to language
         return requireNotNull(movieResult)
@@ -1523,23 +2502,48 @@ private class FakeGateway(
         profileSettingsUpdates += input
         val current = effectiveSettingsResult.settings
         val updated = current.copy(
-            maximumResolution = input.maximumResolution.applyTo(current.maximumResolution),
-            preferDirectPlay = input.preferDirectPlay.applyTo(current.preferDirectPlay),
-            audioLanguage = input.audioLanguage.applyTo(current.audioLanguage),
-            metadataLanguage = input.metadataLanguage.applyTo(current.metadataLanguage),
-            subtitleLanguage = input.subtitleLanguage.applyTo(current.subtitleLanguage),
-            transcoding = input.transcoding.applyTo(current.transcoding),
+            maximumResolution = input.maximumResolution.applyEffectiveTo(current.maximumResolution),
+            preferDirectPlay = input.preferDirectPlay.applyEffectiveTo(current.preferDirectPlay),
+            audioLanguage = input.audioLanguage.applyEffectiveTo(current.audioLanguage),
+            metadataLanguage = input.metadataLanguage.applyEffectiveTo(current.metadataLanguage),
+            subtitleLanguage = input.subtitleLanguage.applyEffectiveTo(current.subtitleLanguage),
+            forcedSubtitleLanguage = input.forcedSubtitleLanguage.applyEffectiveTo(current.forcedSubtitleLanguage),
+            autoplayNextEpisode = input.autoplayNextEpisode.applyEffectiveTo(current.autoplayNextEpisode),
+            transcoding = input.transcoding.applyEffectiveTo(current.transcoding),
         )
-        effectiveSettingsResult = effectiveSettingsResult.copy(settings = updated)
+        val currentSources = effectiveSettingsResult.sources
+        val updatedSources = currentSources.copy(
+            maximumResolution = input.maximumResolution.applySourceTo(currentSources.maximumResolution),
+            preferDirectPlay = input.preferDirectPlay.applySourceTo(currentSources.preferDirectPlay),
+            audioLanguage = input.audioLanguage.applySourceTo(currentSources.audioLanguage),
+            metadataLanguage = input.metadataLanguage.applySourceTo(currentSources.metadataLanguage),
+            subtitleLanguage = input.subtitleLanguage.applySourceTo(currentSources.subtitleLanguage),
+            forcedSubtitleLanguage = input.forcedSubtitleLanguage.applySourceTo(currentSources.forcedSubtitleLanguage),
+            autoplayNextEpisode = input.autoplayNextEpisode.applySourceTo(currentSources.autoplayNextEpisode),
+            transcoding = input.transcoding.applySourceTo(currentSources.transcoding),
+        )
+        effectiveSettingsResult = effectiveSettingsResult.copy(settings = updated, sources = updatedSources)
         return io.rivune.api.SettingsLayer(1, updated)
     }
     override suspend fun playbackSources(mediaType: String, resourceId: String, capabilities: io.rivune.api.PlaybackCapabilities, addonId: UUID?): io.rivune.api.PlaybackSourceList {
         lastPlaybackCapabilities = capabilities
+        playbackSourceResources += resourceId
+        playbackEvents += "sources:$resourceId"
         return requireNotNull(sourceList)
     }
     override suspend fun preparePlayback(sourceRef: String, startSeconds: Int?, externalPlayer: Boolean): io.rivune.api.PlaybackPreparation {
         preparedForExternalPlayer = externalPlayer
         return requireNotNull(preparation)
+    }
+    override suspend fun playbackMarkers(imdbId: String, season: Int, episode: Int): io.rivune.api.PlaybackMarkerList {
+        val request = PlaybackMarkerRequest(imdbId, season, episode)
+        val callIndex = markerRequests.size
+        markerRequests += request
+        val result = markerResultsByCall.getOrNull(callIndex) ?: markerResult
+        val delayMillis = markerDelaysByCall.getOrNull(callIndex) ?: markerDelayMillis
+        if (delayMillis > 0) delay(delayMillis)
+        markerFailure?.let { throw it }
+        return result
     }
     override suspend fun resolvePlayback(sourceRef: String, titleId: String?, startSeconds: Int?, externalPlayer: Boolean): io.rivune.api.PlaybackSession {
         resolvedForExternalPlayer = externalPlayer
@@ -1583,10 +2587,71 @@ private class FakeGateway(
     override fun resolveArtworkUrl(value: String) = if (value.startsWith("/")) "https://media.example.com$value" else null
     override fun resolveResourceUrl(value: String) = if (value.startsWith("https://")) value else "https://media.example.com$value"
 }
-private fun <T> io.rivune.api.PatchField<T>.applyTo(current: T?): T? = when (this) {
-    io.rivune.api.PatchField.Omitted -> current
-    io.rivune.api.PatchField.Null -> null
+private fun FakeGateway.configurePlayback(
+    titleId: UUID,
+    sessionId: UUID = UUID.randomUUID(),
+): io.rivune.api.PlaybackSourceOption {
+    val addonId = UUID.randomUUID()
+    val source = io.rivune.api.PlaybackSourceOption(
+        id = "source",
+        sourceRef = "source-ref",
+        addonId = addonId,
+        manifestId = "addon",
+        streamIndex = 0,
+        name = "Direct",
+        protocol = "http",
+        mode = io.rivune.api.PlaybackMode.DIRECT,
+        expiresAt = "2099-01-01T00:00:00Z",
+    )
+    progress = io.rivune.api.PlaybackProgress(
+        titleId,
+        io.rivune.api.PlaybackProgressMediaType.EPISODE,
+        0,
+        1_800,
+        false,
+        0,
+        "2026-08-12T00:00:00Z",
+        "2026-08-12T00:00:00Z",
+    )
+    sourceList = io.rivune.api.PlaybackSourceList(listOf(source), emptyList())
+    preparation = io.rivune.api.PlaybackPreparation(
+        source.sourceRef,
+        io.rivune.api.PlaybackMode.DIRECT,
+        "http",
+        subtitleCount = 0,
+        expiresAt = "2099-01-01T00:00:00Z",
+    )
+    playbackSession = io.rivune.api.PlaybackSession(
+        sessionId,
+        "selected",
+        sources = listOf(
+            io.rivune.api.PlaybackSource(
+                "selected",
+                addonId,
+                "addon",
+                mode = io.rivune.api.PlaybackMode.DIRECT,
+                url = "https://media.example.com/episode.m3u8",
+                protocol = "hls",
+                compatible = true,
+                media = io.rivune.api.PlaybackMediaInspection(durationSeconds = 1_800.0),
+            ),
+        ),
+        subtitles = emptyList(),
+        providerErrors = emptyList(),
+        expiresAt = "2099-01-01T00:00:00Z",
+    )
+    return source
+}
+
+private fun <T> io.rivune.api.PatchField<T>.applyEffectiveTo(current: T?): T? = when (this) {
+    io.rivune.api.PatchField.Omitted, io.rivune.api.PatchField.Null -> current
     is io.rivune.api.PatchField.Value -> value
+}
+
+private fun <T> io.rivune.api.PatchField<T>.applySourceTo(current: String?): String? = when (this) {
+    io.rivune.api.PatchField.Omitted -> current
+    io.rivune.api.PatchField.Null -> "instance"
+    is io.rivune.api.PatchField.Value -> "profile"
 }
 
 private fun discovery(setupRequired: Boolean = false) = Discovery(
@@ -1662,7 +2727,7 @@ private fun collection(folder: CollectionFolder? = null) = Collection(
     createdAt = "2026-08-12T00:00:00Z",
     updatedAt = "2026-08-12T00:00:00Z",
 )
-private fun series(id: UUID) = io.rivune.api.Series(
+private fun series(id: UUID, imdbId: String? = null) = io.rivune.api.Series(
     id = id,
     mediaType = io.rivune.api.MediaType.SERIES,
     name = "Series",
@@ -1673,44 +2738,56 @@ private fun series(id: UUID) = io.rivune.api.Series(
     cast = emptyList(),
     voteAverage = 8.0,
     voteCount = 10,
-    seasons = listOf(
-        io.rivune.api.SeasonSummary(
-            id = "season-1",
-            mediaType = io.rivune.api.MediaType.SEASON,
-            seriesId = id,
-            name = "Season 1",
-            overview = "",
-            seasonNumber = 1,
-            episodeCount = 2,
-            voteAverage = 8.0,
-            externalIds = emptyMap(),
-        ),
-    ),
+    seasons = listOf(seasonSummary(id, "season-1", 1, 2)),
     aliases = emptyList(),
     episodeOrders = emptyList(),
     mappingProvider = io.rivune.api.SeriesMappingProvider.TMDB,
-    externalIds = mapOf("tmdb" to "42"),
+    externalIds = mapOf("tmdb" to "42") + listOfNotNull(imdbId?.let { "imdb" to it }).toMap(),
 )
 
-private fun season(seriesId: UUID, episodes: List<io.rivune.api.Episode>) = io.rivune.api.Season(
-    id = "season-1",
+private fun seasonSummary(seriesId: UUID, id: String, number: Int, episodeCount: Int) =
+    io.rivune.api.SeasonSummary(
+        id = id,
+        mediaType = io.rivune.api.MediaType.SEASON,
+        seriesId = seriesId,
+        name = "Season $number",
+        overview = "",
+        seasonNumber = number,
+        episodeCount = episodeCount,
+        voteAverage = 8.0,
+        externalIds = emptyMap(),
+    )
+
+private fun season(
+    seriesId: UUID,
+    episodes: List<io.rivune.api.Episode>,
+    id: String = "season-1",
+    number: Int = 1,
+) = io.rivune.api.Season(
+    id = id,
     mediaType = io.rivune.api.MediaType.SEASON,
     seriesId = seriesId,
-    name = "Season 1",
+    name = "Season $number",
     overview = "",
-    seasonNumber = 1,
+    seasonNumber = number,
     voteAverage = 8.0,
     episodes = episodes,
     externalIds = emptyMap(),
 )
 
-private fun episode(id: UUID, seriesId: UUID, number: Int) = io.rivune.api.Episode(
+private fun episode(
+    id: UUID,
+    seriesId: UUID,
+    number: Int,
+    seasonId: String = "season-1",
+    seasonNumber: Int = 1,
+) = io.rivune.api.Episode(
     id = id,
     mediaType = io.rivune.api.MediaType.EPISODE,
-    seasonId = "season-1",
+    seasonId = seasonId,
     name = "Episode $number",
     overview = "",
-    seasonNumber = 1,
+    seasonNumber = seasonNumber,
     episodeNumber = number,
     voteAverage = 8.0,
     voteCount = 10,

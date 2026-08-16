@@ -1280,6 +1280,11 @@ class RivuneApiClient(
         putPatch("audioLanguage", input.audioLanguage) { name, value -> put(name, value) }
         putPatch("metadataLanguage", input.metadataLanguage) { name, value -> put(name, value) }
         putPatch("subtitleLanguage", input.subtitleLanguage) { name, value -> put(name, value) }
+        putPatch("forcedSubtitleLanguage", input.forcedSubtitleLanguage) { name, value -> put(name, value) }
+        putPatch("autoplayNextEpisode", input.autoplayNextEpisode) { name, value -> put(name, value) }
+        putPatch("skipIntroEnabled", input.skipIntroEnabled) { name, value -> put(name, value) }
+        putPatch("skipRecapEnabled", input.skipRecapEnabled) { name, value -> put(name, value) }
+        putPatch("skipOutroEnabled", input.skipOutroEnabled) { name, value -> put(name, value) }
         putPatch("transcoding", input.transcoding) { name, value -> put(name, value) }
     }.toString()
 

@@ -1,0 +1,19 @@
+Rivune for Android
+Copyright 2026 Rivune contributors
+
+This notice applies to the distributed Rivune Android application binary. It
+includes dev.jdtech.mpv:libmpv:1.0.0 and its bundled native runtime. The wrapper
+is MIT licensed, mpv 0.41.0 is GPL-2.0-or-later, and FFmpeg 8.1 was built with
+--enable-gpl and --enable-version3. The resulting combined Android application
+is conveyed under GNU GPL version 3.
+
+Applicable distribution terms: LICENSE.txt
+Exact GPLv3 text: licenses/GPL-3.0.txt
+Corresponding Source access and directions: THIRD_PARTY_NOTICES.txt
+Native-component copyrights, licenses, and upstream sources:
+THIRD_PARTY_NOTICES.txt
+
+Rivune-authored source files remain available separately under the repository's
+Apache License 2.0. This Android binary notice does not change the terms of the
+separately distributed server, web, Apple, Windows, API, documentation, or other
+repository components.

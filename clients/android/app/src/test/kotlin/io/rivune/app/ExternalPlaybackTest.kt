@@ -9,6 +9,17 @@ import kotlin.test.assertTrue
 
 class ExternalPlaybackTest {
     @Test
+    fun discoveryAcceptsOnlySupportedMediaPlayers() {
+        assertTrue(isSupportedExternalPlayerPackage("org.videolan.vlc"))
+        assertTrue(isSupportedExternalPlayerPackage("is.xyz.mpv"))
+        assertTrue(isSupportedExternalPlayerPackage("com.brouken.player"))
+        assertTrue(isSupportedExternalPlayerPackage("com.mxtech.videoplayer.ad"))
+        assertTrue(isSupportedExternalPlayerPackage("com.mxtech.videoplayer.pro"))
+        assertFalse(isSupportedExternalPlayerPackage("com.google.android.apps.photos"))
+        assertFalse(isSupportedExternalPlayerPackage("org.example.video-handler"))
+    }
+
+    @Test
     fun supportAdvertisesGenericCapabilitiesAndFiltersPlayersByMimeType() {
         val support = ExternalPlaybackSupport(
             listOf(
@@ -59,19 +70,19 @@ class ExternalPlaybackTest {
 
         assertEquals(
             PreferredPlaybackTarget.Ask,
-            preferredPlaybackTarget(PreferredPlayer.Ask, source, support),
+            preferredPlaybackTarget(PreferredPlayer.Ask, EmbeddedPlayerPreference.AUTOMATIC, source, support),
         )
         assertEquals(
-            PreferredPlaybackTarget.Rivune,
-            preferredPlaybackTarget(PreferredPlayer.Rivune, source, support),
+            PreferredPlaybackTarget.Embedded(EmbeddedPlayerPreference.AUTOMATIC),
+            preferredPlaybackTarget(PreferredPlayer.Rivune, EmbeddedPlayerPreference.AUTOMATIC, source, support),
         )
         assertEquals(
             PreferredPlaybackTarget.External(installed),
-            preferredPlaybackTarget(PreferredPlayer.External(installed.packageName), source, support),
+            preferredPlaybackTarget(PreferredPlayer.External(installed.packageName), EmbeddedPlayerPreference.AUTOMATIC, source, support),
         )
         assertEquals(
             PreferredPlaybackTarget.Ask,
-            preferredPlaybackTarget(PreferredPlayer.External("org.example.missing"), source, support),
+            preferredPlaybackTarget(PreferredPlayer.External("org.example.missing"), EmbeddedPlayerPreference.AUTOMATIC, source, support),
         )
     }
 
@@ -91,7 +102,7 @@ class ExternalPlaybackTest {
 
         assertEquals(
             PreferredPlaybackTarget.Ask,
-            preferredPlaybackTarget(PreferredPlayer.Rivune, source, ExternalPlaybackSupport()),
+            preferredPlaybackTarget(PreferredPlayer.Rivune, EmbeddedPlayerPreference.AUTOMATIC, source, ExternalPlaybackSupport()),
         )
     }
 
@@ -145,5 +156,103 @@ class ExternalPlaybackTest {
         assertTrue(magnet?.startsWith("magnet:?xt=urn%3Abtih%3A0123456789abcdef0123456789abcdef01234567") == true)
         assertTrue(magnet?.contains("dn=A%20film") == true)
         assertNull(magnetUrl("../../not-a-hash", "A film"))
+    }
+
+    @Test
+    fun embeddedPreferencesSelectExpectedEngineAndFallbackPolicy() {
+        assertEquals(
+            EmbeddedPlayerSelection(EmbeddedPlayerEngine.MEDIA3, fallbackAllowed = true),
+            embeddedPlayerSelection(EmbeddedPlayerPreference.AUTOMATIC),
+        )
+        assertEquals(
+            EmbeddedPlayerSelection(EmbeddedPlayerEngine.MEDIA3, fallbackAllowed = false),
+            embeddedPlayerSelection(EmbeddedPlayerPreference.MEDIA3),
+        )
+        assertEquals(
+            EmbeddedPlayerSelection(EmbeddedPlayerEngine.MPV, fallbackAllowed = false),
+            embeddedPlayerSelection(EmbeddedPlayerPreference.MPV),
+        )
+    }
+
+    @Test
+    fun eligibleAutomaticMedia3FailureTransitionsSameSessionToMpv() {
+        val sessionId = java.util.UUID.randomUUID()
+        val presentation = PlayerPresentation(
+            key = "media3",
+            sessionId = sessionId,
+            titleId = java.util.UUID.randomUUID(),
+            title = "Film",
+            mediaUrl = "https://media.example/film.mkv",
+            protocol = "http",
+            container = "mkv",
+            mediaTimeline = io.rivune.api.PlaybackMediaTimeline.RELATIVE,
+            startPositionMs = 120_000L,
+            timelineStartPositionMs = 120_000L,
+            durationSeconds = 3_600,
+            expectedProgressVersion = 2,
+            engine = EmbeddedPlayerEngine.MEDIA3,
+            fallbackAllowed = true,
+        )
+
+        val fallback = presentation.fallbackToMpv(PlayerEngineFailure(145_000L, fallbackEligible = true), "mpv")
+        assertEquals(sessionId, fallback?.sessionId)
+        assertEquals("mpv", fallback?.key)
+        assertEquals(145_000L, fallback?.startPositionMs)
+        assertEquals(120_000L, fallback?.timelineStartPositionMs)
+        assertEquals(
+            25_000L,
+            mediaPlaybackPositionMs(
+                requireNotNull(fallback).startPositionMs,
+                fallback.timelineStartPositionMs,
+                fallback.mediaTimeline,
+            ),
+        )
+        assertEquals(
+            145_000L,
+            absolutePlaybackPositionMs(25_000L, fallback.timelineStartPositionMs, fallback.mediaTimeline),
+        )
+        val replayAbsoluteMs = absolutePlaybackPositionMs(0L, fallback.timelineStartPositionMs, fallback.mediaTimeline)
+        assertEquals(120_000L, replayAbsoluteMs)
+        assertEquals(
+            0L,
+            mediaPlaybackPositionMs(replayAbsoluteMs, fallback.timelineStartPositionMs, fallback.mediaTimeline),
+        )
+        assertEquals(EmbeddedPlayerEngine.MPV, fallback?.engine)
+        assertFalse(requireNotNull(fallback).fallbackAllowed)
+        assertNull(fallback.externalPlayer)
+        assertNull(presentation.fallbackToMpv(PlayerEngineFailure(42_500L, fallbackEligible = false), "ignored"))
+        assertNull(fallback.fallbackToMpv(PlayerEngineFailure(43_000L, fallbackEligible = true), "ignored"))
+        assertNull(
+            presentation.copy(fallbackAllowed = false)
+                .fallbackToMpv(PlayerEngineFailure(42_500L, fallbackEligible = true), "ignored"),
+        )
+    }
+
+    @Test
+    fun capabilitySelectorKeepsExplicitOrOfferedMedia3SafeAndUsesMpvWhenAvailable() {
+        val media3 = io.rivune.api.PlaybackCapabilities(
+            streamingProtocols = listOf("http"),
+            containers = listOf("mp4"),
+            videoCodecs = listOf("h264"),
+        )
+        assertEquals(
+            media3,
+            playbackCapabilitiesFor(PreferredPlayer.Rivune, EmbeddedPlayerPreference.MEDIA3, media3),
+        )
+        assertEquals(
+            MpvPlaybackCapabilities,
+            playbackCapabilitiesFor(PreferredPlayer.Rivune, EmbeddedPlayerPreference.AUTOMATIC, media3),
+        )
+        assertEquals(
+            MpvPlaybackCapabilities,
+            playbackCapabilitiesFor(PreferredPlayer.Rivune, EmbeddedPlayerPreference.MPV, media3),
+        )
+        assertEquals(
+            media3,
+            playbackCapabilitiesFor(PreferredPlayer.Ask, EmbeddedPlayerPreference.MPV, media3),
+        )
+        val capped = MpvPlaybackCapabilities.withQualityLimit(PlaybackQualityLimit(720, 2_000))
+        assertEquals(720, capped.maximumHeight)
+        assertEquals(2_000, capped.maximumVideoBitrateKbps)
     }
 }
