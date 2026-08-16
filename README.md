@@ -15,12 +15,12 @@ Requirements: Docker Engine with Compose v2, Bash, and OpenSSL. On a Linux host,
 ```sh
 git clone https://github.com/moodiness/rivune.git
 cd rivune
-./rivune setup --public-url https://media.example.com --version 1.7.0
+./rivune setup --public-url https://media.example.com --version 1.7.1
 ./rivune up
 ./rivune doctor
 ```
 
-Omit `--public-url` for a loopback-only installation. `--version` is required and accepts only an exact stable numeric release such as `1.7.0`; mutable image tags such as `latest` are rejected so a fresh install is reproducible. `./rivune help` lists explicit wrappers for lifecycle, logs, diagnostics, authenticated backup verification, and restore. The command always resolves the repository Compose file and never prints generated secrets.
+Omit `--public-url` for a loopback-only installation. `--version` is required and accepts only an exact stable numeric release such as `1.7.1`; mutable image tags such as `latest` are rejected so a fresh install is reproducible. `./rivune help` lists explicit wrappers for lifecycle, logs, diagnostics, authenticated backup verification, and restore. The command always resolves the repository Compose file and never prints generated secrets.
 
 On Windows PowerShell, run `.\scripts\create-env.ps1`, fill the generated private `.env`, then use `docker compose pull` and `docker compose up -d`. The lower-level `./scripts/create-env.sh` path remains available on Unix hosts that need to customize `.env` before startup.
 
@@ -62,11 +62,11 @@ The Android project includes the native Rivune application for phones, tablets, 
 
 ### Android app
 
-Official Android releases provide a universal APK for phones, tablets, and Android TV. Download `rivune-android-<version>.apk` from the matching [GitHub Release](https://github.com/moodiness/rivune/releases), verify it with the published `SHA256SUMS`, and complete Android's normal package-installation prompt. The public application ID is `io.rivune.app` and Android 8.0 or newer is required.
+Official Android releases provide a universal APK for phones, tablets, and Android TV. Download `rivune-android-<version>.apk` and its `rivune-android-<version>-corresponding-source.tar.gz` from the matching [GitHub Release](https://github.com/moodiness/rivune/releases), verify both with the published `SHA256SUMS`, and complete Android's normal package-installation prompt. The public application ID is `io.rivune.app` and Android 8.0 or newer is required.
 
 The installed app checks the dedicated `rivune-android-update.json` release asset at most once every 24 hours and also offers a manual check in Settings. It never contains a GitHub token. An update is downloaded only after consent, then its size, SHA-256, package identity, version code, and signing certificate are verified before Android shows its own installation confirmation. Silent installation is not supported; if Android blocks installs from this source, grant that system permission and return to Rivune to continue.
 
-Android Settings also stores device-local startup, preferred-player, motion, language, accent, frame-rate matching, picture-format, and per-network quality choices. About shows the connected server/build details and can copy or export a bounded in-memory diagnostic report through Android's document picker; the report excludes credentials, profile/media data, URL paths, queries, and raw exception text.
+Android Settings keeps device-specific startup, preferred-player, motion, language, accent, frame-rate matching, picture-format, and Wi-Fi/Ethernet versus mobile-network quality choices local to the device. Preferred-player choices include asking every time, Rivune automatic (AndroidX Media3 first with an embedded mpv fallback for unsupported media), explicit Media3, explicit mpv, and detected external players. Profile controls display the effective Rivune server value and its provenance, support clearing a profile override to inherit the server policy, and cover resolution, direct play, automatic next episode, audio, subtitles, forced subtitles, and metadata language. The effective transcoding permission remains visible but read-only because only a global administrator may change that server policy. Internal episode playback exposes a one-shot Next action and starts the next episode after a natural end when the effective profile setting allows it; an external player continues only after returning an explicit completed result. About shows the connected server/build details and can copy or export a bounded in-memory diagnostic report through Android's document picker; the report excludes credentials, profile/media data, URL paths, queries, and raw exception text.
 
 ```sh
 cd web && npm ci && npm run build
@@ -76,4 +76,13 @@ cd ../clients/android && ./gradlew :rivune-api:testDebugUnitTest :app:testDebugU
 
 ## License
 
-Licensed under the [Apache License 2.0](LICENSE). Third-party notices are listed in [`NOTICE`](NOTICE).
+The repository's server, web, Apple, Windows, API, documentation, and other
+separately distributed Rivune components are licensed under the
+[Apache License 2.0](LICENSE). General third-party notices are in
+[`NOTICE`](NOTICE).
+
+The Android application binary includes a GPLv3 native playback stack and is
+distributed under different combined-work terms. See
+[`clients/android/app/src/main/assets/legal/LICENSE.txt`](clients/android/app/src/main/assets/legal/LICENSE.txt) and
+[`clients/android/app/src/main/assets/legal/THIRD_PARTY_NOTICES.txt`](clients/android/app/src/main/assets/legal/THIRD_PARTY_NOTICES.txt)
+for the exact terms, Corresponding Source directions, and attributions.
