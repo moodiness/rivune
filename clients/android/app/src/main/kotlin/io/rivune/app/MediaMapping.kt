@@ -5,6 +5,8 @@ import io.rivune.api.AddonResourceBatch
 import io.rivune.api.AddonResourceResult
 import io.rivune.api.CollectionItem
 import io.rivune.api.LibraryItem
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -28,6 +30,18 @@ internal fun CollectionItem.toMediaTarget(): MediaTarget {
         releaseInfo = releaseInfo,
         released = released,
     )
+}
+
+internal fun titleReleaseDate(value: String?): String? {
+    val normalized = value?.trim()?.takeIf(String::isNotEmpty) ?: return null
+    val parsed = runCatching {
+        if ('T' in normalized) {
+            DateTimeFormatter.ISO_DATE_TIME.parse(normalized, LocalDate::from)
+        } else {
+            LocalDate.parse(normalized)
+        }
+    }.getOrNull() ?: return null
+    return parsed.toString()
 }
 
 internal fun LibraryItem.toMediaTarget(untitled: String = "Untitled"): MediaTarget = MediaTarget(

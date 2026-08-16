@@ -18,6 +18,13 @@ private const val MX_PLAYER_FREE_PACKAGE = "com.mxtech.videoplayer.ad"
 private const val MX_PLAYER_PRO_PACKAGE = "com.mxtech.videoplayer.pro"
 private const val MX_PLAYER_FREE_ACTIVITY = "com.mxtech.videoplayer.ad.ActivityScreen"
 private const val MX_PLAYER_PRO_ACTIVITY = "com.mxtech.videoplayer.ActivityScreen"
+private val SUPPORTED_EXTERNAL_PLAYER_PACKAGES = setOf(
+    VLC_PACKAGE,
+    MPV_PACKAGE,
+    JUST_PLAYER_PACKAGE,
+    MX_PLAYER_FREE_PACKAGE,
+    MX_PLAYER_PRO_PACKAGE,
+)
 private const val MAX_EXTERNAL_PLAYBACK_MS = Int.MAX_VALUE.toLong() * 1_000L
 
 internal const val EXTERNAL_VIDEO_CAPABILITY = "android_intent"
@@ -63,14 +70,31 @@ data class ExternalPlaybackSupport(
     }
 }
 
+internal data class EmbeddedPlayerSelection(
+    val engine: EmbeddedPlayerEngine,
+    val fallbackAllowed: Boolean,
+)
+
+internal fun embeddedPlayerSelection(preference: EmbeddedPlayerPreference): EmbeddedPlayerSelection = when (preference) {
+    EmbeddedPlayerPreference.AUTOMATIC -> EmbeddedPlayerSelection(EmbeddedPlayerEngine.MEDIA3, fallbackAllowed = true)
+    EmbeddedPlayerPreference.MEDIA3 -> EmbeddedPlayerSelection(EmbeddedPlayerEngine.MEDIA3, fallbackAllowed = false)
+    EmbeddedPlayerPreference.MPV -> EmbeddedPlayerSelection(EmbeddedPlayerEngine.MPV, fallbackAllowed = false)
+}
+
+sealed interface PlaybackTargetSelection {
+    data class Embedded(val preference: EmbeddedPlayerPreference) : PlaybackTargetSelection
+    data class External(val player: ExternalPlayerApp) : PlaybackTargetSelection
+}
+
 internal sealed interface PreferredPlaybackTarget {
     data object Ask : PreferredPlaybackTarget
-    data object Rivune : PreferredPlaybackTarget
+    data class Embedded(val preference: EmbeddedPlayerPreference) : PreferredPlaybackTarget
     data class External(val player: ExternalPlayerApp) : PreferredPlaybackTarget
 }
 
 internal fun preferredPlaybackTarget(
     preference: PreferredPlayer,
+    embeddedPreference: EmbeddedPlayerPreference,
     source: io.rivune.api.PlaybackSourceOption,
     support: ExternalPlaybackSupport,
 ): PreferredPlaybackTarget {
@@ -80,7 +104,7 @@ internal fun preferredPlaybackTarget(
         PreferredPlayer.Rivune -> if (source.mode == PlaybackMode.EXTERNAL) {
             PreferredPlaybackTarget.Ask
         } else {
-            PreferredPlaybackTarget.Rivune
+            PreferredPlaybackTarget.Embedded(embeddedPreference)
         }
         is PreferredPlayer.External -> players.firstOrNull { it.packageName == preference.packageName }
             ?.let(PreferredPlaybackTarget::External)
@@ -101,7 +125,7 @@ internal fun detectExternalPlaybackSupport(context: Context): ExternalPlaybackSu
     externalVideoProbeIntents().forEach { (mimeType, intent) ->
         packageManager.queryExternalActivities(intent)
             .mapNotNull { it.activityInfo?.packageName }
-            .filterNot { it == ownPackage }
+            .filter { it != ownPackage && isSupportedExternalPlayerPackage(it) }
             .forEach { packageName ->
                 videoMimeTypesByPackage.getOrPut(packageName, ::mutableSetOf).add(mimeType)
             }
@@ -111,7 +135,7 @@ internal fun detectExternalPlaybackSupport(context: Context): ExternalPlaybackSu
             .addCategory(Intent.CATEGORY_DEFAULT),
     )
         .mapNotNull { it.activityInfo?.packageName }
-        .filterNot { it == ownPackage }
+        .filter { it != ownPackage && isSupportedExternalPlayerPackage(it) }
         .toSet()
     val packages = (videoMimeTypesByPackage.keys + magnetPackages).sorted()
     val players = packages.map { packageName ->
@@ -127,6 +151,9 @@ internal fun detectExternalPlaybackSupport(context: Context): ExternalPlaybackSu
     }.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER, ExternalPlayerApp::label).thenBy(ExternalPlayerApp::packageName))
     return ExternalPlaybackSupport(players)
 }
+
+internal fun isSupportedExternalPlayerPackage(packageName: String): Boolean =
+    packageName in SUPPORTED_EXTERNAL_PLAYER_PACKAGES
 
 internal fun buildExternalPlaybackIntent(
     context: Context,

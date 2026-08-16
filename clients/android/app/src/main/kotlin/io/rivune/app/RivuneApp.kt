@@ -261,12 +261,16 @@ internal fun RivuneRoot(
                             appPreferences = appPreferences,
                             onStartupTab = application.appPreferences::setStartupTab,
                             onPreferredPlayer = application.appPreferences::setPreferredPlayer,
+                            onPreferredEmbeddedPlayer = application.appPreferences::setPreferredEmbeddedPlayer,
                             onAnimationPreference = application.appPreferences::setAnimationPreference,
                             onAccentColor = application.appPreferences::setAccentColor,
                             onFrameRateMatching = application.appPreferences::setFrameRateMatching,
                             onVideoAspect = application.appPreferences::setVideoAspect,
                             onWifiQuality = application.appPreferences::setWifiQuality,
                             onMobileQuality = application.appPreferences::setMobileQuality,
+                            onAutoSkipIntro = application.appPreferences::setAutoSkipIntro,
+                            onAutoSkipRecap = application.appPreferences::setAutoSkipRecap,
+                            onAutoSkipOutro = application.appPreferences::setAutoSkipOutro,
                             onChangeServer = viewModel::disconnectServer,
                             onOpenExternalUrl = { url ->
                                 try {

@@ -32,6 +32,7 @@ class ProfileSettingsContractsTest {
         server.enqueue(jsonResponse(settingsLayerFixture()))
         server.enqueue(jsonResponse(settingsLayerFixture()))
         server.enqueue(jsonResponse(settingsLayerFixture()))
+        server.enqueue(jsonResponse(settingsLayerFixture()))
         server.start()
         try {
             val client = RivuneApiClient(
@@ -46,6 +47,23 @@ class ProfileSettingsContractsTest {
             assertEquals("profile", effective.sources.metadataLanguage)
             assertEquals("fr", effective.settings.audioLanguage)
             assertEquals("en", effective.settings.subtitleLanguage)
+            assertEquals("es", effective.settings.forcedSubtitleLanguage)
+            assertEquals(true, effective.settings.autoplayNextEpisode)
+            assertEquals(true, effective.settings.skipIntroEnabled)
+            assertEquals(false, effective.settings.skipRecapEnabled)
+            assertEquals(true, effective.settings.skipOutroEnabled)
+            assertEquals("instance", effective.sources.allowTranscoding)
+            assertEquals("instance", effective.sources.transcoding)
+            assertEquals("instance", effective.sources.maximumCastMembers)
+            assertEquals("profile", effective.sources.maximumResolution)
+            assertEquals("profile", effective.sources.preferDirectPlay)
+            assertEquals("profile", effective.sources.audioLanguage)
+            assertEquals("profile", effective.sources.subtitleLanguage)
+            assertEquals("profile", effective.sources.forcedSubtitleLanguage)
+            assertEquals("profile", effective.sources.autoplayNextEpisode)
+            assertEquals("profile", effective.sources.skipIntroEnabled)
+            assertEquals("instance", effective.sources.skipRecapEnabled)
+            assertEquals("default", effective.sources.skipOutroEnabled)
 
             val updated = client.updateProfileSettings(
                 profileId,
@@ -55,6 +73,11 @@ class ProfileSettingsContractsTest {
                     audioLanguage = PatchField.Value("en"),
                     metadataLanguage = PatchField.Value("de-DE"),
                     subtitleLanguage = PatchField.Value("fr"),
+                    forcedSubtitleLanguage = PatchField.Value("es"),
+                    autoplayNextEpisode = PatchField.Value(false),
+                    skipIntroEnabled = PatchField.Value(false),
+                    skipRecapEnabled = PatchField.Value(true),
+                    skipOutroEnabled = PatchField.Value(false),
                     transcoding = PatchField.Value("disabled"),
                 ),
             )
@@ -63,6 +86,11 @@ class ProfileSettingsContractsTest {
             assertEquals("de-DE", updated.settings.metadataLanguage)
             assertEquals("en", updated.settings.audioLanguage)
             assertEquals("fr", updated.settings.subtitleLanguage)
+            assertEquals("es", updated.settings.forcedSubtitleLanguage)
+            assertEquals(false, updated.settings.autoplayNextEpisode)
+            assertEquals(false, updated.settings.skipIntroEnabled)
+            assertEquals(true, updated.settings.skipRecapEnabled)
+            assertEquals(false, updated.settings.skipOutroEnabled)
             assertEquals("disabled", updated.settings.transcoding)
 
             client.updateProfileSettings(
@@ -73,8 +101,17 @@ class ProfileSettingsContractsTest {
                     audioLanguage = PatchField.Null,
                     metadataLanguage = PatchField.Null,
                     subtitleLanguage = PatchField.Null,
+                    forcedSubtitleLanguage = PatchField.Null,
+                    autoplayNextEpisode = PatchField.Null,
+                    skipIntroEnabled = PatchField.Null,
+                    skipRecapEnabled = PatchField.Null,
+                    skipOutroEnabled = PatchField.Null,
                     transcoding = PatchField.Null,
                 ),
+            )
+            client.updateProfileSettings(
+                profileId,
+                ProfileSettingsUpdate(autoplayNextEpisode = PatchField.Value(true)),
             )
             client.updateProfileSettings(
                 profileId,
@@ -94,19 +131,22 @@ class ProfileSettingsContractsTest {
             assertEquals("Bearer settings-access", patch.getHeader("Authorization"))
             assertEquals("profile-context", patch.getHeader("X-Rivune-Profile-Context"))
             assertEquals(
-                """{"maximumResolution":"2160p","preferDirectPlay":false,"audioLanguage":"en","metadataLanguage":"de-DE","subtitleLanguage":"fr","transcoding":"disabled"}""",
+                """{"maximumResolution":"2160p","preferDirectPlay":false,"audioLanguage":"en","metadataLanguage":"de-DE","subtitleLanguage":"fr","forcedSubtitleLanguage":"es","autoplayNextEpisode":false,"skipIntroEnabled":false,"skipRecapEnabled":true,"skipOutroEnabled":false,"transcoding":"disabled"}""",
                 patch.body.readUtf8(),
             )
             val resetPatch = server.takeRequest()
             assertEquals("PATCH", resetPatch.method)
             assertEquals(
-                """{"maximumResolution":null,"preferDirectPlay":null,"audioLanguage":null,"metadataLanguage":null,"subtitleLanguage":null,"transcoding":null}""",
+                """{"maximumResolution":null,"preferDirectPlay":null,"audioLanguage":null,"metadataLanguage":null,"subtitleLanguage":null,"forcedSubtitleLanguage":null,"autoplayNextEpisode":null,"skipIntroEnabled":null,"skipRecapEnabled":null,"skipOutroEnabled":null,"transcoding":null}""",
                 resetPatch.body.readUtf8(),
             )
-            val partialPatch = server.takeRequest()
-            assertEquals("PATCH", partialPatch.method)
-            assertEquals("""{"metadataLanguage":"es-ES"}""", partialPatch.body.readUtf8())
-            assertEquals(5, server.requestCount)
+            val autoplayPatch = server.takeRequest()
+            assertEquals("PATCH", autoplayPatch.method)
+            assertEquals("""{"autoplayNextEpisode":true}""", autoplayPatch.body.readUtf8())
+            val omittedPatch = server.takeRequest()
+            assertEquals("PATCH", omittedPatch.method)
+            assertEquals("""{"metadataLanguage":"es-ES"}""", omittedPatch.body.readUtf8())
+            assertEquals(6, server.requestCount)
         } finally {
             server.shutdown()
         }
@@ -199,10 +239,10 @@ class ProfileSettingsContractsTest {
 
 
     private fun effectiveSettingsFixture() =
-        """{"schemaVersion":1,"settings":{"maximumResolution":"1080p","preferDirectPlay":true,"audioLanguage":"fr","subtitleLanguage":"en","metadataLanguage":"fr-FR"},"sources":{"maximumResolution":"profile","preferDirectPlay":"profile","audioLanguage":"profile","subtitleLanguage":"profile","metadataLanguage":"profile"}}"""
+        """{"schemaVersion":1,"settings":{"allowTranscoding":true,"transcoding":"enabled","maximumCastMembers":5,"maximumResolution":"1080p","preferDirectPlay":true,"audioLanguage":"fr","subtitleLanguage":"en","forcedSubtitleLanguage":"es","autoplayNextEpisode":true,"skipIntroEnabled":true,"skipRecapEnabled":false,"skipOutroEnabled":true,"metadataLanguage":"fr-FR"},"sources":{"allowTranscoding":"instance","transcoding":"instance","maximumCastMembers":"instance","maximumResolution":"profile","preferDirectPlay":"profile","audioLanguage":"profile","subtitleLanguage":"profile","forcedSubtitleLanguage":"profile","autoplayNextEpisode":"profile","skipIntroEnabled":"profile","skipRecapEnabled":"instance","skipOutroEnabled":"default","metadataLanguage":"profile"}}"""
 
     private fun settingsLayerFixture() =
-        """{"schemaVersion":1,"settings":{"maximumResolution":"2160p","preferDirectPlay":false,"audioLanguage":"en","subtitleLanguage":"fr","metadataLanguage":"de-DE","transcoding":"disabled"},"updatedAt":"2026-08-13T12:00:00Z"}"""
+        """{"schemaVersion":1,"settings":{"maximumResolution":"2160p","preferDirectPlay":false,"audioLanguage":"en","subtitleLanguage":"fr","forcedSubtitleLanguage":"es","autoplayNextEpisode":false,"skipIntroEnabled":false,"skipRecapEnabled":true,"skipOutroEnabled":false,"metadataLanguage":"de-DE","transcoding":"disabled"},"updatedAt":"2026-08-13T12:00:00Z"}"""
 
     private fun jsonResponse(body: String) = MockResponse()
         .setHeader("Content-Type", "application/json")

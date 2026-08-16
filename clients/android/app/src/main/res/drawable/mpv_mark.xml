@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Converted without visual changes from mpv's official logo:
+  https://github.com/mpv-player/mpv/blob/v0.41.0/etc/mpv.svg
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="40dp"
+    android:height="40dp"
+    android:viewportWidth="64"
+    android:viewportHeight="64">
+    <path
+        android:fillColor="#E5E5E5"
+        android:pathData="M59.949194,32A27.949194,27.949194 0,1 1,4.050806 32A27.949194,27.949194 0,1 1,59.949194 32Z" />
+    <path
+        android:fillColor="#672168"
+        android:pathData="M58.677646,31.1457A25.950588,25.950588 0,1 1,6.77647 31.1457A25.950588,25.950588 0,1 1,58.677646 31.1457Z" />
+    <path
+        android:fillColor="#420143"
+        android:pathData="M54.224396,29.4335A20,20 0,1 1,14.224396 29.4335A20,20 0,1 1,54.224396 29.4335Z" />
+    <path
+        android:fillColor="#DDDBDD"
+        android:pathData="M44.481446,32.1185A12.848894,12.848894 0,1 1,18.783658 32.1185A12.848894,12.848894 0,1 1,44.481446 32.1185Z" />
+    <path
+        android:fillColor="#691F69"
+        android:pathData="M28.374316,26.3468L28.374316,37.797L37.590396,31.9323Z" />
+</vector>

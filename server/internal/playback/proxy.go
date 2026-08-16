@@ -39,6 +39,7 @@ const (
 	maximumDirectStreamsPerHost   = 16
 	directStreamReadIdleTimeout   = 45 * time.Second
 	maximumTargetCapabilityLength = 12 * 1024
+	directSubtitleAssetKind       = "subtitle"
 )
 
 type directStreamAdmission struct {
@@ -294,9 +295,9 @@ func (service *Service) proxyAsset(w http.ResponseWriter, r *http.Request, sessi
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
 
-	if r.Method == http.MethodGet && response.StatusCode >= 200 && response.StatusCode < 300 && isHLSPlaylist(response, upstreamURL) {
+	if asset.Kind != directSubtitleAssetKind && r.Method == http.MethodGet && response.StatusCode >= 200 && response.StatusCode < 300 && isHLSPlaylist(response, upstreamURL) {
+		defer response.Body.Close()
 		body, err := io.ReadAll(io.LimitReader(response.Body, maximumPlaylistBytes+1))
 		if err != nil {
 			return fmt.Errorf("read HLS playlist: %w", err)
@@ -334,6 +335,16 @@ func (service *Service) proxyAsset(w http.ResponseWriter, r *http.Request, sessi
 		return writeUpstreamHLSPlaylist(w, response.Header, rewritten)
 	}
 
+	return writeDirectProxyAsset(w, r, *asset, response, upstreamURL)
+}
+
+func writeDirectProxyAsset(w http.ResponseWriter, r *http.Request, asset storedAsset, response *http.Response, upstreamURL string) error {
+	defer response.Body.Close()
+	boundedSubtitle := asset.Kind == directSubtitleAssetKind && r.Method != http.MethodHead
+	if boundedSubtitle && proxyResponseTotalLength(response) > maximumConvertedSubtitleBytes {
+		return fmt.Errorf("%w: subtitle exceeds %d bytes", ErrMediaSourceFailed, maximumConvertedSubtitleBytes)
+	}
+
 	copyAssetHeaders(w.Header(), response.Header, true)
 	if contentType := replacementContentType(response.Header.Get("Content-Type"), upstreamURL); contentType != "" {
 		w.Header().Set("Content-Type", contentType)
@@ -342,9 +353,45 @@ func (service *Service) proxyAsset(w http.ResponseWriter, r *http.Request, sessi
 	if r.Method == http.MethodHead {
 		return nil
 	}
+	if boundedSubtitle {
+		return copyBoundedSubtitleAsset(w, response.Body)
+	}
 	return copyPlaybackAsset(w, response.Body)
 }
 
+func proxyResponseTotalLength(response *http.Response) int64 {
+	length := response.ContentLength
+	if raw := strings.TrimSpace(response.Header.Get("Content-Length")); raw != "" {
+		if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil && parsed >= 0 {
+			length = parsed
+		}
+	}
+	if response.StatusCode != http.StatusPartialContent {
+		return length
+	}
+	rawRange := strings.TrimSpace(response.Header.Get("Content-Range"))
+	slash := strings.LastIndexByte(rawRange, '/')
+	if slash < 0 || slash == len(rawRange)-1 || rawRange[slash+1:] == "*" {
+		return length
+	}
+	total, err := strconv.ParseInt(rawRange[slash+1:], 10, 64)
+	if err == nil && total >= 0 {
+		return total
+	}
+	return length
+}
+
+func copyBoundedSubtitleAsset(destination io.Writer, source io.Reader) error {
+	output := &maximumWriter{destination: destination, remaining: maximumConvertedSubtitleBytes}
+	_, err := io.Copy(output, source)
+	if output.exceeded {
+		panic(http.ErrAbortHandler)
+	}
+	if err != nil {
+		return fmt.Errorf("copy playback subtitle: %w", err)
+	}
+	return nil
+}
 func copyPlaybackAsset(destination io.Writer, source io.Reader) error {
 	if _, err := io.Copy(destination, source); err != nil {
 		return fmt.Errorf("copy playback asset: %w", err)
