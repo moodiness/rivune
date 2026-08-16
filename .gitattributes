@@ -1,5 +1,7 @@
+.gitattributes text eol=lf
 *.sh text eol=lf
 server/Dockerfile text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
 *.xml text eol=lf
+scripts/jellyfin-compat/artifacts/**/*.json text eol=lf
