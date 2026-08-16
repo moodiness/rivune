@@ -1195,7 +1195,7 @@ jobs:
               --header 'X-GitHub-Api-Version: 2022-11-28' \
               --header "Content-Type: ${content_type}" \
               --url-query "name=${asset_name}" \
-              --data-binary "@${asset_path}" \
+              --upload-file "${asset_path}" \
               "${upload_url}")"
             if ! jq -e --arg name "${asset_name}" --argjson size "${expected_size}" '
               .id as $id |
