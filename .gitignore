@@ -26,6 +26,9 @@ clients/apple/.build/
 clients/windows/**/bin/
 clients/windows/**/obj/
 
+# Local release recovery artifacts
+.release-recovery/
+
 # Accidental Windows null-device outputs
 NUL.*
 **/NUL.*
