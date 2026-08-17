@@ -15,12 +15,12 @@ Requirements: Docker Engine with Compose v2, Bash, and OpenSSL. On a Linux host,
 ```sh
 git clone https://github.com/moodiness/rivune.git
 cd rivune
-./rivune setup --public-url https://media.example.com --version 1.7.1
+./rivune setup --public-url https://media.example.com --version 1.7.2
 ./rivune up
 ./rivune doctor
 ```
 
-Omit `--public-url` for a loopback-only installation. `--version` is required and accepts only an exact stable numeric release such as `1.7.1`; mutable image tags such as `latest` are rejected so a fresh install is reproducible. `./rivune help` lists explicit wrappers for lifecycle, logs, diagnostics, authenticated backup verification, and restore. The command always resolves the repository Compose file and never prints generated secrets.
+Omit `--public-url` for a loopback-only installation. `--version` is required and accepts only an exact stable numeric release such as `1.7.2`; mutable image tags such as `latest` are rejected so a fresh install is reproducible. `./rivune help` lists explicit wrappers for lifecycle, logs, diagnostics, authenticated backup verification, and restore. The command always resolves the repository Compose file and never prints generated secrets.
 
 On Windows PowerShell, run `.\scripts\create-env.ps1`, fill the generated private `.env`, then use `docker compose pull` and `docker compose up -d`. The lower-level `./scripts/create-env.sh` path remains available on Unix hosts that need to customize `.env` before startup.
 
