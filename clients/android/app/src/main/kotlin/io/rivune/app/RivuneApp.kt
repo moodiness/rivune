@@ -268,6 +268,7 @@ internal fun RivuneRoot(
                             onVideoAspect = application.appPreferences::setVideoAspect,
                             onWifiQuality = application.appPreferences::setWifiQuality,
                             onMobileQuality = application.appPreferences::setMobileQuality,
+                            onAutomaticallyShowStreams = application.appPreferences::setAutomaticallyShowStreams,
                             onAutoSkipIntro = application.appPreferences::setAutoSkipIntro,
                             onAutoSkipRecap = application.appPreferences::setAutoSkipRecap,
                             onAutoSkipOutro = application.appPreferences::setAutoSkipOutro,

@@ -886,6 +886,29 @@ func TestFFmpegHLSOutputArgumentsUseBoundedSlidingPlaylist(t *testing.T) {
 	}
 }
 
+func TestFFmpegHLSOutputArgumentsPreserveSeekableTimeline(t *testing.T) {
+	seekable := storedAsset{
+		Kind:                processingTranscode,
+		HLSSegmentContainer: "ts",
+		DurationSeconds:     3_600,
+		StartSeconds:        87,
+	}
+	arguments := strings.Join(hlsOutputArguments(seekable, "flags"), " ")
+	if !strings.Contains(arguments, "-output_ts_offset 87 -f hls") {
+		t.Fatalf("seekable HLS arguments do not preserve absolute timestamps: %s", arguments)
+	}
+
+	for name, asset := range map[string]storedAsset{
+		"initial generation": {Kind: processingTranscode, HLSSegmentContainer: "ts", DurationSeconds: 3_600},
+		"relative fMP4":      {Kind: processingTranscode, HLSSegmentContainer: "mp4", DurationSeconds: 3_600, StartSeconds: 87},
+		"relative remux":     {Kind: processingRemux, HLSSegmentContainer: "ts", DurationSeconds: 3_600, StartSeconds: 87},
+	} {
+		if relative := strings.Join(hlsOutputArguments(asset, "flags"), " "); strings.Contains(relative, "-output_ts_offset") {
+			t.Fatalf("%s HLS arguments unexpectedly shift timestamps: %s", name, relative)
+		}
+	}
+}
+
 func TestHLSPlaylistSegmentBoundsAcceptTransportStreamAndFragmentedMP4(t *testing.T) {
 	for _, suffix := range []string{".ts", ".m4s"} {
 		t.Run(suffix, func(t *testing.T) {

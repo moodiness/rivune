@@ -648,6 +648,53 @@ func (fetcher *recordingResourceFetcher) FetchAllPlaybackResources(_ context.Con
 	}}, nil
 }
 
+func TestStableSourceIdentityUsesOnlyProviderStableFields(t *testing.T) {
+	base := Source{AddonID: "addon", ManifestID: "manifest"}
+	if identity := stableSourceIdentity(base); identity != "" {
+		t.Fatalf("identity without stable source fields = %q", identity)
+	}
+	if identity := stableSourceIdentity(Source{AddonID: "addon", ManifestID: "manifest", Name: "Displayed", Title: "Title", Description: "Description"}); identity != "" {
+		t.Fatalf("display metadata produced identity %q", identity)
+	}
+	firstSignedURL := Source{AddonID: "addon", ManifestID: "manifest", URL: "https://media.example/movie.mp4?token=first"}
+	rotatedSignedURL := firstSignedURL
+	rotatedSignedURL.URL = "https://media.example/movie.mp4?token=second"
+	if first, second := stableSourceIdentity(firstSignedURL), stableSourceIdentity(rotatedSignedURL); first != "" || second != "" {
+		t.Fatalf("signed URL rotation produced stable identities: %q, %q", first, second)
+	}
+
+	fileIndex := 7
+	for name, source := range map[string]Source{
+		"filename":           {AddonID: "addon", ManifestID: "manifest", Filename: "movie.mkv"},
+		"youtube":            {AddonID: "addon", ManifestID: "manifest", YTID: "video-id"},
+		"torrent":            {AddonID: "addon", ManifestID: "manifest", InfoHash: "0123456789ABCDEF0123456789ABCDEF01234567"},
+		"torrent-file-index": {AddonID: "addon", ManifestID: "manifest", InfoHash: "0123456789ABCDEF0123456789ABCDEF01234567", FileIndex: &fileIndex},
+	} {
+		t.Run(name, func(t *testing.T) {
+			source.URL = "https://media.example/movie?token=first"
+			first := stableSourceIdentity(source)
+			source.URL = "https://media.example/movie?token=rotated"
+			second := stableSourceIdentity(source)
+			if first == "" || first != second {
+				t.Fatalf("stable source field produced non-deterministic identity across URL rotation: %q, %q", first, second)
+			}
+		})
+	}
+}
+
+func TestUniqueStableSourceIdentitiesSuppressesCollisions(t *testing.T) {
+	references := []sourceReference{
+		{Source: Source{AddonID: "addon", ManifestID: "manifest", Filename: "shared.mkv"}},
+		{Source: Source{AddonID: "addon", ManifestID: "manifest", Filename: "shared.mkv"}},
+		{Source: Source{AddonID: "addon", ManifestID: "manifest", Filename: "unique.mkv"}},
+		{Source: Source{AddonID: "addon", ManifestID: "manifest", Name: "display-only"}},
+	}
+	identities := uniqueStableSourceIdentities(references)
+	if len(identities) != len(references) || identities[0] != "" || identities[1] != "" || identities[2] == "" || identities[3] != "" {
+		t.Fatalf("unexpected published stable identities: %#v", identities)
+	}
+}
+
 func TestSourcesTargetsRequestedProfileAddon(t *testing.T) {
 	profileID := "profile-id"
 	current := time.Now()
@@ -672,7 +719,7 @@ func TestSourcesTargetsRequestedProfileAddon(t *testing.T) {
 	if fetcher.fetchPath.Resource != "stream" || fetcher.fetchPath.Type != "tv" || fetcher.fetchPath.ID != "channel-1" || len(fetcher.fetchPath.Extra) != 0 {
 		t.Fatalf("unexpected targeted resource: %+v", fetcher.fetchPath)
 	}
-	if len(list.Sources) != 1 || list.Sources[0].AddonID != "requested-addon" || list.Sources[0].AddonName != "Live Add-on" || list.Sources[0].SourceRef == "" {
+	if len(list.Sources) != 1 || list.Sources[0].AddonID != "requested-addon" || list.Sources[0].AddonName != "Live Add-on" || list.Sources[0].SourceRef == "" || list.Sources[0].StableIdentity != "" {
 		t.Fatalf("unexpected targeted source list: %+v", list)
 	}
 }
@@ -704,8 +751,8 @@ func TestSourcesWithoutAddonKeepsFanout(t *testing.T) {
 				t.Fatalf("unexpected fan-out resource: %+v", fetcher.fetchAllPath)
 			}
 			if len(list.Sources) != 2 ||
-				list.Sources[0].AddonID != "fanout-addon-a" || list.Sources[0].ManifestID != "org.example.streams.a" || list.Sources[0].AddonName != "First Streams" || list.Sources[0].Name != "First Movie" || list.Sources[0].SourceRef == "" ||
-				list.Sources[1].AddonID != "fanout-addon-b" || list.Sources[1].ManifestID != "org.example.streams.b" || list.Sources[1].AddonName != "Second Streams" || list.Sources[1].Name != "Second Movie" || list.Sources[1].SourceRef == "" {
+				list.Sources[0].AddonID != "fanout-addon-a" || list.Sources[0].ManifestID != "org.example.streams.a" || list.Sources[0].AddonName != "First Streams" || list.Sources[0].Name != "First Movie" || list.Sources[0].SourceRef == "" || list.Sources[0].StableIdentity != "" ||
+				list.Sources[1].AddonID != "fanout-addon-b" || list.Sources[1].ManifestID != "org.example.streams.b" || list.Sources[1].AddonName != "Second Streams" || list.Sources[1].Name != "Second Movie" || list.Sources[1].SourceRef == "" || list.Sources[1].StableIdentity != "" {
 				t.Fatalf("fan-out stream provenance was not preserved: %+v", list.Sources)
 			}
 		})
@@ -810,6 +857,70 @@ type sourceMediaProcessor map[string]MediaInspection
 
 func (processor sourceMediaProcessor) Probe(_ context.Context, asset storedAsset) (MediaInspection, error) {
 	return processor[asset.URL], nil
+}
+
+type sourceProbeResult struct {
+	inspection MediaInspection
+	err        error
+}
+
+type sourceResultMediaProcessor map[string]sourceProbeResult
+
+func (processor sourceResultMediaProcessor) Probe(_ context.Context, asset storedAsset) (MediaInspection, error) {
+	result := processor[asset.URL]
+	return result.inspection, result.err
+}
+
+func TestDecidePlaybackSourceReturnsProbeTimeoutWhenEveryCandidateFails(t *testing.T) {
+	sourceURL := "https://media.example/stalled.mp4"
+	sources := []Source{{ID: "stream-1", Mode: "direct", URL: sourceURL, Protocol: "http", Container: "mp4"}}
+	assets := []storedAsset{{ID: "stream-1", Kind: "stream", URL: sourceURL}}
+	service := &Service{
+		processor: sourceResultMediaProcessor{
+			sourceURL: {err: fmt.Errorf("probe guarded source: %w", ErrMediaSourceTimeout)},
+		},
+		probes: newMediaProbeCache(time.Now),
+	}
+
+	err := service.decidePlaybackSource(context.Background(), sources, assets, Capabilities{
+		StreamingProtocols: []string{"http"}, Containers: []string{"mp4"},
+		VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+	})
+	if !errors.Is(err, ErrMediaSourceTimeout) {
+		t.Fatalf("source decision error = %v, want media source timeout", err)
+	}
+}
+
+func TestDecidePlaybackSourceUsesPlayableCandidateAfterProbeTimeout(t *testing.T) {
+	stalledURL := "https://media.example/stalled.mp4"
+	playableURL := "https://media.example/playable.mp4"
+	sources := []Source{
+		{ID: "stream-1", Mode: "direct", URL: stalledURL, Protocol: "http", Container: "mp4"},
+		{ID: "stream-2", Mode: "direct", URL: playableURL, Protocol: "http", Container: "mp4"},
+	}
+	assets := []storedAsset{
+		{ID: "stream-1", Kind: "stream", URL: stalledURL},
+		{ID: "stream-2", Kind: "stream", URL: playableURL},
+	}
+	service := &Service{
+		processor: sourceResultMediaProcessor{
+			stalledURL: {err: ErrMediaSourceTimeout},
+			playableURL: {inspection: MediaInspection{
+				Container:   "mp4",
+				VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264", Width: 1920, Height: 1080}},
+				AudioTracks: []MediaTrack{{Index: 1, Type: "audio", Codec: "aac", Channels: 2}},
+			}},
+		},
+		probes: newMediaProbeCache(time.Now),
+	}
+
+	err := service.decidePlaybackSource(context.Background(), sources, assets, Capabilities{
+		StreamingProtocols: []string{"http"}, Containers: []string{"mp4"},
+		VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"},
+	})
+	if err != nil || sources[0].Compatible || !sources[1].Compatible || assets[1].Kind != "stream" {
+		t.Fatalf("fallback source decision: err=%v sources=%+v assets=%+v", err, sources, assets)
+	}
 }
 
 func TestDecidePlaybackSourceProbesCompatibleHLSDuration(t *testing.T) {

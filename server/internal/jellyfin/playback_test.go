@@ -771,6 +771,7 @@ func TestPlaybackInfoSourceErrorClassIsBoundedAndUsesWrappedSentinels(t *testing
 		{playback.ErrTranscodingDisabled, "transcoding_disabled"},
 		{playback.ErrClientCapabilityMissing, "client_capability_missing"},
 		{playback.ErrProviderUnavailable, "provider_unavailable"},
+		{fmt.Errorf("private detail: %w", playback.ErrMediaSourceTimeout), "media_source_timeout"},
 		{fmt.Errorf("private detail: %w", playback.ErrMediaSourceFailed), "media_source_failed"},
 		{playback.ErrMediaCapacityReached, "media_capacity_reached"},
 		{playback.ErrMediaStorageLimit, "media_storage_limit"},

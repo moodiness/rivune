@@ -1,9 +1,13 @@
 package io.rivune.app
 
+import io.rivune.api.PlaybackCapabilities
+import io.rivune.api.PlaybackMediaProfile
 import io.rivune.api.PlaybackMode
+import io.rivune.api.PlaybackProcessingMode
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -66,6 +70,7 @@ class ExternalPlaybackTest {
             protocol = "http",
             mode = PlaybackMode.DIRECT,
             expiresAt = "2099-01-01T00:00:00Z",
+            stableIdentity = "stable-direct",
         )
 
         assertEquals(
@@ -98,6 +103,7 @@ class ExternalPlaybackTest {
             protocol = "external",
             mode = PlaybackMode.EXTERNAL,
             expiresAt = "2099-01-01T00:00:00Z",
+            stableIdentity = "stable-torrent",
         )
 
         assertEquals(
@@ -219,6 +225,12 @@ class ExternalPlaybackTest {
         )
         assertEquals(EmbeddedPlayerEngine.MPV, fallback?.engine)
         assertFalse(requireNotNull(fallback).fallbackAllowed)
+        assertEquals(EmbeddedPlayerPreference.MPV, fallback.recoveryEmbeddedPreference())
+        assertEquals(EmbeddedPlayerPreference.AUTOMATIC, presentation.recoveryEmbeddedPreference())
+        assertEquals(
+            EmbeddedPlayerPreference.MEDIA3,
+            presentation.copy(fallbackAllowed = false).recoveryEmbeddedPreference(),
+        )
         assertNull(fallback.externalPlayer)
         assertNull(presentation.fallbackToMpv(PlayerEngineFailure(42_500L, fallbackEligible = false), "ignored"))
         assertNull(fallback.fallbackToMpv(PlayerEngineFailure(43_000L, fallbackEligible = true), "ignored"))
@@ -230,7 +242,7 @@ class ExternalPlaybackTest {
 
     @Test
     fun capabilitySelectorKeepsExplicitOrOfferedMedia3SafeAndUsesMpvWhenAvailable() {
-        val media3 = io.rivune.api.PlaybackCapabilities(
+        val media3 = PlaybackCapabilities(
             streamingProtocols = listOf("http"),
             containers = listOf("mp4"),
             videoCodecs = listOf("h264"),
@@ -252,7 +264,68 @@ class ExternalPlaybackTest {
             playbackCapabilitiesFor(PreferredPlayer.Ask, EmbeddedPlayerPreference.MPV, media3),
         )
         val capped = MpvPlaybackCapabilities.withQualityLimit(PlaybackQualityLimit(720, 2_000))
+        assertTrue(assertNotNull(capped.maximumHeight) <= 720)
+        assertTrue(assertNotNull(capped.maximumVideoBitrateKbps) <= 2_000)
+    }
+
+    @Test
+    fun mpvCapabilitiesKeepSoftwareBreadthWithoutOverclaimingDeviceVideoSupport() {
+        val device = PlaybackCapabilities(
+            streamingProtocols = listOf("http"),
+            containers = listOf("mp4", "mkv"),
+            videoCodecs = listOf("h264"),
+            audioCodecs = listOf("aac"),
+            hdrFormats = listOf("sdr"),
+            maximumHeight = 1_080,
+            maximumVideoBitrateKbps = 12_000,
+            mediaProfiles = listOf(
+                PlaybackMediaProfile("mkv", "h264", "aac", maximumVideoBitDepth = 8),
+                PlaybackMediaProfile("mp4", "hevc", "aac", maximumVideoBitDepth = 10),
+            ),
+        )
+
+        val capabilities = mpvPlaybackCapabilities(device)
+
+        assertEquals(listOf("h264"), capabilities.videoCodecs)
+        assertFalse(capabilities.videoCodecs.orEmpty().any { it == "hevc" || it == "h265" })
+        assertFalse(capabilities.mediaProfiles.orEmpty().any { it.videoCodec == "hevc" || it.videoCodec == "h265" })
+        assertEquals(listOf("sdr"), capabilities.hdrFormats)
+        assertEquals(1_080, capabilities.maximumHeight)
+        assertEquals(12_000, capabilities.maximumVideoBitrateKbps)
+        assertTrue("avi" in capabilities.containers)
+        assertTrue("truehd" in capabilities.audioCodecs.orEmpty())
+        assertTrue("truehd" in capabilities.mediaProfiles.orEmpty().single().audioCodec.orEmpty().split(','))
+        assertTrue(PlaybackProcessingMode.TRANSCODE in capabilities.processingModes.orEmpty())
+
+        val capped = capabilities.withQualityLimit(PlaybackQualityLimit(720, 2_000))
         assertEquals(720, capped.maximumHeight)
         assertEquals(2_000, capped.maximumVideoBitrateKbps)
     }
+
+    @Test
+    fun mpvCapabilitiesRetainHardwareHevcAndItsDeviceLimits() {
+        val device = PlaybackCapabilities(
+            streamingProtocols = listOf("http"),
+            containers = listOf("mp4"),
+            videoCodecs = listOf("h264", "hevc"),
+            audioCodecs = listOf("aac"),
+            hdrFormats = listOf("sdr", "hdr10", "hlg"),
+            maximumHeight = 2_160,
+            maximumVideoBitrateKbps = 30_000,
+            mediaProfiles = listOf(
+                PlaybackMediaProfile("mp4", "h264", "aac", maximumVideoBitDepth = 8),
+                PlaybackMediaProfile("mp4", "hevc", "aac", maximumVideoBitDepth = 10),
+            ),
+        )
+
+        val capabilities = mpvPlaybackCapabilities(device)
+        val hevcProfile = capabilities.mediaProfiles.orEmpty().single { it.videoCodec == "hevc" }
+
+        assertTrue("hevc" in capabilities.videoCodecs.orEmpty())
+        assertEquals(10, hevcProfile.maximumVideoBitDepth)
+        assertEquals(listOf("sdr", "hdr10", "hlg"), capabilities.hdrFormats)
+        assertEquals(2_160, capabilities.maximumHeight)
+        assertEquals(30_000, capabilities.maximumVideoBitrateKbps)
+    }
+
 }

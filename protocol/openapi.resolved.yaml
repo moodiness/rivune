@@ -3846,6 +3846,8 @@ paths:
           $ref: '#/components/responses/Error'
         '503':
           $ref: '#/components/responses/PlaybackCapacity'
+        '504':
+          $ref: '#/components/responses/Error'
         '507':
           $ref: '#/components/responses/Error'
   /playback/resolve:
@@ -3887,6 +3889,8 @@ paths:
           $ref: '#/components/responses/Error'
         '503':
           $ref: '#/components/responses/PlaybackCapacity'
+        '504':
+          $ref: '#/components/responses/Error'
         '507':
           $ref: '#/components/responses/Error'
   /playback/sessions/{sessionId}:
@@ -4032,6 +4036,8 @@ paths:
           $ref: '#/components/responses/Error'
         '503':
           $ref: '#/components/responses/PlaybackCapacity'
+        '504':
+          $ref: '#/components/responses/Error'
         '507':
           $ref: '#/components/responses/Error'
     head:
@@ -4058,6 +4064,8 @@ paths:
           $ref: '#/components/responses/Error'
         '503':
           $ref: '#/components/responses/PlaybackCapacity'
+        '504':
+          $ref: '#/components/responses/Error'
         '507':
           $ref: '#/components/responses/Error'
   /calendar:
@@ -10441,7 +10449,7 @@ components:
           type: string
           maxLength: 128
         externalPlayer:
-          description: When true, preserve the original source for handoff to an installed player without server media conversion.
+          description: When true, preserve the original source for a direct-capable player, including embedded libmpv or an installed player, without server media conversion.
           type: boolean
         startSeconds:
           description: Whole-second playback offset applied to processed media.
@@ -10469,6 +10477,7 @@ components:
       required:
         - id
         - sourceRef
+        - stableIdentity
         - addonId
         - manifestId
         - streamIndex
@@ -10483,6 +10492,10 @@ components:
           minLength: 16
           maxLength: 128
           description: Opaque, session-bound reference. Provider URLs and private headers are retained only by the server.
+        stableIdentity:
+          type: string
+          maxLength: 64
+          description: Non-secret logical source identity for matching the same provider stream after refreshing opaque references. Empty when no stable identity can be derived; clients must not fall back to display labels or list position.
         addonId:
           type: string
           format: uuid
@@ -10527,7 +10540,7 @@ components:
           minimum: 0
           maximum: 604800
         externalPlayer:
-          description: When true, preserve the original source for handoff to an installed player without server media conversion.
+          description: When true, preserve the original source for a direct-capable player, including embedded libmpv or an installed player, without server media conversion.
           type: boolean
     PlaybackMode:
       type: string

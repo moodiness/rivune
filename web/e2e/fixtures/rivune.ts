@@ -1804,7 +1804,7 @@ export class RivuneHarness {
     }
     if (path === "/playback/sources" && request.method() === "POST") {
       const resourceId = String((body as { resourceId?: string })?.resourceId ?? "unknown");
-      await json(route, { sources: [{ id: `option-${resourceId}`, sourceRef: `source-${resourceId}`, addonId: "fixture-addon", manifestId: "fixture-manifest", addonName: "Fixture Add-on", streamIndex: 0, name: "Fixture 1080p", description: "Deterministic direct stream", protocol: "http", container: "mp4", expiresAt }], providerErrors: [] });
+      await json(route, { sources: [{ id: `option-${resourceId}`, sourceRef: `source-${resourceId}`, stableIdentity: `stable-${resourceId}`, addonId: "fixture-addon", manifestId: "fixture-manifest", addonName: "Fixture Add-on", streamIndex: 0, name: "Fixture 1080p", description: "Deterministic direct stream", protocol: "http", container: "mp4", expiresAt }], providerErrors: [] });
       return;
     }
     if (path === "/playback/prepare" && request.method() === "POST") {

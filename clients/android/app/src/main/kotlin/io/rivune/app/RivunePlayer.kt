@@ -28,6 +28,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -51,6 +54,7 @@ import androidx.compose.material.icons.rounded.Audiotrack
 import androidx.compose.material.icons.rounded.FitScreen
 import androidx.compose.material.icons.rounded.WidthWide
 import androidx.compose.material.icons.rounded.ZoomInMap
+import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Forward10
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.Lock
@@ -89,6 +93,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -100,6 +105,8 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -128,7 +135,9 @@ import io.rivune.api.PlaybackMediaTimeline
 import io.rivune.app.ui.components.RivuneFocusSurface
 import io.rivune.app.ui.components.RivuneFunctionalSurface
 import io.rivune.app.ui.components.RivunePrimaryButton
+import io.rivune.app.ui.components.RivuneTestTags
 import io.rivune.app.ui.components.RivuneSecondaryButton
+import io.rivune.app.ui.components.RivuneTextButton
 import io.rivune.app.ui.theme.LocalRivuneMotionPolicy
 import io.rivune.app.ui.theme.RivuneDimensions
 import io.rivune.app.ui.theme.RivuneMotion
@@ -190,6 +199,7 @@ private data class PlayerMenuChoice(
 @Composable
 internal fun RivunePlayerScreen(
     presentation: PlayerPresentation,
+    failure: PlayerEngineFailure?,
     isTv: Boolean,
     frameRateMatching: FrameRateMatchingPreference,
     videoAspect: VideoAspectPreference,
@@ -201,35 +211,265 @@ internal fun RivunePlayerScreen(
     onNext: () -> Unit,
     onClose: () -> Unit,
     onPlaybackError: (PlayerEngineFailure) -> Unit,
+    onRetry: () -> Unit,
+    onStartOver: () -> Unit,
+    onChooseSource: () -> Unit,
 ) {
-    when (presentation.engine) {
-        EmbeddedPlayerEngine.MEDIA3 -> Media3PlayerScreen(
-            presentation = presentation,
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        if (failure == null) {
+            when (presentation.engine) {
+                EmbeddedPlayerEngine.MEDIA3 -> Media3PlayerScreen(
+                    presentation = presentation,
+                    isTv = isTv,
+                    frameRateMatching = frameRateMatching,
+                    videoAspect = videoAspect,
+                    autoSkipIntro = autoSkipIntro,
+                    autoSkipRecap = autoSkipRecap,
+                    autoSkipOutro = autoSkipOutro,
+                    onProgress = onProgress,
+                    onPlaybackEnded = onPlaybackEnded,
+                    onNext = onNext,
+                    onClose = onClose,
+                    onPlaybackError = onPlaybackError,
+                )
+                EmbeddedPlayerEngine.MPV -> MpvPlayerScreen(
+                    presentation = presentation,
+                    isTv = isTv,
+                    videoAspect = videoAspect,
+                    autoSkipIntro = autoSkipIntro,
+                    autoSkipRecap = autoSkipRecap,
+                    autoSkipOutro = autoSkipOutro,
+                    onProgress = onProgress,
+                    onPlaybackEnded = onPlaybackEnded,
+                    onNext = onNext,
+                    onClose = onClose,
+                    onPlaybackError = onPlaybackError,
+                )
+            }
+        } else {
+            PlayerRecoveryOverlay(
+                isTv = isTv,
+                failure = failure,
+                onRetry = onRetry,
+                onStartOver = onStartOver,
+                onChooseSource = onChooseSource,
+            )
+        }
+    }
+}
+
+@Composable
+private fun PlayerRecoveryOverlay(
+    isTv: Boolean,
+    failure: PlayerEngineFailure,
+    onRetry: () -> Unit,
+    onStartOver: () -> Unit,
+    onChooseSource: () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onChooseSource,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnClickOutside = false,
+            decorFitsSystemWindows = false,
+        ),
+    ) {
+        PlayerRecoveryOverlayContent(
             isTv = isTv,
-            frameRateMatching = frameRateMatching,
-            videoAspect = videoAspect,
-            autoSkipIntro = autoSkipIntro,
-            autoSkipRecap = autoSkipRecap,
-            autoSkipOutro = autoSkipOutro,
-            onProgress = onProgress,
-            onPlaybackEnded = onPlaybackEnded,
-            onNext = onNext,
-            onClose = onClose,
-            onPlaybackError = onPlaybackError,
+            failure = failure,
+            onRetry = onRetry,
+            onStartOver = onStartOver,
+            onChooseSource = onChooseSource,
         )
-        EmbeddedPlayerEngine.MPV -> MpvPlayerScreen(
-            presentation = presentation,
-            isTv = isTv,
-            videoAspect = videoAspect,
-            autoSkipIntro = autoSkipIntro,
-            autoSkipRecap = autoSkipRecap,
-            autoSkipOutro = autoSkipOutro,
-            onProgress = onProgress,
-            onPlaybackEnded = onPlaybackEnded,
-            onNext = onNext,
-            onClose = onClose,
-            onPlaybackError = onPlaybackError,
-        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun PlayerRecoveryOverlayContent(
+    isTv: Boolean,
+    failure: PlayerEngineFailure,
+    onRetry: () -> Unit,
+    onStartOver: () -> Unit,
+    onChooseSource: () -> Unit,
+) {
+    val retryFocus = remember { FocusRequester() }
+    LaunchedEffect(isTv) {
+        if (isTv) {
+            withFrameNanos { }
+            retryFocus.requestFocus()
+        }
+    }
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.radialGradient(
+                    colors = listOf(
+                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.28f),
+                        RivuneScrim,
+                    ),
+                ),
+            )
+            .pointerInput(Unit) { detectTapGestures { } }
+            .focusGroup()
+            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .padding(if (isTv) RivuneSpacing.display else RivuneSpacing.lg)
+            .semantics { liveRegion = LiveRegionMode.Assertive },
+        contentAlignment = Alignment.Center,
+    ) {
+        val cardMaxWidth = if (isTv) {
+            RivuneDimensions.dialogMax
+        } else {
+            RivuneDimensions.dialogMax - RivuneSpacing.huge
+        }
+        val compactActions = maxWidth < cardMaxWidth
+        RivuneFunctionalSurface(
+            modifier = Modifier
+                .widthIn(max = cardMaxWidth)
+                .fillMaxWidth()
+                .testTag(RivuneTestTags.PlayerRecoveryCard),
+            shape = RivuneShapes.extraLarge,
+            contentPadding = PaddingValues(if (isTv) RivuneSpacing.xl else RivuneSpacing.lg),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(if (isTv) RivuneSpacing.xl else RivuneSpacing.lg)) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(if (isTv) RivuneSpacing.lg else RivuneSpacing.md),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(if (isTv) RivuneSpacing.display else RivuneSpacing.huge)
+                            .background(MaterialTheme.colorScheme.errorContainer, RivuneShapes.pill)
+                            .clearAndSetSemantics { },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.ErrorOutline,
+                            contentDescription = null,
+                            modifier = Modifier.size(
+                                if (isTv) RivuneSpacing.xxl else RivuneDimensions.iconMedium,
+                            ),
+                            tint = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                    }
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(RivuneSpacing.xs),
+                    ) {
+                        Text(
+                            text = stringResource(R.string.player_recovery_title),
+                            modifier = Modifier.semantics { heading() },
+                            style = if (isTv) {
+                                MaterialTheme.typography.headlineMedium
+                            } else {
+                                MaterialTheme.typography.headlineSmall
+                            },
+                        )
+                        Text(
+                            text = stringResource(
+                                if (failure.reason == PlayerEngineFailureReason.STARTUP_TIMEOUT) {
+                                    R.string.player_recovery_startup_body
+                                } else {
+                                    R.string.player_recovery_body
+                                },
+                            ),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = if (isTv) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                }
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    maxItemsInEachRow = if (compactActions) 1 else 3,
+                    horizontalArrangement = Arrangement.spacedBy(
+                        space = RivuneSpacing.sm,
+                        alignment = Alignment.CenterHorizontally,
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(RivuneSpacing.xs),
+                ) {
+                    val actionModifier = if (compactActions) Modifier.fillMaxWidth() else Modifier
+                    PlayerRecoveryAction(
+                        label = stringResource(R.string.player_recovery_retry),
+                        onClick = onRetry,
+                        isTv = isTv,
+                        icon = Icons.Rounded.Replay,
+                        prominent = true,
+                        modifier = actionModifier.focusRequester(retryFocus),
+                    )
+                    PlayerRecoveryAction(
+                        label = stringResource(R.string.player_recovery_start_over),
+                        onClick = onStartOver,
+                        isTv = isTv,
+                        modifier = actionModifier,
+                    )
+                    PlayerRecoveryAction(
+                        label = stringResource(R.string.player_recovery_choose_source),
+                        onClick = onChooseSource,
+                        isTv = isTv,
+                        modifier = actionModifier,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlayerRecoveryAction(
+    label: String,
+    onClick: () -> Unit,
+    isTv: Boolean,
+    modifier: Modifier = Modifier,
+    icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    prominent: Boolean = false,
+) {
+    RivuneFocusSurface(
+        onClick = onClick,
+        isTv = isTv,
+        idleColor = Color.Transparent,
+        focusedColor = Color.Transparent,
+        pressedColor = Color.Transparent,
+        selectedColor = Color.Transparent,
+        focusScale = RivuneMotion.tvButtonFocusScale,
+        showFocusBorder = false,
+        shape = RivuneShapes.pill,
+        modifier = modifier.heightIn(
+            min = if (isTv) RivuneDimensions.buttonHeightTv else RivuneDimensions.touchTarget,
+        ),
+    ) {
+        Row(
+            modifier = Modifier.padding(
+                horizontal = if (isTv) RivuneSpacing.lg else RivuneSpacing.md,
+                vertical = RivuneSpacing.xxs,
+            ),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    modifier = Modifier.size(
+                        if (isTv && prominent) RivuneSpacing.xl else RivuneDimensions.iconMedium,
+                    ),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(Modifier.width(RivuneSpacing.sm))
+            }
+            Text(
+                text = label,
+                color = MaterialTheme.colorScheme.onSurface,
+                style = when {
+                    prominent && isTv -> MaterialTheme.typography.titleMedium
+                    prominent -> MaterialTheme.typography.titleSmall
+                    isTv -> MaterialTheme.typography.titleSmall
+                    else -> MaterialTheme.typography.labelLarge
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
@@ -1028,6 +1268,7 @@ private fun MpvPlayerScreen(
     var controlsLocked by remember(presentation.key) { mutableStateOf(false) }
     var unlockVisible by remember(presentation.key) { mutableStateOf(false) }
     var playbackEnded by remember(presentation.key) { mutableStateOf(false) }
+    var playbackRequested by remember(presentation.key) { mutableStateOf(true) }
     var isPlaying by remember(presentation.key) { mutableStateOf(false) }
     var positionMs by remember(presentation.key) { mutableLongStateOf(presentation.startPositionMs.coerceAtLeast(0L)) }
     var durationMs by remember(presentation.key) { mutableLongStateOf(presentation.durationSeconds.coerceAtLeast(0).toLong() * 1_000L) }
@@ -1085,10 +1326,10 @@ private fun MpvPlayerScreen(
                 terminalDelivered = true; playbackEnded = true; controlsVisible = true; optionsMenu = null
                 finalProgressReporter?.invoke(); currentOnPlaybackEnded()
             }
-            override fun onPlaybackFailed(failurePositionMs: Long) {
+            override fun onPlaybackFailed(failurePositionMs: Long, reason: PlayerEngineFailureReason) {
                 if (terminalDelivered || closeRequested) return
                 terminalDelivered = true; visualState = PlayerVisualState.Ready; finalProgressReporter?.invoke()
-                currentOnPlaybackError(PlayerEngineFailure(failurePositionMs, fallbackEligible = false))
+                currentOnPlaybackError(PlayerEngineFailure(failurePositionMs, fallbackEligible = false, reason = reason))
             }
         })
     }
@@ -1113,13 +1354,35 @@ private fun MpvPlayerScreen(
         autoSkippedMarkerEntries = autoSkipConsumedAfterUserSeek(presentation.markers, autoSkippedMarkerEntries, bounded)
         controller.seekTo(bounded); positionMs = bounded
     }
+    fun replayFromStart() {
+        if (!controller.replayFromStart()) return
+        val replayPositionMs = absolutePlaybackPositionMs(
+            0L,
+            presentation.timelineStartPositionMs,
+            presentation.mediaTimeline,
+        )
+        autoSkippedMarkerEntries = autoSkipConsumedAfterUserSeek(
+            presentation.markers,
+            autoSkippedMarkerEntries,
+            replayPositionMs,
+        )
+        terminalDelivered = false
+        playbackEnded = false
+        playbackRequested = true
+        positionMs = replayPositionMs
+    }
     fun seekBy(deltaMs: Long) { if (!controlsLocked) { seekTo(positionMs + deltaMs); noteInteraction() } }
     fun togglePlayback() {
         if (controlsLocked) return
         if (playbackEnded) {
-            terminalDelivered = false; playbackEnded = false
-            seekTo(absolutePlaybackPositionMs(0L, presentation.timelineStartPositionMs, presentation.mediaTimeline)); controller.play()
-        } else if (isPlaying) controller.pause() else controller.play()
+            replayFromStart()
+        } else if (playbackRequested) {
+            playbackRequested = false
+            controller.pause()
+        } else {
+            playbackRequested = true
+            controller.play()
+        }
         noteInteraction()
     }
     fun requestClose() { if (!closeRequested) { reportProgress(); closeRequested = true; currentOnClose() } }
@@ -1136,12 +1399,12 @@ private fun MpvPlayerScreen(
 
     BackHandler(enabled = !closeRequested, onBack = ::dismissChromeOrClose)
     DisposableEffect(controller, lifecycleOwner) {
-        var resumeAfterPause = true
+        var resumeAfterPause = playbackRequested
         var finished = false
         val lifecycleObserver = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_RESUME -> if (resumeAfterPause && !finished) controller.play()
-                Lifecycle.Event.ON_PAUSE -> { resumeAfterPause = isPlaying; controller.pause() }
+                Lifecycle.Event.ON_PAUSE -> { resumeAfterPause = playbackRequested; controller.pause() }
                 Lifecycle.Event.ON_DESTROY -> if (!finished) { finished = true; reportProgress(); controller.release() }
                 else -> Unit
             }
@@ -1207,8 +1470,8 @@ private fun MpvPlayerScreen(
                 }
                 when (event.nativeKeyEvent.keyCode) {
                     AndroidKeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { togglePlayback(); true }
-                    AndroidKeyEvent.KEYCODE_MEDIA_PLAY -> { controller.play(); noteInteraction(); true }
-                    AndroidKeyEvent.KEYCODE_MEDIA_PAUSE -> { controller.pause(); noteInteraction(); true }
+                    AndroidKeyEvent.KEYCODE_MEDIA_PLAY -> { playbackRequested = true; controller.play(); noteInteraction(); true }
+                    AndroidKeyEvent.KEYCODE_MEDIA_PAUSE -> { playbackRequested = false; controller.pause(); noteInteraction(); true }
                     AndroidKeyEvent.KEYCODE_MEDIA_REWIND -> { seekBy(-SEEK_INCREMENT_MS); true }
                     AndroidKeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { seekBy(SEEK_INCREMENT_MS); true }
                     AndroidKeyEvent.KEYCODE_DPAD_CENTER, AndroidKeyEvent.KEYCODE_ENTER, AndroidKeyEvent.KEYCODE_NUMPAD_ENTER,
@@ -1275,9 +1538,8 @@ private fun MpvPlayerScreen(
                 },
                 onLock = { controlsLocked = true; unlockVisible = false; controlsVisible = false; optionsMenu = null },
                 onReplay = {
-                    terminalDelivered = false; playbackEnded = false
-                    seekTo(absolutePlaybackPositionMs(0L, presentation.timelineStartPositionMs, presentation.mediaTimeline))
-                    controller.play(); noteInteraction()
+                    replayFromStart()
+                    noteInteraction()
                 },
                 onNext = ::requestNext,
             )
@@ -1722,11 +1984,6 @@ private fun PlaybackTimeline(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(
-                Brush.verticalGradient(
-                    listOf(Color.Transparent, RivuneScrim.copy(alpha = 0.82f), RivuneScrim.copy(alpha = 0.96f)),
-                ),
-            )
             .padding(
                 start = if (isTv) RivuneSpacing.display else if (isWide) RivuneSpacing.xxl else RivuneSpacing.md,
                 top = if (isTv) RivuneSpacing.huge else RivuneSpacing.xxl,
@@ -2071,11 +2328,10 @@ private fun MarkerSkipAction(
     ) {
         marker?.let { visibleMarker ->
             val label = markerLabel(visibleMarker.type)
-            RivunePrimaryButton(
+            RivuneTextButton(
                 label = label,
                 onClick = { onClick(visibleMarker) },
                 isTv = isTv,
-                compact = true,
                 modifier = Modifier
                     .focusRequester(focusRequester)
                     .semantics {

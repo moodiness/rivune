@@ -2,6 +2,7 @@ package playback
 
 import (
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -17,6 +18,7 @@ var (
 	ErrProviderUnavailable     = errors.New("playback provider unavailable")
 	ErrSourceReferenceExpired  = errors.New("playback source reference is invalid or expired")
 	ErrMediaSourceFailed       = errors.New("media source failed")
+	ErrMediaSourceTimeout      = fmt.Errorf("%w: timed out", ErrMediaSourceFailed)
 	ErrMediaCapacityReached    = errors.New("media processing capacity reached")
 	ErrMediaStorageLimit       = errors.New("media storage limit reached")
 )
@@ -101,7 +103,7 @@ type SourceOption struct {
 	Container      string    `json:"container,omitempty"`
 	ExpiresAt      time.Time `json:"expiresAt"`
 	ReportedHeight int       `json:"-"`
-	StableIdentity string    `json:"-"`
+	StableIdentity string    `json:"stableIdentity"`
 }
 
 func (SourceOption) String() string {

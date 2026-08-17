@@ -665,6 +665,7 @@ data class PlaybackSourceOption(
     val mode: PlaybackMode? = null,
     val container: String? = null,
     val expiresAt: String,
+    val stableIdentity: String = "",
 )
 
 @Serializable

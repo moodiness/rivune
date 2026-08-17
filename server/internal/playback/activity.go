@@ -687,6 +687,8 @@ func mediaJobErrorClass(err error) string {
 	switch {
 	case errors.Is(err, ErrMediaCapacityReached):
 		return "capacity"
+	case errors.Is(err, ErrMediaSourceTimeout):
+		return "timeout"
 	case errors.Is(err, ErrMediaSourceFailed):
 		return "source"
 	case errors.Is(err, ErrMediaStorageLimit):

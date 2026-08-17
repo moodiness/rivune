@@ -45,45 +45,46 @@ type hlsStorageTicker struct {
 }
 
 type Service struct {
-	pool                      *pgxpool.Pool
-	addons                    ResourceFetcher
-	client                    *http.Client
-	directStreams             directStreamAdmission
-	directStreamGlobalLimit   int
-	directStreamOwnerLimit    int
-	directStreamIdleTimeout   time.Duration
-	introDBClient             *http.Client
-	introDBBaseURL            string
-	processor                 MediaProcessor
-	now                       func() time.Time
-	mediaOptions              MediaOptions
-	runtimeSettings           *runtimesettings.Source
-	mediaStorageBytes         atomic.Int64
-	references                *sourceReferenceStore
-	probes                    *mediaProbeCache
-	preparations              *playbackPreparationCache
-	targetSigningKey          [32]byte
-	targetCapabilityKey       [32]byte
-	hlsResetMu                sync.RWMutex
-	hlsMu                     sync.Mutex
-	hlsStorageMu              sync.Mutex
-	hlsWorkspaceGeneration    atomic.Uint64
-	hlsStorageMonitorRunning  bool
-	hlsStorageMonitorWorkers  int
-	hlsStorageMonitorInterval time.Duration
-	hlsStorageTickerFactory   func(time.Duration) hlsStorageTicker
-	hlsStorageMonitorWake     chan struct{}
-	hlsWorkspaceSize          func(string) int64
-	hlsSeekMu                 sync.Mutex
-	hlsSeekGates              map[string]*hlsSeekGate
-	introDBCacheStores        atomic.Uint64
-	deliveryChildrenMu        sync.Mutex
-	deliveryChildren          *deliveryChildBudget
-	profileTxFactory          func(context.Context, auth.Principal) (playbackProfileTransaction, error)
-	sessionCleanupTxFactory   func(context.Context) (playbackProfileTransaction, error)
-	hlsJobs                   map[string]*hlsJob
-	trickplayMu               sync.Mutex
-	trickplayImages           *trickplayCache
+	pool                           *pgxpool.Pool
+	addons                         ResourceFetcher
+	client                         *http.Client
+	directStreams                  directStreamAdmission
+	directStreamGlobalLimit        int
+	directStreamOwnerLimit         int
+	directStreamIdleTimeout        time.Duration
+	directStreamStartupReadTimeout time.Duration
+	introDBClient                  *http.Client
+	introDBBaseURL                 string
+	processor                      MediaProcessor
+	now                            func() time.Time
+	mediaOptions                   MediaOptions
+	runtimeSettings                *runtimesettings.Source
+	mediaStorageBytes              atomic.Int64
+	references                     *sourceReferenceStore
+	probes                         *mediaProbeCache
+	preparations                   *playbackPreparationCache
+	targetSigningKey               [32]byte
+	targetCapabilityKey            [32]byte
+	hlsResetMu                     sync.RWMutex
+	hlsMu                          sync.Mutex
+	hlsStorageMu                   sync.Mutex
+	hlsWorkspaceGeneration         atomic.Uint64
+	hlsStorageMonitorRunning       bool
+	hlsStorageMonitorWorkers       int
+	hlsStorageMonitorInterval      time.Duration
+	hlsStorageTickerFactory        func(time.Duration) hlsStorageTicker
+	hlsStorageMonitorWake          chan struct{}
+	hlsWorkspaceSize               func(string) int64
+	hlsSeekMu                      sync.Mutex
+	hlsSeekGates                   map[string]*hlsSeekGate
+	introDBCacheStores             atomic.Uint64
+	deliveryChildrenMu             sync.Mutex
+	deliveryChildren               *deliveryChildBudget
+	profileTxFactory               func(context.Context, auth.Principal) (playbackProfileTransaction, error)
+	sessionCleanupTxFactory        func(context.Context) (playbackProfileTransaction, error)
+	hlsJobs                        map[string]*hlsJob
+	trickplayMu                    sync.Mutex
+	trickplayImages                *trickplayCache
 }
 
 const (
@@ -107,6 +108,11 @@ func NewService(pool *pgxpool.Pool, addons ResourceFetcher, processor MediaProce
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.DialContext = netguard.DialContextPublic
+	transport.ForceAttemptHTTP2 = false
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetHTTP2(true)
+	transport.Protocols = protocols
 	transport.MaxResponseHeaderBytes = 64 << 10
 	transport.ResponseHeaderTimeout = 15 * time.Second
 	transport.MaxIdleConns = maximumDirectStreamsGlobal
@@ -132,8 +138,8 @@ func NewService(pool *pgxpool.Pool, addons ResourceFetcher, processor MediaProce
 	service := &Service{
 		pool: pool, addons: addons, client: &http.Client{Transport: transport, CheckRedirect: playbackRedirectPolicy}, processor: processor,
 		directStreamGlobalLimit: maximumDirectStreamsGlobal, directStreamOwnerLimit: maximumDirectStreamsPerOwner,
-		directStreamIdleTimeout: directStreamReadIdleTimeout,
-		introDBClient:           &http.Client{Transport: transport.Clone(), Timeout: 8 * time.Second}, introDBBaseURL: introDBDefaultBaseURL,
+		directStreamIdleTimeout: directStreamReadIdleTimeout, directStreamStartupReadTimeout: directStreamStartupReadTimeout,
+		introDBClient: &http.Client{Transport: transport.Clone(), Timeout: 8 * time.Second}, introDBBaseURL: introDBDefaultBaseURL,
 		now: now, mediaOptions: options, hlsJobs: make(map[string]*hlsJob), targetSigningKey: targetSigningKey, targetCapabilityKey: targetCapabilityKey,
 		deliveryChildren: newDeliveryChildBudget(maximumDeliveryChildrenGlobal, maximumDeliveryChildrenPerProfile),
 		references:       newSourceReferenceStore(now), probes: newMediaProbeCache(now), preparations: newPlaybackPreparationCache(now),
@@ -288,6 +294,7 @@ func (service *Service) sources(ctx context.Context, principal auth.Principal, i
 	if pin {
 		pinnedIdentifiers = make([]string, 0, len(storedReferences))
 	}
+	stableIdentities := uniqueStableSourceIdentities(storedReferences)
 	options := make([]SourceOption, 0, len(storedReferences))
 	for index := range storedReferences {
 		reference := storedReferences[index]
@@ -296,7 +303,7 @@ func (service *Service) sources(ctx context.Context, principal auth.Principal, i
 		options = append(options, SourceOption{
 			ID: source.ID, SourceRef: reference.ID, AddonID: source.AddonID, ManifestID: source.ManifestID, AddonName: source.AddonName,
 			StreamIndex: source.StreamIndex, Name: name, Description: description, Filename: filename,
-			Protocol: source.Protocol, Mode: source.Mode, Container: source.Container, ExpiresAt: reference.ExpiresAt, ReportedHeight: sourceResolutionHint(source), StableIdentity: stableSourceIdentity(source),
+			Protocol: source.Protocol, Mode: source.Mode, Container: source.Container, ExpiresAt: reference.ExpiresAt, ReportedHeight: sourceResolutionHint(source), StableIdentity: stableIdentities[index],
 		})
 		if pin {
 			pinnedIdentifiers = append(pinnedIdentifiers, reference.ID)
@@ -1225,13 +1232,29 @@ func stableSourceIdentity(source Source) string {
 		}
 	case strings.TrimSpace(source.Filename) != "":
 		identity = "filename\x00" + strings.TrimSpace(source.Filename)
-	case strings.TrimSpace(source.Name) != "" || strings.TrimSpace(source.Title) != "" || strings.TrimSpace(source.Description) != "":
-		identity = "metadata\x00" + strings.TrimSpace(source.Name) + "\x00" + strings.TrimSpace(source.Title) + "\x00" + strings.TrimSpace(source.Description)
 	default:
 		return ""
 	}
 	digest := sha256.Sum256([]byte(addonID + "\x00" + manifestID + "\x00" + identity))
 	return base64.RawURLEncoding.EncodeToString(digest[:])
+}
+
+func uniqueStableSourceIdentities(references []sourceReference) []string {
+	identities := make([]string, len(references))
+	counts := make(map[string]int, len(references))
+	for index := range references {
+		identity := stableSourceIdentity(references[index].Source)
+		identities[index] = identity
+		if identity != "" {
+			counts[identity]++
+		}
+	}
+	for index, identity := range identities {
+		if counts[identity] != 1 {
+			identities[index] = ""
+		}
+	}
+	return identities
 }
 
 func normalizeStreams(batch addon.ResourceBatch, capabilities Capabilities) ([]Source, []storedAsset, error) {

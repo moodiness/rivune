@@ -173,6 +173,8 @@
     <string name="preferences_source_device">Politique de l’appareil</string>
     <string name="viewer_prefer_direct_play">Préférer la lecture directe</string>
     <string name="viewer_prefer_direct_play_body">Préfère un flux inchangé lorsque l’appareil peut le lire.</string>
+    <string name="preferences_auto_show_streams">Afficher automatiquement les sources</string>
+    <string name="preferences_auto_show_streams_body">Charge les sources en arrière-plan à l’ouverture d’un média lisible et affiche immédiatement la liste.</string>
     <string name="viewer_autoplay_next_episode">Lire automatiquement l’épisode suivant</string>
     <string name="viewer_autoplay_next_episode_body">Lance le prochain épisode disponible lorsque la lecture se termine naturellement.</string>
     <string name="preferences_skip_intro">Marqueurs d’introduction</string>
@@ -333,6 +335,12 @@
     <string name="player_skip_intro">Passer l’introduction</string>
     <string name="player_skip_recap">Passer le récapitulatif</string>
     <string name="player_skip_outro">Passer le générique</string>
+    <string name="player_recovery_title">Lecture interrompue</string>
+    <string name="player_recovery_body">Cette source s’est interrompue.</string>
+    <string name="player_recovery_startup_body">Rivune n’a pas pu démarrer cette source.</string>
+    <string name="player_recovery_retry">Réessayer</string>
+    <string name="player_recovery_start_over">Recommencer</string>
+    <string name="player_recovery_choose_source">Choisir une autre source</string>
     <string name="pin_title">Saisissez le PIN du profil</string>
     <string name="pin_body">Déverrouillez %1$s pour continuer.</string>
     <string name="pin_label">PIN</string>

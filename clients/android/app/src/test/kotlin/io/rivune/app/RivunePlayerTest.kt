@@ -64,6 +64,63 @@ class RivunePlayerTest {
         )
         corruptOrRuntimeFailures.forEach { assertFalse(media3FallbackEligible(it)) }
     }
+    @Test
+    fun mpvStartupWatchdogRequiresRequestedPlaybackAndLiveSurface() {
+        assertTrue(shouldArmMpvStartupWatchdog(true, true, startupSucceeded = false, terminal = false))
+        assertFalse(shouldArmMpvStartupWatchdog(false, true, startupSucceeded = false, terminal = false))
+        assertFalse(shouldArmMpvStartupWatchdog(true, false, startupSucceeded = false, terminal = false))
+        assertFalse(shouldArmMpvStartupWatchdog(true, true, startupSucceeded = true, terminal = false))
+        assertFalse(shouldArmMpvStartupWatchdog(true, true, startupSucceeded = false, terminal = true))
+        assertEquals(45_000L, MPV_STARTUP_TIMEOUT_MS)
+    }
+
+    @Test
+    fun mpvTerminalPolicyRejectsPlayAndFocusResume() {
+        assertTrue(shouldResumeMpvPlayback(playbackRequested = true, terminal = false))
+        assertFalse(shouldResumeMpvPlayback(playbackRequested = false, terminal = false))
+        assertFalse(shouldResumeMpvPlayback(playbackRequested = true, terminal = true))
+        assertFalse(shouldResumeMpvPlayback(playbackRequested = false, terminal = true))
+    }
+
+    @Test
+    fun mpvReplayResetsAndResumesOnlyNaturalEnd() {
+        val replayState = assertNotNull(resetMpvNaturalEndForReplay(MpvTerminalState.NATURAL_END))
+
+        assertEquals(MpvTerminalState.ACTIVE, replayState)
+        assertTrue(
+            shouldResumeMpvPlayback(
+                playbackRequested = true,
+                terminal = replayState != MpvTerminalState.ACTIVE,
+            ),
+        )
+        assertNull(resetMpvNaturalEndForReplay(MpvTerminalState.ACTIVE))
+        assertNull(resetMpvNaturalEndForReplay(MpvTerminalState.FAILURE))
+        assertNull(resetMpvNaturalEndForReplay(MpvTerminalState.RELEASED))
+    }
+
+    @Test
+    fun mpvRemainsPreparingUntilPlaybackRestartAndBuffersOnlyAfterStartup() {
+        assertEquals(MpvPlaybackState.PREPARING, mpvPlaybackState(startupSucceeded = false, pausedForCache = false))
+        assertEquals(MpvPlaybackState.PREPARING, mpvPlaybackState(startupSucceeded = false, pausedForCache = true))
+        assertEquals(MpvPlaybackState.READY, mpvPlaybackState(startupSucceeded = true, pausedForCache = false))
+        assertEquals(MpvPlaybackState.BUFFERING, mpvPlaybackState(startupSucceeded = true, pausedForCache = true))
+    }
+
+    @Test
+    fun onlyEligibleAutomaticMedia3FailuresBypassRecoveryOverlay() {
+        val presentation = playerPresentationForPolicy(
+            engine = EmbeddedPlayerEngine.MEDIA3,
+            fallbackAllowed = true,
+        )
+        assertTrue(shouldAutomaticallyFallbackToMpv(presentation, PlayerEngineFailure(10L, fallbackEligible = true)))
+        assertFalse(shouldAutomaticallyFallbackToMpv(presentation, PlayerEngineFailure(10L, fallbackEligible = false)))
+        assertFalse(
+            shouldAutomaticallyFallbackToMpv(
+                presentation.copy(engine = EmbeddedPlayerEngine.MPV, fallbackAllowed = false),
+                PlayerEngineFailure(10L, fallbackEligible = true),
+            ),
+        )
+    }
 
     @Test
     fun advertisedDeviceCapabilitiesHaveConservativeGlobalBounds() {
@@ -284,6 +341,18 @@ class RivunePlayerTest {
     }
 
     @Test
+    fun mpvInitialResumeIsPartOfLoadCommand() {
+        assertEquals(
+            listOf("loadfile", "https://media.example/movie.mkv", "replace"),
+            mpvLoadFileCommand("https://media.example/movie.mkv", 0L).toList(),
+        )
+        assertEquals(
+            listOf("loadfile", "https://media.example/movie.mkv", "replace", "-1", "start=+100.250"),
+            mpvLoadFileCommand("https://media.example/movie.mkv", 100_250L).toList(),
+        )
+    }
+
+    @Test
     fun absoluteTimelineKeepsMediaPositionsUnshifted() {
         assertEquals(
             120_000L,
@@ -469,6 +538,26 @@ class RivunePlayerTest {
             resolveMpvSubtitleSelection("native:sub:3", embedded, emptyList(), emptySet()),
         )
     }
+
+    private fun playerPresentationForPolicy(
+        engine: EmbeddedPlayerEngine,
+        fallbackAllowed: Boolean,
+    ) = PlayerPresentation(
+        key = "policy",
+        sessionId = java.util.UUID.randomUUID(),
+        titleId = java.util.UUID.randomUUID(),
+        title = "Title",
+        mediaUrl = "https://media.example/video",
+        protocol = "http",
+        container = "mkv",
+        mediaTimeline = null,
+        startPositionMs = 0L,
+        timelineStartPositionMs = 0L,
+        durationSeconds = 100,
+        expectedProgressVersion = 0L,
+        engine = engine,
+        fallbackAllowed = fallbackAllowed,
+    )
 
     private fun subtitle(index: Int) = PlayerSubtitlePresentation(
         id = "subtitle-$index",

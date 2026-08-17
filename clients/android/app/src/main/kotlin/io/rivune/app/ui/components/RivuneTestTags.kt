@@ -9,4 +9,6 @@ internal object RivuneTestTags {
     const val PairingSuccess = "rivune.pairing.success"
     const val PairingIssue = "rivune.pairing.issue"
     const val PairingDisconnectConfirm = "rivune.pairing.disconnect.confirm"
+    const val PlayerRecoveryCard = "rivune.player.recovery.card"
+    const val SourcePickerList = "rivune.source-picker.list"
 }

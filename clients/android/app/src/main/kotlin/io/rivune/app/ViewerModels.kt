@@ -1,5 +1,6 @@
 package io.rivune.app
 
+import io.rivune.api.CastMember
 import io.rivune.api.Episode
 import io.rivune.api.LibraryItem
 import io.rivune.api.Movie
@@ -75,6 +76,7 @@ data class MediaDetailState(
     val movie: Movie? = null,
     val series: Series? = null,
     val season: Season? = null,
+    val cast: List<CastMember> = emptyList(),
     val progress: PlaybackProgress? = null,
     val episodeProgress: Map<UUID, PlaybackProgress> = emptyMap(),
     val trailers: List<Trailer> = emptyList(),
@@ -135,10 +137,25 @@ enum class EmbeddedPlayerPreference {
     MPV,
 }
 
+enum class PlayerEngineFailureReason {
+    PLAYBACK_ERROR,
+    STARTUP_TIMEOUT,
+}
+
 data class PlayerEngineFailure(
     val positionMs: Long,
     val fallbackEligible: Boolean,
+    val reason: PlayerEngineFailureReason = PlayerEngineFailureReason.PLAYBACK_ERROR,
 )
+
+data class PlayerFailureState(
+    val playerKey: String,
+    val sessionId: UUID,
+    val failure: PlayerEngineFailure,
+)
+
+internal fun PlayerFailureState.matches(player: PlayerPresentation): Boolean =
+    playerKey == player.key && sessionId == player.sessionId
 
 data class PlayerPresentation(
     val key: String,
@@ -161,21 +178,37 @@ data class PlayerPresentation(
     val markers: List<io.rivune.api.PlaybackMarker> = emptyList(),
 )
 
+internal fun shouldAutomaticallyFallbackToMpv(
+    presentation: PlayerPresentation,
+    failure: PlayerEngineFailure,
+): Boolean = presentation.externalPlayer == null &&
+    presentation.engine == EmbeddedPlayerEngine.MEDIA3 &&
+    presentation.fallbackAllowed &&
+    failure.fallbackEligible
+
 internal fun PlayerPresentation.fallbackToMpv(
     failure: PlayerEngineFailure,
     newKey: String,
-): PlayerPresentation? = takeIf {
-    it.externalPlayer == null &&
-        it.engine == EmbeddedPlayerEngine.MEDIA3 &&
-        it.fallbackAllowed &&
-        failure.fallbackEligible
-}?.copy(
+): PlayerPresentation? = takeIf { shouldAutomaticallyFallbackToMpv(it, failure) }?.copy(
     key = newKey,
     engine = EmbeddedPlayerEngine.MPV,
     fallbackAllowed = false,
     startPositionMs = failure.positionMs.coerceAtLeast(0L),
     externalPlayer = null,
 )
+
+internal fun PlayerPresentation.recoveryEmbeddedPreference(): EmbeddedPlayerPreference = when {
+    engine == EmbeddedPlayerEngine.MPV -> EmbeddedPlayerPreference.MPV
+    fallbackAllowed -> EmbeddedPlayerPreference.AUTOMATIC
+    else -> EmbeddedPlayerPreference.MEDIA3
+}
+
+internal fun io.rivune.api.PlaybackSourceOption.matchesRecoverySource(
+    previous: io.rivune.api.PlaybackSourceOption,
+): Boolean = stableIdentity.isNotBlank() &&
+    stableIdentity == previous.stableIdentity &&
+    addonId == previous.addonId &&
+    manifestId == previous.manifestId
 data class ProfilePreferencesState(
     val effective: EffectiveSettings? = null,
     val canEdit: Boolean = false,
@@ -202,7 +235,9 @@ data class ViewerState(
     val detail: MediaDetailState? = null,
     val detailHistory: List<MediaDetailState> = emptyList(),
     val sourcePicker: SourcePickerState? = null,
+    val sourcePickerVisible: Boolean = false,
     val player: PlayerPresentation? = null,
+    val playerFailure: PlayerFailureState? = null,
     val preferences: ProfilePreferencesState? = null,
     val loading: ViewerLoading? = null,
     val inlineFailure: UiFailure? = null,

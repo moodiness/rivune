@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -272,6 +273,17 @@ func TestFFmpegSubprocessHelper(t *testing.T) {
 		os.Exit(0)
 	case "probe-malformed-optional":
 		_, _ = io.WriteString(os.Stdout, `{"streams":[{"index":-2,"codec_type":"video","codec_name":"h264","profile":{},"level":"bad","width":-1920,"height":"bad","pix_fmt":"unknown","bits_per_raw_sample":"NaN","avg_frame_rate":"1/0","r_frame_rate":"-25/1","color_range":"unknown","color_space":{},"color_transfer":"n/a","color_primaries":"-Inf","bit_rate":"-1000","tags":[],"disposition":{"attached_pic":-1,"forced":"bad","default":-1},"side_data_list":{}}],"format":{"format_name":"mov,mp4","duration":"NaN","bit_rate":"-1","size":"Inf"}}`)
+		os.Exit(0)
+	case "probe-http":
+		response, err := http.Get(os.Getenv("RIVUNE_FFMPEG_HELPER_URL"))
+		if err != nil {
+			os.Exit(2)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			os.Exit(2)
+		}
+		_, _ = io.WriteString(os.Stdout, `{"streams":[{"index":0,"codec_type":"video","codec_name":"h264"}],"format":{"format_name":"mov","duration":"1"}}`)
 		os.Exit(0)
 	case "subtitle-output":
 		chunk := bytes.Repeat([]byte("x"), 64<<10)

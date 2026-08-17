@@ -323,6 +323,8 @@ func playbackInfoSourceErrorClass(err error) string {
 		return "client_capability_missing"
 	case errors.Is(err, playback.ErrProviderUnavailable):
 		return "provider_unavailable"
+	case errors.Is(err, playback.ErrMediaSourceTimeout):
+		return "media_source_timeout"
 	case errors.Is(err, playback.ErrMediaSourceFailed):
 		return "media_source_failed"
 	case errors.Is(err, playback.ErrMediaCapacityReached):
@@ -2809,6 +2811,8 @@ func (handler *Handler) writePlaybackError(response http.ResponseWriter, request
 		handler.writeCompatError(response, http.StatusBadRequest, "InvalidRequest", "The playback request is invalid")
 	case errors.Is(err, playback.ErrUnsupportedSource), errors.Is(err, playback.ErrTranscodingDisabled), errors.Is(err, playback.ErrClientCapabilityMissing):
 		handler.writeCompatError(response, http.StatusUnprocessableEntity, "PlaybackProfileUnsupported", "The selected source is unsupported by this device")
+	case errors.Is(err, playback.ErrMediaSourceTimeout):
+		handler.writeCompatError(response, http.StatusGatewayTimeout, "PlaybackSourceTimeout", "The media source timed out before playback could start")
 	case errors.Is(err, playback.ErrProviderUnavailable), errors.Is(err, playback.ErrMediaSourceFailed):
 		handler.writeCompatError(response, http.StatusBadGateway, "PlaybackSourceFailed", "The media source is unavailable")
 	case errors.Is(err, playback.ErrMediaCapacityReached):
@@ -2840,6 +2844,8 @@ func (handler *Handler) writeStreamPlaybackError(response http.ResponseWriter, r
 		handler.writeStreamError(response, request, http.StatusNotFound, "PlaybackSessionNotFound", "The playback session is invalid or expired")
 	case errors.Is(err, playback.ErrUnsupportedSource), errors.Is(err, playback.ErrTranscodingDisabled), errors.Is(err, playback.ErrClientCapabilityMissing), errors.Is(err, playback.ErrNoPlayableSource):
 		handler.writeStreamError(response, request, http.StatusUnprocessableEntity, "PlaybackProfileUnsupported", "The selected source is unsupported by this device")
+	case errors.Is(err, playback.ErrMediaSourceTimeout):
+		handler.writeStreamError(response, request, http.StatusGatewayTimeout, "PlaybackSourceTimeout", "The media source timed out before playback could start")
 	case errors.Is(err, playback.ErrProviderUnavailable), errors.Is(err, playback.ErrMediaSourceFailed):
 		handler.writeStreamError(response, request, http.StatusBadGateway, "PlaybackSourceFailed", "The media source is unavailable")
 	case errors.Is(err, playback.ErrMediaCapacityReached):

@@ -88,9 +88,14 @@ func (fake *fakePlaybackService) ProxyAsset(w http.ResponseWriter, r *http.Reque
 
 func TestPlaybackSourcesReturnsOpaqueReferences(t *testing.T) {
 	expiresAt := time.Now().UTC().Add(time.Hour)
-	service := &fakePlaybackService{sources: playback.SourceList{Sources: []playback.SourceOption{{
-		ID: "stream-1", SourceRef: "opaque-source-reference", Name: "Source", Protocol: "external", Mode: "external", ExpiresAt: expiresAt,
-	}}}}
+	service := &fakePlaybackService{sources: playback.SourceList{
+		Sources: []playback.SourceOption{{
+			ID: "stream-1", SourceRef: "opaque-source-reference", StableIdentity: "stable-external",
+			AddonID: "11111111-1111-4111-8111-111111111111", ManifestID: "manifest", StreamIndex: 0,
+			Name: "Source", Protocol: "external", Mode: "external", ExpiresAt: expiresAt,
+		}},
+		ProviderErrors: []playback.ProviderFailure{},
+	}}
 	api := testAPI(&fakeInstanceService{})
 	api.auth = &fakeAuthService{principal: auth.Principal{SessionID: "session-id", UserID: "user-id"}}
 	api.playback = service
@@ -106,7 +111,8 @@ func TestPlaybackSourcesReturnsOpaqueReferences(t *testing.T) {
 
 	api.Handler().ServeHTTP(response, request)
 
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"sourceRef":"opaque-source-reference"`) || !strings.Contains(response.Body.String(), `"mode":"external"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"sourceRef":"opaque-source-reference"`) ||
+		!strings.Contains(response.Body.String(), `"stableIdentity":"stable-external"`) || !strings.Contains(response.Body.String(), `"mode":"external"`) {
 		t.Fatalf("unexpected sources response: status=%d body=%s", response.Code, response.Body.String())
 	}
 	if service.sourcesInput.AddonID != "11111111-1111-4111-8111-111111111111" ||
@@ -117,6 +123,7 @@ func TestPlaybackSourcesReturnsOpaqueReferences(t *testing.T) {
 		len(service.sourcesInput.Capabilities.ExternalPlayers) != 1 {
 		t.Fatalf("unexpected sources input: %+v", service.sourcesInput)
 	}
+	validateContractResponse(t, loadOpenAPIContract(t), "/playback/sources", nil, request, response)
 }
 
 func TestPreparePlaybackUsesOpaqueReference(t *testing.T) {
@@ -243,6 +250,7 @@ func TestPlaybackAssetReturnsStableMediaErrors(t *testing.T) {
 		retryAfter string
 	}{
 		{name: "source", method: http.MethodGet, err: playback.ErrMediaSourceFailed, status: http.StatusBadGateway, code: "playback_source_failed"},
+		{name: "timeout", method: http.MethodGet, err: playback.ErrMediaSourceTimeout, status: http.StatusGatewayTimeout, code: "playback_source_timeout"},
 		{name: "capability", method: http.MethodGet, err: playback.ErrClientCapabilityMissing, status: http.StatusUnprocessableEntity, code: "playback_client_capability_missing"},
 		{name: "capacity GET", method: http.MethodGet, err: playback.ErrMediaCapacityReached, status: http.StatusServiceUnavailable, code: "playback_capacity_reached", retryAfter: "10"},
 		{name: "capacity HEAD", method: http.MethodHead, err: playback.ErrMediaCapacityReached, status: http.StatusServiceUnavailable, code: "playback_capacity_reached", retryAfter: "10"},
@@ -272,7 +280,7 @@ func TestPlaybackAssetReturnsStableMediaErrors(t *testing.T) {
 			if response.Header().Get("Retry-After") != test.retryAfter {
 				t.Fatalf("unexpected Retry-After header %q", response.Header().Get("Retry-After"))
 			}
-			if test.status == http.StatusServiceUnavailable || test.status == http.StatusInsufficientStorage {
+			if test.status == http.StatusGatewayTimeout || test.status == http.StatusServiceUnavailable || test.status == http.StatusInsufficientStorage {
 				validateContractResponse(t, loadOpenAPIContract(t), "/playback/sessions/{sessionId}/assets/{assetId}", map[string]string{"sessionId": "11111111-1111-4111-8111-111111111111", "assetId": "asset-id"}, request, response)
 			}
 		})
@@ -519,6 +527,37 @@ func TestPlaybackPrepareAndResolveReturnSpecificTranscodingErrors(t *testing.T) 
 			} else if service.resolveInput.AllowTranscoding || service.resolveInput.MaximumHeight != 720 {
 				t.Fatalf("resolve did not receive fresh effective policy: %+v", service.resolveInput)
 			}
+		})
+	}
+}
+
+func TestPlaybackPrepareAndResolveReturnSourceTimeout(t *testing.T) {
+	profileID := "profile-id"
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	document := loadOpenAPIContract(t)
+	for _, path := range []string{"/api/v1/playback/prepare", "/api/v1/playback/resolve"} {
+		t.Run(path, func(t *testing.T) {
+			service := &fakePlaybackService{}
+			if strings.Contains(path, "/prepare") {
+				service.prepareErr = playback.ErrMediaSourceTimeout
+			} else {
+				service.resolveErr = playback.ErrMediaSourceTimeout
+			}
+			api := testAPI(&fakeInstanceService{})
+			api.auth = &fakeAuthService{principal: auth.Principal{
+				SessionID: "session-id", UserID: "user-id", ActiveProfileID: &profileID, ProfileGrantExpiresAt: &expiresAt,
+			}}
+			api.playback = service
+			api.settings = &fakeSettingsService{}
+			request := httptest.NewRequest(http.MethodPost, path, stringsReader(`{"sourceRef":"opaque-source-reference"}`))
+			request.Header.Set("Authorization", "Bearer access-token")
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			api.Handler().ServeHTTP(response, request)
+			if response.Code != http.StatusGatewayTimeout || !strings.Contains(response.Body.String(), `"code":"playback_source_timeout"`) {
+				t.Fatalf("source timeout response: status=%d body=%s", response.Code, response.Body.String())
+			}
+			validateContractResponse(t, document, strings.TrimPrefix(path, "/api/v1"), nil, request, response)
 		})
 	}
 }

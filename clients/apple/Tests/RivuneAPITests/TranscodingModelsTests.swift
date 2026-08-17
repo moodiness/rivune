@@ -28,7 +28,7 @@ final class TranscodingModelsTests: XCTestCase {
         let json = Data("""
         {
           "sources":[
-            {"id":"source-1","sourceRef":"ref-1","addonId":"66666666-6666-4666-8666-666666666666","addonName":"Test Addon","manifestId":"org.test","streamIndex":0,"name":"Primary","protocol":"hls","expiresAt":"2026-08-03T12:00:00Z"},
+            {"id":"source-1","sourceRef":"ref-1","stableIdentity":"stable-primary","addonId":"66666666-6666-4666-8666-666666666666","addonName":"Test Addon","manifestId":"org.test","streamIndex":0,"name":"Primary","protocol":"hls","expiresAt":"2026-08-03T12:00:00Z"},
             {"id":"source-2","sourceRef":"ref-2","addonId":"77777777-7777-4777-8777-777777777777","manifestId":"org.other","streamIndex":1,"name":"Fallback","protocol":"dash","expiresAt":"2026-08-03T12:00:00Z"}
           ],
           "providerErrors":[]
@@ -40,10 +40,12 @@ final class TranscodingModelsTests: XCTestCase {
         XCTAssertEqual(sourceList.sources[0].addonId, UUID(uuidString: "66666666-6666-4666-8666-666666666666"))
         XCTAssertEqual(sourceList.sources[0].manifestId, "org.test")
         XCTAssertEqual(sourceList.sources[0].sourceRef, "ref-1")
+        XCTAssertEqual(sourceList.sources[0].stableIdentity, "stable-primary")
         XCTAssertNil(sourceList.sources[1].addonName)
         XCTAssertEqual(sourceList.sources[1].addonId, UUID(uuidString: "77777777-7777-4777-8777-777777777777"))
         XCTAssertEqual(sourceList.sources[1].manifestId, "org.other")
         XCTAssertEqual(sourceList.sources[1].sourceRef, "ref-2")
+        XCTAssertEqual(sourceList.sources[1].stableIdentity, "")
     }
 
     func testSessionDecodesDecisionBurnSubtitleSelectionsAndUnknownProperties() throws {

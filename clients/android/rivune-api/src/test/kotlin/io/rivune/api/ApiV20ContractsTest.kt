@@ -35,7 +35,7 @@ class ApiV20ContractsTest {
         server.enqueue(discoveryResponse(setupCompleted = true, demoAvailable = false))
         server.enqueue(jsonResponse(seriesFixture()))
         server.enqueue(jsonResponse("""{"markers":[{"type":"intro","startSeconds":12.25,"endSeconds":91.75,"confidence":0.9,"submissionCount":8}]}"""))
-        server.enqueue(jsonResponse("""{"sources":[{"id":"stream-1","sourceRef":"opaque-source-reference","addonId":"33333333-3333-4333-8333-333333333333","manifestId":"manifest","streamIndex":0,"name":"External","protocol":"external","mode":"external","expiresAt":"2099-01-01T00:00:00Z"}],"providerErrors":[]}"""))
+        server.enqueue(jsonResponse("""{"sources":[{"id":"stream-1","sourceRef":"opaque-source-reference","stableIdentity":"stable-external","addonId":"33333333-3333-4333-8333-333333333333","manifestId":"manifest","streamIndex":0,"name":"External","protocol":"external","mode":"external","expiresAt":"2099-01-01T00:00:00Z"}],"providerErrors":[]}"""))
         server.start()
         try {
             val serverUrl = server.loopbackUrl("/").toString()
@@ -53,6 +53,7 @@ class ApiV20ContractsTest {
                 addonId = addonId,
             )
             assertEquals(PlaybackMode.EXTERNAL, sources.sources.single().mode)
+            assertEquals("stable-external", sources.sources.single().stableIdentity)
 
             val discoveryRequest = server.takeRequest()
             assertEquals("/.well-known/rivune", discoveryRequest.path)

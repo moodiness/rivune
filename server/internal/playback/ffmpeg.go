@@ -219,6 +219,9 @@ func (processor *FFmpegProcessor) Probe(ctx context.Context, asset storedAsset) 
 		if timeoutErr := probeContext.Err(); timeoutErr != nil {
 			return MediaInspection{}, fmt.Errorf("probe media: %w", timeoutErr)
 		}
+		if sourceErr := egress.sourceError(); sourceErr != nil {
+			return MediaInspection{}, fmt.Errorf("probe media: %w", sourceErr)
+		}
 		return MediaInspection{}, fmt.Errorf("probe media: %w: %s", runErr, diagnostic.String())
 	}
 	return parseFFprobeInspection(output.Bytes(), asset.Container)
@@ -748,10 +751,14 @@ func mediaDiagnosticToken(value string) string {
 }
 
 func hlsOutputArguments(asset storedAsset, hlsFlags string) []string {
-	arguments := []string{
+	arguments := make([]string, 0, 18)
+	if _, seekable := seekableHLSSegmentCount(asset); seekable && asset.StartSeconds > 0 {
+		arguments = append(arguments, "-output_ts_offset", strconv.FormatFloat(asset.StartSeconds, 'f', -1, 64))
+	}
+	arguments = append(arguments,
 		"-f", "hls", "-hls_time", strconv.Itoa(hlsSegmentDurationSeconds),
 		"-hls_list_size", strconv.Itoa(hlsRetainedSegments), "-hls_delete_threshold", strconv.Itoa(hlsDeleteThreshold),
-	}
+	)
 	if normalizedHLSSegmentContainer(asset.HLSSegmentContainer) == "mp4" {
 		arguments = append(arguments,
 			"-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",

@@ -80,6 +80,7 @@ internal data class AppPreferencesState(
     val videoAspect: VideoAspectPreference = VideoAspectPreference.FIT,
     val wifiQuality: NetworkQualityPreference = NetworkQualityPreference.AUTOMATIC,
     val mobileQuality: NetworkQualityPreference = NetworkQualityPreference.AUTOMATIC,
+    val automaticallyShowStreams: Boolean = true,
     val autoSkipIntro: Boolean = false,
     val autoSkipRecap: Boolean = false,
     val autoSkipOutro: Boolean = false,
@@ -99,6 +100,7 @@ internal fun appPreferencesState(
     videoAspect: String? = null,
     wifiQuality: String? = null,
     mobileQuality: String? = null,
+    automaticallyShowStreams: Boolean = true,
     autoSkipIntro: Boolean = false,
     autoSkipRecap: Boolean = false,
     autoSkipOutro: Boolean = false,
@@ -123,6 +125,7 @@ internal fun appPreferencesState(
     videoAspect = VideoAspectPreference.fromPreference(videoAspect),
     wifiQuality = NetworkQualityPreference.fromPreference(wifiQuality),
     mobileQuality = NetworkQualityPreference.fromPreference(mobileQuality),
+    automaticallyShowStreams = automaticallyShowStreams,
     autoSkipIntro = autoSkipIntro,
     autoSkipRecap = autoSkipRecap,
     autoSkipOutro = autoSkipOutro,
@@ -193,6 +196,10 @@ internal class AppPreferencesStore(context: Context) : AppPreferencesReader, Sha
     fun setMobileQuality(value: NetworkQualityPreference) {
         preferences.edit { putString(MOBILE_QUALITY_KEY, value.preferenceValue) }
     }
+    fun setAutomaticallyShowStreams(value: Boolean) {
+        preferences.edit { putBoolean(AUTO_SHOW_STREAMS_KEY, value) }
+    }
+
 
     fun setAutoSkipIntro(value: Boolean) {
         preferences.edit { putBoolean(AUTO_SKIP_INTRO_KEY, value) }
@@ -221,6 +228,7 @@ internal class AppPreferencesStore(context: Context) : AppPreferencesReader, Sha
         videoAspect = preferences.getString(VIDEO_ASPECT_KEY, null),
         wifiQuality = preferences.getString(WIFI_QUALITY_KEY, null),
         mobileQuality = preferences.getString(MOBILE_QUALITY_KEY, null),
+        automaticallyShowStreams = preferences.getBoolean(AUTO_SHOW_STREAMS_KEY, true),
         autoSkipIntro = preferences.getBoolean(AUTO_SKIP_INTRO_KEY, false),
         autoSkipRecap = preferences.getBoolean(AUTO_SKIP_RECAP_KEY, false),
         autoSkipOutro = preferences.getBoolean(AUTO_SKIP_OUTRO_KEY, false),
@@ -238,6 +246,7 @@ internal class AppPreferencesStore(context: Context) : AppPreferencesReader, Sha
         const val VIDEO_ASPECT_KEY = "video_aspect"
         const val WIFI_QUALITY_KEY = "wifi_quality"
         const val MOBILE_QUALITY_KEY = "mobile_quality"
+        const val AUTO_SHOW_STREAMS_KEY = "auto_show_streams"
         const val AUTO_SKIP_INTRO_KEY = "auto_skip_intro"
         const val AUTO_SKIP_RECAP_KEY = "auto_skip_recap"
         const val AUTO_SKIP_OUTRO_KEY = "auto_skip_outro"
@@ -255,6 +264,7 @@ internal class AppPreferencesStore(context: Context) : AppPreferencesReader, Sha
             VIDEO_ASPECT_KEY,
             WIFI_QUALITY_KEY,
             MOBILE_QUALITY_KEY,
+            AUTO_SHOW_STREAMS_KEY,
             AUTO_SKIP_INTRO_KEY,
             AUTO_SKIP_RECAP_KEY,
             AUTO_SKIP_OUTRO_KEY,

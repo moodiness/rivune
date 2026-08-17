@@ -7,6 +7,7 @@ import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import dev.jdtech.mpv.MPVLib
@@ -16,9 +17,15 @@ import java.nio.file.StandardCopyOption
 import java.security.KeyStore
 import java.security.cert.X509Certificate
 import java.util.Base64
+import java.util.Locale
 import kotlin.math.roundToLong
 
 internal enum class MpvPlaybackState { PREPARING, BUFFERING, READY }
+internal enum class MpvTerminalState { ACTIVE, NATURAL_END, FAILURE, RELEASED }
+
+internal fun resetMpvNaturalEndForReplay(state: MpvTerminalState): MpvTerminalState? =
+    MpvTerminalState.ACTIVE.takeIf { state == MpvTerminalState.NATURAL_END }
+internal const val MPV_STARTUP_TIMEOUT_MS = 45_000L
 
 internal data class MpvTrack(
     val nativeId: Int?,
@@ -88,10 +95,33 @@ internal fun projectMpvSubtitleTracks(
 
 internal fun isMpvNaturalEnd(observedEof: Boolean, currentEof: Boolean?): Boolean =
     observedEof || currentEof == true
+internal fun shouldArmMpvStartupWatchdog(
+    playbackRequested: Boolean,
+    hasLiveSurface: Boolean,
+    startupSucceeded: Boolean,
+    terminal: Boolean,
+): Boolean = playbackRequested && hasLiveSurface && !startupSucceeded && !terminal
+
+internal fun shouldResumeMpvPlayback(playbackRequested: Boolean, terminal: Boolean): Boolean =
+    playbackRequested && !terminal
+
+internal fun mpvPlaybackState(startupSucceeded: Boolean, pausedForCache: Boolean): MpvPlaybackState = when {
+    !startupSucceeded -> MpvPlaybackState.PREPARING
+    pausedForCache -> MpvPlaybackState.BUFFERING
+    else -> MpvPlaybackState.READY
+}
+
 
 internal fun initialMpvExternalSubtitles(
     advertised: List<PlayerSubtitlePresentation>,
 ): List<PlayerSubtitlePresentation> = listOfNotNull(advertised.firstOrNull(PlayerSubtitlePresentation::selected))
+
+internal fun mpvLoadFileCommand(mediaUrl: String, startPositionMs: Long): Array<String> {
+    val boundedStartMs = startPositionMs.coerceAtLeast(0L)
+    if (boundedStartMs == 0L) return arrayOf("loadfile", mediaUrl, "replace")
+    val startOption = String.format(Locale.US, "start=+%.3f", boundedStartMs / 1_000.0)
+    return arrayOf("loadfile", mediaUrl, "replace", "-1", startOption)
+}
 
 internal fun isMpvSubtitleRequestPending(deadlineMs: Long?, nowMs: Long): Boolean =
     deadlineMs != null && deadlineMs > nowMs
@@ -121,7 +151,7 @@ internal interface MpvPlaybackListener {
     fun onPositionChanged(positionMs: Long, durationMs: Long)
     fun onTracksChanged(audio: List<MpvTrack>, subtitles: List<MpvTrack>)
     fun onPlaybackEnded()
-    fun onPlaybackFailed(positionMs: Long)
+    fun onPlaybackFailed(positionMs: Long, reason: PlayerEngineFailureReason)
 }
 
 /** Owns one native libmpv instance at a time and confines public operations to the main thread. */
@@ -143,13 +173,19 @@ internal class MpvPlaybackController(
         .setOnAudioFocusChangeListener(
             { change ->
                 when (change) {
-                    AudioManager.AUDIOFOCUS_GAIN -> if (!pauseRequested) {
+                    AudioManager.AUDIOFOCUS_GAIN -> if (
+                        shouldResumeMpvPlayback(playbackRequested = !pauseRequested, terminal = terminalState != MpvTerminalState.ACTIVE)
+                    ) {
                         hasAudioFocus = true
+                        startupSuspendedForAudioFocus = false
                         mpv?.setPropertyBoolean("pause", false)
+                        refreshStartupWatchdog()
                     }
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                         hasAudioFocus = false
+                        startupSuspendedForAudioFocus = true
                         mpv?.setPropertyBoolean("pause", true)
+                        cancelStartupWatchdog()
                         updatePlaying()
                     }
                     AudioManager.AUDIOFOCUS_LOSS -> pause()
@@ -165,11 +201,12 @@ internal class MpvPlaybackController(
     private var closed = false
     private var tearingDown = false
     private var fileLoaded = false
-    private var terminalEventDelivered = false
+    private var terminalState = MpvTerminalState.ACTIVE
     private var pausedForCache = false
     private var pauseRequested = false
     private var nativePaused = true
     private var hasAudioFocus = false
+    private var startupSuspendedForAudioFocus = false
     private var eofReached = false
     private var requestedPositionMs = presentation.startPositionMs.coerceAtLeast(0L)
     private var requestedAspect = VideoAspectPreference.FIT
@@ -182,6 +219,9 @@ internal class MpvPlaybackController(
     private var pendingExternalSubtitleIdentity: String? = null
     private var pendingExternalSubtitleDeadlineMs: Long? = null
     private val externalSubtitleTimeout = Runnable { expireExternalSubtitleRequest() }
+    private var startupSucceeded = false
+    private var startupWatchdog: Runnable? = null
+    private var startupWatchdogToken = 0L
 
     var positionMs: Long = requestedPositionMs
         private set
@@ -198,28 +238,47 @@ internal class MpvPlaybackController(
 
     fun releaseSurfaceView(view: SurfaceView) {
         if (surfaceView !== view) return
+        cancelStartupWatchdog()
         view.holder.removeCallback(surfaceCallback)
         if (view.holder.surface.isValid) destroyNativeForSurfaceLoss()
         surfaceView = null
     }
 
     fun play() {
+        if (!shouldResumeMpvPlayback(playbackRequested = true, terminal = terminalState != MpvTerminalState.ACTIVE)) return
         val focusGranted = audioManager.requestAudioFocus(audioFocusRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
         hasAudioFocus = focusGranted
         if (!focusGranted) {
+            startupSuspendedForAudioFocus = true
             mpv?.setPropertyBoolean("pause", true)
+            cancelStartupWatchdog()
             return
         }
         pauseRequested = false
+        startupSuspendedForAudioFocus = false
         val currentSurface = surfaceView?.holder
         if (mpv == null && currentSurface?.surface?.isValid == true) surfaceCallback.surfaceCreated(currentSurface)
         mpv?.setPropertyBoolean("pause", false)
+        refreshStartupWatchdog()
+    }
+
+    fun replayFromStart(): Boolean {
+        terminalState = resetMpvNaturalEndForReplay(terminalState) ?: return false
+        val startPositionMs = absolutePlaybackPositionMs(
+            0L,
+            presentation.timelineStartPositionMs,
+            presentation.mediaTimeline,
+        )
+        seekTo(startPositionMs)
+        play()
+        return true
     }
 
     fun pause() {
         pauseRequested = true
         hasAudioFocus = false
         mpv?.setPropertyBoolean("pause", true)
+        cancelStartupWatchdog()
         audioManager.abandonAudioFocusRequest(audioFocusRequest)
     }
 
@@ -227,7 +286,6 @@ internal class MpvPlaybackController(
         val target = absolutePositionMs.coerceAtLeast(0L)
         requestedPositionMs = target
         positionMs = target
-        terminalEventDelivered = false
         eofReached = false
         mpv?.setPropertyDouble(
             "time-pos",
@@ -247,14 +305,17 @@ internal class MpvPlaybackController(
         when (aspect) {
             VideoAspectPreference.FIT -> {
                 instance.setPropertyString("video-aspect-override", "no")
+                instance.setPropertyString("keepaspect", "yes")
                 instance.setPropertyDouble("panscan", 0.0)
             }
             VideoAspectPreference.FILL -> {
+                instance.setPropertyString("video-aspect-override", "no")
                 instance.setPropertyDouble("panscan", 0.0)
-                instance.setPropertyString("video-aspect-override", "-1")
+                instance.setPropertyString("keepaspect", "no")
             }
             VideoAspectPreference.ZOOM -> {
                 instance.setPropertyString("video-aspect-override", "no")
+                instance.setPropertyString("keepaspect", "yes")
                 instance.setPropertyDouble("panscan", 1.0)
             }
         }
@@ -331,6 +392,7 @@ internal class MpvPlaybackController(
     fun release() {
         if (closed) return
         closed = true
+        terminalState = MpvTerminalState.RELEASED
         surfaceView?.holder?.removeCallback(surfaceCallback)
         surfaceView = null
         destroyNative()
@@ -340,13 +402,17 @@ internal class MpvPlaybackController(
 
     private val surfaceCallback = object : SurfaceHolder.Callback {
         override fun surfaceCreated(holder: SurfaceHolder) {
-            if (closed || terminalEventDelivered || !holder.surface.isValid) return
-            val instance = ensureNative() ?: return
-            instance.attachSurface(holder.surface)
-            instance.setOptionString("force-window", "yes")
+            if (closed || terminalState != MpvTerminalState.ACTIVE || !holder.surface.isValid) return
+            val instance = ensureNative(holder.surface) ?: return
             instance.setPropertyString("android-surface-size", "${holder.surfaceFrame.width()}x${holder.surfaceFrame.height()}")
             instance.setPropertyBoolean("pause", true)
-            instance.command(arrayOf("loadfile", presentation.mediaUrl, "replace"))
+            val mediaPositionMs = mediaPlaybackPositionMs(
+                requestedPositionMs,
+                presentation.timelineStartPositionMs,
+                presentation.mediaTimeline,
+            )
+            instance.command(mpvLoadFileCommand(presentation.mediaUrl, mediaPositionMs))
+            refreshStartupWatchdog()
         }
 
         override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
@@ -360,7 +426,7 @@ internal class MpvPlaybackController(
         }
     }
 
-    private fun ensureNative(): MPVLib? {
+    private fun ensureNative(surface: Surface): MPVLib? {
         mpv?.let { return it }
         if (closed) return null
         val instance = MPVLib.create(appContext)
@@ -376,8 +442,10 @@ internal class MpvPlaybackController(
         tearingDown = false
         fileLoaded = false
         eofReached = false
+        startupSucceeded = false
         try {
             configure(instance)
+            instance.attachSurface(surface)
             instance.addObserver(eventObserver)
             instance.init()
             observe(instance)
@@ -396,7 +464,7 @@ internal class MpvPlaybackController(
         instance.setOptionString("vo", "gpu")
         instance.setOptionString("gpu-context", "android")
         instance.setOptionString("opengl-es", "yes")
-        instance.setOptionString("hwdec", "mediacodec-copy")
+        instance.setOptionString("hwdec", "mediacodec")
         instance.setOptionString("hwdec-codecs", "all")
         instance.setOptionString("ao", "audiotrack,opensles")
         instance.setOptionString("audio-set-media-role", "yes")
@@ -405,20 +473,20 @@ internal class MpvPlaybackController(
         instance.setOptionString("demuxer-max-back-bytes", (16 * 1024 * 1024).toString())
         instance.setOptionString("tls-ca-file", androidCaBundle(appContext).absolutePath)
         instance.setOptionString("tls-verify", "yes")
-        instance.setOptionString("network-timeout", "30")
+        instance.setOptionString("network-timeout", "60")
         instance.setOptionString("input-default-bindings", "no")
         instance.setOptionString("input-vo-keyboard", "no")
         instance.setOptionString("osc", "no")
         instance.setOptionString("terminal", "no")
         instance.setOptionString("idle", "yes")
         instance.setOptionString("keep-open", "yes")
-        instance.setOptionString("force-window", "no")
+        instance.setOptionString("force-window", "yes")
         instance.setOptionString("save-position-on-quit", "no")
     }
 
     private fun observe(instance: MPVLib) {
-        instance.observeProperty("time-pos/full", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
-        instance.observeProperty("duration/full", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
+        instance.observeProperty("time-pos", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
+        instance.observeProperty("duration", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
         instance.observeProperty("pause", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
         instance.observeProperty("paused-for-cache", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
         instance.observeProperty("eof-reached", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
@@ -441,7 +509,7 @@ internal class MpvPlaybackController(
                     "pause" -> { nativePaused = value; updatePlaying() }
                     "paused-for-cache" -> {
                         pausedForCache = value
-                        listener.onStateChanged(if (value) MpvPlaybackState.BUFFERING else MpvPlaybackState.READY)
+                        listener.onStateChanged(mpvPlaybackState(startupSucceeded, pausedForCache))
                         updatePlaying()
                     }
                     "eof-reached" -> eofReached = value
@@ -454,7 +522,7 @@ internal class MpvPlaybackController(
                 when (eventId) {
                     MPVLib.MpvEvent.MPV_EVENT_START_FILE -> listener.onStateChanged(MpvPlaybackState.PREPARING)
                     MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> onFileLoaded()
-                    MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> listener.onStateChanged(MpvPlaybackState.READY)
+                    MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> onPlaybackRestart()
                     MPVLib.MpvEvent.MPV_EVENT_END_FILE -> {
                         val endedAtEof = isMpvNaturalEnd(eofReached, mpv?.getPropertyBoolean("eof-reached"))
                         if (endedAtEof) deliverEnd() else deliverFailure()
@@ -471,13 +539,13 @@ internal class MpvPlaybackController(
 
     private fun handleNumericProperty(property: String, seconds: Double) {
         when (property) {
-            "time-pos/full" -> {
+            "time-pos" -> {
                 val mediaPosition = (seconds * 1_000.0).roundToLong().coerceAtLeast(0L)
                 positionMs = absolutePlaybackPositionMs(mediaPosition, presentation.timelineStartPositionMs, presentation.mediaTimeline)
                     .let { if (durationMs > 0L) it.coerceAtMost(durationMs) else it }
                 requestedPositionMs = positionMs
             }
-            "duration/full" -> {
+            "duration" -> {
                 val mediaDuration = (seconds * 1_000.0).roundToLong().coerceAtLeast(0L)
                 durationMs = resolvedPlaybackDurationMs(
                     presentation.durationSeconds.coerceAtLeast(0).toLong() * 1_000L,
@@ -497,13 +565,11 @@ internal class MpvPlaybackController(
             ?.let { identity -> presentation.subtitles.firstOrNull { mpvExternalSubtitleIdentity(it) == identity } }
             ?.let { addExternalSubtitle(instance, it) }
         if (selectedSubtitleIdentity == null) instance.setPropertyString("sid", "no")
-        val mediaPositionMs = mediaPlaybackPositionMs(requestedPositionMs, presentation.timelineStartPositionMs, presentation.mediaTimeline)
-        if (mediaPositionMs > 0L) instance.setPropertyDouble("time-pos", mediaPositionMs / 1_000.0)
         setAspect(requestedAspect)
         setSpeed(requestedSpeed)
         if (pauseRequested) instance.setPropertyBoolean("pause", true) else play()
         refreshTracks()
-        listener.onStateChanged(MpvPlaybackState.READY)
+        listener.onStateChanged(MpvPlaybackState.PREPARING)
         updatePlaying()
     }
 
@@ -566,8 +632,56 @@ internal class MpvPlaybackController(
         listener.onTracksChanged(audio, subtitleTracks)
     }
 
+    private fun onPlaybackRestart() {
+        if (startupSucceeded) return
+        startupSucceeded = true
+        cancelStartupWatchdog()
+        listener.onStateChanged(mpvPlaybackState(startupSucceeded, pausedForCache))
+        updatePlaying()
+    }
+
+    private fun refreshStartupWatchdog() {
+        val hasLiveSurface = mpv != null && surfaceView?.holder?.surface?.isValid == true
+        val shouldArm = shouldArmMpvStartupWatchdog(
+            playbackRequested = !pauseRequested && !startupSuspendedForAudioFocus,
+            hasLiveSurface = hasLiveSurface,
+            startupSucceeded = startupSucceeded,
+            terminal = terminalState != MpvTerminalState.ACTIVE || closed || tearingDown,
+        )
+        if (!shouldArm) {
+            cancelStartupWatchdog()
+            return
+        }
+        if (startupWatchdog != null) return
+        val instanceGeneration = generation
+        val token = ++startupWatchdogToken
+        val watchdog = Runnable {
+            startupWatchdog = null
+            if (
+                generation == instanceGeneration && startupWatchdogToken == token &&
+                shouldArmMpvStartupWatchdog(
+                    playbackRequested = !pauseRequested && !startupSuspendedForAudioFocus,
+                    hasLiveSurface = mpv != null && surfaceView?.holder?.surface?.isValid == true,
+                    startupSucceeded = startupSucceeded,
+                    terminal = terminalState != MpvTerminalState.ACTIVE || closed || tearingDown,
+                )
+            ) {
+                deliverFailure(PlayerEngineFailureReason.STARTUP_TIMEOUT)
+            }
+        }
+        startupWatchdog = watchdog
+        mainHandler.postDelayed(watchdog, MPV_STARTUP_TIMEOUT_MS)
+    }
+
+    private fun cancelStartupWatchdog() {
+        startupWatchdogToken += 1L
+        startupWatchdog?.let(mainHandler::removeCallbacks)
+        startupWatchdog = null
+    }
+
     private fun updatePlaying() {
-        val updated = fileLoaded && hasAudioFocus && !nativePaused && !pausedForCache && !terminalEventDelivered
+        val updated = startupSucceeded && fileLoaded && hasAudioFocus && !nativePaused && !pausedForCache &&
+            terminalState == MpvTerminalState.ACTIVE
         if (updated != isPlaying) {
             isPlaying = updated
             surfaceView?.keepScreenOn = updated
@@ -576,8 +690,9 @@ internal class MpvPlaybackController(
     }
 
     private fun deliverEnd() {
-        if (terminalEventDelivered || closed || tearingDown) return
-        terminalEventDelivered = true
+        if (terminalState != MpvTerminalState.ACTIVE || closed || tearingDown) return
+        cancelStartupWatchdog()
+        terminalState = MpvTerminalState.NATURAL_END
         isPlaying = false
         surfaceView?.keepScreenOn = false
         audioManager.abandonAudioFocusRequest(audioFocusRequest)
@@ -585,14 +700,18 @@ internal class MpvPlaybackController(
         listener.onPlaybackEnded()
     }
 
-    private fun deliverFailure() {
-        if (terminalEventDelivered || closed || tearingDown) return
-        terminalEventDelivered = true
+    private fun deliverFailure(reason: PlayerEngineFailureReason = PlayerEngineFailureReason.PLAYBACK_ERROR) {
+        if (terminalState != MpvTerminalState.ACTIVE || closed || tearingDown) return
+        terminalState = MpvTerminalState.FAILURE
+        pauseRequested = true
+        hasAudioFocus = false
+        cancelStartupWatchdog()
+        runCatching { mpv?.setPropertyBoolean("pause", true) }
         isPlaying = false
         surfaceView?.keepScreenOn = false
         audioManager.abandonAudioFocusRequest(audioFocusRequest)
         listener.onPlayingChanged(false)
-        listener.onPlaybackFailed(positionMs)
+        listener.onPlaybackFailed(positionMs, reason)
     }
 
     private fun destroyNativeForSurfaceLoss() {
@@ -602,6 +721,7 @@ internal class MpvPlaybackController(
     }
 
     private fun destroyNative() {
+        cancelStartupWatchdog()
         val instance = mpv ?: return
         tearingDown = true
         generation += 1L
@@ -612,6 +732,7 @@ internal class MpvPlaybackController(
         } finally {
             mpv = null
             fileLoaded = false
+            startupSucceeded = false
             subtitleTracks = emptyList()
             clearPendingExternalSubtitleRequest()
             pausedForCache = false
