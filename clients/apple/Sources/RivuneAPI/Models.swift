@@ -1076,6 +1076,32 @@ public struct PlaybackSourceOption: Codable, Sendable, Equatable, Identifiable {
     public let mode: PlaybackMode?
     public let container: String?
     public let expiresAt: String
+    public let stableIdentity: String
+}
+
+extension PlaybackSourceOption {
+    private enum CodingKeys: String, CodingKey {
+        case id, sourceRef, addonId, addonName, manifestId, streamIndex, name, description, filename
+        case `protocol`, mode, container, expiresAt, stableIdentity
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        sourceRef = try values.decode(String.self, forKey: .sourceRef)
+        addonId = try values.decode(UUID.self, forKey: .addonId)
+        addonName = try values.decodeIfPresent(String.self, forKey: .addonName)
+        manifestId = try values.decode(String.self, forKey: .manifestId)
+        streamIndex = try values.decode(Int.self, forKey: .streamIndex)
+        name = try values.decode(String.self, forKey: .name)
+        description = try values.decodeIfPresent(String.self, forKey: .description)
+        filename = try values.decodeIfPresent(String.self, forKey: .filename)
+        `protocol` = try values.decode(String.self, forKey: .protocol)
+        mode = try values.decodeIfPresent(PlaybackMode.self, forKey: .mode)
+        container = try values.decodeIfPresent(String.self, forKey: .container)
+        expiresAt = try values.decode(String.self, forKey: .expiresAt)
+        stableIdentity = try values.decodeIfPresent(String.self, forKey: .stableIdentity) ?? ""
+    }
 }
 
 public enum PlaybackMode: String, Codable, Sendable, Equatable {

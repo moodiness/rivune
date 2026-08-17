@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -213,6 +214,59 @@ func TestDirectStreamIdleBodyCancellationReleasesLease(t *testing.T) {
 	_ = response.Body.Close()
 }
 
+func TestReadIdleBodyPreservesTimeoutAndParentCancellation(t *testing.T) {
+	t.Run("idle timeout", func(t *testing.T) {
+		body := newBlockingDirectStreamBody()
+		stream := newReadIdleBody(context.Background(), body, func() {}, func() {}, 20*time.Millisecond, 20*time.Millisecond)
+		_, err := stream.Read(make([]byte, 1))
+		if !errors.Is(err, ErrMediaSourceTimeout) || !errors.Is(err, ErrMediaSourceFailed) {
+			t.Fatalf("idle read error = %v, want timeout and source failure identities", err)
+		}
+	})
+	t.Run("parent cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		body := newBlockingDirectStreamBody()
+		stream := newReadIdleBody(ctx, body, func() {}, func() {}, time.Hour, time.Hour)
+		cancel()
+		_, err := stream.Read(make([]byte, 1))
+		if !errors.Is(err, context.Canceled) || errors.Is(err, ErrMediaSourceTimeout) {
+			t.Fatalf("canceled read error = %v, want context cancellation", err)
+		}
+	})
+}
+
+func TestDirectStartupTimeoutDoesNotCommitAndReleasesAdmission(t *testing.T) {
+	stalled := newBlockingDirectStreamBody()
+	var calls atomic.Int32
+	service := &Service{
+		client: &http.Client{Transport: playbackRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			body := io.ReadCloser(io.NopCloser(strings.NewReader("retry")))
+			if calls.Add(1) == 1 {
+				body = stalled
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Length": []string{"5"}}, Body: body, ContentLength: 5, Request: request}, nil
+		})},
+		directStreamGlobalLimit: 1, directStreamOwnerLimit: 1,
+		directStreamIdleTimeout: time.Hour, directStreamStartupReadTimeout: 20 * time.Millisecond,
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://rivune.test/asset", nil)
+	asset := storedAsset{URL: "https://provider.example/media.mp4", Container: "mp4"}
+	upstream, err := service.fetchProxyAsset(request.Context(), request, asset, asset.URL, "session-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := &countingProxyResponseWriter{}
+	err = writeDirectProxyAssetWithStartupTimeout(writer, request, asset, upstream, asset.URL, service.directStartupReadTimeout())
+	if !errors.Is(err, ErrMediaSourceTimeout) || writer.status != 0 || len(writer.Header()) != 0 {
+		t.Fatalf("startup result error=%v status=%d headers=%v", err, writer.status, writer.Header())
+	}
+	retry, err := service.fetchProxyAsset(request.Context(), request, asset, asset.URL, "session-a")
+	if err != nil {
+		t.Fatalf("startup failure did not release admission: %v", err)
+	}
+	_ = retry.Body.Close()
+}
+
 type pacedDirectStreamBody struct {
 	remaining int
 	delay     time.Duration
@@ -269,10 +323,45 @@ func TestDefaultPlaybackTransportBoundsPerHostConnections(t *testing.T) {
 	if !ok {
 		t.Fatalf("playback transport type = %T", service.client.Transport)
 	}
-	if transport.MaxConnsPerHost != maximumDirectStreamsPerHost ||
+	if transport.ForceAttemptHTTP2 || transport.Protocols == nil || !transport.Protocols.HTTP1() ||
+		!transport.Protocols.HTTP2() || transport.Protocols.UnencryptedHTTP2() ||
+		transport.MaxConnsPerHost != maximumDirectStreamsPerHost ||
 		transport.MaxIdleConnsPerHost != maximumDirectStreamsPerHost ||
 		transport.MaxIdleConns != maximumDirectStreamsGlobal {
-		t.Fatalf("playback transport connection bounds: max=%d per-host=%d idle-per-host=%d", transport.MaxIdleConns, transport.MaxConnsPerHost, transport.MaxIdleConnsPerHost)
+		t.Fatalf("playback transport configuration: protocols=%v max=%d per-host=%d idle-per-host=%d", transport.Protocols, transport.MaxIdleConns, transport.MaxConnsPerHost, transport.MaxIdleConnsPerHost)
+	}
+}
+
+func TestDefaultPlaybackTransportNegotiatesTLSHTTP2(t *testing.T) {
+	protocol := make(chan int, 1)
+	origin := httptest.NewUnstartedServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		protocol <- request.ProtoMajor
+		_, _ = io.WriteString(response, "media")
+	}))
+	origin.EnableHTTP2 = true
+	origin.StartTLS()
+	defer origin.Close()
+
+	service, err := NewService(nil, nil, nil, MediaOptions{TempDirectory: filepath.Join(t.TempDir(), "workspace")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := service.client.Transport.(*http.Transport)
+	transport.DialContext = (&net.Dialer{}).DialContext
+	tlsConfig := origin.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	tlsConfig.NextProtos = []string{"h2", "http/1.1"}
+	transport.TLSClientConfig = tlsConfig
+	response, err := service.client.Get(origin.URL + "/media.mkv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, readErr := io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if response.ProtoMajor != 2 || <-protocol != 2 {
+		t.Fatalf("playback transport protocol = %s, want HTTP/2", response.Proto)
 	}
 }
 
@@ -302,11 +391,13 @@ func (body *trackedProxyBody) Close() error {
 }
 
 type countingProxyResponseWriter struct {
-	header  http.Header
-	status  int
-	written int64
-	wrote   chan struct{}
-	once    sync.Once
+	header      http.Header
+	status      int
+	written     int64
+	wrote       chan struct{}
+	headerWrote chan struct{}
+	once        sync.Once
+	headerOnce  sync.Once
 }
 
 func (writer *countingProxyResponseWriter) Header() http.Header {
@@ -319,6 +410,9 @@ func (writer *countingProxyResponseWriter) Header() http.Header {
 func (writer *countingProxyResponseWriter) WriteHeader(status int) {
 	if writer.status == 0 {
 		writer.status = status
+		if writer.headerWrote != nil {
+			writer.headerOnce.Do(func() { close(writer.headerWrote) })
+		}
 	}
 }
 
@@ -339,6 +433,65 @@ func directProxyResponse(body io.ReadCloser) *http.Response {
 		Header:        make(http.Header),
 		Body:          body,
 		ContentLength: -1,
+	}
+}
+
+func TestDirectStartupPreflightSkipsBodylessResponsesAndAcceptsCleanEOF(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		status     int
+		length     int64
+		header     http.Header
+		wantReads  int64
+		wantStatus int
+	}{
+		{name: "HEAD", method: http.MethodHead, status: http.StatusOK, length: -1, wantStatus: http.StatusOK},
+		{name: "no content", method: http.MethodGet, status: http.StatusNoContent, length: -1, wantStatus: http.StatusNoContent},
+		{name: "known zero length", method: http.MethodGet, status: http.StatusOK, length: 0, wantStatus: http.StatusOK},
+		{name: "explicit zero length", method: http.MethodGet, status: http.StatusOK, length: -1, header: http.Header{"Content-Length": []string{"0"}}, wantStatus: http.StatusOK},
+		{name: "clean EOF", method: http.MethodGet, status: http.StatusOK, length: -1, wantReads: 2, wantStatus: http.StatusOK},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := &trackedProxyBody{reader: strings.NewReader("")}
+			response := directProxyResponse(body)
+			response.StatusCode = test.status
+			response.ContentLength = test.length
+			response.Header = test.header
+			if response.Header == nil {
+				response.Header = make(http.Header)
+			}
+			writer := &countingProxyResponseWriter{}
+			err := writeDirectProxyAssetWithStartupTimeout(writer, httptest.NewRequest(test.method, "/movie.mp4", nil), storedAsset{Kind: "stream"}, response, "https://provider.example/movie.mp4", 10*time.Millisecond)
+			if err != nil || writer.status != test.wantStatus || body.reads.Load() != test.wantReads || !body.closed.Load() {
+				t.Fatalf("bodyless result error=%v status=%d reads=%d closed=%t", err, writer.status, body.reads.Load(), body.closed.Load())
+			}
+		})
+	}
+}
+func TestDirectStartupEOFWithDeclaredContentFailsBeforeCommit(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		length int64
+		header string
+	}{
+		{name: "response length", length: 1},
+		{name: "valid header", length: -1, header: "1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := &trackedProxyBody{reader: strings.NewReader("")}
+			response := directProxyResponse(body)
+			response.ContentLength = test.length
+			if test.header != "" {
+				response.Header.Set("Content-Length", test.header)
+			}
+			writer := &countingProxyResponseWriter{}
+			err := writeDirectProxyAssetWithStartupTimeout(writer, httptest.NewRequest(http.MethodGet, "/movie.mp4", nil), storedAsset{Kind: "stream"}, response, "https://provider.example/movie.mp4", time.Second)
+			if !errors.Is(err, ErrMediaSourceFailed) || writer.status != 0 || len(writer.Header()) != 0 || !body.closed.Load() {
+				t.Fatalf("declared empty source error=%v status=%d headers=%v closed=%t", err, writer.status, writer.Header(), body.closed.Load())
+			}
+		})
 	}
 }
 
@@ -385,7 +538,7 @@ func TestDirectSubtitleProxyStopsNeverEndingUpstream(t *testing.T) {
 	upstream := &trackedProxyBody{reader: zeroProxyReader{}}
 	requestContext, cancel := context.WithCancel(context.Background())
 	var released atomic.Bool
-	body := newReadIdleBody(context.Background(), upstream, cancel, func() { released.Store(true) }, time.Hour)
+	body := newReadIdleBody(context.Background(), upstream, cancel, func() { released.Store(true) }, time.Hour, time.Hour)
 	writer := &countingProxyResponseWriter{}
 	request := httptest.NewRequest(http.MethodGet, "/external.vtt", nil)
 
@@ -486,6 +639,48 @@ func TestDirectProxyLimitUsesStoredAssetKind(t *testing.T) {
 	}
 }
 
+func TestDirectMediaProxyCommitsFirstByteThenAbortsIdleStream(t *testing.T) {
+	upstream := &firstByteThenBlockingBody{closed: make(chan struct{})}
+	requestContext, cancel := context.WithCancel(context.Background())
+	var released atomic.Bool
+	body := newReadIdleBody(context.Background(), upstream, cancel, func() { released.Store(true) }, 20*time.Millisecond, 20*time.Millisecond)
+	writer := &countingProxyResponseWriter{}
+	recovered := recoveredProxyPanic(func() {
+		_ = writeDirectProxyAssetWithStartupTimeout(writer, httptest.NewRequest(http.MethodGet, "/movie.mp4", nil), storedAsset{Kind: "stream"}, directProxyResponse(body), "https://provider.example/movie.mp4", time.Second)
+	})
+	if recovered != http.ErrAbortHandler || writer.status != http.StatusOK || writer.written != 1 {
+		t.Fatalf("post-commit stall panic=%v status=%d bytes=%d", recovered, writer.status, writer.written)
+	}
+	select {
+	case <-requestContext.Done():
+	default:
+		t.Fatal("post-commit timeout did not cancel upstream context")
+	}
+	if !released.Load() {
+		t.Fatal("post-commit timeout did not release admission")
+	}
+}
+
+type firstByteThenBlockingBody struct {
+	closed chan struct{}
+	once   sync.Once
+	read   atomic.Int32
+}
+
+func (body *firstByteThenBlockingBody) Read(destination []byte) (int, error) {
+	if body.read.Add(1) == 1 {
+		destination[0] = 'x'
+		return 1, nil
+	}
+	<-body.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (body *firstByteThenBlockingBody) Close() error {
+	body.once.Do(func() { close(body.closed) })
+	return nil
+}
+
 type gatedMediaProxyBody struct {
 	release chan struct{}
 	read    int
@@ -495,10 +690,11 @@ type gatedMediaProxyBody struct {
 func (body *gatedMediaProxyBody) Read(destination []byte) (int, error) {
 	body.read++
 	if body.read == 1 {
-		return copy(destination, "first"), nil
+		destination[0] = 'f'
+		return 1, nil
 	}
 	<-body.release
-	return copy(destination, "second"), io.EOF
+	return copy(destination, "irstsecond"), io.EOF
 }
 
 func (body *gatedMediaProxyBody) Close() error {
@@ -515,11 +711,11 @@ func TestDirectMediaProxyStillStreamsBeforeUpstreamEOF(t *testing.T) {
 	}()
 	select {
 	case <-writer.wrote:
-		if writer.written != int64(len("first")) {
-			t.Fatalf("media bytes before upstream continuation = %d", writer.written)
+		if writer.written != 1 {
+			t.Fatalf("media bytes before upstream continuation = %d, want first byte only", writer.written)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("media proxy buffered instead of streaming the first chunk")
+		t.Fatal("media proxy buffered instead of streaming the first byte")
 	}
 	close(body.release)
 	if err := <-done; err != nil {
@@ -527,5 +723,47 @@ func TestDirectMediaProxyStillStreamsBeforeUpstreamEOF(t *testing.T) {
 	}
 	if writer.written != int64(len("firstsecond")) || !body.closed.Load() {
 		t.Fatalf("media result bytes=%d closed=%t", writer.written, body.closed.Load())
+	}
+}
+
+func TestDirectMediaProxyPreservesUpstreamErrorBody(t *testing.T) {
+	body := &trackedProxyBody{reader: strings.NewReader("missing")}
+	response := directProxyResponse(body)
+	response.StatusCode = http.StatusNotFound
+	response.ContentLength = int64(len("missing"))
+	response.Header.Set("Content-Length", strconv.Itoa(len("missing")))
+	writer := &countingProxyResponseWriter{}
+
+	if err := writeDirectProxyAsset(writer, httptest.NewRequest(http.MethodGet, "/movie.mp4", nil), storedAsset{Kind: "stream"}, response, "https://provider.example/movie.mp4"); err != nil {
+		t.Fatal(err)
+	}
+	if writer.status != http.StatusNotFound || writer.written != int64(len("missing")) || !body.closed.Load() {
+		t.Fatalf("upstream error status=%d bytes=%d closed=%t", writer.status, writer.written, body.closed.Load())
+	}
+}
+
+func TestDirectMediaProxyCommitsFinalErrorBeforeReadingBody(t *testing.T) {
+	upstream := newBlockingDirectStreamBody()
+	response := directProxyResponse(newReadIdleBody(context.Background(), upstream, func() {}, func() {}, 25*time.Millisecond, 25*time.Millisecond))
+	response.StatusCode = http.StatusServiceUnavailable
+	writer := &countingProxyResponseWriter{headerWrote: make(chan struct{})}
+	done := make(chan any, 1)
+	go func() {
+		done <- recoveredProxyPanic(func() {
+			_ = writeDirectProxyAssetWithStartupTimeout(writer, httptest.NewRequest(http.MethodGet, "/movie.mp4", nil), storedAsset{Kind: "stream"}, response, "https://provider.example/movie.mp4", time.Second)
+		})
+	}()
+	select {
+	case <-writer.headerWrote:
+		if writer.status != http.StatusServiceUnavailable {
+			t.Fatalf("final upstream status = %d", writer.status)
+		}
+	case recovered := <-done:
+		t.Fatalf("final upstream response ended before status commit: panic=%v status=%d", recovered, writer.status)
+	case <-time.After(time.Second):
+		t.Fatal("final upstream status waited for body preflight")
+	}
+	if recovered := <-done; recovered != http.ErrAbortHandler {
+		t.Fatalf("stalled final error panic = %v", recovered)
 	}
 }

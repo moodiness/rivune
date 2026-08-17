@@ -551,7 +551,25 @@ func servePlaybackSources(w http.ResponseWriter, r *http.Request, expiresAt any)
 		notFound(w)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"sources": []map[string]any{{"id": "demo-option-720", "sourceRef": "demo-source-720-" + input.ResourceID, "addonId": "demo-addon", "manifestId": "demo.synthetic", "streamIndex": 0, "name": "Demo 720p", "description": "Synthetic H.264/AAC demonstration stream", "filename": "demo-720p.mp4", "protocol": "http", "container": "mp4", "expiresAt": expiresAt}, {"id": "demo-option-360", "sourceRef": "demo-source-360-" + input.ResourceID, "addonId": "demo-addon", "manifestId": "demo.synthetic", "streamIndex": 1, "name": "Demo 360p", "description": "Synthetic low-bandwidth stream", "filename": "demo-360p.mp4", "protocol": "http", "container": "mp4", "expiresAt": expiresAt}}, "providerErrors": []any{}})
+	writeJSON(w, 200, map[string]any{
+		"sources": []map[string]any{
+			{
+				"id": "demo-option-720", "sourceRef": "demo-source-720-" + input.ResourceID,
+				"stableIdentity": "demo:720:" + input.ResourceID,
+				"addonId":        "demo-addon", "manifestId": "demo.synthetic", "streamIndex": 0,
+				"name": "Demo 720p", "description": "Synthetic H.264/AAC demonstration stream",
+				"filename": "demo-720p.mp4", "protocol": "http", "container": "mp4", "expiresAt": expiresAt,
+			},
+			{
+				"id": "demo-option-360", "sourceRef": "demo-source-360-" + input.ResourceID,
+				"stableIdentity": "demo:360:" + input.ResourceID,
+				"addonId":        "demo-addon", "manifestId": "demo.synthetic", "streamIndex": 1,
+				"name": "Demo 360p", "description": "Synthetic low-bandwidth stream",
+				"filename": "demo-360p.mp4", "protocol": "http", "container": "mp4", "expiresAt": expiresAt,
+			},
+		},
+		"providerErrors": []any{},
+	})
 }
 func servePlaybackPrepare(w http.ResponseWriter, r *http.Request, expiresAt any) {
 	var input playback.PrepareInput

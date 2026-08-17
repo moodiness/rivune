@@ -85,6 +85,7 @@ func TestMediaJobErrorClassIsClosed(t *testing.T) {
 		want string
 	}{
 		{err: ErrMediaCapacityReached, want: "capacity"},
+		{err: ErrMediaSourceTimeout, want: "timeout"},
 		{err: ErrMediaSourceFailed, want: "source"},
 		{err: ErrMediaProcessingFailed, want: "processing"},
 		{err: ErrMediaStorageLimit, want: "storage"},

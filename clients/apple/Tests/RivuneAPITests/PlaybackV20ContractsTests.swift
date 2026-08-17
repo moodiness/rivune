@@ -203,7 +203,7 @@ private final class V20RecordingTransport: HTTPTransport, @unchecked Sendable {
             return response(request, body: Data("{\"markers\":[]}".utf8))
         }
         if path.hasSuffix("/playback/sources") {
-            return response(request, body: Data("{\"sources\":[{\"id\":\"stream-1\",\"sourceRef\":\"opaque-source-reference\",\"addonId\":\"44444444-4444-4444-8444-444444444444\",\"manifestId\":\"manifest\",\"streamIndex\":0,\"name\":\"External\",\"protocol\":\"external\",\"mode\":\"external\",\"expiresAt\":\"2099-01-01T00:00:00Z\"}],\"providerErrors\":[]}".utf8))
+            return response(request, body: Data("{\"sources\":[{\"id\":\"stream-1\",\"sourceRef\":\"opaque-source-reference\",\"stableIdentity\":\"stable-external\",\"addonId\":\"44444444-4444-4444-8444-444444444444\",\"manifestId\":\"manifest\",\"streamIndex\":0,\"name\":\"External\",\"protocol\":\"external\",\"mode\":\"external\",\"expiresAt\":\"2099-01-01T00:00:00Z\"}],\"providerErrors\":[]}".utf8))
         }
         if path.hasSuffix("/playback/prepare") {
             return response(request, body: Data("{\"sourceRef\":\"opaque-source-reference\",\"mode\":\"direct\",\"protocol\":\"http\",\"subtitleCount\":0,\"expiresAt\":\"2099-01-01T00:00:00Z\"}".utf8))

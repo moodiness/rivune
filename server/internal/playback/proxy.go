@@ -30,16 +30,17 @@ import (
 )
 
 const (
-	maximumPlaylistBytes          = 8 * 1024 * 1024
-	maximumPlaylistLines          = 2*maximumPlaylistReferences + 16
-	maximumPlaylistReferences     = 10_000
-	maximumRewrittenPlaylistBytes = 16 * 1024 * 1024
-	maximumDirectStreamsGlobal    = 64
-	maximumDirectStreamsPerOwner  = 4
-	maximumDirectStreamsPerHost   = 16
-	directStreamReadIdleTimeout   = 45 * time.Second
-	maximumTargetCapabilityLength = 12 * 1024
-	directSubtitleAssetKind       = "subtitle"
+	maximumPlaylistBytes           = 8 * 1024 * 1024
+	maximumPlaylistLines           = 2*maximumPlaylistReferences + 16
+	maximumPlaylistReferences      = 10_000
+	maximumRewrittenPlaylistBytes  = 16 * 1024 * 1024
+	maximumDirectStreamsGlobal     = 64
+	maximumDirectStreamsPerOwner   = 4
+	maximumDirectStreamsPerHost    = 16
+	directStreamReadIdleTimeout    = 45 * time.Second
+	directStreamStartupReadTimeout = 15 * time.Second
+	maximumTargetCapabilityLength  = 12 * 1024
+	directSubtitleAssetKind        = "subtitle"
 )
 
 type directStreamAdmission struct {
@@ -74,25 +75,27 @@ func (admission *directStreamAdmission) acquire(owner string, globalLimit, owner
 }
 
 type readIdleBody struct {
-	body         io.ReadCloser
-	cancel       context.CancelFunc
-	release      func()
-	idleTimeout  time.Duration
-	parentDone   <-chan struct{}
-	readStarted  chan struct{}
-	readProgress chan struct{}
-	done         chan struct{}
-	finishOnce   sync.Once
-	closeOnce    sync.Once
-	closeErr     error
-	errMu        sync.Mutex
-	readErr      error
+	body               io.ReadCloser
+	cancel             context.CancelFunc
+	release            func()
+	startupReadTimeout time.Duration
+	idleTimeout        time.Duration
+	parent             context.Context
+	readStarted        chan struct{}
+	readProgress       chan struct{}
+	done               chan struct{}
+	finishOnce         sync.Once
+	closeOnce          sync.Once
+	closeErr           error
+	errMu              sync.Mutex
+	readErr            error
+	terminalErr        error
 }
 
-func newReadIdleBody(parent context.Context, body io.ReadCloser, cancel context.CancelFunc, release func(), idleTimeout time.Duration) io.ReadCloser {
+func newReadIdleBody(parent context.Context, body io.ReadCloser, cancel context.CancelFunc, release func(), startupReadTimeout, idleTimeout time.Duration) io.ReadCloser {
 	stream := &readIdleBody{
-		body: body, cancel: cancel, release: release, idleTimeout: idleTimeout,
-		parentDone: parent.Done(), readStarted: make(chan struct{}), readProgress: make(chan struct{}), done: make(chan struct{}),
+		body: body, cancel: cancel, release: release, startupReadTimeout: startupReadTimeout, idleTimeout: idleTimeout,
+		parent: parent, readStarted: make(chan struct{}), readProgress: make(chan struct{}), done: make(chan struct{}),
 	}
 	go stream.watch()
 	return stream
@@ -114,8 +117,12 @@ func (stream *readIdleBody) Read(destination []byte) (int, error) {
 	if err != nil {
 		stream.errMu.Lock()
 		stream.readErr = err
+		terminalErr := stream.terminalErr
 		stream.errMu.Unlock()
 		stream.finish()
+		if terminalErr != nil {
+			err = terminalErr
+		}
 	}
 	return read, err
 }
@@ -127,23 +134,29 @@ func (stream *readIdleBody) Close() error {
 }
 
 func (stream *readIdleBody) watch() {
-	timer := time.NewTimer(stream.idleTimeout)
+	timer := time.NewTimer(stream.startupReadTimeout)
 	stopReadIdleTimer(timer)
 	defer timer.Stop()
 	armed := false
+	startup := true
 	for {
 		select {
-		case <-stream.parentDone:
-			stream.expire()
+		case <-stream.parent.Done():
+			stream.expire(stream.parent.Err())
 			return
 		case <-stream.done:
 			return
 		case <-stream.readStarted:
 			if !armed {
-				timer.Reset(stream.idleTimeout)
+				timeout := stream.idleTimeout
+				if startup {
+					timeout = stream.startupReadTimeout
+				}
+				timer.Reset(timeout)
 				armed = true
 			}
 		case <-stream.readProgress:
+			startup = false
 			if armed {
 				stopReadIdleTimer(timer)
 				armed = false
@@ -151,11 +164,12 @@ func (stream *readIdleBody) watch() {
 		case <-timer.C:
 			select {
 			case <-stream.readProgress:
+				startup = false
 				armed = false
 				continue
 			default:
 			}
-			stream.expire()
+			stream.expire(ErrMediaSourceTimeout)
 			return
 		}
 	}
@@ -170,7 +184,15 @@ func stopReadIdleTimer(timer *time.Timer) {
 	}
 }
 
-func (stream *readIdleBody) expire() {
+func (stream *readIdleBody) expire(err error) {
+	stream.errMu.Lock()
+	if parentErr := stream.parent.Err(); parentErr != nil {
+		err = parentErr
+	}
+	if stream.terminalErr == nil {
+		stream.terminalErr = err
+	}
+	stream.errMu.Unlock()
 	stream.cancel()
 	_ = stream.closeBody()
 	stream.finish()
@@ -183,10 +205,12 @@ func (stream *readIdleBody) closeBody() error {
 
 func (stream *readIdleBody) terminalReadError() error {
 	stream.errMu.Lock()
-	err := stream.readErr
-	stream.errMu.Unlock()
-	if err != nil {
-		return err
+	defer stream.errMu.Unlock()
+	if stream.terminalErr != nil {
+		return stream.terminalErr
+	}
+	if stream.readErr != nil {
+		return stream.readErr
 	}
 	return io.ErrClosedPipe
 }
@@ -296,9 +320,13 @@ func (service *Service) proxyAsset(w http.ResponseWriter, r *http.Request, sessi
 		return err
 	}
 
-	if asset.Kind != directSubtitleAssetKind && r.Method == http.MethodGet && response.StatusCode >= 200 && response.StatusCode < 300 && isHLSPlaylist(response, upstreamURL) {
+	if asset.Kind != directSubtitleAssetKind && response.StatusCode >= 200 && response.StatusCode < 300 && playbackResponseHasBody(r.Method, response) && isHLSPlaylist(response, upstreamURL) {
 		defer response.Body.Close()
-		body, err := io.ReadAll(io.LimitReader(response.Body, maximumPlaylistBytes+1))
+		prefix, preflightErr := readPlaybackStartupByte(r.Context(), r.Method, response, service.directStartupReadTimeout())
+		if preflightErr != nil {
+			return classifyMediaStartupReadError(preflightErr)
+		}
+		body, err := io.ReadAll(io.LimitReader(io.MultiReader(bytes.NewReader(prefix), response.Body), maximumPlaylistBytes+1))
 		if err != nil {
 			return fmt.Errorf("read HLS playlist: %w", err)
 		}
@@ -335,14 +363,34 @@ func (service *Service) proxyAsset(w http.ResponseWriter, r *http.Request, sessi
 		return writeUpstreamHLSPlaylist(w, response.Header, rewritten)
 	}
 
-	return writeDirectProxyAsset(w, r, *asset, response, upstreamURL)
+	return writeDirectProxyAssetWithStartupTimeout(w, r, *asset, response, upstreamURL, service.directStartupReadTimeout())
+}
+
+func (service *Service) directStartupReadTimeout() time.Duration {
+	timeout := service.directStreamStartupReadTimeout
+	if timeout <= 0 {
+		return directStreamStartupReadTimeout
+	}
+	return timeout
 }
 
 func writeDirectProxyAsset(w http.ResponseWriter, r *http.Request, asset storedAsset, response *http.Response, upstreamURL string) error {
-	defer response.Body.Close()
-	boundedSubtitle := asset.Kind == directSubtitleAssetKind && r.Method != http.MethodHead
+	return writeDirectProxyAssetWithStartupTimeout(w, r, asset, response, upstreamURL, directStreamStartupReadTimeout)
+}
+
+func writeDirectProxyAssetWithStartupTimeout(w http.ResponseWriter, r *http.Request, asset storedAsset, response *http.Response, upstreamURL string, startupTimeout time.Duration) error {
+	if response.Body != nil {
+		defer response.Body.Close()
+	}
+	successful := response.StatusCode >= 200 && response.StatusCode < 300
+	boundedSubtitle := successful && asset.Kind == directSubtitleAssetKind && r.Method != http.MethodHead
 	if boundedSubtitle && proxyResponseTotalLength(response) > maximumConvertedSubtitleBytes {
 		return fmt.Errorf("%w: subtitle exceeds %d bytes", ErrMediaSourceFailed, maximumConvertedSubtitleBytes)
+	}
+	hasBody := playbackResponseHasBody(r.Method, response)
+	prefix, err := readPlaybackStartupByte(r.Context(), r.Method, response, startupTimeout)
+	if err != nil {
+		return classifyMediaStartupReadError(err)
 	}
 
 	copyAssetHeaders(w.Header(), response.Header, true)
@@ -350,13 +398,129 @@ func writeDirectProxyAsset(w http.ResponseWriter, r *http.Request, asset storedA
 		w.Header().Set("Content-Type", contentType)
 	}
 	w.WriteHeader(response.StatusCode)
-	if r.Method == http.MethodHead {
+	if !successful {
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
+	if r.Method == http.MethodHead || !hasBody {
 		return nil
 	}
 	if boundedSubtitle {
-		return copyBoundedSubtitleAsset(w, response.Body)
+		source := io.Reader(bytes.NewReader(prefix))
+		if response.Body != nil {
+			source = io.MultiReader(source, response.Body)
+		}
+		if err = copyBoundedSubtitleAsset(w, source); err != nil {
+			panic(http.ErrAbortHandler)
+		}
+		return nil
 	}
-	return copyPlaybackAsset(w, response.Body)
+	if len(prefix) > 0 {
+		if _, err = w.Write(prefix); err != nil {
+			panic(http.ErrAbortHandler)
+		}
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
+	if response.Body != nil {
+		err = copyPlaybackAsset(w, response.Body)
+	}
+	if err != nil {
+		panic(http.ErrAbortHandler)
+	}
+	return nil
+}
+
+type onceCloseReadCloser struct {
+	io.ReadCloser
+	once sync.Once
+	err  error
+}
+
+func (body *onceCloseReadCloser) Close() error {
+	body.once.Do(func() { body.err = body.ReadCloser.Close() })
+	return body.err
+}
+
+type startupReadResult struct {
+	prefix []byte
+	err    error
+}
+
+func readPlaybackStartupByte(ctx context.Context, method string, response *http.Response, timeout time.Duration) ([]byte, error) {
+	if response == nil || response.StatusCode < 200 || response.StatusCode >= 300 || !playbackResponseHasBody(method, response) {
+		return nil, nil
+	}
+	if _, ok := response.Body.(*onceCloseReadCloser); !ok {
+		response.Body = &onceCloseReadCloser{ReadCloser: response.Body}
+	}
+	if timeout <= 0 {
+		timeout = directStreamStartupReadTimeout
+	}
+	result := make(chan startupReadResult, 1)
+	go func() {
+		var first [1]byte
+		read, err := io.ReadFull(response.Body, first[:])
+		result <- startupReadResult{prefix: first[:read], err: err}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case completed := <-result:
+		if errors.Is(completed.err, io.EOF) {
+			if playbackResponseDeclaresContent(response) {
+				return completed.prefix, io.ErrUnexpectedEOF
+			}
+			return completed.prefix, nil
+		}
+		return completed.prefix, completed.err
+	case <-ctx.Done():
+		_ = response.Body.Close()
+		return nil, ctx.Err()
+	case <-timer.C:
+		if err := ctx.Err(); err != nil {
+			_ = response.Body.Close()
+			return nil, err
+		}
+		_ = response.Body.Close()
+		return nil, ErrMediaSourceTimeout
+	}
+}
+
+func playbackResponseDeclaresContent(response *http.Response) bool {
+	if response.ContentLength > 0 {
+		return true
+	}
+	raw := strings.TrimSpace(response.Header.Get("Content-Length"))
+	length, err := strconv.ParseInt(raw, 10, 64)
+	return err == nil && length > 0
+}
+
+func playbackResponseHasBody(method string, response *http.Response) bool {
+	if response == nil || response.Body == nil || method != http.MethodGet ||
+		response.StatusCode >= 100 && response.StatusCode < 200 ||
+		response.StatusCode == http.StatusNoContent || response.StatusCode == http.StatusResetContent ||
+		response.StatusCode == http.StatusNotModified {
+		return false
+	}
+	if raw := strings.TrimSpace(response.Header.Get("Content-Length")); raw != "" {
+		length, err := strconv.ParseInt(raw, 10, 64)
+		return err != nil || length != 0
+	}
+	return response.ContentLength != 0
+}
+
+func classifyMediaStartupReadError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, ErrMediaSourceTimeout), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return err
+	default:
+		return fmt.Errorf("%w: read media source startup byte: %w", ErrMediaSourceFailed, err)
+	}
 }
 
 func proxyResponseTotalLength(response *http.Response) int64 {
@@ -469,7 +633,7 @@ func (service *Service) fetchAdmittedAsset(ctx context.Context, incoming *http.R
 	if idleTimeout <= 0 {
 		idleTimeout = directStreamReadIdleTimeout
 	}
-	response.Body = newReadIdleBody(ctx, response.Body, cancel, release, idleTimeout)
+	response.Body = newReadIdleBody(ctx, response.Body, cancel, release, idleTimeout, idleTimeout)
 	return response, nil
 }
 

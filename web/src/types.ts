@@ -540,6 +540,7 @@ export type PlaybackSourceOption = {
   protocol: string;
   container?: string;
   expiresAt: string;
+  stableIdentity: string;
 };
 export type PlaybackProviderFailure = { addonId: string; manifestId: string; code: string; message: string };
 export type PlaybackSourceList = { sources: PlaybackSourceOption[]; providerErrors: PlaybackProviderFailure[] };

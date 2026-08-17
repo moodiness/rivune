@@ -403,7 +403,7 @@ test("seekable TS resumes and seeks in place without rebuilding playback", async
     }
     if (request.method() === "POST" && path.endsWith("/playback/sources")) {
       requestCounts.sources += 1;
-      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ sources: [{ id: "seekable-option", sourceRef: "seekable-source", addonId: "fixture-addon", manifestId: "fixture-manifest", streamIndex: 0, name: "Seekable TS", protocol: "http", container: "mkv", expiresAt: "2099-01-01T00:00:00Z" }], providerErrors: [] }) });
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ sources: [{ id: "seekable-option", sourceRef: "seekable-source", stableIdentity: "stable-seekable", addonId: "fixture-addon", manifestId: "fixture-manifest", streamIndex: 0, name: "Seekable TS", protocol: "http", container: "mkv", expiresAt: "2099-01-01T00:00:00Z" }], providerErrors: [] }) });
       return;
     }
     if (request.method() === "POST" && path.endsWith("/playback/prepare")) {
@@ -490,7 +490,7 @@ test("server transcodes remain in the existing web video and HLS source pipeline
     if (request.method() === "POST" && path.endsWith("/playback/sources")) {
       const input: unknown = request.postDataJSON();
       if (input && typeof input === "object" && "capabilities" in input) announcedCapabilities = input.capabilities;
-      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ sources: [{ id: "audio-option", sourceRef: "audio-transcode-source", addonId: "fixture-addon", manifestId: "fixture-manifest", streamIndex: 0, name: "Server audio conversion", protocol: "http", container: "mkv", expiresAt: "2099-01-01T00:00:00Z" }], providerErrors: [] }) });
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ sources: [{ id: "audio-option", sourceRef: "audio-transcode-source", stableIdentity: "stable-audio-transcode", addonId: "fixture-addon", manifestId: "fixture-manifest", streamIndex: 0, name: "Server audio conversion", protocol: "http", container: "mkv", expiresAt: "2099-01-01T00:00:00Z" }], providerErrors: [] }) });
       return;
     }
     if (request.method() === "POST" && path.endsWith("/playback/prepare")) {
@@ -586,7 +586,7 @@ test("external-only sources are disclosed without starting web media", async ({ 
       await route.fulfill({
         contentType: "application/json",
         body: JSON.stringify({
-          sources: [{ id: "external-option", sourceRef: "external-source-reference", addonId: "fixture-addon", manifestId: "fixture-manifest", streamIndex: 0, name: "External 4K source", protocol: "external", expiresAt: new Date(Date.now() + 60_000).toISOString() }],
+          sources: [{ id: "external-option", sourceRef: "external-source-reference", stableIdentity: "stable-external", addonId: "fixture-addon", manifestId: "fixture-manifest", streamIndex: 0, name: "External 4K source", protocol: "external", expiresAt: new Date(Date.now() + 60_000).toISOString() }],
           providerErrors: [],
         }),
       });
@@ -660,6 +660,7 @@ test("multiline stream metadata stays inside its source card and row actions pla
         sources: Array.from({ length: 7 }, (_, index) => ({
           id: `multiline-${index}`,
           sourceRef: `multiline-source-${index}`,
+          stableIdentity: `stable-multiline-${index}`,
           addonId: "fixture-addon",
           manifestId: "fixture-manifest",
           streamIndex: index,
@@ -714,9 +715,9 @@ test("multiline stream metadata stays inside its source card and row actions pla
 test("stream add-on categories filter exact sources without duplicate options", async ({ page, rivune }) => {
   const expiresAt = new Date(Date.now() + 60_000).toISOString();
   let sources = [
-    { id: "alpha-primary", sourceRef: "alpha-primary-ref", addonId: "addon-alpha", manifestId: "alpha-manifest", addonName: "  Fixture Alpha  ", streamIndex: 0, name: "Alpha Primary 1080p", description: "Primary alpha stream", protocol: "http", container: "mp4", expiresAt },
-    { id: "alpha-secondary", sourceRef: "alpha-secondary-ref", addonId: "addon-alpha", manifestId: "alpha-manifest", addonName: "Fixture Alpha", streamIndex: 1, name: "Alpha Secondary 4K", description: "Secondary alpha stream", protocol: "http", container: "mkv", expiresAt },
-    { id: "beta-primary", sourceRef: "beta-primary-ref", addonId: "addon-beta", manifestId: "fixture-beta", streamIndex: 0, name: "Beta Primary 720p", description: "Beta stream", protocol: "http", container: "mp4", expiresAt },
+    { id: "alpha-primary", sourceRef: "alpha-primary-ref", stableIdentity: "stable-alpha-primary", addonId: "addon-alpha", manifestId: "alpha-manifest", addonName: "  Fixture Alpha  ", streamIndex: 0, name: "Alpha Primary 1080p", description: "Primary alpha stream", protocol: "http", container: "mp4", expiresAt },
+    { id: "alpha-secondary", sourceRef: "alpha-secondary-ref", stableIdentity: "stable-alpha-secondary", addonId: "addon-alpha", manifestId: "alpha-manifest", addonName: "Fixture Alpha", streamIndex: 1, name: "Alpha Secondary 4K", description: "Secondary alpha stream", protocol: "http", container: "mkv", expiresAt },
+    { id: "beta-primary", sourceRef: "beta-primary-ref", stableIdentity: "stable-beta-primary", addonId: "addon-beta", manifestId: "fixture-beta", streamIndex: 0, name: "Beta Primary 720p", description: "Beta stream", protocol: "http", container: "mp4", expiresAt },
   ];
   let sourceRequestCount = 0;
   await page.route("**/api/v1/playback/sources", async (route) => {

@@ -590,7 +590,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		playbackService := &fakePlaybackService{
 			sources: playback.SourceList{
 				Sources: []playback.SourceOption{{
-					ID: "source-1", SourceRef: "opaque-contract-source", AddonID: contractAddonID,
+					ID: "source-1", SourceRef: "opaque-contract-source", StableIdentity: "stable-contract-source", AddonID: contractAddonID,
 					ManifestID: "org.rivune.contract", AddonName: "Contract Add-on", StreamIndex: 0, Name: "Contract source",
 					Protocol: "hls", Mode: "direct", Container: "mpegts", ExpiresAt: expiresAt,
 				}},

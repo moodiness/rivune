@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.content.Context
 import android.content.res.Configuration
 import android.os.Bundle
+import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -14,6 +15,9 @@ import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import io.rivune.app.ui.theme.RivuneTheme
+
+private const val DebugPlayerRecoveryPreviewAction = "io.rivune.app.action.DEBUG_PLAYER_RECOVERY_PREVIEW"
 
 class MainActivity : ComponentActivity() {
     private val isTelevision: Boolean by lazy {
@@ -22,6 +26,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private var systemAnimationsEnabled by mutableStateOf(true)
+    private var showPlayerRecoveryPreview = false
 
     private val viewModel: RivuneViewModel by viewModels {
         RivuneViewModel.factory(this, isTelevision)
@@ -39,35 +44,53 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
         val updates = (application as RivuneApplication).appUpdates
+        showPlayerRecoveryPreview = BuildConfig.DEBUG && intent.action == DebugPlayerRecoveryPreviewAction
         setContent {
-            RivuneRoot(viewModel, updates, this, systemAnimationsEnabled)
+            if (showPlayerRecoveryPreview) {
+                RivuneTheme {
+                    BackHandler(onBack = ::finish)
+                    PlayerRecoveryOverlayContent(
+                        isTv = isTelevision,
+                        failure = PlayerEngineFailure(positionMs = 0L, fallbackEligible = false),
+                        onRetry = ::finish,
+                        onStartOver = ::finish,
+                        onChooseSource = ::finish,
+                    )
+                }
+            } else {
+                RivuneRoot(viewModel, updates, this, systemAnimationsEnabled)
+            }
         }
-        updates.checkAutomatically()
+        if (!showPlayerRecoveryPreview) updates.checkAutomatically()
     }
 
     override fun onResume() {
         super.onResume()
         systemAnimationsEnabled = ValueAnimator.areAnimatorsEnabled()
-        viewModel.refreshExternalPlaybackSupport()
-        val updates = (application as RivuneApplication).appUpdates
-        updates.activityResumed(this)
-        updates.resumeAfterPermission(this)
+        if (!showPlayerRecoveryPreview) {
+            viewModel.refreshExternalPlaybackSupport()
+            val updates = (application as RivuneApplication).appUpdates
+            updates.activityResumed(this)
+            updates.resumeAfterPermission(this)
+        }
     }
 
     override fun onPause() {
-        (application as RivuneApplication).appUpdates.activityPaused(this)
+        if (!showPlayerRecoveryPreview) {
+            (application as RivuneApplication).appUpdates.activityPaused(this)
+        }
         super.onPause()
     }
 
     override fun onDestroy() {
         val terminal = isFinishing
-        if (terminal) {
+        if (terminal && !showPlayerRecoveryPreview) {
             viewModel.beginTerminalOwnerDestruction()
         }
         try {
             super.onDestroy()
         } finally {
-            if (terminal) {
+            if (terminal && !showPlayerRecoveryPreview) {
                 viewModel.stopPlaybackForTerminalOwner()
             }
         }

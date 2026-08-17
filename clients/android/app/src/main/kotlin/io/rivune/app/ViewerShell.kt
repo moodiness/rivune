@@ -8,6 +8,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.scrollBy
@@ -139,6 +140,7 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -174,6 +176,7 @@ import io.rivune.app.ui.components.RivuneSecondaryButton
 import io.rivune.app.ui.components.RivuneSkeleton
 import io.rivune.app.ui.components.RivuneSectionHeading
 import io.rivune.app.ui.components.RivuneTextButton
+import io.rivune.app.ui.components.RivuneTestTags
 import io.rivune.app.ui.components.RivuneTextField
 import io.rivune.app.ui.theme.LocalRivuneMotionPolicy
 import io.rivune.app.ui.theme.RivuneBreakpoints
@@ -315,6 +318,7 @@ internal fun ViewerShell(
     onVideoAspect: (VideoAspectPreference) -> Unit,
     onWifiQuality: (NetworkQualityPreference) -> Unit,
     onMobileQuality: (NetworkQualityPreference) -> Unit,
+    onAutomaticallyShowStreams: (Boolean) -> Unit,
     onAutoSkipIntro: (Boolean) -> Unit,
     onAutoSkipRecap: (Boolean) -> Unit,
     onAutoSkipOutro: (Boolean) -> Unit,
@@ -327,16 +331,25 @@ internal fun ViewerShell(
     val openedCollection = state.openedCollectionId?.let { id -> state.collections.firstOrNull { it.id == id } }
     when {
         viewer.player != null -> {
+            val playerFailure = viewer.playerFailure
+                ?.takeIf { it.matches(viewer.player) }
+                ?.failure
             BackHandler(onBack = viewModel::closePlayer)
-            if (viewer.player.externalPlayer == null) {
+            if (viewer.player.externalPlayer == null || playerFailure != null) {
                 RivunePlayerScreen(
                     presentation = viewer.player,
+                    failure = playerFailure,
                     isTv = state.isTv,
                     onProgress = viewModel::reportPlayerProgress,
                     onPlaybackEnded = viewModel::playerPlaybackEnded,
                     onNext = viewModel::playNextEpisode,
                     onClose = viewModel::closePlayer,
-                    onPlaybackError = viewModel::playerFailed,
+                    onPlaybackError = { failure ->
+                        viewModel.playerFailed(viewer.player.key, viewer.player.sessionId, failure)
+                    },
+                    onRetry = viewModel::retryFailedPlayer,
+                    onStartOver = viewModel::restartFailedPlayer,
+                    onChooseSource = viewModel::chooseAnotherPlaybackSource,
                     frameRateMatching = appPreferences.frameRateMatching,
                     videoAspect = appPreferences.videoAspect,
                     autoSkipIntro = appPreferences.autoSkipIntro,
@@ -349,7 +362,13 @@ internal fun ViewerShell(
                     isTv = state.isTv,
                     onResult = viewModel::externalPlaybackFinished,
                     onClose = viewModel::closePlayer,
-                    onLaunchFailure = { viewModel.playerFailed(PlayerEngineFailure(0L, fallbackEligible = false)) },
+                    onLaunchFailure = {
+                        viewModel.playerFailed(
+                            viewer.player.key,
+                            viewer.player.sessionId,
+                            PlayerEngineFailure(0L, fallbackEligible = false),
+                        )
+                    },
                 )
             }
         }
@@ -378,6 +397,7 @@ internal fun ViewerShell(
                 onVideoAspect = onVideoAspect,
                 onWifiQuality = onWifiQuality,
                 onMobileQuality = onMobileQuality,
+                onAutomaticallyShowStreams = onAutomaticallyShowStreams,
                 onAutoSkipIntro = onAutoSkipIntro,
                 onAutoSkipRecap = onAutoSkipRecap,
                 onAutoSkipOutro = onAutoSkipOutro,
@@ -395,10 +415,11 @@ internal fun ViewerShell(
             BackHandler(onBack = viewModel::backViewer)
             DetailScreen(
                 state = viewer,
+                automaticallyShowStreams = appPreferences.automaticallyShowStreams,
                 isTv = state.isTv,
                 artworkUrl = viewModel::artworkUrl,
                 onOpenExternalUrl = onOpenExternalUrl,
-                onBack = viewModel::backViewer,
+                onBack = viewModel::backDetail,
                 onSeason = viewModel::selectSeason,
                 onEpisode = viewModel::openEpisode,
                 onPlay = { viewModel.playMedia() },
@@ -704,6 +725,7 @@ private fun ProfilePreferencesScreen(
     onVideoAspect: (VideoAspectPreference) -> Unit,
     onWifiQuality: (NetworkQualityPreference) -> Unit,
     onMobileQuality: (NetworkQualityPreference) -> Unit,
+    onAutomaticallyShowStreams: (Boolean) -> Unit,
     onAutoSkipIntro: (Boolean) -> Unit,
     onAutoSkipRecap: (Boolean) -> Unit,
     onAutoSkipOutro: (Boolean) -> Unit,
@@ -848,6 +870,15 @@ private fun ProfilePreferencesScreen(
                                     isTv = isTv,
                                     onSelect = onPreferredPlayer,
                                     onSelectEmbedded = onPreferredEmbeddedPlayer,
+                                )
+                            }
+                            item {
+                                DeviceBooleanPreferenceCard(
+                                    title = stringResource(R.string.preferences_auto_show_streams),
+                                    description = stringResource(R.string.preferences_auto_show_streams_body),
+                                    value = deviceSettings.automaticallyShowStreams,
+                                    isTv = isTv,
+                                    onSelect = onAutomaticallyShowStreams,
                                 )
                             }
                             item {
@@ -4139,6 +4170,7 @@ internal fun displayableSeasons(seasons: List<SeasonSummary>): List<SeasonSummar
 @Composable
 private fun DetailScreen(
     state: ViewerState,
+    automaticallyShowStreams: Boolean,
     isTv: Boolean,
     artworkUrl: (String?) -> String?,
     onOpenExternalUrl: (String) -> Unit,
@@ -4171,7 +4203,7 @@ private fun DetailScreen(
     val backdrop = artworkUrl(
         movie?.backdropUrl ?: season?.backdropUrl ?: series?.backdropUrl ?: detail.target.backgroundUrl ?: detail.target.posterUrl,
     )
-    val cast = movie?.cast ?: series?.cast.orEmpty()
+    val cast = detail.cast
     val orderedSeasons = remember(series?.seasons) { displayableSeasons(series?.seasons.orEmpty()) }
     val trailer = if (season == null) detail.trailers.firstOrNull()
     else detail.seasonTrailers.firstOrNull() ?: detail.trailers.firstOrNull()
@@ -4182,13 +4214,13 @@ private fun DetailScreen(
     val backFocus = remember { FocusRequester() }
     val playFocus = remember { FocusRequester() }
     val detailListState = rememberLazyListState()
-    val hasPlayAction = detail.target.mediaType != "series"
-    val showStatus = (state.sourcePicker == null && state.inlineFailure != null) ||
+    val hasPlayAction = detail.target.mediaType != "series" && !automaticallyShowStreams
+    val showStatus = (!state.sourcePickerVisible && state.inlineFailure != null) ||
         state.loading == ViewerLoading.DETAIL || state.loading == ViewerLoading.SEASON ||
         state.loading == ViewerLoading.ACTION
     val backLabel = stringResource(R.string.viewer_back)
-    LaunchedEffect(isTv, detail.target.id, season?.id, state.inlineFailure, state.sourcePicker) {
-        if (isTv && state.sourcePicker == null) {
+    LaunchedEffect(isTv, detail.target.id, season?.id, state.inlineFailure, state.sourcePickerVisible) {
+        if (isTv && !state.sourcePickerVisible) {
             if (hasPlayAction && state.inlineFailure == null) playFocus.requestFocus() else backFocus.requestFocus()
             withFrameNanos { }
         }
@@ -4238,8 +4270,10 @@ private fun DetailScreen(
                             isTv = isTv,
                             isWide = wideHero,
                             actionsEnabled = state.loading == null,
+                            showPlayAction = hasPlayAction,
                             actionLoading = state.loading == ViewerLoading.ACTION,
                             onPlay = onPlay,
+                            playEnabled = state.sourcePicker != null || state.loading != ViewerLoading.SOURCES,
                             onToggleLibrary = onToggleLibrary,
                             onToggleWatched = onToggleWatched,
                             onTrailer = onTrailer,
@@ -4430,7 +4464,7 @@ private fun DetailScreen(
         )
     }
     AnimatedVisibility(
-        visible = state.sourcePicker != null,
+        visible = state.sourcePickerVisible,
         modifier = Modifier.fillMaxSize(),
         enter = fadeIn(
             animationSpec = motionPolicy.finiteAnimationSpec(RivuneMotion.fast),
@@ -4440,13 +4474,14 @@ private fun DetailScreen(
         ),
     ) {
         state.sourcePicker?.let { picker ->
-            SourcePickerPanel(
+            SourcePickerOverlay(
                 picker = picker,
                 isTv = isTv,
                 externalPlayers = externalPlayers,
                 loading = state.loading == ViewerLoading.SOURCES || state.loading == ViewerLoading.PLAYER,
+                enabled = state.loading == null,
                 failure = state.inlineFailure,
-                onDismiss = onDismissSources,
+                onBack = if (automaticallyShowStreams) onBack else onDismissSources,
                 onRefresh = onRefreshSources,
                 onSelectSource = onSelectSource,
                 onChooseTarget = onChooseTarget,
@@ -4467,6 +4502,8 @@ private fun DetailSummary(
     overview: String?,
     isTv: Boolean,
     isWide: Boolean,
+    showPlayAction: Boolean,
+    playEnabled: Boolean,
     actionsEnabled: Boolean,
     actionLoading: Boolean,
     onPlay: () -> Unit,
@@ -4583,27 +4620,29 @@ private fun DetailSummary(
             horizontalArrangement = Arrangement.spacedBy(if (isTv) RivuneSpacing.sm else RivuneSpacing.xs),
             verticalArrangement = Arrangement.spacedBy(if (isTv) RivuneSpacing.sm else RivuneSpacing.xs),
         ) {
-            if (detail.target.mediaType != "series") {
+            if (showPlayAction) {
                 DetailLabeledAction(
                     label = stringResource(if (resumeProgress != null) R.string.viewer_resume else R.string.viewer_play),
                     icon = Icons.Rounded.PlayArrow,
                     onClick = onPlay,
-                    enabled = actionsEnabled,
+                    enabled = actionsEnabled && playEnabled,
                     isTv = isTv,
                     modifier = playModifier,
                     progressDescription = resumeProgressDescription,
                 )
             }
             onTrailer?.let {
-                DetailTrailerAction(
+                DetailLabeledAction(
                     label = stringResource(R.string.viewer_trailer),
+                    icon = Icons.Rounded.Theaters,
                     onClick = it,
                     enabled = actionsEnabled,
                     isTv = isTv,
+                    progressDescription = null,
                 )
             }
             if (detail.target.mediaType != "series" || season != null) {
-                DetailIconAction(
+                DetailLabeledAction(
                     icon = if (watched) Icons.Rounded.Visibility else Icons.Rounded.VisibilityOff,
                     label = stringResource(if (watched) R.string.viewer_mark_unwatched else R.string.viewer_mark_watched),
                     selected = watched,
@@ -4611,10 +4650,11 @@ private fun DetailSummary(
                     loading = actionLoading,
                     isTv = isTv,
                     onClick = onToggleWatched,
+                    progressDescription = null,
                 )
             }
             if (detail.target.mediaType != "episode") {
-                DetailIconAction(
+                DetailLabeledAction(
                     icon = if (detail.inLibrary) Icons.Rounded.Check else Icons.Rounded.LibraryAdd,
                     label = stringResource(if (detail.inLibrary) R.string.viewer_in_library else R.string.viewer_add_library),
                     selected = detail.inLibrary,
@@ -4622,6 +4662,7 @@ private fun DetailSummary(
                     loading = actionLoading,
                     isTv = isTv,
                     onClick = onToggleLibrary,
+                    progressDescription = null,
                 )
             }
         }
@@ -4728,111 +4769,35 @@ private fun DetailLabeledAction(
     onClick: () -> Unit,
     enabled: Boolean,
     isTv: Boolean,
+    selected: Boolean = false,
+    loading: Boolean = false,
     progressDescription: String?,
     modifier: Modifier = Modifier,
 ) {
     RivuneFocusSurface(
         onClick = onClick,
-        enabled = enabled,
+        enabled = enabled && !loading,
         isTv = isTv,
+        selected = selected,
         idleColor = Color.Transparent,
         focusedColor = Color.Transparent,
         pressedColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
         showSelectionBorder = false,
+        selectedColor = Color.Transparent,
         shape = RivuneShapes.pill,
         modifier = modifier
             .heightIn(min = if (isTv) ViewerTvTarget else ViewerPhoneTarget)
-            .then(
-                if (progressDescription != null) Modifier.semantics {
-                    stateDescription = progressDescription
-                } else Modifier,
-            ),
+            .semantics {
+                this.selected = selected
+                if (loading) stateDescription = label
+                else if (progressDescription != null) stateDescription = progressDescription
+            },
     ) {
         Row(
             modifier = Modifier.padding(horizontal = if (isTv) RivuneSpacing.md else RivuneSpacing.sm),
             horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.xs),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                modifier = Modifier.size(RivuneDimensions.iconMedium),
-                tint = MaterialTheme.colorScheme.onSurface,
-            )
-            Text(
-                text = label,
-                color = MaterialTheme.colorScheme.onSurface,
-                style = if (isTv) MaterialTheme.typography.titleMedium else MaterialTheme.typography.labelLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-    }
-}
-
-@Composable
-private fun DetailTrailerAction(
-    label: String,
-    onClick: () -> Unit,
-    enabled: Boolean,
-    isTv: Boolean,
-) {
-    val target = if (isTv) ViewerTvTarget else ViewerPhoneTarget
-    RivuneFocusSurface(
-        onClick = onClick,
-        enabled = enabled,
-        isTv = isTv,
-        idleColor = Color.Transparent,
-        focusedColor = Color.Transparent,
-        pressedColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
-        showSelectionBorder = false,
-        shape = CircleShape,
-        modifier = Modifier
-            .size(target)
-            .semantics { contentDescription = label },
-    ) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Icon(
-                imageVector = Icons.Rounded.Theaters,
-                contentDescription = null,
-                modifier = Modifier.size(RivuneDimensions.iconMedium),
-                tint = MaterialTheme.colorScheme.onSurface,
-            )
-        }
-    }
-}
-
-@Composable
-private fun DetailIconAction(
-    icon: ImageVector,
-    label: String,
-    selected: Boolean,
-    enabled: Boolean,
-    loading: Boolean,
-    isTv: Boolean,
-    onClick: () -> Unit,
-) {
-    val target = if (isTv) ViewerTvTarget else ViewerPhoneTarget
-    RivuneFocusSurface(
-        onClick = onClick,
-        enabled = enabled && !loading,
-        selected = selected,
-        isTv = isTv,
-        idleColor = Color.Transparent,
-        selectedColor = Color.Transparent,
-        focusedColor = Color.Transparent,
-        pressedColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
-        showSelectionBorder = false,
-        shape = CircleShape,
-        modifier = Modifier
-            .size(target)
-            .semantics {
-                contentDescription = label
-                this.selected = selected
-                if (loading) stateDescription = label
-            },
-    ) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             if (loading) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(RivuneDimensions.iconMedium),
@@ -4847,18 +4812,26 @@ private fun DetailIconAction(
                     tint = MaterialTheme.colorScheme.onSurface,
                 )
             }
+            Text(
+                text = label,
+                color = MaterialTheme.colorScheme.onSurface,
+                style = if (isTv) MaterialTheme.typography.titleMedium else MaterialTheme.typography.labelLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
 
 @Composable
-private fun SourcePickerPanel(
+internal fun SourcePickerOverlay(
     picker: SourcePickerState,
     isTv: Boolean,
     externalPlayers: List<ExternalPlayerApp>,
+    enabled: Boolean,
     loading: Boolean,
     failure: UiFailure?,
-    onDismiss: () -> Unit,
+    onBack: () -> Unit,
     onRefresh: () -> Unit,
     onSelectSource: (PlaybackSourceOption) -> Unit,
     onChooseTarget: (PlaybackTargetSelection) -> Unit,
@@ -4872,45 +4845,43 @@ private fun SourcePickerPanel(
             ExternalPlaybackSupport(externalPlayers).playersFor(source.mode, source.protocol, source.container)
         }.orEmpty()
     }
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
+    BackHandler(enabled = targetSource == null, onBack = onBack)
+    BoxWithConstraints(
+        modifier = modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .imePadding(),
     ) {
-        BoxWithConstraints(
-            modifier = modifier
-                .statusBarsPadding()
-                .navigationBarsPadding()
-                .imePadding(),
-        ) {
-            val compact = !isTv && maxWidth < RivuneBreakpoints.medium
-            val horizontalMargin = if (compact) RivuneSpacing.sm else RivuneSpacing.huge
-            val verticalMargin = if (compact) RivuneSpacing.sm else RivuneSpacing.xxl
-            val availableWidth = maxWidth - horizontalMargin * 2
-            val availableHeight = maxHeight - verticalMargin * 2
-            val railWidth = if (compact) {
-                availableWidth
-            } else {
-                (availableWidth * ViewerSourceRailWidthFraction)
-                    .coerceAtLeast(ViewerSourceRailMinWidth)
-                    .coerceAtMost(ViewerSourceRailMaxWidth)
-                    .coerceAtMost(availableWidth)
-            }
-            val railHeight = availableHeight.coerceAtMost(ViewerSourceRailMaxHeight)
-            SourcePickerContent(
-                picker = picker,
-                isTv = isTv,
-                loading = loading,
-                failure = failure,
-                firstSourceFocus = firstSourceFocus,
-                onRefresh = onRefresh,
-                onSelect = onSelectSource,
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .padding(end = horizontalMargin)
-                    .width(railWidth)
-                    .height(railHeight),
-            )
+        val compact = !isTv && maxWidth < RivuneBreakpoints.medium
+        val horizontalMargin = if (compact) RivuneSpacing.sm else RivuneSpacing.huge
+        val verticalMargin = if (compact) RivuneSpacing.sm else RivuneSpacing.xxl
+        val availableWidth = maxWidth - horizontalMargin * 2
+        val availableHeight = maxHeight - verticalMargin * 2
+        val railWidth = if (compact) {
+            availableWidth
+        } else {
+            (availableWidth * ViewerSourceRailWidthFraction)
+                .coerceAtLeast(ViewerSourceRailMinWidth)
+                .coerceAtMost(ViewerSourceRailMaxWidth)
+                .coerceAtMost(availableWidth)
         }
+        val railHeight = availableHeight.coerceAtMost(ViewerSourceRailMaxHeight)
+        SourcePickerContent(
+            picker = picker,
+            isTv = isTv,
+            enabled = enabled,
+            loading = loading,
+            failure = failure,
+            firstSourceFocus = firstSourceFocus,
+            onRefresh = onRefresh,
+            onSelect = onSelectSource,
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = horizontalMargin)
+                .width(railWidth)
+                .height(railHeight),
+        )
     }
     targetSource?.let { source ->
         PlaybackTargetDialog(
@@ -4927,6 +4898,7 @@ private fun SourcePickerPanel(
 private fun SourcePickerContent(
     picker: SourcePickerState,
     isTv: Boolean,
+    enabled: Boolean,
     loading: Boolean,
     failure: UiFailure?,
     firstSourceFocus: FocusRequester,
@@ -4978,7 +4950,7 @@ private fun SourcePickerContent(
                         label = stringResource(R.string.viewer_library_all),
                         selected = selectedAddonId == null,
                         isTv = isTv,
-                        enabled = !loading,
+                        enabled = enabled && !loading,
                         onClick = { selectedAddonId = null },
                     )
                 }
@@ -4987,12 +4959,13 @@ private fun SourcePickerContent(
                         label = label,
                         selected = selectedAddonId == addonId,
                         isTv = isTv,
-                        enabled = !loading,
+                        enabled = enabled && !loading,
                         onClick = { selectedAddonId = addonId },
                     )
                 }
             }
             SourceRefreshAction(
+                enabled = enabled && !loading,
                 loading = loading,
                 isTv = isTv,
                 onClick = onRefresh,
@@ -5019,15 +4992,17 @@ private fun SourcePickerContent(
             Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.fillMaxSize().padding(end = RivuneSpacing.sm),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(end = RivuneSpacing.sm)
+                        .testTag(RivuneTestTags.SourcePickerList),
                     contentPadding = PaddingValues(vertical = RivuneSpacing.xs),
                     verticalArrangement = Arrangement.spacedBy(RivuneSpacing.xs),
                 ) {
                     items(filteredOptions, key = PlaybackSourceOption::id) { option ->
                         RivuneFocusSurface(
                             onClick = { onSelect(option) },
-                            isTv = isTv,
-                            enabled = !loading,
+                            enabled = enabled && !loading,
                             idleColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f),
                             selectedColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.82f),
                             focusedColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.88f),
@@ -5147,6 +5122,7 @@ internal fun playbackSourceFooter(option: PlaybackSourceOption): String = buildS
 
 @Composable
 private fun SourceRefreshAction(
+    enabled: Boolean,
     loading: Boolean,
     isTv: Boolean,
     onClick: () -> Unit,
@@ -5157,7 +5133,7 @@ private fun SourceRefreshAction(
     val target = if (isTv) ViewerTvTarget else ViewerPhoneTarget
     RivuneFocusSurface(
         onClick = onClick,
-        enabled = !loading,
+        enabled = enabled,
         isTv = isTv,
         idleColor = Color.Transparent,
         focusedColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.88f),

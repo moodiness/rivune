@@ -811,15 +811,15 @@ func TestLateSourceRevocationBlocksPreparedPlaybackAtFinalBoundary(t *testing.T)
 				sourceValidation: func(string) error { return nil },
 			}
 			processor := &countingProbeProcessor{inspection: MediaInspection{
-				Container: "mp4", VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264", Width: 1280, Height: 720}},
+				Container: "mkv", VideoTracks: []MediaTrack{{Index: 0, Type: "video", Codec: "h264", Width: 1280, Height: 720}},
 				AudioTracks: []MediaTrack{{Index: 1, Type: "audio", Codec: "aac", Channels: 2}},
 			}}
 			references := newSourceReferenceStore(func() time.Time { return now })
 			reference, err := references.put(principal, sourceReference{
 				MediaType: "movie", AddonMediaType: "movie", ResourceID: "resource-id",
-				Source:       Source{ID: "source-id", AddonID: "addon-id", ManifestID: "manifest-id", Mode: "direct", URL: "https://media.example/movie.mp4", Protocol: "http", Container: "mp4", Compatible: true},
-				Asset:        &storedAsset{ID: "source-id", Kind: "stream", URL: "https://media.example/movie.mp4", Container: "mp4"},
-				Capabilities: Capabilities{StreamingProtocols: []string{"http"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"}},
+				Source:       Source{ID: "source-id", AddonID: "addon-id", ManifestID: "manifest-id", Name: "First provider text", Title: "First provider title", Filename: "first-provider-filename-secret", StreamIndex: 0, Mode: "direct", URL: "https://media.example/first.mkv?signature=first-provider-url-secret", Protocol: "http", Container: "mkv", Compatible: true},
+				Asset:        &storedAsset{ID: "source-id", Kind: "stream", URL: "https://media.example/first.mkv?signature=first-provider-url-secret", Container: "mkv"},
+				Capabilities: Capabilities{StreamingProtocols: []string{"http"}, Containers: []string{"mkv"}, VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"}},
 			})
 			if err != nil {
 				t.Fatal(err)

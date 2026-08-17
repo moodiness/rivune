@@ -352,6 +352,7 @@ test("custom metadata preserves opaque playback while watchstate uses resolved U
         sources: [{
           id: "fixture-custom-source",
           sourceRef: "fixture-custom-source",
+          stableIdentity: "stable-custom-source",
           addonId: "fixture-stream-addon",
           manifestId: "fixture-stream-addon",
           streamIndex: 0,

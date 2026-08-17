@@ -173,6 +173,8 @@
     <string name="preferences_source_device">Device policy</string>
     <string name="viewer_prefer_direct_play">Prefer direct play</string>
     <string name="viewer_prefer_direct_play_body">Prefer an unchanged stream when the device can play it.</string>
+    <string name="preferences_auto_show_streams">Show streams automatically</string>
+    <string name="preferences_auto_show_streams_body">Load streams in the background when opening playable media, and show the source list immediately.</string>
     <string name="viewer_autoplay_next_episode">Play next episode automatically</string>
     <string name="viewer_autoplay_next_episode_body">Start the next available episode when playback reaches its natural end.</string>
     <string name="preferences_skip_intro">Intro markers</string>
@@ -333,6 +335,12 @@
     <string name="player_skip_intro">Skip intro</string>
     <string name="player_skip_recap">Skip recap</string>
     <string name="player_skip_outro">Skip outro</string>
+    <string name="player_recovery_title">Playback stopped</string>
+    <string name="player_recovery_body">This source stopped unexpectedly.</string>
+    <string name="player_recovery_startup_body">Rivune couldn’t start this source.</string>
+    <string name="player_recovery_retry">Retry</string>
+    <string name="player_recovery_start_over">Start over</string>
+    <string name="player_recovery_choose_source">Choose another source</string>
     <string name="pin_title">Enter profile PIN</string>
     <string name="pin_body">Unlock %1$s to continue.</string>
     <string name="pin_label">PIN</string>

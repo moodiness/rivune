@@ -313,8 +313,8 @@ test("Search merges exact custom results from equivalent configurations", async 
       contentType: "application/json",
       body: JSON.stringify({
         sources: [
-          { id: "provider-one", sourceRef: "provider-one-ref", addonId: "shared-primary", manifestId: "fixture.shared", addonName: "Fixture Provider One", streamIndex: 0, name: "Option One", protocol: "http", container: "mp4", expiresAt: "2099-01-01T00:00:00Z" },
-          { id: "provider-two", sourceRef: "provider-two-ref", addonId: "shared-secondary", manifestId: "fixture.shared", addonName: "Fixture Provider Two", streamIndex: 0, name: "Option Two", protocol: "http", container: "mp4", expiresAt: "2099-01-01T00:00:00Z" },
+          { id: "provider-one", sourceRef: "provider-one-ref", stableIdentity: "stable-provider-one", addonId: "shared-primary", manifestId: "fixture.shared", addonName: "Fixture Provider One", streamIndex: 0, name: "Option One", protocol: "http", container: "mp4", expiresAt: "2099-01-01T00:00:00Z" },
+          { id: "provider-two", sourceRef: "provider-two-ref", stableIdentity: "stable-provider-two", addonId: "shared-secondary", manifestId: "fixture.shared", addonName: "Fixture Provider Two", streamIndex: 0, name: "Option Two", protocol: "http", container: "mp4", expiresAt: "2099-01-01T00:00:00Z" },
         ],
         providerErrors: [],
       }),

@@ -105,20 +105,59 @@ internal object DevicePlaybackCapabilities {
     }
 }
 
-internal val MpvPlaybackCapabilities = PlaybackCapabilities(
-    streamingProtocols = listOf("http", "hls", "dash"),
-    containers = listOf("mp4", "mkv", "matroska", "avi", "mov", "flv", "ts", "m2ts", "mpegts", "webm", "ogv", "ogg", "3gp", "mpeg"),
-    videoCodecs = listOf("h264", "hevc", "h265", "mpeg4", "divx", "xvid", "wmv", "vc1", "vp8", "vp9", "av1", "mpeg", "mpeg2video", "theora"),
-    audioCodecs = listOf("aac", "mp3", "mp2", "flac", "opus", "vorbis", "ac3", "eac3", "dts", "truehd", "alac", "wma"),
-    hdrFormats = listOf("sdr", "hdr10", "hlg", "dolby_vision"),
-    processingModes = listOf(
-        PlaybackProcessingMode.REMUX,
-        PlaybackProcessingMode.TRANSCODE_AUDIO,
-        PlaybackProcessingMode.TRANSCODE,
-    ),
-    maximumAudioChannels = 8,
-    subtitleModes = listOf(PlaybackSubtitleMode.EXTERNAL, PlaybackSubtitleMode.BURN),
+private val MPV_CONTAINERS = listOf(
+    "mp4", "mkv", "matroska", "avi", "mov", "flv", "ts", "m2ts", "mpegts", "webm", "ogv", "ogg", "3gp", "mpeg",
 )
+
+private val MPV_AUDIO_CODECS = listOf(
+    "aac", "mp3", "mp2", "flac", "opus", "vorbis", "ac3", "eac3", "dts", "truehd", "alac", "wma",
+)
+
+private val MPV_PROCESSING_MODES = listOf(
+    PlaybackProcessingMode.REMUX,
+    PlaybackProcessingMode.TRANSCODE_AUDIO,
+    PlaybackProcessingMode.TRANSCODE,
+)
+
+internal fun mpvPlaybackCapabilities(deviceCapabilities: PlaybackCapabilities): PlaybackCapabilities {
+    val deviceVideoCodecs = deviceCapabilities.videoCodecs.orEmpty().map(::normalizedVideoCodec).toSet()
+    val mediaProfiles = deviceCapabilities.mediaProfiles?.mapNotNull { profile ->
+        if (profile.container !in MPV_CONTAINERS || normalizedVideoCodec(profile.videoCodec) !in deviceVideoCodecs) {
+            return@mapNotNull null
+        }
+        profile.copy(audioCodec = mpvProfileAudioCodecs(profile.container).joinToString(","))
+    }
+    return deviceCapabilities.copy(
+        streamingProtocols = listOf("http", "hls", "dash"),
+        containers = MPV_CONTAINERS,
+        audioCodecs = MPV_AUDIO_CODECS,
+        processingModes = MPV_PROCESSING_MODES,
+        maximumAudioChannels = 8,
+        subtitleModes = listOf(PlaybackSubtitleMode.EXTERNAL, PlaybackSubtitleMode.BURN),
+        mediaProfiles = mediaProfiles,
+    )
+}
+
+internal val MpvPlaybackCapabilities: PlaybackCapabilities by lazy(LazyThreadSafetyMode.PUBLICATION) {
+    mpvPlaybackCapabilities(DevicePlaybackCapabilities.value)
+}
+
+private fun mpvProfileAudioCodecs(container: String): List<String> {
+    val demuxedCodecs = when (container) {
+        "mp4" -> setOf("aac", "mp3", "flac", "ac3", "eac3", "dts", "alac")
+        "mkv", "matroska" -> MPV_AUDIO_CODECS.toSet()
+        "webm" -> setOf("opus", "vorbis")
+        "mpegts" -> setOf("aac", "mp3", "mp2", "ac3", "eac3", "dts")
+        else -> emptySet()
+    }
+    return MPV_AUDIO_CODECS.filter(demuxedCodecs::contains)
+}
+
+private fun normalizedVideoCodec(codec: String): String = when (codec.lowercase()) {
+    "avc" -> "h264"
+    "h265" -> "hevc"
+    else -> codec.lowercase()
+}
 
 internal fun playbackCapabilitiesFor(
     preferredPlayer: PreferredPlayer,

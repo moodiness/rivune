@@ -113,6 +113,8 @@ func (a *API) preparePlayback(w http.ResponseWriter, r *http.Request, principal 
 		writeError(w, http.StatusUnprocessableEntity, "playback_source_unsupported", "This source needs video or audio conversion that browser playback does not permit; choose another source or an external player")
 	case errors.Is(err, playback.ErrNoPlayableSource):
 		writeError(w, http.StatusNotFound, "playback_source_not_found", "The selected source is not compatible with this device")
+	case errors.Is(err, playback.ErrMediaSourceTimeout):
+		writeError(w, http.StatusGatewayTimeout, "playback_source_timeout", "The selected media source timed out before playback could start")
 	case errors.Is(err, playback.ErrMediaSourceFailed):
 		writeError(w, http.StatusBadGateway, "playback_source_failed", "The selected media source stopped responding")
 	case errors.Is(err, playback.ErrMediaCapacityReached):
@@ -165,6 +167,8 @@ func (a *API) resolvePlayback(w http.ResponseWriter, r *http.Request, principal 
 		writeError(w, http.StatusNotFound, "playback_source_not_found", "The selected source is not compatible with this device")
 	case errors.Is(err, playback.ErrProviderUnavailable):
 		writeError(w, http.StatusBadGateway, "playback_provider_unavailable", "Playback providers are unavailable")
+	case errors.Is(err, playback.ErrMediaSourceTimeout):
+		writeError(w, http.StatusGatewayTimeout, "playback_source_timeout", "The selected media source timed out before playback could start")
 	case errors.Is(err, playback.ErrMediaSourceFailed):
 		writeError(w, http.StatusBadGateway, "playback_source_failed", "The selected media source stopped responding")
 	case errors.Is(err, playback.ErrMediaCapacityReached):
@@ -225,6 +229,8 @@ func (a *API) playbackAsset(w http.ResponseWriter, r *http.Request) {
 		writePlaybackAssetError(w, r, http.StatusNotFound, "playback_session_not_found", "The playback session is invalid or expired")
 	case errors.Is(err, playback.ErrClientCapabilityMissing):
 		writePlaybackAssetError(w, r, http.StatusUnprocessableEntity, "playback_client_capability_missing", "This source requires a server output mode that this client did not announce")
+	case errors.Is(err, playback.ErrMediaSourceTimeout):
+		writePlaybackAssetError(w, r, http.StatusGatewayTimeout, "playback_source_timeout", "The selected media source timed out before playback could start")
 	case errors.Is(err, playback.ErrMediaSourceFailed):
 		writePlaybackAssetError(w, r, http.StatusBadGateway, "playback_source_failed", "The selected media source stopped responding")
 	case errors.Is(err, playback.ErrMediaCapacityReached):

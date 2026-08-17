@@ -234,6 +234,31 @@ func TestSessionAdmissionCookieAndRole(t *testing.T) {
 	}
 }
 
+func TestPlaybackSourcesExposeStableRecoveryIdentities(t *testing.T) {
+	service := New(&fakeAdmission{}, Options{})
+	handler := service.Handler(http.NotFoundHandler())
+	cookie := createCookie(t, handler)
+	body := strings.NewReader(`{"mediaType":"movie","resourceId":"demo-signal-horizon","capabilities":{"streamingProtocols":["http"],"containers":["mp4"]}}`)
+	request := demoRequest(http.MethodPost, APIPrefix+"/playback/sources", body, cookie)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("playback sources = %d: %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Sources []struct {
+			SourceRef      string `json:"sourceRef"`
+			StableIdentity string `json:"stableIdentity"`
+		} `json:"sources"`
+	}
+	decodeTestJSON(t, response, &result)
+	if len(result.Sources) != 2 || result.Sources[0].StableIdentity == "" || result.Sources[1].StableIdentity == "" ||
+		result.Sources[0].StableIdentity == result.Sources[1].StableIdentity || result.Sources[0].StableIdentity == result.Sources[0].SourceRef {
+		t.Fatalf("unsafe playback recovery identities: %+v", result.Sources)
+	}
+}
+
 func TestDemoCookieNeverFallsThroughAndOriginIsChecked(t *testing.T) {
 	admission := &fakeAdmission{}
 	service := New(admission, Options{})

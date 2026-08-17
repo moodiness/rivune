@@ -2,6 +2,7 @@ package playback
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strconv"
 	"strings"
@@ -114,9 +115,11 @@ func (service *Service) decidePlaybackSource(ctx context.Context, sources []Sour
 	var transcodePlan sourcePlan
 	var fallbackCopyPlan sourcePlan
 	var fallbackTranscodePlan sourcePlan
+	var probeErrors error
 	for _, candidate := range candidates {
 		inspection, err := service.probeMedia(ctx, assets[candidate.assetIndex])
 		if err != nil {
+			probeErrors = errors.Join(probeErrors, err)
 			continue
 		}
 		source := &sources[candidate.sourceIndex]
@@ -179,6 +182,9 @@ func (service *Service) decidePlaybackSource(ctx context.Context, sources []Sour
 	if selected.mode != "" {
 		applyPlaybackDecision(sources, assets, selected.candidate, selected.inspection, selected.mode, selected.decision, capabilities)
 		return nil
+	}
+	if errors.Is(probeErrors, ErrMediaSourceTimeout) {
+		return probeErrors
 	}
 	if conversionDenied {
 		return ErrTranscodingDisabled

@@ -26,8 +26,8 @@ import (
 const (
 	ffmpegEgressHeaderTimeout   = 5 * time.Second
 	ffmpegEgressDialTimeout     = 10 * time.Second
-	ffmpegEgressMaxConcurrent   = 32
 	ffmpegEgressReadIdleTimeout = 10 * time.Second
+	ffmpegEgressMaxConcurrent   = 32
 	ffmpegEgressMaxRedirects    = 10
 	ffmpegEgressMaxTargets      = 20_000
 )
@@ -96,14 +96,17 @@ func (connection *boundedProxyConnection) Close() error {
 }
 
 type ffmpegEgressProxy struct {
-	listener        net.Listener
-	server          *http.Server
-	transport       *http.Transport
-	readIdleTimeout time.Duration
-	cancel          context.CancelFunc
-	done            chan struct{}
-	slots           chan struct{}
+	listener           net.Listener
+	server             *http.Server
+	transport          *http.Transport
+	startupReadTimeout time.Duration
+	readIdleTimeout    time.Duration
+	cancel             context.CancelFunc
+	done               chan struct{}
+	slots              chan struct{}
 
+	errorMu            sync.Mutex
+	terminalError      error
 	sourceOrigin  mediaOrigin
 	sourceHeaders http.Header
 	signingKey    [32]byte
@@ -126,10 +129,10 @@ func startFFmpegEgressProxyWithDial(ctx context.Context, dial egressDialContext)
 }
 
 func startFFmpegEgressProxyWithDialAndSource(ctx context.Context, dial egressDialContext, asset storedAsset) (*ffmpegEgressProxy, error) {
-	return startFFmpegEgressProxyWithReadIdleTimeout(ctx, dial, asset, ffmpegEgressReadIdleTimeout)
+	return startFFmpegEgressProxyWithTimeouts(ctx, dial, asset, directStreamStartupReadTimeout, ffmpegEgressReadIdleTimeout)
 }
 
-func startFFmpegEgressProxyWithReadIdleTimeout(ctx context.Context, dial egressDialContext, asset storedAsset, readIdleTimeout time.Duration) (*ffmpegEgressProxy, error) {
+func startFFmpegEgressProxyWithTimeouts(ctx context.Context, dial egressDialContext, asset storedAsset, startupReadTimeout, readIdleTimeout time.Duration) (*ffmpegEgressProxy, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -147,14 +150,15 @@ func startFFmpegEgressProxyWithReadIdleTimeout(ctx context.Context, dial egressD
 	listener := newBoundedProxyListener(rawListener, ffmpegEgressMaxConcurrent)
 	proxyContext, cancel := context.WithCancel(ctx)
 	proxy := &ffmpegEgressProxy{
-		listener:        listener,
-		cancel:          cancel,
-		done:            make(chan struct{}),
-		slots:           make(chan struct{}, ffmpegEgressMaxConcurrent),
-		readIdleTimeout: readIdleTimeout,
-		signingKey:      signingKey,
-		targets:         make(map[string]*url.URL),
-		connections:     make(map[net.Conn]struct{}),
+		listener:           listener,
+		cancel:             cancel,
+		done:               make(chan struct{}),
+		slots:              make(chan struct{}, ffmpegEgressMaxConcurrent),
+		startupReadTimeout: startupReadTimeout,
+		readIdleTimeout:    readIdleTimeout,
+		signingKey:         signingKey,
+		targets:            make(map[string]*url.URL),
+		connections:        make(map[net.Conn]struct{}),
 	}
 	boundedDial := func(ctx context.Context, network, address string) (net.Conn, error) {
 		dialContext, dialCancel := context.WithTimeout(ctx, ffmpegEgressDialTimeout)
@@ -173,6 +177,10 @@ func startFFmpegEgressProxyWithReadIdleTimeout(ctx context.Context, dial egressD
 		ResponseHeaderTimeout:  ffmpegEgressDialTimeout,
 		MaxResponseHeaderBytes: 64 << 10,
 	}
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetHTTP2(true)
+	proxy.transport.Protocols = protocols
 	proxy.server = &http.Server{
 		Handler:           proxy,
 		ReadHeaderTimeout: ffmpegEgressHeaderTimeout,
@@ -306,9 +314,15 @@ func (proxy *ffmpegEgressProxy) serveTarget(response http.ResponseWriter, incomi
 		http.Error(response, "upstream unavailable", http.StatusBadGateway)
 		return
 	}
-	reader := bufio.NewReaderSize(upstream.Body, 1024)
-	playlist := incoming.Method == http.MethodGet && upstream.StatusCode >= 200 && upstream.StatusCode < 300 &&
-		(isHLSPlaylist(upstream, upstream.Request.URL.String()) || readerStartsHLS(reader))
+	defer func() { _ = upstream.Body.Close() }()
+	hasBody := playbackResponseHasBody(incoming.Method, upstream)
+	reader, err := proxy.preflightTarget(incoming.Context(), incoming.Method, upstream)
+	if err != nil {
+		proxy.writePreflightError(response, incoming, err)
+		return
+	}
+	playlist := hasBody && upstream.StatusCode >= 200 && upstream.StatusCode < 300 &&
+		(isHLSPlaylist(upstream, upstream.Request.URL.String()) || shouldSniffNetworkManifest(upstream) && readerStartsHLS(reader))
 	if playlist && (upstream.StatusCode != http.StatusOK || incoming.Header.Get("Range") != "") {
 		_ = upstream.Body.Close()
 		fullHeaders := incoming.Header.Clone()
@@ -319,16 +333,19 @@ func (proxy *ffmpegEgressProxy) serveTarget(response http.ResponseWriter, incomi
 			http.Error(response, "upstream unavailable", http.StatusBadGateway)
 			return
 		}
-		reader = bufio.NewReaderSize(upstream.Body, 1024)
-		playlist = upstream.StatusCode == http.StatusOK &&
-			(isHLSPlaylist(upstream, upstream.Request.URL.String()) || readerStartsHLS(reader))
+		hasBody = playbackResponseHasBody(incoming.Method, upstream)
+		reader, err = proxy.preflightTarget(incoming.Context(), incoming.Method, upstream)
+		if err != nil {
+			proxy.writePreflightError(response, incoming, err)
+			return
+		}
+		playlist = hasBody && upstream.StatusCode >= 200 && upstream.StatusCode < 300 &&
+			(isHLSPlaylist(upstream, upstream.Request.URL.String()) || shouldSniffNetworkManifest(upstream) && readerStartsHLS(reader))
 		if !playlist {
-			_ = upstream.Body.Close()
 			http.Error(response, "invalid ranged HLS playlist", http.StatusBadGateway)
 			return
 		}
 	}
-	defer upstream.Body.Close()
 
 	if playlist {
 		body, readErr := io.ReadAll(io.LimitReader(reader, maximumPlaylistBytes+1))
@@ -349,19 +366,73 @@ func (proxy *ffmpegEgressProxy) serveTarget(response http.ResponseWriter, incomi
 		_, _ = response.Write(rewritten)
 		return
 	}
-	if incoming.Method == http.MethodGet && upstream.StatusCode >= 200 && upstream.StatusCode < 300 &&
-		unsupportedNetworkManifest(upstream, reader) {
+	if hasBody && upstream.StatusCode >= 200 && upstream.StatusCode < 300 && unsupportedNetworkManifest(upstream, reader) {
 		http.Error(response, "unsupported network manifest", http.StatusBadGateway)
 		return
 	}
 
 	copyAssetHeaders(response.Header(), upstream.Header, true)
 	response.WriteHeader(upstream.StatusCode)
-	if incoming.Method == http.MethodGet {
-		if _, err := io.Copy(response, reader); err != nil {
+	if upstream.StatusCode < 200 || upstream.StatusCode >= 300 {
+		if flusher, ok := response.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		if incoming.Method == http.MethodGet && upstream.Body != nil {
+			if _, copyErr := io.Copy(response, reader); copyErr != nil {
+				panic(http.ErrAbortHandler)
+			}
+		}
+		return
+	}
+	if incoming.Method == http.MethodGet && hasBody {
+		first, readErr := reader.ReadByte()
+		if readErr == nil {
+			if _, writeErr := response.Write([]byte{first}); writeErr != nil {
+				panic(http.ErrAbortHandler)
+			}
+			if flusher, ok := response.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		} else if !errors.Is(readErr, io.EOF) {
+			panic(http.ErrAbortHandler)
+		}
+		if _, copyErr := io.Copy(response, reader); copyErr != nil {
 			panic(http.ErrAbortHandler)
 		}
 	}
+}
+
+func (proxy *ffmpegEgressProxy) preflightTarget(ctx context.Context, method string, upstream *http.Response) (*bufio.Reader, error) {
+	prefix, err := readPlaybackStartupByte(ctx, method, upstream, proxy.startupReadTimeout)
+	return bufio.NewReaderSize(io.MultiReader(bytes.NewReader(prefix), upstream.Body), 1024), err
+}
+
+func (proxy *ffmpegEgressProxy) writePreflightError(response http.ResponseWriter, request *http.Request, err error) {
+	if request.Context().Err() != nil {
+		return
+	}
+	status := http.StatusBadGateway
+	if errors.Is(err, ErrMediaSourceTimeout) {
+		proxy.errorMu.Lock()
+		proxy.terminalError = ErrMediaSourceTimeout
+		proxy.errorMu.Unlock()
+		status = http.StatusGatewayTimeout
+	}
+	http.Error(response, "upstream unavailable", status)
+}
+
+func (proxy *ffmpegEgressProxy) sourceError() error {
+	if proxy == nil {
+		return nil
+	}
+	proxy.errorMu.Lock()
+	defer proxy.errorMu.Unlock()
+	return proxy.terminalError
+}
+
+func shouldSniffNetworkManifest(response *http.Response) bool {
+	contentType := strings.ToLower(response.Header.Get("Content-Type"))
+	return contentType == "" || strings.Contains(contentType, "octet-stream") || strings.HasPrefix(contentType, "text/")
 }
 
 func readerStartsHLS(reader *bufio.Reader) bool {
@@ -480,7 +551,11 @@ func (proxy *ffmpegEgressProxy) fetchTarget(ctx context.Context, method string, 
 			requestwork.EndOutbound(ctx, requestwork.Now(), 0)
 		} else {
 			observed := requestwork.ObserveBody(ctx, upstream.Body)
-			upstream.Body = newReadIdleBody(ctx, observed, cancel, func() {}, proxy.readIdleTimeout)
+			startupReadTimeout := proxy.startupReadTimeout
+			if upstream.StatusCode < 200 || upstream.StatusCode >= 300 {
+				startupReadTimeout = proxy.readIdleTimeout
+			}
+			upstream.Body = newReadIdleBody(ctx, observed, cancel, func() {}, startupReadTimeout, proxy.readIdleTimeout)
 		}
 		if !isHTTPRedirect(upstream.StatusCode) {
 			upstream.Request = request
