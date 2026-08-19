@@ -628,7 +628,7 @@ jobs:
           deps_root="${third_party_root}/buildscripts/deps"
           fetch_git_source mbedtls https://github.com/Mbed-TLS/mbedtls.git \
             0bebf8b8c7f07abe3571ded48a11aa907a1ffb20 "${deps_root}/mbedtls"
-          fetch_git_source dav1d https://code.videolan.org/videolan/dav1d.git \
+          fetch_git_source dav1d https://github.com/videolan/dav1d.git \
             b546257f770768b2c88258c533da38b91a06f737 "${deps_root}/dav1d"
           fetch_git_source ffmpeg https://github.com/FFmpeg/FFmpeg.git \
             9047fa1b084f76b1b4d065af2d743df1b40dfb56 "${deps_root}/ffmpeg"
@@ -649,7 +649,7 @@ jobs:
             bbb3c7f1570a4a021e52683f3fbdf74fe492ae84 "${deps_root}/libass"
           fetch_source_tarball lua https://www.lua.org/ftp/lua-5.2.4.tar.gz \
             b9e2e4aad6789b3b63a056d442f7b39f0ecfca3ae0f1fc0ae4e9614401b69f4b "${deps_root}/lua"
-          fetch_git_source libplacebo https://code.videolan.org/videolan/libplacebo.git \
+          fetch_git_source libplacebo https://github.com/haasn/libplacebo.git \
             cee9b076f2c63104ccfd497fa79c39a867293ec4 "${deps_root}/libplacebo"
           fetch_git_source mpv https://github.com/mpv-player/mpv.git \
             41f6a645068483470267271e1d09966ca3b9f413 "${deps_root}/mpv"
@@ -1946,7 +1946,8 @@ jobs:
       - release
     runs-on: windows-latest
     permissions:
-      contents: read
+      # GitHub exposes draft release assets only to tokens with contents: write.
+      contents: write
     steps:
       - name: Verify remote executable architecture, version, hash, and unsigned state
         env:
