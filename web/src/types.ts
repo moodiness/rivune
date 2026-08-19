@@ -837,6 +837,9 @@ export type ContinueItem = {
   releaseInfo?: string;
   resourceId?: string;
   resourceProvider?: string;
+  episodeTitle?: string;
+  episodeStillUrl?: string;
+  episodeAirDate?: string;
   lastWatchedAt: string;
 };
 export type ContinueWatching = { items: ContinueItem[] };

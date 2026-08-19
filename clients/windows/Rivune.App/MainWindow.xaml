@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="Rivune.App.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Rivune">
+    <Grid Background="{ThemeResource RivuneCanvasBrush}">
+        <Grid.RowDefinitions><RowDefinition x:Name="TitleBarRow" Height="32" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+        <Grid x:Name="AppTitleBar" Background="{ThemeResource RivuneCanvasBrush}">
+            <TextBlock Text="Rivune" Margin="16,0" VerticalAlignment="Center" Foreground="{ThemeResource RivunePrimaryTextBrush}" FontWeight="SemiBold" />
+        </Grid>
+        <Frame x:Name="RootFrame" Grid.Row="1" />
+    </Grid>
+</Window>

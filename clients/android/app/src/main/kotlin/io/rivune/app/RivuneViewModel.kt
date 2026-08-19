@@ -25,6 +25,7 @@ import io.rivune.api.Movie
 import io.rivune.api.PlaybackCapabilities
 import io.rivune.api.PlaybackPreparation
 import io.rivune.api.PlaybackProgress
+import io.rivune.api.PlaybackProgressMediaType
 import io.rivune.api.PlaybackMarkerList
 import io.rivune.api.PlaybackProgressBatch
 import io.rivune.api.PlaybackSession
@@ -619,6 +620,8 @@ class RivuneViewModel internal constructor(
         if (mutableState.value.isBusy) return
         val currentGateway = gateway ?: return
         val operationGeneration = generation
+        viewerRequestGeneration += 1
+        folderRequestGeneration += 1
         mutableState.value = mutableState.value.copy(isBusy = true, failure = null)
         viewModelScope.launch {
             try {
@@ -1939,6 +1942,9 @@ class RivuneViewModel internal constructor(
         val currentGateway = gateway ?: return
         val operationGeneration = generation
         val language = metadataLanguage()
+        val preserveRenderedHome = mutableState.value.collections.isNotEmpty() ||
+            mutableState.value.viewer.heroSlides.isNotEmpty() ||
+            mutableState.value.viewer.continueWatching.isNotEmpty()
         val requestGeneration = ++viewerRequestGeneration
         mutableState.value = mutableState.value.copy(
             isBusy = false,
@@ -1966,40 +1972,43 @@ class RivuneViewModel internal constructor(
                     val selected = mutableState.value.selectedCollectionId
                         ?.takeIf { id -> collections.any { it.id == id } }
                         ?: collections.firstOrNull()?.id
-                    mutableState.value = mutableState.value.copy(
-                        collections = collections,
-                        selectedCollectionId = selected,
-                        openedCollectionId = mutableState.value.openedCollectionId
-                            ?.takeIf { id -> collections.any { it.id == id } },
-                        isBusy = false,
-                        viewer = mutableState.value.viewer.copy(
-                            heroSlides = emptyList(),
-                            inlineFailure = null,
-                        ),
-                    )
+                    if (!preserveRenderedHome) {
+                        mutableState.value = mutableState.value.copy(
+                            collections = collections,
+                            selectedCollectionId = selected,
+                            openedCollectionId = mutableState.value.openedCollectionId
+                                ?.takeIf { id -> collections.any { it.id == id } },
+                        )
+                    }
                     val homeResolutionTask = async {
                         resolveHomeCollections(currentGateway, collections, language) { collectionId, folder ->
-                            if (viewerRequestCurrent(operationGeneration, requestGeneration)) {
+                            if (!preserveRenderedHome && viewerRequestCurrent(operationGeneration, requestGeneration)) {
                                 replaceCollectionFolder(collectionId, folder)
                             }
                         }
                     }
 
                     val continuePage = continueTask.await()
-                    val continueTargets = continuePage?.let { enrichContinueWatching(currentGateway, it, language) }.orEmpty()
+                    val continueTargets = continuePage?.let(::mapContinueWatching)
                     if (!viewerRequestCurrent(operationGeneration, requestGeneration)) {
                         homeResolutionTask.cancel()
                         return@coroutineScope
                     }
-                    mutableState.value = mutableState.value.copy(
-                        viewer = mutableState.value.viewer.copy(continueWatching = continueTargets),
-                    )
+                    if (!preserveRenderedHome && continueTargets != null) {
+                        mutableState.value = mutableState.value.copy(
+                            viewer = mutableState.value.viewer.copy(continueWatching = continueTargets),
+                        )
+                    }
 
                     val homeResolution = homeResolutionTask.await()
                     if (!viewerRequestCurrent(operationGeneration, requestGeneration)) return@coroutineScope
                     mutableState.value = mutableState.value.copy(
                         collections = homeResolution.collections,
+                        selectedCollectionId = selected,
+                        openedCollectionId = mutableState.value.openedCollectionId
+                            ?.takeIf { id -> homeResolution.collections.any { it.id == id } },
                         viewer = mutableState.value.viewer.copy(
+                            continueWatching = continueTargets ?: mutableState.value.viewer.continueWatching,
                             heroSlides = homeResolution.heroSlides,
                             loading = null,
                         ),
@@ -2096,64 +2105,44 @@ class RivuneViewModel internal constructor(
         if (collections != current.collections) mutableState.value = current.copy(collections = collections)
     }
 
-    private suspend fun enrichContinueWatching(
-        currentGateway: RivuneGateway,
-        page: ContinueWatchingPage,
-        language: String?,
-    ): List<MediaTarget> = coroutineScope {
-        page.items.map { item ->
-            async {
-                val fallback = MediaTarget(
-                    id = item.titleId.toString(),
-                    resourceId = item.titleId.toString(),
-                    mediaType = item.mediaType.name.lowercase(),
-                    title = if (item.episodeNumber != null) "Episode" else "Continue watching",
-                    titleId = item.titleId,
-                    seriesId = item.seriesId,
-                    seasonId = item.seasonId?.toString(),
-                    seasonNumber = item.seasonNumber,
-                    episodeNumber = item.episodeNumber,
-                    resumePositionSeconds = item.positionSeconds,
-                    durationSeconds = item.durationSeconds,
-                )
-                val enriched = runCatching {
-                    if (item.seriesId == null) {
-                        val movie = currentGateway.movie(item.titleId, language)
-                        fallback.copy(
-                            mediaType = "movie",
-                            title = movie.title,
-                            resourceId = movie.externalIds["imdb"] ?: movie.externalIds["tmdb"] ?: fallback.resourceId,
-                            externalIds = movie.externalIds,
-                            posterUrl = movie.posterUrl,
-                            backgroundUrl = movie.backdropUrl,
-                            description = movie.overview,
-                            releaseInfo = movie.releaseDate,
-                        )
-                    } else {
-                        val seriesId = requireNotNull(item.seriesId)
-                        val series = runCatching { currentGateway.series(seriesId, language = language) }
-                            .recoverCatching { currentGateway.series(seriesId, SeriesMappingProvider.TVDB, language) }
-                            .getOrThrow()
-                        val summary = series.seasons.firstOrNull { it.id == item.seasonId?.toString() }
-                            ?: series.seasons.firstOrNull { it.seasonNumber == item.seasonNumber }
-                        val season = summary?.let { currentGateway.season(it.id, series.mappingProvider, language) }
-                        val episode = season?.episodes?.firstOrNull { it.id == item.titleId }
-                            ?: season?.episodes?.firstOrNull { it.episodeNumber == item.episodeNumber }
-                        episode?.toMediaTarget(series, fallback)?.let { target ->
-                            target.copy(
-                                title = listOf(series.name, target.title)
-                                    .filter(String::isNotBlank)
-                                    .joinToString(" · "),
-                            )
-                        } ?: fallback.copy(title = series.name, posterUrl = series.posterUrl, backgroundUrl = series.backdropUrl)
-                    }
-                }.getOrDefault(fallback)
-                enriched.copy(
-                    resumePositionSeconds = item.positionSeconds,
-                    durationSeconds = item.durationSeconds,
-                )
-            }
-        }.awaitAll()
+    private fun mapContinueWatching(page: ContinueWatchingPage): List<MediaTarget> = page.items.map { item ->
+        val payloadResourceId = item.resourceId?.takeIf(String::isNotBlank)
+        val resourceId = payloadResourceId ?: item.titleId.toString()
+        val provider = item.resourceProvider?.takeIf(String::isNotBlank)
+        val isEpisode = item.mediaType == PlaybackProgressMediaType.EPISODE
+        val episodeTitle = item.episodeTitle?.takeIf(String::isNotBlank)
+            ?: item.episodeNumber?.let { "Episode $it" }
+        val title = if (isEpisode) {
+            listOfNotNull(item.title?.takeIf(String::isNotBlank), episodeTitle)
+                .joinToString(" · ")
+                .ifBlank { "Episode" }
+        } else {
+            item.title?.takeIf(String::isNotBlank) ?: "Continue watching"
+        }
+        val episodeStillUrl = item.episodeStillUrl?.takeIf(String::isNotBlank)
+        MediaTarget(
+            id = item.titleId.toString(),
+            resourceId = resourceId,
+            mediaType = item.mediaType.name.lowercase(),
+            title = title,
+            titleId = item.titleId,
+            provider = provider,
+            externalIds = if (provider != null && payloadResourceId != null) {
+                mapOf(provider to payloadResourceId)
+            } else {
+                emptyMap()
+            },
+            posterUrl = if (isEpisode) episodeStillUrl ?: item.posterUrl else item.posterUrl,
+            backgroundUrl = if (isEpisode) episodeStillUrl ?: item.backgroundUrl ?: item.posterUrl else item.backgroundUrl,
+            releaseInfo = if (isEpisode) item.episodeAirDate ?: item.releaseInfo else item.releaseInfo,
+            released = if (isEpisode) item.episodeAirDate else null,
+            seriesId = item.seriesId,
+            seasonId = item.seasonId?.toString(),
+            seasonNumber = item.seasonNumber,
+            episodeNumber = item.episodeNumber,
+            resumePositionSeconds = item.positionSeconds,
+            durationSeconds = item.durationSeconds,
+        )
     }
 
     private fun loadSearchDescriptors() {
@@ -2599,7 +2588,6 @@ class RivuneViewModel internal constructor(
             resolvedFolder = null,
             calendarEvents = emptyList(),
             viewer = viewer.copy(
-                continueWatching = emptyList(),
                 detail = null,
                 detailHistory = emptyList(),
                 sourcePicker = null,

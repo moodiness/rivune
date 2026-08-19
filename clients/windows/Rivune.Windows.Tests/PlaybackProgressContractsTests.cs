@@ -147,7 +147,7 @@ public sealed class PlaybackProgressContractsTests
         {"items":[{"titleId":"11111111-1111-4111-8111-111111111111","progress":{"titleId":"11111111-1111-4111-8111-111111111111","mediaType":"episode","positionSeconds":10,"durationSeconds":20,"completed":false,"version":4000000000,"lastWatchedAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:01Z"}},{"titleId":"33333333-3333-4333-8333-333333333333","progress":null}]}
         """;
         const string continueJson = """
-        {"items":[{"titleId":"11111111-1111-4111-8111-111111111111","mediaType":"episode","seriesId":"44444444-4444-4444-8444-444444444444","seasonId":"55555555-5555-4555-8555-555555555555","seasonNumber":2,"episodeNumber":3,"positionSeconds":0,"durationSeconds":1800,"version":4000000001,"reason":"next_episode","lastWatchedAt":"2026-08-01T00:00:00Z"}]}
+        {"items":[{"titleId":"11111111-1111-4111-8111-111111111111","mediaType":"episode","seriesId":"44444444-4444-4444-8444-444444444444","seasonId":"55555555-5555-4555-8555-555555555555","seasonNumber":2,"episodeNumber":3,"title":"Snapshot Series","posterUrl":"/series-poster.jpg","backgroundUrl":"/series-background.jpg","releaseInfo":"2026","resourceId":"tt1234567:2:3","resourceProvider":"imdb","episodeTitle":"Snapshot Episode","episodeStillUrl":"/episode-still.jpg","episodeAirDate":"2026-08-12","positionSeconds":0,"durationSeconds":1800,"version":4000000001,"reason":"next_episode","lastWatchedAt":"2026-08-01T00:00:00Z"}]}
         """;
 
         var batch = JsonSerializer.Deserialize<PlaybackProgressBatch>(json, JsonOptions)!;
@@ -158,6 +158,15 @@ public sealed class PlaybackProgressContractsTests
         Assert.Null(batch.Items[1].Progress);
         Assert.Equal(ContinueWatchingReason.NextEpisode, Assert.Single(page.Items).Reason);
         Assert.Equal(4_000_000_001, page.Items[0].Version);
+        Assert.Equal("Snapshot Series", page.Items[0].Title);
+        Assert.Equal("/series-poster.jpg", page.Items[0].PosterUrl);
+        Assert.Equal("/series-background.jpg", page.Items[0].BackgroundUrl);
+        Assert.Equal("2026", page.Items[0].ReleaseInfo);
+        Assert.Equal("tt1234567:2:3", page.Items[0].ResourceId);
+        Assert.Equal("imdb", page.Items[0].ResourceProvider);
+        Assert.Equal("Snapshot Episode", page.Items[0].EpisodeTitle);
+        Assert.Equal("/episode-still.jpg", page.Items[0].EpisodeStillUrl);
+        Assert.Equal("2026-08-12", page.Items[0].EpisodeAirDate);
     }
 
     [Fact]
@@ -238,7 +247,7 @@ public sealed class PlaybackProgressContractsTests
             {
                 "/api/v1/metadata/series/11111111-1111-4111-8111-111111111111" => JsonResponse("""{"id":"11111111-1111-4111-8111-111111111111","mediaType":"series","name":"Series","originalName":"Series","originalLanguage":"en","overview":"","genres":[],"cast":[],"voteAverage":0,"voteCount":0,"seasons":[],"aliases":[],"episodeOrders":[],"selectedEpisodeOrderId":"9876543210","mappingProvider":"tvdb","externalIds":{}}"""),
                 "/api/v1/playback/markers" => JsonResponse("""{"markers":[{"type":"intro","startSeconds":1.5,"endSeconds":2.5,"confidence":1,"submissionCount":1}]}"""),
-                "/api/v1/playback/sources" => JsonResponse("""{"sources":[{"id":"stream-1","sourceRef":"opaque-source-reference","addonId":"22222222-2222-4222-8222-222222222222","manifestId":"manifest","streamIndex":0,"name":"External","protocol":"external","mode":"external","expiresAt":"2099-01-01T00:00:00Z"}],"providerErrors":[]}"""),
+                "/api/v1/playback/sources" => JsonResponse("""{"sources":[{"id":"stream-1","sourceRef":"opaque-source-reference","stableIdentity":"stable-stream-1","addonId":"22222222-2222-4222-8222-222222222222","manifestId":"manifest","streamIndex":0,"name":"External","protocol":"external","mode":"external","expiresAt":"2099-01-01T00:00:00Z"}],"providerErrors":[]}"""),
                 "/api/v1/playback/prepare" => JsonResponse("""{"sourceRef":"opaque-source-reference","mode":"direct","protocol":"http","subtitleCount":0,"expiresAt":"2099-01-01T00:00:00Z"}"""),
                 "/api/v1/playback/resolve" => JsonResponse("""{"id":"44444444-4444-4444-8444-444444444444","selectedSourceId":"stream-1","sources":[],"subtitles":[],"providerErrors":[],"expiresAt":"2099-01-01T00:00:00Z"}"""),
                 "/api/v1/progress/batch" => JsonResponse("""{"items":[{"titleId":"11111111-1111-4111-8111-111111111111","progress":null}]}"""),

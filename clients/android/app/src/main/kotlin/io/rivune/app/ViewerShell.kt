@@ -4345,7 +4345,7 @@ private fun DetailScreen(
                                         summary.episodeCount,
                                     ),
                                     summary.voteAverage.takeIf { it > 0.0 }
-                                        ?.let { String.format(Locale.getDefault(), "★ %.1f/10", it) },
+                                        ?.let { String.format(Locale.getDefault(), "★ %.1f", it) },
                                 ).joinToString(" · ")
                                 SeasonTile(
                                     title = summary.name,
@@ -4531,7 +4531,7 @@ private fun DetailSummary(
         (movie?.runtimeMinutes ?: target.runtimeMinutes)
             ?.takeIf { it > 0 }
             ?.let { stringResource(R.string.viewer_minutes, it) },
-        rating?.takeIf { it > 0.0 }?.let { String.format(locale, "★ %.1f/10", it) },
+        rating?.takeIf { it > 0.0 }?.let { String.format(locale, "★ %.1f", it) },
         series?.status?.takeIf(String::isNotBlank),
     )
     val genres = (movie?.genres ?: series?.genres.orEmpty())
@@ -6061,7 +6061,7 @@ private fun EpisodeRow(
     val locale = Locale.getDefault()
     val primaryMetadata = listOfNotNull(
         runtimeMinutes?.takeIf { it > 0 }?.let { stringResource(R.string.viewer_minutes, it) },
-        rating?.let { String.format(locale, "★ %.1f/10", it) },
+        rating?.let { String.format(locale, "★ %.1f", it) },
     ).joinToString(" · ")
     val releaseDate = target.releaseInfo
         ?.takeIf(String::isNotBlank)

@@ -15,12 +15,12 @@ Requirements: Docker Engine with Compose v2, Bash, and OpenSSL. On a Linux host,
 ```sh
 git clone https://github.com/moodiness/rivune.git
 cd rivune
-./rivune setup --public-url https://media.example.com --version 1.7.2
+./rivune setup --public-url https://media.example.com --version 1.8.0
 ./rivune up
 ./rivune doctor
 ```
 
-Omit `--public-url` for a loopback-only installation. `--version` is required and accepts only an exact stable numeric release such as `1.7.2`; mutable image tags such as `latest` are rejected so a fresh install is reproducible. `./rivune help` lists explicit wrappers for lifecycle, logs, diagnostics, authenticated backup verification, and restore. The command always resolves the repository Compose file and never prints generated secrets.
+Omit `--public-url` for a loopback-only installation. `--version` is required and accepts only an exact stable numeric release such as `1.8.0`; mutable image tags such as `latest` are rejected so a fresh install is reproducible. `./rivune help` lists explicit wrappers for lifecycle, logs, diagnostics, authenticated backup verification, and restore. The command always resolves the repository Compose file and never prints generated secrets.
 
 On Windows PowerShell, run `.\scripts\create-env.ps1`, fill the generated private `.env`, then use `docker compose pull` and `docker compose up -d`. The lower-level `./scripts/create-env.sh` path remains available on Unix hosts that need to customize `.env` before startup.
 
@@ -60,18 +60,24 @@ Backend requirements are Go 1.26.6 or newer in the 1.26 line and PostgreSQL 18. 
 
 The Android project includes the native Rivune application for phones, tablets, and Android TV plus the reusable `rivune-api` SDK. It supports server discovery, restored sessions, passwordless device pairing, category-scoped profiles and PINs, and paginated collection browsing.
 
+The Windows project includes a native responsive WinUI 3 application plus the reusable `Rivune.Windows` protocol-v20 client. It supports HTTPS or loopback-HTTP discovery, passwordless device pairing, DPAPI-protected issuer-scoped sessions, profile avatars and PINs, Home/Search/Library/Calendar browsing, collection and title details, profile settings with provenance, source filtering, and same-origin guarded native HTTP/HLS playback. The player includes resume/completion synchronization, track selection, chapter markers, configurable intro/recap/outro skipping, next-episode playback, retry recovery, keyboard/gamepad navigation, and compact, desktop, TV, reduced-motion, and high-contrast layouts. Official Windows releases provide exactly one self-contained x64 `Rivune.exe` for Windows 10 build 19041 or newer. Download it from the matching [GitHub Release](https://github.com/moodiness/rivune/releases), verify it with `SHA256SUMS`, place it in a user-writable folder, and run it directly. The executable is intentionally unsigned, so Microsoft Defender SmartScreen may show an unknown-publisher warning; proceed only when the file came from the official release and its SHA-256 matches. After explicit consent, later updates are downloaded from the trusted global feed, verified by size and SHA-256, installed by replacing the current portable executable after exit, and rolled back if replacement fails. Build and verify the project on Windows with `dotnet test clients/windows/Rivune.Windows.slnx --configuration Release`.
+
+`Rivune.exe` is portable, but its local state is not stored beside the executable. The last server address and device-only preferences are kept under `%LOCALAPPDATA%\Rivune\` and may be backed up while Rivune is closed. Session files under `%LOCALAPPDATA%\Rivune\credentials\` are encrypted with Windows DPAPI for the current Windows user; they are not a portable backup and normally cannot be restored under another account or Windows installation. After a migration, pair or sign in again. Profiles, library, progress, and other account data remain on the self-hosted Rivune server. The Windows client currently has no installer, Store package, code signature, ARM64 build, or system-wide updater. Keep the file named `Rivune.exe` in a writable local folder: automatic replacement cannot update a read-only location such as a protected `Program Files` directory.
+
 ### Android app
 
 Official Android releases provide a universal APK for phones, tablets, and Android TV. Download `rivune-android-<version>.apk` and its `rivune-android-<version>-corresponding-source.tar.gz` from the matching [GitHub Release](https://github.com/moodiness/rivune/releases), verify both with the published `SHA256SUMS`, and complete Android's normal package-installation prompt. The public application ID is `io.rivune.app` and Android 8.0 or newer is required.
 
-The installed app checks the dedicated `rivune-android-update.json` release asset at most once every 24 hours and also offers a manual check in Settings. It never contains a GitHub token. An update is downloaded only after consent, then its size, SHA-256, package identity, version code, and signing certificate are verified before Android shows its own installation confirmation. Silent installation is not supported; if Android blocks installs from this source, grant that system permission and return to Rivune to continue.
+The installed apps check the global `rivune-update.json` release asset at most once every 24 hours and also offer a manual check in Settings. The same schema-v2 document advertises the Android APK and unsigned x64 Windows `Rivune.exe`; `rivune-android-update.json` remains a generated schema-v1 compatibility bridge for Android v1.7.2 installations. Neither client contains a GitHub token. An Android update is downloaded only after consent, then its size, SHA-256, package identity, version code, and signing certificate are verified before Android shows its own installation confirmation. Silent installation is not supported; if Android blocks installs from this source, grant that system permission and return to Rivune to continue.
 
 Android Settings keeps device-specific startup, preferred-player, motion, language, accent, frame-rate matching, picture-format, and Wi-Fi/Ethernet versus mobile-network quality choices local to the device. Preferred-player choices include asking every time, Rivune automatic (AndroidX Media3 first with an embedded mpv fallback for unsupported media), explicit Media3, explicit mpv, and detected external players. Profile controls display the effective Rivune server value and its provenance, support clearing a profile override to inherit the server policy, and cover resolution, direct play, automatic next episode, audio, subtitles, forced subtitles, and metadata language. The effective transcoding permission remains visible but read-only because only a global administrator may change that server policy. Internal episode playback exposes a one-shot Next action and starts the next episode after a natural end when the effective profile setting allows it; an external player continues only after returning an explicit completed result. About shows the connected server/build details and can copy or export a bounded in-memory diagnostic report through Android's document picker; the report excludes credentials, profile/media data, URL paths, queries, and raw exception text.
 
 ```sh
 cd web && npm ci && npm run build
 cd ../server && go test ./...
-cd ../clients/android && ./gradlew :rivune-api:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
+cd ../clients/update && go test ./...
+cd ../android && ./gradlew :rivune-api:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
+cd ../windows && dotnet test Rivune.Windows.slnx --configuration Release --nologo
 ```
 
 ## License

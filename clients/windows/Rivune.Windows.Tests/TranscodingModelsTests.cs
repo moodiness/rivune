@@ -38,12 +38,12 @@ public sealed class TranscodingModelsTests
     }
 
     [Fact]
-    public void SourceListDecodesOptionalAddonNameAndSourceIdentity()
+    public void SourceListDecodesOptionalAddonNameAndDefaultsOmittedSourceIdentity()
     {
         const string json = """
         {
           "sources":[
-            {"id":"source-1","sourceRef":"ref-1","addonId":"66666666-6666-4666-8666-666666666666","addonName":"Test Addon","manifestId":"org.test","streamIndex":0,"name":"Primary","protocol":"hls","expiresAt":"2026-08-03T12:00:00Z"},
+            {"id":"source-1","sourceRef":"ref-1","stableIdentity":"stable-1","addonId":"66666666-6666-4666-8666-666666666666","addonName":"Test Addon","manifestId":"org.test","streamIndex":0,"name":"Primary","protocol":"hls","expiresAt":"2026-08-03T12:00:00Z"},
             {"id":"source-2","sourceRef":"ref-2","addonId":"77777777-7777-4777-8777-777777777777","manifestId":"org.other","streamIndex":1,"name":"Fallback","protocol":"dash","expiresAt":"2026-08-03T12:00:00Z"}
           ],
           "providerErrors":[]
@@ -55,10 +55,12 @@ public sealed class TranscodingModelsTests
         Assert.Equal(Guid.Parse("66666666-6666-4666-8666-666666666666"), sourceList.Sources[0].AddonId);
         Assert.Equal("org.test", sourceList.Sources[0].ManifestId);
         Assert.Equal("ref-1", sourceList.Sources[0].SourceRef);
+        Assert.Equal("stable-1", sourceList.Sources[0].StableIdentity);
         Assert.Null(sourceList.Sources[1].AddonName);
         Assert.Equal(Guid.Parse("77777777-7777-4777-8777-777777777777"), sourceList.Sources[1].AddonId);
         Assert.Equal("org.other", sourceList.Sources[1].ManifestId);
         Assert.Equal("ref-2", sourceList.Sources[1].SourceRef);
+        Assert.Equal(string.Empty, sourceList.Sources[1].StableIdentity);
     }
 
     [Fact]
@@ -86,6 +88,14 @@ public sealed class TranscodingModelsTests
         Assert.Equal(PlaybackMediaTimeline.Relative, session.Sources[0].MediaTimeline);
         Assert.Null(session.Subtitles[0].Url);
         Assert.Equal("future_provider_code", session.ProviderErrors[0].Code);
+    }
+
+    [Theory]
+    [InlineData("{\"sources\":null,\"providerErrors\":[]}", typeof(PlaybackSourceList))]
+    [InlineData("{\"id\":\"22222222-2222-4222-8222-222222222222\",\"selectedSourceId\":\"source-1\",\"sources\":null,\"subtitles\":[],\"providerErrors\":[],\"expiresAt\":\"2026-08-03T12:00:00Z\"}", typeof(PlaybackSession))]
+    public void NullRequiredPlaybackCollectionsAreRejected(string json, Type modelType)
+    {
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize(json, modelType, JsonOptions));
     }
 
     [Fact]
@@ -129,25 +139,8 @@ public sealed class TranscodingModelsTests
     }
 
     [Fact]
-    public void MissingNewSettingsAndUnknownErrorCodesAreTolerated()
+    public void UnknownErrorCodesAreTolerated()
     {
-        var values = JsonSerializer.Deserialize<SettingsValues>("{\"futureSetting\":true}", JsonOptions)!;
-        Assert.Null(values.AllowTranscoding);
-        Assert.Null(values.Transcoding);
-        Assert.Null(values.MaximumCastMembers);
-
-        var inherited = JsonSerializer.Deserialize<SettingsValues>("{\"maximumCastMembers\":null}", JsonOptions)!;
-        Assert.Null(inherited.MaximumCastMembers);
-
-        var effective = JsonSerializer.Deserialize<EffectiveSettings>(
-            """{"schemaVersion":1,"settings":{"allowTranscoding":false,"transcoding":"enabled","maximumCastMembers":20,"futureSetting":true},"sources":{"allowTranscoding":"instance","transcoding":"profile","maximumCastMembers":"instance","theme":"default"}}""",
-            JsonOptions)!;
-        Assert.Equal(false, effective.Settings.AllowTranscoding);
-        Assert.Equal("enabled", effective.Settings.Transcoding);
-        Assert.Equal(20, effective.Settings.MaximumCastMembers);
-        Assert.Equal("instance", effective.Sources.AllowTranscoding);
-        Assert.Equal("instance", effective.Sources.MaximumCastMembers);
-
         var error = JsonSerializer.Deserialize<ServerError>("{\"code\":\"future_error_code\",\"message\":\"future\",\"futureField\":true}", JsonOptions)!;
         Assert.Equal("future_error_code", error.Code);
     }

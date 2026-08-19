@@ -470,9 +470,9 @@ func (service *Service) LocalizeContinuePage(ctx context.Context, value *watchst
 	if value == nil {
 		return
 	}
-	values := make([]*string, 0, len(value.Items)*2)
+	values := make([]*string, 0, len(value.Items)*3)
 	for index := range value.Items {
-		values = append(values, &value.Items[index].PosterURL, &value.Items[index].BackgroundURL)
+		values = append(values, &value.Items[index].PosterURL, &value.Items[index].BackgroundURL, &value.Items[index].EpisodeStillURL)
 	}
 	service.localizeStrings(ctx, values...)
 }

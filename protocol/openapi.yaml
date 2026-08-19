@@ -4724,7 +4724,7 @@ paths:
           headers:
             X-Request-ID:
               $ref: "#/components/headers/RequestId"
-          description: Resumable titles and suggested next episodes for the selected profile.
+          description: Resumable titles and suggested next episodes, localized from cached metadata using the selected profile's effective metadata language.
           content:
             application/json:
               schema:
@@ -10328,6 +10328,28 @@ components:
         reason:
           type: string
           enum: [resume, next_episode]
+        title:
+          type: string
+        posterUrl:
+          type: string
+          format: uri-reference
+        backgroundUrl:
+          type: string
+          format: uri-reference
+        releaseInfo:
+          type: string
+        resourceId:
+          type: string
+        resourceProvider:
+          type: string
+        episodeTitle:
+          type: string
+        episodeStillUrl:
+          type: string
+          format: uri-reference
+        episodeAirDate:
+          type: string
+          format: date
         lastWatchedAt:
           type: string
           format: date-time

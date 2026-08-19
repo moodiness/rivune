@@ -7,12 +7,7 @@ const maximumAgeMilliseconds = 24 * 60 * 60 * 1000;
 const maximumSerializedHomeLength = 2_000_000;
 const maximumCachedItemsPerFolder = 5;
 
-export type CachedContinueItem = ContinueItem & {
-  episodeTitle?: string;
-  episodeOverview?: string;
-  episodeStillUrl?: string;
-  episodeAirDate?: string;
-};
+export type CachedContinueItem = ContinueItem;
 
 export type HomeCacheSnapshot = {
   collections: Collection[];

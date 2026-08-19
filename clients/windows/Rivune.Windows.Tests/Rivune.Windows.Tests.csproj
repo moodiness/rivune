@@ -14,5 +14,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../Rivune.Windows/Rivune.Windows.csproj" />
+    <ProjectReference Include="../Rivune.App.Core/Rivune.App.Core.csproj" />
   </ItemGroup>
 </Project>

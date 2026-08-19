@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Rivune.App</RootNamespace>
+    <AssemblyName>Rivune.App.Core</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Rivune.Windows/Rivune.Windows.csproj" />
+    <InternalsVisibleTo Include="Rivune.Windows.Tests" />
+    <InternalsVisibleTo Include="Rivune" />
+  </ItemGroup>
+</Project>

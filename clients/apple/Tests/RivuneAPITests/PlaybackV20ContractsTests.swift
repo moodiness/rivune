@@ -93,7 +93,7 @@ final class PlaybackV20ContractsTests: XCTestCase {
         _ = try await client.setTitlesWatchedBatch([SetWatchedBatchItem(titleId: titleId, completed: true, expectedVersion: 7)])
         _ = try await client.markTitleWatched(titleId: titleId, expectedVersion: 8)
         _ = try await client.markTitleUnwatched(titleId: titleId, expectedVersion: 9)
-        _ = try await client.continueWatching(limit: 25)
+        let continuePage = try await client.continueWatching(limit: 25)
         try await client.dismissContinueWatchingTitle(titleId: titleId)
 
         let requests = transport.apiRequests()
@@ -113,6 +113,16 @@ final class PlaybackV20ContractsTests: XCTestCase {
         XCTAssertEqual(query(requests[3])["expectedVersion"], "6")
         XCTAssertEqual(query(requests[6])["expectedVersion"], "9")
         XCTAssertEqual(query(requests[7])["limit"], "25")
+        let continueItem = try XCTUnwrap(continuePage.items.first)
+        XCTAssertEqual(continueItem.title, "Signal Horizon")
+        XCTAssertEqual(continueItem.posterUrl, "/series-poster")
+        XCTAssertEqual(continueItem.backgroundUrl, "/series-background")
+        XCTAssertEqual(continueItem.releaseInfo, "2026")
+        XCTAssertEqual(continueItem.resourceId, "tt9000:2:3")
+        XCTAssertEqual(continueItem.resourceProvider, "imdb")
+        XCTAssertEqual(continueItem.episodeTitle, "Moonrise")
+        XCTAssertEqual(continueItem.episodeStillUrl, "/episode-still")
+        XCTAssertEqual(continueItem.episodeAirDate, "2026-08-15")
 
         let batchBody = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(requests[1].httpBody)) as? [String: Any])
         XCTAssertEqual((batchBody["titleIds"] as? [String])?.map { $0.lowercased() }, [titleId.uuidString.lowercased()])
@@ -218,7 +228,9 @@ private final class V20RecordingTransport: HTTPTransport, @unchecked Sendable {
             return response(request, body: Data("{\"items\":[{\"titleId\":\"11111111-1111-4111-8111-111111111111\",\"progress\":\(progress)}]}".utf8))
         }
         if path.hasSuffix("/continue-watching") && request.httpMethod == "GET" {
-            return response(request, body: Data("{\"items\":[]}".utf8))
+            return response(request, body: Data("""
+            {"items":[{"titleId":"11111111-1111-4111-8111-111111111111","mediaType":"episode","seriesId":"22222222-2222-4222-8222-222222222222","seasonId":"33333333-3333-4333-8333-333333333333","seasonNumber":2,"episodeNumber":3,"positionSeconds":120,"durationSeconds":1800,"version":1,"reason":"resume","title":"Signal Horizon","posterUrl":"/series-poster","backgroundUrl":"/series-background","releaseInfo":"2026","resourceId":"tt9000:2:3","resourceProvider":"imdb","episodeTitle":"Moonrise","episodeStillUrl":"/episode-still","episodeAirDate":"2026-08-15","lastWatchedAt":"2026-08-15T00:00:00Z"}]}
+            """.utf8))
         }
         if request.httpMethod == "DELETE" {
             if path.contains("/watched") { return response(request, body: Data(progress.utf8)) }

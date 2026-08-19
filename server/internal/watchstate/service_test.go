@@ -20,10 +20,11 @@ import (
 )
 
 type progressBatchQueryCounter struct {
-	read                atomic.Int64
-	write               atomic.Int64
-	titleAddonShareLock atomic.Int64
-	tvAddonShareLock    atomic.Int64
+	read                 atomic.Int64
+	write                atomic.Int64
+	titleAddonShareLock  atomic.Int64
+	tvAddonShareLock     atomic.Int64
+	continueLocalization atomic.Int64
 }
 
 func (counter *progressBatchQueryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
@@ -38,6 +39,9 @@ func (counter *progressBatchQueryCounter) TraceQueryStart(ctx context.Context, _
 	}
 	if strings.Contains(data.SQL, "watchstate.lock_tv_addon") && strings.Contains(data.SQL, "FOR SHARE OF addon") {
 		counter.tvAddonShareLock.Add(1)
+	}
+	if strings.Contains(data.SQL, "watchstate.continue_localization") {
+		counter.continueLocalization.Add(1)
 	}
 	return ctx
 }
@@ -753,7 +757,7 @@ func TestResolveTitleProfileScopedFallbackIsolatedAndLibraryPreservesIdentity(t 
 		if loaded, err := service.GetProgress(ctx, profileOne, first.TitleID); err != nil || loaded.Version != ownedProgress.Version {
 			t.Fatalf("owner reads profile-scoped progress: progress=%+v err=%v", loaded, err)
 		}
-		ownerContinue, err := service.ContinueWatching(ctx, profileOne, 10)
+		ownerContinue, err := service.ContinueWatching(ctx, profileOne, "", 10)
 		if err != nil || len(ownerContinue.Items) != 1 || ownerContinue.Items[0].TitleID != first.TitleID {
 			t.Fatalf("owner continue list lost profile-scoped title: page=%+v err=%v", ownerContinue, err)
 		}
@@ -846,7 +850,7 @@ func TestResolveTitleProfileScopedFallbackIsolatedAndLibraryPreservesIdentity(t 
 			canonicalBatch.Items[0].Progress.Version != canonicalProgress.Version || canonicalBatch.Items[1].Progress != nil {
 			t.Fatalf("shared canonical batch progress unavailable: batch=%+v err=%v", canonicalBatch, err)
 		}
-		profileTwoContinue, err := service.ContinueWatching(ctx, profileTwo, 10)
+		profileTwoContinue, err := service.ContinueWatching(ctx, profileTwo, "", 10)
 		if err != nil {
 			t.Fatalf("list continue watching after legacy foreign progress: %v", err)
 		}
@@ -1354,7 +1358,13 @@ func TestNextEpisodeItemsExcludeKnownFutureReleases(t *testing.T) {
 			('00000000-0000-4000-8000-000000000310', 'season', '00000000-0000-4000-8000-000000000300', 1, NULL, 'Season 1', NULL, NULL),
 			('00000000-0000-4000-8000-000000000311', 'episode', '00000000-0000-4000-8000-000000000310', 1, NULL, 'Episode 1', NULL, NULL),
 			('00000000-0000-4000-8000-000000000312', 'episode', '00000000-0000-4000-8000-000000000310', 2, NULL, 'Episode 2', NULL, NULL),
-			('00000000-0000-4000-8000-000000000313', 'episode', '00000000-0000-4000-8000-000000000310', 3, NULL, 'Episode 3', NULL, NULL)
+			('00000000-0000-4000-8000-000000000313', 'episode', '00000000-0000-4000-8000-000000000310', 3, NULL, 'Episode 3', NULL, NULL);
+		UPDATE titles SET poster_url = 'https://images.example/released-poster.jpg',
+		                  background_url = 'https://images.example/released-background.jpg',
+		                  release_info = '2026'
+		WHERE id = '00000000-0000-4000-8000-000000000200';
+		UPDATE titles SET poster_url = 'https://images.example/released-episode-3.jpg'
+		WHERE id = '00000000-0000-4000-8000-000000000213';
 	`); err != nil {
 		t.Fatalf("seed temporary titles: %v", err)
 	}
@@ -1389,8 +1399,13 @@ func TestNextEpisodeItemsExcludeKnownFutureReleases(t *testing.T) {
 	if items[0].SeriesID != "00000000-0000-4000-8000-000000000200" ||
 		items[0].TitleID != "00000000-0000-4000-8000-000000000213" ||
 		items[0].EpisodeNumber == nil || *items[0].EpisodeNumber != 3 ||
-		items[0].Reason != "next_episode" {
-		t.Fatalf("expected the first released candidate after the future episode, got %#v", items[0])
+		items[0].Reason != "next_episode" || items[0].Title != "Released Show" ||
+		items[0].PosterURL != "https://images.example/released-poster.jpg" ||
+		items[0].BackgroundURL != "https://images.example/released-background.jpg" ||
+		items[0].ReleaseInfo != "2026" || items[0].ResourceID != "released-show:1:3" ||
+		items[0].ResourceProvider != "tmdb" || items[0].EpisodeTitle != "Episode 3" ||
+		items[0].EpisodeStillURL != "https://images.example/released-episode-3.jpg" || items[0].EpisodeAirDate == "" {
+		t.Fatalf("expected the released candidate with series and episode snapshots, got %#v", items[0])
 	}
 	if items[1].SeriesID != "00000000-0000-4000-8000-000000000300" ||
 		items[1].TitleID != "00000000-0000-4000-8000-000000000312" ||
@@ -1495,11 +1510,11 @@ func TestDismissContinuePersistsUntilNewWatchActivity(t *testing.T) {
 			dismissed_at timestamptz NOT NULL DEFAULT now(),
 			PRIMARY KEY (profile_id, title_id)
 		);
-		INSERT INTO titles (id, media_type, parent_id, ordinal, display_title, resource_id, resource_provider) VALUES
-			('00000000-0000-4000-8000-000000000400', 'series', NULL, NULL, 'Series', 'series', 'tmdb'),
-			('00000000-0000-4000-8000-000000000410', 'season', '00000000-0000-4000-8000-000000000400', 1, 'Season 1', NULL, NULL),
-			('00000000-0000-4000-8000-000000000411', 'episode', '00000000-0000-4000-8000-000000000410', 1, 'Episode 1', NULL, NULL),
-			('00000000-0000-4000-8000-000000000500', 'movie', NULL, NULL, 'Movie', 'movie', 'tmdb');
+		INSERT INTO titles (id, media_type, parent_id, ordinal, release_date, display_title, poster_url, background_url, release_info, resource_id, resource_provider) VALUES
+			('00000000-0000-4000-8000-000000000400', 'series', NULL, NULL, NULL, 'Series', 'https://images.example/series-poster.jpg', 'https://images.example/series-background.jpg', '2026', 'series', 'tmdb'),
+			('00000000-0000-4000-8000-000000000410', 'season', '00000000-0000-4000-8000-000000000400', 1, NULL, 'Season 1', NULL, NULL, NULL, NULL, NULL),
+			('00000000-0000-4000-8000-000000000411', 'episode', '00000000-0000-4000-8000-000000000410', 1, '2026-01-03', 'Episode 1', 'https://images.example/episode-1.jpg', NULL, NULL, NULL, NULL),
+			('00000000-0000-4000-8000-000000000500', 'movie', NULL, NULL, NULL, 'Movie', NULL, NULL, NULL, 'movie', 'tmdb');
 		INSERT INTO profile_progress (profile_id, title_id, position_seconds, duration_seconds) VALUES
 			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000411', 200, 1000),
 			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000500', 300, 1000);
@@ -1511,21 +1526,34 @@ func TestDismissContinuePersistsUntilNewWatchActivity(t *testing.T) {
 	principal := captureActiveProfileTestSession(t, ctx, pool, auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}, profileID)
 	service := NewService(pool, time.UTC)
 
-	initial, err := service.ContinueWatching(ctx, principal, 10)
+	initial, err := service.ContinueWatching(ctx, principal, "", 10)
 	if err != nil || len(initial.Items) != 2 {
 		t.Fatalf("initial continue items = %#v, error %v", initial.Items, err)
+	}
+	var episodeItem ContinueItem
+	for _, item := range initial.Items {
+		if item.MediaType == "episode" {
+			episodeItem = item
+		}
+	}
+	if episodeItem.Title != "Series" || episodeItem.PosterURL != "https://images.example/series-poster.jpg" ||
+		episodeItem.BackgroundURL != "https://images.example/series-background.jpg" || episodeItem.ReleaseInfo != "2026" ||
+		episodeItem.ResourceID != "series:1:1" || episodeItem.ResourceProvider != "tmdb" ||
+		episodeItem.EpisodeTitle != "Episode 1" || episodeItem.EpisodeStillURL != "https://images.example/episode-1.jpg" ||
+		episodeItem.EpisodeAirDate != "2026-01-03" {
+		t.Fatalf("native resume snapshot contract mismatch: %+v", episodeItem)
 	}
 	if err := service.DismissContinue(ctx, principal, "00000000-0000-4000-8000-000000000411"); err != nil {
 		t.Fatalf("dismiss episode series: %v", err)
 	}
-	afterEpisode, err := service.ContinueWatching(ctx, principal, 10)
+	afterEpisode, err := service.ContinueWatching(ctx, principal, "", 10)
 	if err != nil || len(afterEpisode.Items) != 1 || afterEpisode.Items[0].MediaType != "movie" {
 		t.Fatalf("continue items after episode dismissal = %#v, error %v", afterEpisode.Items, err)
 	}
 	if err := service.DismissContinue(ctx, principal, "00000000-0000-4000-8000-000000000500"); err != nil {
 		t.Fatalf("dismiss movie: %v", err)
 	}
-	afterMovie, err := service.ContinueWatching(ctx, principal, 10)
+	afterMovie, err := service.ContinueWatching(ctx, principal, "", 10)
 	if err != nil || len(afterMovie.Items) != 0 {
 		t.Fatalf("continue items after movie dismissal = %#v, error %v", afterMovie.Items, err)
 	}
@@ -1534,9 +1562,177 @@ func TestDismissContinuePersistsUntilNewWatchActivity(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("update dismissed episode progress: %v", err)
 	}
-	restored, err := service.ContinueWatching(ctx, principal, 10)
+	restored, err := service.ContinueWatching(ctx, principal, "", 10)
 	if err != nil || len(restored.Items) != 1 || restored.Items[0].TitleID != "00000000-0000-4000-8000-000000000411" {
 		t.Fatalf("restored continue items = %#v, error %v", restored.Items, err)
+	}
+}
+
+func TestNormalizeContinueMetadataLanguage(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: ""},
+		{input: " AUTO "},
+		{input: " FR-fr ", want: "fr-FR"},
+		{input: "zh-hant-tw", want: "zh-Hant-TW"},
+	}
+	for _, test := range tests {
+		got, err := normalizeContinueMetadataLanguage(test.input)
+		if err != nil || got != test.want {
+			t.Fatalf("normalize metadata language %q = %q, %v; want %q", test.input, got, err, test.want)
+		}
+	}
+	if _, err := normalizeContinueMetadataLanguage("not_a_language"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("invalid metadata language error = %v", err)
+	}
+}
+
+func TestContinueWatchingOverlaysCachedMetadataLanguage(t *testing.T) {
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = os.Getenv("RIVUNE_DATABASE_URL")
+	}
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL or RIVUNE_DATABASE_URL to run the PostgreSQL localized continue test")
+	}
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatalf("parse test database URL: %v", err)
+	}
+	counter := &progressBatchQueryCounter{}
+	config.ConnConfig.Tracer = counter
+	config.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	defer pool.Close()
+
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		CREATE TEMPORARY TABLE profiles (id uuid PRIMARY KEY, category_id uuid);
+		CREATE TEMPORARY TABLE user_profile_access (
+			user_id uuid NOT NULL, profile_id uuid NOT NULL, can_manage boolean NOT NULL DEFAULT false,
+			PRIMARY KEY (user_id, profile_id)
+		);
+		CREATE TEMPORARY TABLE titles (
+			id uuid PRIMARY KEY, media_type text NOT NULL, parent_id uuid, ordinal integer,
+			release_date date, display_title text, poster_url text, background_url text, release_info text,
+			resource_id text, resource_provider text, is_current boolean NOT NULL DEFAULT true, source_addon_id uuid
+		);
+		CREATE TEMPORARY TABLE profile_title_external_ids (
+			profile_id uuid NOT NULL, title_id uuid NOT NULL, provider text NOT NULL,
+			namespace text NOT NULL, external_id text NOT NULL
+		);
+		CREATE TEMPORARY TABLE profile_addons (id uuid PRIMARY KEY, enabled boolean NOT NULL DEFAULT true);
+		CREATE TEMPORARY TABLE addon_profile_access (addon_id uuid NOT NULL, profile_id uuid NOT NULL);
+		CREATE TEMPORARY TABLE addon_category_access (addon_id uuid NOT NULL, category_id uuid NOT NULL);
+		CREATE TEMPORARY TABLE profile_progress (
+			profile_id uuid NOT NULL, title_id uuid NOT NULL, position_seconds integer NOT NULL,
+			duration_seconds integer NOT NULL, completed boolean NOT NULL DEFAULT false, version bigint NOT NULL DEFAULT 1,
+			last_watched_at timestamptz NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (profile_id, title_id)
+		);
+		CREATE TEMPORARY TABLE profile_continue_dismissals (
+			profile_id uuid NOT NULL, title_id uuid NOT NULL, dismissed_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (profile_id, title_id)
+		);
+		CREATE TEMPORARY TABLE title_metadata (
+			title_id uuid NOT NULL, provider text NOT NULL, language text NOT NULL, payload jsonb NOT NULL,
+			expires_at timestamptz NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (title_id, provider, language)
+		);
+
+		INSERT INTO profiles (id) VALUES ('11111111-1111-4111-8111-111111111111');
+		INSERT INTO titles (id, media_type, parent_id, ordinal, release_date, display_title, poster_url, background_url, release_info, resource_id, resource_provider) VALUES
+			('00000000-0000-4000-8000-000000000600', 'series', NULL, NULL, '2024-01-01', 'English Series', 'https://images.example/en-series-poster.jpg', 'https://images.example/en-series-backdrop.jpg', '2024', 'series-600', 'tmdb'),
+			('00000000-0000-4000-8000-000000000610', 'season', '00000000-0000-4000-8000-000000000600', 1, '2024-01-01', 'Season 1', NULL, NULL, NULL, NULL, NULL),
+			('00000000-0000-4000-8000-000000000611', 'episode', '00000000-0000-4000-8000-000000000610', 2, '2024-01-08', 'English Episode', 'https://images.example/en-episode-still.jpg', 'https://images.example/en-episode-backdrop.jpg', NULL, NULL, NULL),
+			('00000000-0000-4000-8000-000000000700', 'movie', NULL, NULL, '2025-03-04', 'English Movie', 'https://images.example/en-movie-poster.jpg', 'https://images.example/en-movie-backdrop.jpg', '2025', 'movie-700', 'tmdb');
+		INSERT INTO profile_progress (profile_id, title_id, position_seconds, duration_seconds, last_watched_at) VALUES
+			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000611', 200, 1000, '2026-01-02T00:00:00Z'),
+			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000700', 300, 1000, '2026-01-01T00:00:00Z');
+		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at, updated_at) VALUES
+			('00000000-0000-4000-8000-000000000600', 'tmdb', 'fr',
+			 '{"id":"00000000-0000-4000-8000-000000000600","mediaType":"series","name":"Série française","firstAirDate":"2024-01-01","posterUrl":"https://images.example/fr-series-poster.jpg","backdropUrl":"https://images.example/fr-series-backdrop.jpg"}',
+			 now() - interval '1 day', now() - interval '2 days'),
+			('00000000-0000-4000-8000-000000000600', 'tmdb', 'fr-FR',
+			 '{"id":"00000000-0000-4000-8000-000000000600","mediaType":"series","name":"Série française régionale","firstAirDate":"2024-01-01","posterUrl":"https://images.example/fr-FR-series-poster.jpg","backdropUrl":"https://images.example/fr-FR-series-backdrop.jpg"}',
+			 now() - interval '1 day', now() - interval '1 day'),
+			('00000000-0000-4000-8000-000000000600', 'tvdb', 'fr',
+			 '{"id":"00000000-0000-4000-8000-000000000600","mediaType":"series","name":"Mauvais fournisseur","posterUrl":"https://images.example/wrong-poster.jpg"}',
+			 now() + interval '1 day', now()),
+			('00000000-0000-4000-8000-000000000610', 'tmdb', 'fr-FR',
+			 '{"id":"00000000-0000-4000-8000-000000000610","mediaType":"season","seriesId":"00000000-0000-4000-8000-000000000600","name":"Saison 1","seasonNumber":1,"episodes":[{"id":"00000000-0000-4000-8000-000000000611","mediaType":"episode","seasonId":"00000000-0000-4000-8000-000000000610","name":"Épisode français","seasonNumber":1,"episodeNumber":2,"airDate":"2024-01-08","stillUrl":"https://images.example/fr-episode-still.jpg","backdropUrl":"https://images.example/fr-episode-backdrop.jpg"}]}',
+			 now() - interval '1 hour', now() - interval '1 day'),
+			('00000000-0000-4000-8000-000000000610', 'tvdb', 'fr-FR',
+			 '{"episodes":"malformed"}', now() + interval '1 day', now());
+	`); err != nil {
+		t.Fatalf("seed localized continue state: %v", err)
+	}
+
+	principal := captureActiveProfileTestSession(t, ctx, pool, auth.Principal{
+		Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
+	}, "11111111-1111-4111-8111-111111111111")
+	service := NewService(pool, time.UTC)
+	localized, err := service.ContinueWatching(ctx, principal, " FR ", 10)
+	if err != nil {
+		t.Fatalf("query localized continue watching: %v", err)
+	}
+	if counter.continueLocalization.Load() != 1 {
+		t.Fatalf("localized continue emitted %d metadata queries, want 1", counter.continueLocalization.Load())
+	}
+	if len(localized.Items) != 2 {
+		t.Fatalf("localized continue items = %#v", localized.Items)
+	}
+	var episode, movie ContinueItem
+	for _, item := range localized.Items {
+		switch item.MediaType {
+		case "episode":
+			episode = item
+		case "movie":
+			movie = item
+		}
+	}
+	if episode.Title != "Série française" || episode.PosterURL != "https://images.example/fr-series-poster.jpg" ||
+		episode.BackgroundURL != "https://images.example/fr-episode-backdrop.jpg" || episode.ReleaseInfo != "2024" ||
+		episode.EpisodeTitle != "Épisode français" || episode.EpisodeStillURL != "https://images.example/fr-episode-still.jpg" ||
+		episode.EpisodeAirDate != "2024-01-08" || episode.ResourceID != "series-600:1:2" || episode.ResourceProvider != "tmdb" {
+		t.Fatalf("localized episode snapshot mismatch: %+v", episode)
+	}
+	if movie.Title != "English Movie" || movie.PosterURL != "https://images.example/en-movie-poster.jpg" ||
+		movie.BackgroundURL != "https://images.example/en-movie-backdrop.jpg" || movie.ReleaseInfo != "2025" {
+		t.Fatalf("movie without localized cache changed: %+v", movie)
+	}
+
+	regional, err := service.ContinueWatching(ctx, principal, "fr-fr", 10)
+	if err != nil {
+		t.Fatalf("query regional localized continue watching: %v", err)
+	}
+	if counter.continueLocalization.Load() != 2 {
+		t.Fatalf("second localized continue emitted %d total metadata queries, want 2", counter.continueLocalization.Load())
+	}
+	for _, item := range regional.Items {
+		if item.MediaType == "episode" && (item.Title != "Série française régionale" ||
+			item.PosterURL != "https://images.example/fr-FR-series-poster.jpg" || item.EpisodeTitle != "Épisode français") {
+			t.Fatalf("regional exact-language priority mismatch: %+v", item)
+		}
+	}
+
+	automatic, err := service.ContinueWatching(ctx, principal, "auto", 10)
+	if err != nil {
+		t.Fatalf("query automatic-language continue watching: %v", err)
+	}
+	if counter.continueLocalization.Load() != 2 {
+		t.Fatalf("automatic language unexpectedly emitted a metadata query")
+	}
+	for _, item := range automatic.Items {
+		if item.MediaType == "episode" && (item.Title != "English Series" || item.EpisodeTitle != "English Episode" ||
+			item.PosterURL != "https://images.example/en-series-poster.jpg" || item.BackgroundURL != "https://images.example/en-series-backdrop.jpg") {
+			t.Fatalf("automatic language changed episode snapshots: %+v", item)
+		}
 	}
 }
 
@@ -1851,7 +2047,7 @@ func TestResolveCustomSeriesPreservesStableHierarchyProgressAndScope(t *testing.
 	if counter.titleAddonShareLock.Load() != 3 {
 		t.Fatalf("addon watched updates emitted %d enabled addon FOR SHARE queries, want 3", counter.titleAddonShareLock.Load())
 	}
-	continuePage, err := service.ContinueWatching(ctx, profileOne, 20)
+	continuePage, err := service.ContinueWatching(ctx, profileOne, "", 20)
 	if err != nil {
 		t.Fatalf("query continue watching for custom hierarchy: %v", err)
 	}

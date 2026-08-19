@@ -93,8 +93,11 @@ test("Home restores persistent rows before revalidation and refreshes opened col
   const folderPath = "/api/v1/collections/alice-collection/folders/alice-folder/items";
   await page.goto("/");
   await expect(page.getByText("Alice Exclusive", { exact: true })).toBeVisible();
+  const continueCard = page.getByRole("button", { name: "Open Signal Horizon" });
+  await expect(continueCard).toContainText("S01 · E01 · First Light");
+  await expect(continueCard.locator("img")).toHaveAttribute("src", "https://fixtures.rivune.test/episode-1-still.svg");
   expect(rivune.matching(folderPath, "GET")).toHaveLength(1);
-  expect(rivune.matching("/api/v1/metadata/seasons/season-1", "GET")).toHaveLength(1);
+  expect(rivune.matching("/api/v1/metadata/seasons/season-1", "GET")).toHaveLength(0);
 
   await page.evaluate(() => {
     for (const key of Object.keys(sessionStorage)) {
@@ -106,7 +109,7 @@ test("Home restores persistent rows before revalidation and refreshes opened col
   await expect(page.getByText("Alice Exclusive", { exact: true })).toBeVisible({ timeout: 800 });
   await expect.poll(() => rivune.matching("/api/v1/collections", "GET").length).toBe(2);
   expect(rivune.matching(folderPath, "GET")).toHaveLength(1);
-  expect(rivune.matching("/api/v1/metadata/seasons/season-1", "GET")).toHaveLength(1);
+  expect(rivune.matching("/api/v1/metadata/seasons/season-1", "GET")).toHaveLength(0);
 
   await page.getByRole("button", { name: "View all" }).click();
   await expect.poll(() => rivune.matching(folderPath, "GET").length).toBe(2);

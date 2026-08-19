@@ -122,6 +122,86 @@ public sealed class AuthenticationBoundaryTests
     }
 
     [Fact]
+    public async Task TransientRefreshFailurePreservesCredentials()
+    {
+        var store = new MemoryCredentialStore(Stored());
+        var handler = new DelegateHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath == "/.well-known/rivune"
+                ? JsonResponse(HttpStatusCode.OK, DiscoveryBody)
+                : JsonResponse(
+                    HttpStatusCode.ServiceUnavailable,
+                    """{"error":{"code":"unavailable","message":"Unavailable"}}""")));
+        using var client = CreateClient(handler, store);
+
+        var exception = await Assert.ThrowsAsync<RivuneServerException>(() =>
+            client.RefreshSessionAsync(TestContext.Current.CancellationToken));
+
+        Assert.Equal((int)HttpStatusCode.ServiceUnavailable, exception.StatusCode);
+        Assert.Equal("old-access", store.Credentials?.Credentials.AccessToken);
+    }
+
+    [Fact]
+    public async Task InvalidRefreshTokenClearsCredentials()
+    {
+        var store = new MemoryCredentialStore(Stored());
+        var handler = new DelegateHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath == "/.well-known/rivune"
+                ? JsonResponse(HttpStatusCode.OK, DiscoveryBody)
+                : JsonResponse(
+                    HttpStatusCode.Unauthorized,
+                    """{"error":{"code":"invalid_refresh_token","message":"The refresh token is invalid or expired"}}""")));
+        using var client = CreateClient(handler, store);
+
+        var exception = await Assert.ThrowsAsync<RivuneServerException>(() =>
+            client.RefreshSessionAsync(TestContext.Current.CancellationToken));
+
+        Assert.Equal("invalid_refresh_token", exception.Code);
+        Assert.Null(store.Credentials);
+    }
+
+    [Fact]
+    public async Task InvalidRefreshTokenSurfacesCredentialDeletionFailure()
+    {
+        var store = new FailingClearCredentialStore(Stored());
+        var handler = new DelegateHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath == "/.well-known/rivune"
+                ? JsonResponse(HttpStatusCode.OK, DiscoveryBody)
+                : JsonResponse(
+                    HttpStatusCode.Unauthorized,
+                    """{"error":{"code":"invalid_refresh_token","message":"Expired"}}""")));
+        using var client = CreateClient(handler, store);
+
+        var exception = await Assert.ThrowsAsync<CredentialStoreException>(() =>
+            client.RefreshSessionAsync(TestContext.Current.CancellationToken));
+
+        Assert.Equal("Local credential deletion failed.", exception.Message);
+        Assert.Equal("old-access", store.Credentials?.Credentials.AccessToken);
+    }
+
+    [Fact]
+    public async Task LoginRejectsNullRequiredTokenFieldsBeforePersistence()
+    {
+        const string invalidToken = """
+            {"tokenType":"Bearer","accessToken":null,"accessTokenExpiresAt":"2026-08-05T12:15:00Z","refreshToken":"refresh","refreshTokenExpiresAt":"2026-09-05T12:00:00Z","sessionId":"22222222-2222-4222-8222-222222222222","deviceId":"33333333-3333-4333-8333-333333333333","authorizationScope":"global_admin","category":null}
+            """;
+        var store = new MemoryCredentialStore(null);
+        var handler = new DelegateHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath == "/.well-known/rivune"
+                ? JsonResponse(HttpStatusCode.OK, DiscoveryBody)
+                : JsonResponse(HttpStatusCode.OK, invalidToken)));
+        using var client = CreateClient(handler, store);
+
+        await Assert.ThrowsAsync<InvalidResponseException>(() => client.LoginAsync(
+            "admin",
+            "password",
+            new LoginDevice { Name = "Windows", Platform = "windows" },
+            TestContext.Current.CancellationToken));
+
+        Assert.Null(store.Credentials);
+        Assert.Equal(0, store.SaveCount);
+    }
+
+    [Fact]
     public async Task RemoteLogoutFailureCannotVetoLocalClearOrTriggerRefresh()
     {
         var refreshRequests = 0;

@@ -61,13 +61,19 @@ public sealed class NotAuthenticatedException : RivuneApiException
 
 public sealed class RivuneServerException : RivuneApiException
 {
-    public RivuneServerException(int statusCode, string code, string message)
+    public RivuneServerException(
+        int statusCode,
+        string code,
+        string message,
+        TimeSpan? retryAfter = null)
         : base(message)
     {
         StatusCode = statusCode;
         Code = code;
+        RetryAfter = retryAfter;
     }
 
     public int StatusCode { get; }
     public string Code { get; }
+    public TimeSpan? RetryAfter { get; }
 }
