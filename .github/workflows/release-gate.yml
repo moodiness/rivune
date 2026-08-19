@@ -157,7 +157,7 @@ jobs:
           go-version: "1.26.6"
           cache: false
       - name: Test update manifest contract
-        working-directory: clients/android/update
+        working-directory: clients/update
         run: go test ./...
       - name: Set up Java
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
@@ -174,7 +174,7 @@ jobs:
         run: bash clients/android/gradlew -p clients/android --no-daemon :rivune-api:testDebugUnitTest :rivune-api:assembleRelease :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
 
   windows-client:
-    name: Windows API client
+    name: Windows x64 portable client
     runs-on: windows-latest
     steps:
       - name: Check out repository
@@ -187,6 +187,65 @@ jobs:
         run: pwsh -NoProfile -File scripts/create-env.Tests.ps1
       - name: Test Windows library
         run: dotnet test clients/windows/Rivune.Windows.slnx --configuration Release --nologo
+      - name: Publish, inspect, and smoke the unsigned x64 executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $project = Join-Path $env:GITHUB_WORKSPACE 'clients/windows/Rivune.App/Rivune.App.csproj'
+          $publish = Join-Path $env:RUNNER_TEMP 'rivune-portable-publish'
+          & dotnet publish $project --configuration Release --runtime win-x64 --output $publish --nologo `
+            -p:Platform=x64 `
+            -p:WindowsPackageType=None `
+            -p:PublishSingleFile=true `
+            -p:IncludeAllContentForSelfExtract=true `
+            -p:SelfContained=true `
+            -p:WindowsAppSDKSelfContained=true `
+            -p:Version=1.8.0 `
+            -p:AssemblyVersion=1.8.0.0 `
+            -p:FileVersion=1.8.0.0 `
+            -p:InformationalVersion=1.8.0 `
+            -p:IncludeSourceRevisionInInformationalVersion=false
+          if ($LASTEXITCODE -ne 0) { throw 'Windows x64 portable publish failed.' }
+
+          $distributable = @(Get-ChildItem -LiteralPath $publish -File -Recurse |
+            Where-Object { $_.Extension -ne '.pdb' })
+          if ($distributable.Count -ne 1 -or $distributable[0].Extension -ne '.exe') {
+            throw "Portable publish must contain exactly one distributable executable; found: $($distributable.Name -join ', ')."
+          }
+          $stage = Join-Path $env:RUNNER_TEMP 'rivune-portable-stage'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $executable = Join-Path $stage 'Rivune.exe'
+          Copy-Item -LiteralPath $distributable[0].FullName -Destination $executable
+          $stagedFiles = @(Get-ChildItem -LiteralPath $stage -File)
+          if ($stagedFiles.Count -ne 1 -or $stagedFiles[0].Name -cne 'Rivune.exe') {
+            throw 'Portable staging must contain exactly Rivune.exe.'
+          }
+          $stream = [IO.File]::OpenRead($executable)
+          try {
+            $reader = [IO.BinaryReader]::new($stream)
+            if ($reader.ReadUInt16() -ne 0x5a4d) { throw 'Portable executable has no DOS PE header.' }
+            $stream.Position = 0x3c
+            $peOffset = $reader.ReadUInt32()
+            $stream.Position = $peOffset
+            if ($reader.ReadUInt32() -ne 0x00004550) { throw 'Portable executable has no PE signature.' }
+            if ($reader.ReadUInt16() -ne 0x8664) { throw 'Portable executable PE machine is not x64.' }
+          } finally {
+            if ($null -ne $reader) { $reader.Dispose() } else { $stream.Dispose() }
+          }
+          $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($executable)
+          if ($version.FileVersion -ne '1.8.0.0' -or $version.ProductVersion -ne '1.8.0') {
+            throw "Portable executable version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
+          }
+          if ((Get-AuthenticodeSignature -FilePath $executable).Status -ne 'NotSigned') {
+            throw 'Portable executable must be unsigned.'
+          }
+          $process = Start-Process -FilePath $executable -PassThru
+          try {
+            Start-Sleep -Seconds 5
+            if ($process.HasExited) { throw "Portable executable exited during smoke test with code $($process.ExitCode)." }
+          } finally {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }
 
   container:
     name: Container, migrations, and HTTPS proxy (amd64)
