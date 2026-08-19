@@ -138,19 +138,124 @@ jobs:
             echo "tag=${RELEASE_TAG}"
           } >> "${GITHUB_OUTPUT}"
 
-  publish:
-    name: Build assets and publish multi-architecture image by digest
+  windows-asset:
+    name: Build and verify Windows x64 portable executable
     if: needs.authorize.outputs.authorized == 'true'
     needs:
       - authorize
-    runs-on: ubuntu-latest
-    environment: release
+    runs-on: windows-latest
     outputs:
-      artifact_name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}
-      image_digest: ${{ steps.container.outputs.digest }}
+      artifact_name: windows-release-asset-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       contents: read
-      packages: write
+    steps:
+      - name: Check out the approved main commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.x
+      - name: Publish and inspect unsigned x64 executable
+        env:
+          RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_TAG -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
+            throw "Release tag is not valid SemVer: $env:RELEASE_TAG"
+          }
+          $components = @([uint64]$Matches[1], [uint64]$Matches[2], [uint64]$Matches[3])
+          if ($components | Where-Object { $_ -gt 65535 }) {
+            throw 'Every SemVer core component must be at most 65535 for Windows file-version metadata.'
+          }
+          $versionName = $env:RELEASE_TAG.Substring(1)
+          $fileVersion = "$($components[0]).$($components[1]).$($components[2]).0"
+          $project = Join-Path $env:GITHUB_WORKSPACE 'clients/windows/Rivune.App/Rivune.App.csproj'
+          $publish = Join-Path $env:RUNNER_TEMP 'rivune-portable-publish'
+          $artifactDirectory = Join-Path $env:GITHUB_WORKSPACE 'windows-release-asset'
+          New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
+
+          & dotnet publish $project --configuration Release --runtime win-x64 --output $publish --nologo `
+            -p:Platform=x64 `
+            -p:WindowsPackageType=None `
+            -p:PublishSingleFile=true `
+            -p:IncludeAllContentForSelfExtract=true `
+            -p:SelfContained=true `
+            -p:WindowsAppSDKSelfContained=true `
+            -p:Version=$versionName `
+            -p:AssemblyVersion=$fileVersion `
+            -p:FileVersion=$fileVersion `
+            -p:InformationalVersion=$versionName `
+            -p:IncludeSourceRevisionInInformationalVersion=false
+          if ($LASTEXITCODE -ne 0) { throw 'Windows x64 portable publish failed.' }
+
+          $distributable = @(Get-ChildItem -LiteralPath $publish -File -Recurse |
+            Where-Object { $_.Extension -ne '.pdb' })
+          if ($distributable.Count -ne 1 -or $distributable[0].Extension -ne '.exe') {
+            throw "Portable publish must contain exactly one distributable executable; found: $($distributable.Name -join ', ')."
+          }
+          $asset = Join-Path $artifactDirectory 'Rivune.exe'
+          Copy-Item -LiteralPath $distributable[0].FullName -Destination $asset
+          $stream = [IO.File]::OpenRead($asset)
+          try {
+            $reader = [IO.BinaryReader]::new($stream)
+            if ($reader.ReadUInt16() -ne 0x5a4d) { throw 'Rivune.exe has no DOS PE header.' }
+            $stream.Position = 0x3c
+            $peOffset = $reader.ReadUInt32()
+            $stream.Position = $peOffset
+            if ($reader.ReadUInt32() -ne 0x00004550) { throw 'Rivune.exe has no PE signature.' }
+            if ($reader.ReadUInt16() -ne 0x8664) { throw 'Rivune.exe PE machine is not x64.' }
+          } finally {
+            if ($null -ne $reader) { $reader.Dispose() } else { $stream.Dispose() }
+          }
+          $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($asset)
+          if ($version.FileVersion -ne $fileVersion -or $version.ProductVersion -ne $versionName) {
+            throw "Rivune.exe version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
+          }
+          if ((Get-AuthenticodeSignature -FilePath $asset).Status -ne 'NotSigned') {
+            throw 'Rivune.exe must be unsigned.'
+          }
+          $size = (Get-Item -LiteralPath $asset).Length
+          if ($size -le 0 -or $size -gt 2147483647) { throw "Rivune.exe size is invalid: $size bytes." }
+          $files = @(Get-ChildItem -LiteralPath $artifactDirectory -File)
+          if ($files.Count -ne 1 -or $files[0].Name -cne 'Rivune.exe') {
+            throw 'Windows release artifact must contain exactly Rivune.exe.'
+          }
+      - name: Upload immutable Windows release executable
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-release-asset-${{ github.run_id }}-${{ github.run_attempt }}
+          path: windows-release-asset/Rivune.exe
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+
+  build-assets:
+    name: Build unsigned Android and Windows release inputs
+    if: needs.authorize.outputs.authorized == 'true'
+    needs:
+      - authorize
+      - windows-asset
+    runs-on: ubuntu-latest
+    outputs:
+      release_inputs_artifact_name: release-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+      unsigned_android_artifact_name: unsigned-android-${{ github.run_id }}-${{ github.run_attempt }}
+      version_name: ${{ steps.metadata.outputs.version_name }}
+      version_code: ${{ steps.metadata.outputs.version_code }}
+      channel: ${{ steps.metadata.outputs.channel }}
+      published_at: ${{ steps.metadata.outputs.published_at }}
+      android_asset_name: ${{ steps.metadata.outputs.android_asset_name }}
+      source_asset_name: ${{ steps.metadata.outputs.source_asset_name }}
+      windows_asset_name: ${{ steps.metadata.outputs.windows_asset_name }}
+      release_url: ${{ steps.metadata.outputs.release_url }}
+      android_asset_url: ${{ steps.metadata.outputs.android_asset_url }}
+      windows_asset_url: ${{ steps.metadata.outputs.windows_asset_url }}
+    permissions:
+      contents: read
     steps:
       - name: Check out the approved main commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -158,11 +263,11 @@ jobs:
           ref: ${{ needs.authorize.outputs.sha }}
           persist-credentials: false
           fetch-depth: 0
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - name: Download immutable Windows release executable
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          go-version: "1.26.6"
-          cache: false
+          name: ${{ needs.windows-asset.outputs.artifact_name }}
+          path: release-assets
       - name: Set up Java
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
@@ -170,32 +275,23 @@ jobs:
           java-version: 17
       - name: Set up Android SDK
         uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4
-      - name: Install Android signing tools
+      - name: Install Android build tools
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
-      - name: Build and verify signed Android release assets
+      - name: Build unsigned Android release and corresponding source
+        id: metadata
         env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
-          ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
           GITHUB_RELEASE_RUN_NUMBER: ${{ github.run_number }}
           RELEASE_SHA: ${{ needs.authorize.outputs.sha }}
           RELEASE_STABLE: ${{ needs.authorize.outputs.stable }}
           RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+          RELEASE_WORKFLOW_CREATED_AT: ${{ github.event.workflow_run.created_at }}
           REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
-          umask 077
-          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_PASSWORD ANDROID_KEY_ALIAS ANDROID_SIGNING_CERT_SHA256; do
-            if [[ -z "${!name:-}" ]]; then
-              echo "Required Android release signing configuration is missing: ${name}" >&2
-              exit 1
-            fi
-          done
+          trap 'rm -rf .release-private' EXIT
 
           version_name="${RELEASE_TAG#v}"
           # github.run_number increases between releases but remains unchanged for rerun attempts.
@@ -221,30 +317,39 @@ jobs:
           else
             channel=prerelease
           fi
-          published_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          if ! published_at="$(date -u --date="${RELEASE_WORKFLOW_CREATED_AT}" +'%Y-%m-%dT%H:%M:%SZ')" ||
+             [[ "${published_at}" != "${RELEASE_WORKFLOW_CREATED_AT}" ]]; then
+            echo "The source workflow creation time is not canonical RFC3339 UTC: ${RELEASE_WORKFLOW_CREATED_AT}" >&2
+            exit 1
+          fi
           asset_name="rivune-android-${version_name}.apk"
           source_asset_name="rivune-android-${version_name}-corresponding-source.tar.gz"
+          windows_asset_name='Rivune.exe'
           release_url="https://github.com/${REPOSITORY}/releases/tag/${RELEASE_TAG}"
           asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${asset_name}"
+          windows_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_asset_name}"
+          windows_size="$(stat -c %s "release-assets/${windows_asset_name}")"
+          if (( windows_size <= 0 || windows_size > 2147483647 )); then
+            echo "Rivune.exe size is invalid: ${windows_size} bytes." >&2
+            exit 1
+          fi
 
-          mkdir -p release-assets .release-private
-          if [[ ! "${ANDROID_KEYSTORE_BASE64}" =~ ^[A-Za-z0-9+/]*={0,2}$ ]] ||
-             (( ${#ANDROID_KEYSTORE_BASE64} % 4 != 0 )) ||
-             ! printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > .release-private/rivune-release.keystore; then
-            echo "ANDROID_KEYSTORE_BASE64 is not valid base64." >&2
-            exit 1
-          fi
-          if [[ ! -s .release-private/rivune-release.keystore ]]; then
-            echo "Decoded Android keystore is empty." >&2
-            exit 1
-          fi
+          mkdir -p release-assets .release-private release-inputs unsigned-android-input
+          {
+            echo "version_name=${version_name}"
+            echo "version_code=${version_code}"
+            echo "channel=${channel}"
+            echo "published_at=${published_at}"
+            echo "android_asset_name=${asset_name}"
+            echo "source_asset_name=${source_asset_name}"
+            echo "windows_asset_name=${windows_asset_name}"
+            echo "release_url=${release_url}"
+            echo "android_asset_url=${asset_url}"
+            echo "windows_asset_url=${windows_asset_url}"
+          } >> "${GITHUB_OUTPUT}"
 
           export RIVUNE_ANDROID_VERSION_NAME="${version_name}"
           export RIVUNE_ANDROID_VERSION_CODE="${version_code}"
-          export RIVUNE_ANDROID_KEYSTORE_PATH="${GITHUB_WORKSPACE}/.release-private/rivune-release.keystore"
-          export RIVUNE_ANDROID_KEYSTORE_PASSWORD="${ANDROID_KEYSTORE_PASSWORD}"
-          export RIVUNE_ANDROID_KEY_ALIAS="${ANDROID_KEY_ALIAS}"
-          export RIVUNE_ANDROID_KEY_PASSWORD="${ANDROID_KEY_PASSWORD}"
 
           bash clients/android/gradlew -p clients/android --no-daemon :app:assembleRelease
           mapfile -t libmpv_aars < <(find "${GRADLE_USER_HOME:-${HOME}/.gradle}/caches/modules-2/files-2.1/dev.jdtech.mpv/libmpv/1.0.0" \
@@ -259,25 +364,12 @@ jobs:
               "${libmpv_aar}" | sha256sum --check --strict
           done
 
-          cp clients/android/app/build/outputs/apk/release/app-release.apk "release-assets/${asset_name}"
-          apksigner="${ANDROID_HOME}/build-tools/36.0.0/apksigner"
-          aapt="${ANDROID_HOME}/build-tools/36.0.0/aapt"
-          "${apksigner}" verify --verbose --print-certs "release-assets/${asset_name}" > .release-private/apksigner.txt
-          actual_cert="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' .release-private/apksigner.txt | tr '[:upper:]' '[:lower:]')"
-          expected_cert="$(printf '%s' "${ANDROID_SIGNING_CERT_SHA256}" | tr -d ':' | tr '[:upper:]' '[:lower:]')"
-          if [[ ! "${expected_cert}" =~ ^[0-9a-f]{64}$ ]] || [[ "${actual_cert}" != "${expected_cert}" ]]; then
-            echo "The APK signing certificate does not match ANDROID_SIGNING_CERT_SHA256." >&2
+          unsigned_apk='clients/android/app/build/outputs/apk/release/app-release-unsigned.apk'
+          if [[ ! -s "${unsigned_apk}" ]]; then
+            echo "Gradle did not produce the expected unsigned release APK." >&2
             exit 1
           fi
-          if [[ "$(grep -c '^Signer #[0-9][0-9]* certificate SHA-256 digest:' .release-private/apksigner.txt)" != 1 ]]; then
-            echo "The APK must have exactly one signing certificate." >&2
-            exit 1
-          fi
-
-          badging="$("${aapt}" dump badging "release-assets/${asset_name}" | sed -n '1p')"
-          [[ "${badging}" == *"package: name='io.rivune.app'"* ]] || { echo "Unexpected APK applicationId." >&2; exit 1; }
-          [[ "${badging}" == *" versionCode='${version_code}'"* ]] || { echo "Unexpected APK versionCode." >&2; exit 1; }
-          [[ "${badging}" == *" versionName='${version_name}'"* ]] || { echo "Unexpected APK versionName." >&2; exit 1; }
+          cp "${unsigned_apk}" unsigned-android-input/app-release-unsigned.apk
 
           # Bundle the exact approved Rivune tree and the complete native source graph
           # used by dev.jdtech.mpv:libmpv:1.0.0. Git object IDs authenticate each
@@ -823,34 +915,281 @@ jobs:
               exit 1
             fi
           done
+          mv "release-assets/${source_asset_name}" release-inputs/
+          mv "release-assets/${windows_asset_name}" release-inputs/
+          rm -rf .release-private
+          trap - EXIT
+      - name: Upload immutable unsigned Android input
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unsigned-android-${{ github.run_id }}-${{ github.run_attempt }}
+          path: unsigned-android-input/app-release-unsigned.apk
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+      - name: Upload immutable Windows and source inputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-inputs/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
 
+  sign-android:
+    name: Sign Android release on an isolated runner
+    if: needs.authorize.outputs.authorized == 'true'
+    needs:
+      - authorize
+      - build-assets
+    runs-on: ubuntu-latest
+    environment: release
+    outputs:
+      artifact_name: signed-android-${{ github.run_id }}-${{ github.run_attempt }}
+      signing_certificate_sha256: ${{ steps.sign.outputs.signing_certificate_sha256 }}
+    permissions:
+      contents: read
+    steps:
+      - name: Download immutable unsigned Android input
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.build-assets.outputs.unsigned_android_artifact_name }}
+          path: unsigned-android-input
+      - name: Set up Java
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4
+      - name: Install Android signing tools
+        run: sdkmanager "build-tools;36.0.0"
+      - name: Sign and verify Android release APK
+        id: sign
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+          ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+          RIVUNE_RELEASE_ANDROID_ASSET_NAME: ${{ needs.build-assets.outputs.android_asset_name }}
+          RIVUNE_RELEASE_VERSION_CODE: ${{ needs.build-assets.outputs.version_code }}
+          RIVUNE_RELEASE_VERSION_NAME: ${{ needs.build-assets.outputs.version_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_PASSWORD ANDROID_KEY_ALIAS ANDROID_SIGNING_CERT_SHA256; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Required release signing configuration is missing: ${name}" >&2
+              exit 1
+            fi
+          done
+
+          keystore_base64="${ANDROID_KEYSTORE_BASE64}"
+          store_password="${ANDROID_KEYSTORE_PASSWORD}"
+          key_password="${ANDROID_KEY_PASSWORD}"
+          key_alias="${ANDROID_KEY_ALIAS}"
+          expected_cert="${ANDROID_SIGNING_CERT_SHA256//:/}"
+          expected_cert="${expected_cert,,}"
+          unset ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_PASSWORD ANDROID_KEY_ALIAS ANDROID_SIGNING_CERT_SHA256
+          if [[ ! "${expected_cert}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "ANDROID_SIGNING_CERT_SHA256 is not a SHA-256 certificate fingerprint." >&2
+            exit 1
+          fi
+
+          signing_dir="$(mktemp -d "${RUNNER_TEMP}/rivune-android-signing.XXXXXX")"
+          trap 'rm -rf -- "${signing_dir}"' EXIT
+          keystore="${signing_dir}/rivune-release.keystore"
+          store_password_file="${signing_dir}/store-password"
+          key_password_file="${signing_dir}/key-password"
+          aligned_apk="${signing_dir}/rivune-aligned.apk"
+          printf '%s' "${store_password}" > "${store_password_file}"
+          printf '%s' "${key_password}" > "${key_password_file}"
+          unset store_password key_password
+          if [[ ! "${keystore_base64}" =~ ^[A-Za-z0-9+/]*={0,2}$ ]] ||
+             (( ${#keystore_base64} % 4 != 0 )) ||
+             ! printf '%s' "${keystore_base64}" | base64 --decode > "${keystore}"; then
+            echo "ANDROID_KEYSTORE_BASE64 is not valid base64." >&2
+            exit 1
+          fi
+          unset keystore_base64
+          if [[ ! -s "${keystore}" ]]; then
+            echo "Decoded Android keystore is empty." >&2
+            exit 1
+          fi
+
+          unsigned_apk='unsigned-android-input/app-release-unsigned.apk'
+          mkdir signed-android
+          asset_path="signed-android/${RIVUNE_RELEASE_ANDROID_ASSET_NAME}"
+          if [[ ! -s "${unsigned_apk}" ]] || [[ -e "${asset_path}" ]]; then
+            echo "The unsigned APK is absent or the signed output path already exists." >&2
+            exit 1
+          fi
+          android_home="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [[ -z "${android_home}" ]]; then
+            echo "The isolated runner does not expose a preinstalled Android SDK." >&2
+            exit 1
+          fi
+          build_tools="${android_home}/build-tools/36.0.0"
+          zipalign="${build_tools}/zipalign"
+          apksigner="${build_tools}/apksigner"
+          aapt="${build_tools}/aapt"
+          for tool in "${zipalign}" "${apksigner}" "${aapt}"; do
+            if [[ ! -x "${tool}" ]]; then
+              echo "The isolated runner is missing required Android signing tool: ${tool}" >&2
+              exit 1
+            fi
+          done
+          "${zipalign}" -f -p 4 "${unsigned_apk}" "${aligned_apk}"
+          "${apksigner}" sign \
+            --ks "${keystore}" \
+            --ks-key-alias "${key_alias}" \
+            --ks-pass "file:${store_password_file}" \
+            --key-pass "file:${key_password_file}" \
+            --v4-signing-enabled false \
+            --out "${asset_path}" \
+            "${aligned_apk}"
+          "${apksigner}" verify --verbose --print-certs "${asset_path}" > "${signing_dir}/apksigner.txt"
+          actual_cert="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "${signing_dir}/apksigner.txt" | tr '[:upper:]' '[:lower:]')"
+          if [[ "${actual_cert}" != "${expected_cert}" ]]; then
+            echo "The APK signing certificate does not match ANDROID_SIGNING_CERT_SHA256." >&2
+            exit 1
+          fi
+          if [[ "$(grep -c '^Signer #[0-9][0-9]* certificate SHA-256 digest:' "${signing_dir}/apksigner.txt")" != 1 ]]; then
+            echo "The APK must have exactly one signing certificate." >&2
+            exit 1
+          fi
+          badging="$("${aapt}" dump badging "${asset_path}" | sed -n '1p')"
+          [[ "${badging}" == *"package: name='io.rivune.app'"* ]] || { echo "Unexpected APK applicationId." >&2; exit 1; }
+          [[ "${badging}" == *" versionCode='${RIVUNE_RELEASE_VERSION_CODE}'"* ]] || { echo "Unexpected APK versionCode." >&2; exit 1; }
+          [[ "${badging}" == *" versionName='${RIVUNE_RELEASE_VERSION_NAME}'"* ]] || { echo "Unexpected APK versionName." >&2; exit 1; }
+          echo "signing_certificate_sha256=${expected_cert}" >> "${GITHUB_OUTPUT}"
+      - name: Remove Android signing material
+        if: ${{ always() }}
+        shell: bash
+        run: rm -rf -- "${RUNNER_TEMP}"/rivune-android-signing.*
+      - name: Upload immutable signed Android APK
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-android-${{ github.run_id }}-${{ github.run_attempt }}
+          path: signed-android/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+
+  publish:
+    name: Assemble release assets and publish image by digest
+    if: needs.authorize.outputs.authorized == 'true'
+    needs:
+      - authorize
+      - build-assets
+      - sign-android
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+      image_digest: ${{ steps.container.outputs.digest }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out the approved main commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          persist-credentials: false
+      - name: Download immutable Windows and source inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.build-assets.outputs.release_inputs_artifact_name }}
+          path: release-assets
+      - name: Download immutable signed Android APK
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.sign-android.outputs.artifact_name }}
+          path: release-assets
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.6"
+          cache: false
+      - name: Generate and verify public release manifests
+        env:
+          RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+          RIVUNE_RELEASE_VERSION_NAME: ${{ needs.build-assets.outputs.version_name }}
+          RIVUNE_RELEASE_VERSION_CODE: ${{ needs.build-assets.outputs.version_code }}
+          RIVUNE_RELEASE_CHANNEL: ${{ needs.build-assets.outputs.channel }}
+          RIVUNE_RELEASE_PUBLISHED_AT: ${{ needs.build-assets.outputs.published_at }}
+          RIVUNE_RELEASE_ANDROID_ASSET_NAME: ${{ needs.build-assets.outputs.android_asset_name }}
+          RIVUNE_RELEASE_SOURCE_ASSET_NAME: ${{ needs.build-assets.outputs.source_asset_name }}
+          RIVUNE_RELEASE_WINDOWS_ASSET_NAME: ${{ needs.build-assets.outputs.windows_asset_name }}
+          RIVUNE_RELEASE_URL: ${{ needs.build-assets.outputs.release_url }}
+          RIVUNE_RELEASE_ANDROID_ASSET_URL: ${{ needs.build-assets.outputs.android_asset_url }}
+          RIVUNE_RELEASE_WINDOWS_ASSET_URL: ${{ needs.build-assets.outputs.windows_asset_url }}
+          RIVUNE_RELEASE_SIGNING_CERT_SHA256: ${{ needs.sign-android.outputs.signing_certificate_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in \
+            RIVUNE_RELEASE_VERSION_NAME \
+            RIVUNE_RELEASE_VERSION_CODE \
+            RIVUNE_RELEASE_CHANNEL \
+            RIVUNE_RELEASE_PUBLISHED_AT \
+            RIVUNE_RELEASE_ANDROID_ASSET_NAME \
+            RIVUNE_RELEASE_SOURCE_ASSET_NAME \
+            RIVUNE_RELEASE_WINDOWS_ASSET_NAME \
+            RIVUNE_RELEASE_URL \
+            RIVUNE_RELEASE_ANDROID_ASSET_URL \
+            RIVUNE_RELEASE_WINDOWS_ASSET_URL \
+            RIVUNE_RELEASE_SIGNING_CERT_SHA256; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Required release metadata is missing: ${name}" >&2
+              exit 1
+            fi
+          done
           (
-            cd clients/android/update
+            cd clients/update
             go run . generate \
-              --apk "${GITHUB_WORKSPACE}/release-assets/${asset_name}" \
-              --output "${GITHUB_WORKSPACE}/release-assets/rivune-android-update.json" \
-              --channel "${channel}" \
+              --apk "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_ANDROID_ASSET_NAME}" \
+              --output "${GITHUB_WORKSPACE}/release-assets/rivune-update.json" \
+              --legacy-android-output "${GITHUB_WORKSPACE}/release-assets/rivune-android-update.json" \
+              --channel "${RIVUNE_RELEASE_CHANNEL}" \
               --tag-name "${RELEASE_TAG}" \
-              --published-at "${published_at}" \
-              --release-url "${release_url}" \
-              --apk-url "${asset_url}" \
+              --published-at "${RIVUNE_RELEASE_PUBLISHED_AT}" \
+              --release-url "${RIVUNE_RELEASE_URL}" \
+              --apk-url "${RIVUNE_RELEASE_ANDROID_ASSET_URL}" \
               --application-id io.rivune.app \
-              --build-version "${version_code}" \
-              --signing-certificate-sha256 "${expected_cert}"
+              --build-version "${RIVUNE_RELEASE_VERSION_CODE}" \
+              --signing-certificate-sha256 "${RIVUNE_RELEASE_SIGNING_CERT_SHA256}" \
+              --windows-executable "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_WINDOWS_ASSET_NAME}" \
+              --windows-executable-url "${RIVUNE_RELEASE_WINDOWS_ASSET_URL}"
             go run . validate \
-              --apk "${GITHUB_WORKSPACE}/release-assets/${asset_name}" \
-              --channel "${channel}" \
+              --apk "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_ANDROID_ASSET_NAME}" \
+              --channel "${RIVUNE_RELEASE_CHANNEL}" \
               --tag-name "${RELEASE_TAG}" \
-              --release-url "${release_url}" \
-              --apk-url "${asset_url}" \
-              "${GITHUB_WORKSPACE}/release-assets/rivune-android-update.json"
+              --release-url "${RIVUNE_RELEASE_URL}" \
+              --apk-url "${RIVUNE_RELEASE_ANDROID_ASSET_URL}" \
+              --application-id io.rivune.app \
+              --build-version "${RIVUNE_RELEASE_VERSION_CODE}" \
+              --signing-certificate-sha256 "${RIVUNE_RELEASE_SIGNING_CERT_SHA256}" \
+              --windows-executable "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_WINDOWS_ASSET_NAME}" \
+              --windows-executable-url "${RIVUNE_RELEASE_WINDOWS_ASSET_URL}" \
+              --legacy-android-manifest "${GITHUB_WORKSPACE}/release-assets/rivune-android-update.json" \
+              "${GITHUB_WORKSPACE}/release-assets/rivune-update.json"
           )
           (
             cd release-assets
-            sha256sum "${asset_name}" "${source_asset_name}" rivune-android-update.json > SHA256SUMS
+            sha256sum \
+              "${RIVUNE_RELEASE_ANDROID_ASSET_NAME}" \
+              "${RIVUNE_RELEASE_SOURCE_ASSET_NAME}" \
+              "${RIVUNE_RELEASE_WINDOWS_ASSET_NAME}" \
+              rivune-update.json \
+              rivune-android-update.json > SHA256SUMS
             sha256sum --check --strict SHA256SUMS
           )
-          rm -rf .release-private
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
       - name: Set up Docker Buildx
@@ -969,22 +1308,28 @@ jobs:
           version_name="${RELEASE_TAG#v}"
           asset_name="rivune-android-${version_name}.apk"
           source_asset_name="rivune-android-${version_name}-corresponding-source.tar.gz"
-          expected_files="$(printf '%s\n' SHA256SUMS rivune-android-update.json "${asset_name}" "${source_asset_name}" | sort)"
+          windows_asset_name='Rivune.exe'
+          expected_files="$(printf '%s\n' SHA256SUMS rivune-update.json rivune-android-update.json "${asset_name}" "${source_asset_name}" "${windows_asset_name}" | sort)"
           actual_files="$(find release-assets -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
           if [[ "${actual_files}" != "${expected_files}" ]]; then
             echo "Immutable artifact does not contain the exact release asset set." >&2
             exit 1
           fi
           checksum_files="$(sed -nE 's/^[0-9a-f]{64}  (.+)$/\1/p' release-assets/SHA256SUMS | sort)"
-          expected_checksum_files="$(printf '%s\n' rivune-android-update.json "${asset_name}" "${source_asset_name}" | sort)"
+          expected_checksum_files="$(printf '%s\n' rivune-update.json rivune-android-update.json "${asset_name}" "${source_asset_name}" "${windows_asset_name}" | sort)"
           if [[ "${checksum_files}" != "${expected_checksum_files}" ]]; then
-            echo "SHA256SUMS must contain exactly the APK, Corresponding Source, and update manifest." >&2
+            echo "SHA256SUMS must contain exactly the APK, Corresponding Source, Rivune.exe, and both update manifests." >&2
             exit 1
           fi
           (
             cd release-assets
             sha256sum --check --strict SHA256SUMS
           )
+          windows_size="$(stat -c %s "release-assets/${windows_asset_name}")"
+          if (( windows_size <= 0 || windows_size > 2147483647 )); then
+            echo "Rivune.exe size is invalid: ${windows_size} bytes." >&2
+            exit 1
+          fi
           if (( $(stat -c %s "release-assets/${source_asset_name}") > 2040109465 )); then
             echo "Corresponding Source archive exceeds the 1.9 GiB release-asset safety limit." >&2
             exit 1
@@ -1034,15 +1379,22 @@ jobs:
           fi
           expected_release_url="https://github.com/${REPOSITORY}/releases/tag/${RELEASE_TAG}"
           expected_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${asset_name}"
+          expected_windows_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_asset_name}"
           (
-            cd clients/android/update
+            cd clients/update
             go run . validate \
               --apk "${GITHUB_WORKSPACE}/release-assets/${asset_name}" \
               --channel "${expected_channel}" \
               --tag-name "${RELEASE_TAG}" \
               --release-url "${expected_release_url}" \
               --apk-url "${expected_asset_url}" \
-              "${GITHUB_WORKSPACE}/release-assets/rivune-android-update.json"
+              --application-id io.rivune.app \
+              --build-version "$(jq -er '.packages.android.buildVersion' "${GITHUB_WORKSPACE}/release-assets/rivune-update.json")" \
+              --signing-certificate-sha256 "$(jq -er '.packages.android.signingCertificateSha256' "${GITHUB_WORKSPACE}/release-assets/rivune-update.json")" \
+              --windows-executable "${GITHUB_WORKSPACE}/release-assets/${windows_asset_name}" \
+              --windows-executable-url "${expected_windows_asset_url}" \
+              --legacy-android-manifest "${GITHUB_WORKSPACE}/release-assets/rivune-android-update.json" \
+              "${GITHUB_WORKSPACE}/release-assets/rivune-update.json"
           )
       - name: Validate curated release notes
         env:
@@ -1168,9 +1520,13 @@ jobs:
                 current_release="$(gh api "repos/${REPOSITORY}/releases/${release_id}" 2>/dev/null || true)"
                 if [[ -n "${current_release}" ]]; then
                   if ! validate_release_metadata "${current_release}" ||
-                     ! jq -e --argjson id "${release_id}" --argjson created "${created_release_json}" \
-                       '.id == $id and .draft == true and .body == $created.body' <<<"${current_release}" >/dev/null 2>&1; then
-                    echo "::warning::Refusing to delete a release that is no longer the draft created by this attempt." >&2
+                     ! jq -e --argjson id "${release_id}" --argjson created "${created_release_json}" '
+                       .id == $id and
+                       .draft == true and
+                       .body == $created.body and
+                       (.assets | type == "array" and length == 0)
+                     ' <<<"${current_release}" >/dev/null 2>&1; then
+                    echo "::warning::Preserving a created draft that changed or already contains release assets." >&2
                     return 0
                   fi
                   if gh api --method DELETE "repos/${REPOSITORY}/releases/${release_id}" >/dev/null 2>&1; then
@@ -1208,6 +1564,102 @@ jobs:
               echo "The uploaded GitHub Release asset response is invalid for ${asset_name}." >&2
               return 1
             fi
+          }
+          complete_partial_release_assets() {
+            local release_json="$1" release_asset_id release_asset_name adopted_sha trusted_sha
+            local candidate_release_id content_type expected_upload_url upload_url
+            local version_name="${RELEASE_TAG#v}"
+            local apk_name="rivune-android-${version_name}.apk"
+            local source_name="rivune-android-${version_name}-corresponding-source.tar.gz"
+            local windows_name='Rivune.exe'
+            local -a expected_names=(
+              SHA256SUMS
+              rivune-update.json
+              rivune-android-update.json
+              "${apk_name}"
+              "${source_name}"
+              "${windows_name}"
+            )
+            local -A seen=()
+
+            if ! jq -e '
+              .assets | arrays |
+              all(.[];
+                (.id | type == "number") and .id > 0 and
+                (.name | type == "string") and
+                .state == "uploaded")
+            ' <<<"${release_json}" >/dev/null; then
+              echo "The partial GitHub Release asset metadata is invalid." >&2
+              return 1
+            fi
+
+            while IFS=$'\t' read -r release_asset_id release_asset_name; do
+              if [[ ! "${release_asset_id}" =~ ^[1-9][0-9]*$ ]]; then
+                echo "The partial GitHub Release contains an invalid asset ID." >&2
+                return 1
+              fi
+              case "${release_asset_name}" in
+                SHA256SUMS|rivune-update.json|rivune-android-update.json|"${apk_name}"|"${source_name}"|"${windows_name}") ;;
+                *)
+                  echo "The partial GitHub Release contains an unexpected asset: ${release_asset_name}" >&2
+                  return 1
+                  ;;
+              esac
+              if [[ -v "seen[${release_asset_name}]" ]]; then
+                echo "The partial GitHub Release contains a duplicate asset: ${release_asset_name}" >&2
+                return 1
+              fi
+              seen["${release_asset_name}"]=1
+            done < <(jq -r '.assets[] | [.id, .name] | @tsv' <<<"${release_json}")
+
+            if (( ${#seen[@]} == ${#expected_names[@]} )); then
+              return 0
+            fi
+            if ! jq -e '.draft == true' <<<"${release_json}" >/dev/null; then
+              echo "A published GitHub Release has an incomplete asset set and cannot be repaired." >&2
+              return 1
+            fi
+
+            rm -rf partial-release-assets
+            mkdir partial-release-assets
+            while IFS=$'\t' read -r release_asset_id release_asset_name; do
+              gh api \
+                --header 'Accept: application/octet-stream' \
+                "repos/${REPOSITORY}/releases/assets/${release_asset_id}" > "partial-release-assets/${release_asset_name}"
+              adopted_sha="$(sha256sum "partial-release-assets/${release_asset_name}" | cut -d ' ' -f1)"
+              trusted_sha="$(sha256sum "release-assets/${release_asset_name}" | cut -d ' ' -f1)"
+              if [[ "${adopted_sha}" != "${trusted_sha}" ]]; then
+                echo "The partial ${release_asset_name} differs from the trusted release artifact." >&2
+                return 1
+              fi
+            done < <(jq -r '.assets[] | [.id, .name] | @tsv' <<<"${release_json}")
+
+            candidate_release_id="$(jq -er '.id | select(type == "number" and . > 0)' <<<"${release_json}")"
+            if [[ "${candidate_release_id}" != "${release_id}" ]]; then
+              echo "The partial GitHub Release ID changed during adoption." >&2
+              return 1
+            fi
+            upload_url="$(jq -er '.upload_url | strings' <<<"${release_json}")"
+            expected_upload_url="https://uploads.github.com/repos/${REPOSITORY}/releases/${candidate_release_id}/assets{?name,label}"
+            if [[ "${upload_url}" != "${expected_upload_url}" ]]; then
+              echo "The partial GitHub Release returned an unexpected asset upload URL." >&2
+              return 1
+            fi
+            upload_url="${upload_url%%\{*}"
+            for release_asset_name in "${expected_names[@]}"; do
+              if [[ -v "seen[${release_asset_name}]" ]]; then
+                continue
+              fi
+              case "${release_asset_name}" in
+                SHA256SUMS) content_type='text/plain' ;;
+                rivune-update.json|rivune-android-update.json) content_type='application/json' ;;
+                "${apk_name}") content_type='application/vnd.android.package-archive' ;;
+                "${source_name}") content_type='application/gzip' ;;
+                "${windows_name}") content_type='application/vnd.microsoft.portable-executable' ;;
+              esac
+              upload_release_asset "release-assets/${release_asset_name}" "${content_type}"
+            done
+            release="$(gh api "repos/${REPOSITORY}/releases/${candidate_release_id}")"
           }
           validate_body_and_digest() {
             local release_json="$1" body marker_mentions
@@ -1247,8 +1699,9 @@ jobs:
             local version_name="${RELEASE_TAG#v}"
             local apk_name="rivune-android-${version_name}.apk"
             local source_name="rivune-android-${version_name}-corresponding-source.tar.gz"
-            local expected_assets actual_assets expected_channel expected_release_url expected_apk_url
-            expected_assets="$(printf '%s\n' SHA256SUMS rivune-android-update.json "${apk_name}" "${source_name}" | sort)"
+            local windows_name='Rivune.exe'
+            local expected_assets actual_assets expected_channel expected_release_url expected_apk_url expected_windows_url
+            expected_assets="$(printf '%s\n' SHA256SUMS rivune-update.json rivune-android-update.json "${apk_name}" "${source_name}" "${windows_name}" | sort)"
             actual_assets="$(jq -r '.assets[].name' <<<"${release_json}" | sort)"
             if [[ "${actual_assets}" != "${expected_assets}" ]]; then
               echo "The GitHub Release asset set is incomplete or contains unexpected files." >&2
@@ -1269,23 +1722,37 @@ jobs:
 
             local checksum_files expected_checksum_files
             checksum_files="$(sed -nE 's/^[0-9a-f]{64}  (.+)$/\1/p' adopted-release-assets/SHA256SUMS | sort)"
-            expected_checksum_files="$(printf '%s\n' rivune-android-update.json "${apk_name}" "${source_name}" | sort)"
+            expected_checksum_files="$(printf '%s\n' rivune-update.json rivune-android-update.json "${apk_name}" "${source_name}" "${windows_name}" | sort)"
             if [[ "${checksum_files}" != "${expected_checksum_files}" ]]; then
-              echo "The adopted SHA256SUMS must contain exactly the APK, Corresponding Source, and update manifest." >&2
+              echo "The adopted SHA256SUMS must contain exactly the APK, Corresponding Source, Rivune.exe, and both update manifests." >&2
               return 1
             fi
             (
               cd adopted-release-assets
               sha256sum --check --strict SHA256SUMS
             )
-
-            local adopted_source_sha trusted_source_sha archive_entries
-            adopted_source_sha="$(sha256sum "adopted-release-assets/${source_name}" | cut -d ' ' -f1)"
-            trusted_source_sha="$(sha256sum "release-assets/${source_name}" | cut -d ' ' -f1)"
-            if [[ "${adopted_source_sha}" != "${trusted_source_sha}" ]]; then
-              echo "The adopted Corresponding Source differs from the trusted release artifact." >&2
+            local adopted_windows_size
+            adopted_windows_size="$(stat -c %s "adopted-release-assets/${windows_name}")"
+            if (( adopted_windows_size <= 0 || adopted_windows_size > 2147483647 )); then
+              echo "The adopted Rivune.exe size is invalid: ${adopted_windows_size} bytes." >&2
               return 1
             fi
+
+            local trusted_asset adopted_asset_sha trusted_asset_sha archive_entries
+            for trusted_asset in \
+              SHA256SUMS \
+              rivune-update.json \
+              rivune-android-update.json \
+              "${apk_name}" \
+              "${source_name}" \
+              "${windows_name}"; do
+              adopted_asset_sha="$(sha256sum "adopted-release-assets/${trusted_asset}" | cut -d ' ' -f1)"
+              trusted_asset_sha="$(sha256sum "release-assets/${trusted_asset}" | cut -d ' ' -f1)"
+              if [[ "${adopted_asset_sha}" != "${trusted_asset_sha}" ]]; then
+                echo "The adopted ${trusted_asset} differs from the trusted release artifact." >&2
+                return 1
+              fi
+            done
             if (( $(stat -c %s "adopted-release-assets/${source_name}") > 2040109465 )); then
               echo "The adopted Corresponding Source exceeds the 1.9 GiB release-asset safety limit." >&2
               return 1
@@ -1337,17 +1804,23 @@ jobs:
             fi
             expected_release_url="https://github.com/${REPOSITORY}/releases/tag/${RELEASE_TAG}"
             expected_apk_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${apk_name}"
+            expected_windows_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_name}"
             (
-              cd clients/android/update
+              cd clients/update
               go run . validate \
                 --apk "${GITHUB_WORKSPACE}/adopted-release-assets/${apk_name}" \
                 --channel "${expected_channel}" \
                 --tag-name "${RELEASE_TAG}" \
                 --release-url "${expected_release_url}" \
                 --apk-url "${expected_apk_url}" \
-                "${GITHUB_WORKSPACE}/adopted-release-assets/rivune-android-update.json"
+                --windows-executable "${GITHUB_WORKSPACE}/adopted-release-assets/${windows_name}" \
+                --windows-executable-url "${expected_windows_url}" \
+                --application-id io.rivune.app \
+                --build-version "$(jq -er '.packages.android.buildVersion' "${GITHUB_WORKSPACE}/adopted-release-assets/rivune-update.json")" \
+                --signing-certificate-sha256 "$(jq -er '.packages.android.signingCertificateSha256' "${GITHUB_WORKSPACE}/adopted-release-assets/rivune-update.json")" \
+                --legacy-android-manifest "${GITHUB_WORKSPACE}/adopted-release-assets/rivune-android-update.json" \
+                "${GITHUB_WORKSPACE}/adopted-release-assets/rivune-update.json"
             )
-
             local trusted_application_id trusted_build_version trusted_cert trusted_version_name
             trusted_application_id="$(jq -er '.package.applicationId' release-assets/rivune-android-update.json)"
             trusted_build_version="$(jq -er '.package.buildVersion' release-assets/rivune-android-update.json)"
@@ -1434,18 +1907,6 @@ jobs:
               echo "The created GitHub Release did not record the published OCI image digest." >&2
               exit 1
             fi
-            upload_url="$(jq -er '.upload_url | strings' <<<"${created_release_json}")"
-            expected_upload_url="https://uploads.github.com/repos/${REPOSITORY}/releases/${release_id}/assets{?name,label}"
-            if [[ "${upload_url}" != "${expected_upload_url}" ]]; then
-              echo "The created GitHub Release returned an unexpected asset upload URL." >&2
-              exit 1
-            fi
-            upload_url="${upload_url%%\{*}"
-            releases="$(wait_for_created_release "${release_id}")"
-            upload_release_asset release-assets/SHA256SUMS text/plain
-            upload_release_asset release-assets/rivune-android-update.json application/json
-            upload_release_asset "release-assets/rivune-android-${RELEASE_TAG#v}.apk" application/vnd.android.package-archive
-            upload_release_asset "release-assets/rivune-android-${RELEASE_TAG#v}-corresponding-source.tar.gz" application/gzip
             releases="$(wait_for_created_release "${release_id}")"
           elif [[ "${release_count}" != 1 ]]; then
             echo "Expected zero or one GitHub Release for ${RELEASE_TAG}, found ${release_count}." >&2
@@ -1456,6 +1917,12 @@ jobs:
           release="$(gh api "repos/${REPOSITORY}/releases/${release_id}")"
           if ! validate_release_metadata "${release}"; then
             echo "The existing GitHub Release metadata does not match the authorized release." >&2
+            exit 1
+          fi
+          validate_body_and_digest "${release}" >/dev/null
+          complete_partial_release_assets "${release}"
+          if ! validate_release_metadata "${release}"; then
+            echo "The completed GitHub Release metadata changed unexpectedly." >&2
             exit 1
           fi
           effective_image_digest="$(validate_body_and_digest "${release}")"
@@ -1471,6 +1938,100 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
           trap - EXIT
 
+  verify-windows-release:
+    name: Verify adopted Windows x64 executable
+    if: needs.authorize.outputs.authorized == 'true'
+    needs:
+      - authorize
+      - release
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Verify remote executable architecture, version, hash, and unsigned state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.release.outputs.release_id }}
+          RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($name in @('GH_TOKEN', 'RELEASE_ID', 'RELEASE_TAG')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Required Windows release verification value is missing: $name"
+            }
+          }
+          if ($env:RELEASE_ID -notmatch '^[1-9][0-9]*$') { throw 'Validated GitHub Release ID is invalid.' }
+          if ($env:RELEASE_TAG -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
+            throw "Release tag is not valid SemVer: $env:RELEASE_TAG"
+          }
+          $components = @([uint64]$Matches[1], [uint64]$Matches[2], [uint64]$Matches[3])
+          if ($components | Where-Object { $_ -gt 65535 }) {
+            throw 'Every SemVer core component must be at most 65535 for Windows file-version metadata.'
+          }
+          $versionName = $env:RELEASE_TAG.Substring(1)
+          $fileVersion = "$($components[0]).$($components[1]).$($components[2]).0"
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $release.tag_name -ne $env:RELEASE_TAG) {
+            throw 'Could not retrieve the validated GitHub Release.'
+          }
+          $asset = @($release.assets | Where-Object { $_.name -ceq 'Rivune.exe' })
+          $manifestAsset = @($release.assets | Where-Object { $_.name -ceq 'rivune-update.json' })
+          if ($asset.Count -ne 1 -or $manifestAsset.Count -ne 1 -or
+              $asset[0].id -notmatch '^[1-9][0-9]*$' -or $manifestAsset[0].id -notmatch '^[1-9][0-9]*$') {
+            throw 'GitHub Release must contain exactly one Rivune.exe and one global update manifest.'
+          }
+          $root = Join-Path $env:RUNNER_TEMP 'rivune-adopted-windows'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          $executable = Join-Path $root 'Rivune.exe'
+          $manifestPath = Join-Path $root 'rivune-update.json'
+          $headers = @{
+            Accept = 'application/octet-stream'
+            Authorization = "Bearer $env:GH_TOKEN"
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          Invoke-WebRequest `
+            -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$($asset[0].id)" `
+            -Headers $headers -OutFile $executable
+          Invoke-WebRequest `
+            -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$($manifestAsset[0].id)" `
+            -Headers $headers -OutFile $manifestPath
+
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          $windows = $manifest.packages.windows
+          $expectedUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/Rivune.exe"
+          if ($windows.format -cne 'exe' -or $windows.fileName -cne 'Rivune.exe' -or
+              $windows.url -cne $expectedUrl -or @($windows.architectures).Count -ne 1 -or
+              $windows.architectures[0] -cne 'x64' -or $windows.minimumOsVersion -cne '10.0.19041.0' -or
+              $windows.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $windows.size -isnot [long] -or $windows.size -le 0 -or $windows.size -gt 2147483647) {
+            throw 'Global update manifest has invalid Windows executable metadata.'
+          }
+          $actualSize = (Get-Item -LiteralPath $executable).Length
+          $actualHash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSize -ne $windows.size -or $actualHash -cne $windows.sha256) {
+            throw 'Rivune.exe size or SHA-256 does not match the global update manifest.'
+          }
+          $stream = [IO.File]::OpenRead($executable)
+          try {
+            $reader = [IO.BinaryReader]::new($stream)
+            if ($reader.ReadUInt16() -ne 0x5a4d) { throw 'Rivune.exe has no DOS PE header.' }
+            $stream.Position = 0x3c
+            $peOffset = $reader.ReadUInt32()
+            $stream.Position = $peOffset
+            if ($reader.ReadUInt32() -ne 0x00004550) { throw 'Rivune.exe has no PE signature.' }
+            if ($reader.ReadUInt16() -ne 0x8664) { throw 'Rivune.exe PE machine is not x64.' }
+          } finally {
+            if ($null -ne $reader) { $reader.Dispose() } else { $stream.Dispose() }
+          }
+          $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($executable)
+          if ($version.FileVersion -ne $fileVersion -or $version.ProductVersion -ne $versionName) {
+            throw "Rivune.exe version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
+          }
+          if ((Get-AuthenticodeSignature -FilePath $executable).Status -ne 'NotSigned') {
+            throw 'Adopted Rivune.exe must be unsigned.'
+          }
+
   promote:
     name: Publish release and promote container tags
     if: needs.authorize.outputs.authorized == 'true'
@@ -1478,6 +2039,7 @@ jobs:
       - authorize
       - publish
       - release
+      - verify-windows-release
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1579,7 +2141,7 @@ jobs:
             echo "The prepared GitHub Release does not record the effective OCI image digest exactly once." >&2
             exit 1
           fi
-          expected_assets="$(printf '%s\n' SHA256SUMS rivune-android-update.json "rivune-android-${RELEASE_TAG#v}.apk" "rivune-android-${RELEASE_TAG#v}-corresponding-source.tar.gz" | sort)"
+          expected_assets="$(printf '%s\n' SHA256SUMS rivune-update.json rivune-android-update.json "rivune-android-${RELEASE_TAG#v}.apk" "rivune-android-${RELEASE_TAG#v}-corresponding-source.tar.gz" Rivune.exe | sort)"
           actual_assets="$(jq -r '.assets[].name' <<<"${release}" | sort)"
           if [[ "${actual_assets}" != "${expected_assets}" ]]; then
             echo "The prepared GitHub Release asset set is incomplete or contains unexpected files." >&2
@@ -1712,7 +2274,7 @@ jobs:
             echo "Final published release metadata does not match the authorized release." >&2
             exit 1
           fi
-          expected_assets="$(printf '%s\n' SHA256SUMS rivune-android-update.json "rivune-android-${RELEASE_TAG#v}.apk" "rivune-android-${RELEASE_TAG#v}-corresponding-source.tar.gz" | sort)"
+          expected_assets="$(printf '%s\n' SHA256SUMS rivune-update.json rivune-android-update.json "rivune-android-${RELEASE_TAG#v}.apk" "rivune-android-${RELEASE_TAG#v}-corresponding-source.tar.gz" Rivune.exe | sort)"
           actual_assets="$(jq -r '.assets[].name' <<<"${final_release}" | sort)"
           if [[ "${actual_assets}" != "${expected_assets}" ]]; then
             echo "Final published release asset set is incomplete or contains unexpected files." >&2
