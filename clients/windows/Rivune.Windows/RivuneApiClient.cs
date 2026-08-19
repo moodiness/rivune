@@ -39,6 +39,139 @@ public sealed class RivuneApiClient : IDisposable
         TokenPair Credentials,
         string? ProfileContext,
         long Epoch);
+    private sealed class ProfileRequestBarrier : IDisposable
+    {
+        private readonly object _sync = new();
+        private TaskCompletionSource? _stateChanged;
+        private int _activeReaders;
+        private int _waitingWriters;
+        private bool _writerActive;
+        private bool _disposed;
+
+        public async ValueTask<ProfileRequestLease> AcquireReaderAsync(CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                Task stateChanged;
+                lock (_sync)
+                {
+                    ObjectDisposedException.ThrowIf(_disposed, this);
+                    if (!_writerActive && _waitingWriters == 0)
+                    {
+                        _activeReaders++;
+                        return new ProfileRequestLease(this, writer: false);
+                    }
+
+                    stateChanged = (_stateChanged ??= NewStateChangedSignal()).Task;
+                }
+
+                await stateChanged.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        public async ValueTask<ProfileRequestLease> AcquireWriterAsync(CancellationToken cancellationToken)
+        {
+            lock (_sync)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                _waitingWriters++;
+            }
+
+            var waiting = true;
+            try
+            {
+                while (true)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    Task stateChanged;
+                    lock (_sync)
+                    {
+                        ObjectDisposedException.ThrowIf(_disposed, this);
+                        if (!_writerActive && _activeReaders == 0)
+                        {
+                            _waitingWriters--;
+                            _writerActive = true;
+                            waiting = false;
+                            return new ProfileRequestLease(this, writer: true);
+                        }
+
+                        stateChanged = (_stateChanged ??= NewStateChangedSignal()).Task;
+                    }
+
+                    await stateChanged.WaitAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                if (waiting)
+                {
+                    lock (_sync)
+                    {
+                        _waitingWriters--;
+                        PulseStateChanged();
+                    }
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_sync)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _disposed = true;
+                PulseStateChanged();
+            }
+        }
+
+        private void Release(bool writer)
+        {
+            lock (_sync)
+            {
+                if (writer)
+                {
+                    _writerActive = false;
+                    PulseStateChanged();
+                    return;
+                }
+
+                _activeReaders--;
+                if (_activeReaders == 0)
+                {
+                    PulseStateChanged();
+                }
+            }
+        }
+
+        private void PulseStateChanged()
+        {
+            var completed = _stateChanged;
+            _stateChanged = null;
+            completed?.TrySetResult();
+        }
+
+        private static TaskCompletionSource NewStateChangedSignal() =>
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public readonly struct ProfileRequestLease : IDisposable
+        {
+            private readonly ProfileRequestBarrier? _owner;
+            private readonly bool _writer;
+
+            public ProfileRequestLease(ProfileRequestBarrier owner, bool writer)
+            {
+                _owner = owner;
+                _writer = writer;
+            }
+
+            public void Dispose() => _owner?.Release(_writer);
+        }
+    }
+
 
     private readonly Uri _serverUrl;
     private readonly string _credentialIssuer;
@@ -48,7 +181,7 @@ public sealed class RivuneApiClient : IDisposable
     private readonly SemaphoreSlim _discoveryGate = new(1, 1);
     private readonly SemaphoreSlim _credentialGate = new(1, 1);
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
-    private readonly SemaphoreSlim _profileRequestGate = new(1, 1);
+    private readonly ProfileRequestBarrier _profileRequestBarrier = new();
 
     private Uri? _apiBaseUrl;
     private Discovery? _discovery;
@@ -162,6 +295,90 @@ public sealed class RivuneApiClient : IDisposable
 
     public Task<Discovery> DiscoverAsync(CancellationToken cancellationToken = default) =>
         DiscoverCoreAsync(force: true, cancellationToken);
+
+    public Uri ResolveResponseResourceUrl(string value)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(value);
+        if (value.StartsWith("//", StringComparison.Ordinal) ||
+            value.Contains('\\') ||
+            value.Contains('#'))
+        {
+            throw new InvalidServerUrlException(value);
+        }
+
+        Uri resolved;
+        if (value.StartsWith("/", StringComparison.Ordinal) && Uri.TryCreate(_serverUrl, value, out var relative))
+        {
+            resolved = relative;
+        }
+        else if (Uri.TryCreate(value, UriKind.Absolute, out var absolute))
+        {
+            resolved = absolute;
+        }
+        else
+        {
+            throw new InvalidServerUrlException(value);
+        }
+
+        if (!IsAllowedServerUrl(resolved) ||
+            string.IsNullOrEmpty(resolved.Host) ||
+            !string.IsNullOrEmpty(resolved.UserInfo) ||
+            !string.IsNullOrEmpty(resolved.Fragment) ||
+            !StringComparer.Ordinal.Equals(CredentialIssuer.Canonicalize(resolved), _credentialIssuer))
+        {
+            throw new InvalidServerUrlException(value);
+        }
+        return resolved;
+    }
+
+    public bool IsAllowedResponseResourceUrl(Uri value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        try
+        {
+            _ = ResolveResponseResourceUrl(value.AbsoluteUri);
+            return true;
+        }
+        catch (InvalidServerUrlException)
+        {
+            return false;
+        }
+    }
+
+    public async Task<byte[]> DownloadSameOriginResourceAsync(
+        string value,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        var uri = ResolveResponseResourceUrl(value);
+        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("image/*"));
+        using var response = await _httpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
+        var statusCode = (int)response.StatusCode;
+        var retryAfter = response.IsSuccessStatusCode ? null : ParseRetryAfter(response.Headers);
+        EnsureCredentialDestination(response.RequestMessage?.RequestUri ?? uri);
+        if (statusCode is >= 300 and <= 399)
+        {
+            throw new RivuneServerException(
+                statusCode,
+                "redirect_not_allowed",
+                "Rivune resource redirects are not allowed.",
+                retryAfter);
+        }
+
+        var body = await ReadResponseBodyAsync(response.Content, cancellationToken).ConfigureAwait(false);
+        if (response.IsSuccessStatusCode)
+        {
+            return body;
+        }
+
+        var exception = DecodeServerError(statusCode, body, retryAfter);
+        CryptographicOperations.ZeroMemory(body);
+        throw exception;
+    }
 
     public async Task<bool> RestoreSessionAsync(CancellationToken cancellationToken = default)
     {
@@ -464,96 +681,86 @@ public sealed class RivuneApiClient : IDisposable
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        await _profileRequestGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var profileMutation = await _profileRequestBarrier
+            .AcquireWriterAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var authentication = await GetAuthenticationSnapshotAsync(cancellationToken).ConfigureAwait(false)
+            ?? throw new NotAuthenticatedException();
+        var uri = await BuildEndpointAsync(
+            ["profiles", profileId.ToString("D"), "select"],
+            query: null,
+            cancellationToken).ConfigureAwait(false);
+        var body = SerializeBody(new SelectProfileRequest(pin));
+        ProfileSelection selection;
         try
         {
-            var authentication = await GetAuthenticationSnapshotAsync(cancellationToken).ConfigureAwait(false)
-                ?? throw new NotAuthenticatedException();
-            var uri = await BuildEndpointAsync(
-                ["profiles", profileId.ToString("D"), "select"],
-                query: null,
-                cancellationToken).ConfigureAwait(false);
-            var body = SerializeBody(new SelectProfileRequest(pin));
-            ProfileSelection selection;
-            try
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                selection = await SendJsonResponseAsync<ProfileSelection>(
-                    HttpMethod.Post,
-                    uri,
-                    body,
-                    authenticated: true,
-                    retryAfterRefresh: true,
-                    CancellationToken.None,
-                    authentication,
-                    cancellationToken).ConfigureAwait(false);
-            }
-            finally
-            {
-                if (body is not null)
-                {
-                    CryptographicOperations.ZeroMemory(body);
-                }
-            }
-            await SetProfileContextAsync(
-                selection.ProfileContext,
-                authentication.Epoch,
-                CancellationToken.None).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
-            return selection;
-        }
-        finally
-        {
-            _profileRequestGate.Release();
-        }
-    }
-
-    public async Task ClearProfileSelectionAsync(CancellationToken cancellationToken = default)
-    {
-        ThrowIfDisposed();
-        await _profileRequestGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var authentication = await GetAuthenticationSnapshotAsync(cancellationToken).ConfigureAwait(false)
-                ?? throw new NotAuthenticatedException();
-            var uri = await BuildEndpointAsync(
-                ["profiles", "selection"],
-                query: null,
-                cancellationToken).ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
-            var response = await SendResponseAsync(
-                HttpMethod.Delete,
+            selection = await SendJsonResponseAsync<ProfileSelection>(
+                HttpMethod.Post,
                 uri,
-                body: null,
+                body,
                 authenticated: true,
                 retryAfterRefresh: true,
                 CancellationToken.None,
                 authentication,
                 cancellationToken).ConfigureAwait(false);
-            CryptographicOperations.ZeroMemory(response.Body);
-            await SetProfileContextAsync(
-                null,
-                authentication.Epoch,
-                CancellationToken.None).ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
         }
         finally
         {
-            _profileRequestGate.Release();
+            if (body is not null)
+            {
+                CryptographicOperations.ZeroMemory(body);
+            }
         }
+        await SetProfileContextAsync(
+            selection.ProfileContext,
+            authentication.Epoch,
+            CancellationToken.None).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        return selection;
     }
 
-    public Task<SettingsLayer> GetInstanceSettingsAsync(CancellationToken cancellationToken = default) =>
-        RequestJsonAsync<SettingsLayer>(HttpMethod.Get, ["settings"], null, null, true, cancellationToken);
+    public async Task ClearProfileSelectionAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        using var profileMutation = await _profileRequestBarrier
+            .AcquireWriterAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var authentication = await GetAuthenticationSnapshotAsync(cancellationToken).ConfigureAwait(false)
+            ?? throw new NotAuthenticatedException();
+        var uri = await BuildEndpointAsync(
+            ["profiles", "selection"],
+            query: null,
+            cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        var response = await SendResponseAsync(
+            HttpMethod.Delete,
+            uri,
+            body: null,
+            authenticated: true,
+            retryAfterRefresh: true,
+            CancellationToken.None,
+            authentication,
+            cancellationToken).ConfigureAwait(false);
+        CryptographicOperations.ZeroMemory(response.Body);
+        await SetProfileContextAsync(
+            null,
+            authentication.Epoch,
+            CancellationToken.None).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+    }
 
-    public Task<SettingsLayer> UpdateInstanceSettingsAsync(
-        bool? allowTranscoding,
+    public Task<InstanceSettingsLayer> GetInstanceSettingsAsync(CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<InstanceSettingsLayer>(HttpMethod.Get, ["settings"], null, null, true, cancellationToken);
+
+    public Task<InstanceSettingsLayer> UpdateInstanceSettingsAsync(
+        InstanceSettingsPatch patch,
         CancellationToken cancellationToken = default) =>
-        RequestJsonAsync<SettingsLayer>(
+        RequestJsonAsync<InstanceSettingsLayer>(
             HttpMethod.Patch,
             ["settings"],
             null,
-            new InstanceTranscodingPatch(allowTranscoding),
+            InstanceSettingsPatchBody(patch),
             true,
             cancellationToken);
 
@@ -570,13 +777,13 @@ public sealed class RivuneApiClient : IDisposable
 
     public Task<SettingsLayer> UpdateProfileSettingsAsync(
         Guid profileId,
-        string? transcoding,
+        SettingsPatch patch,
         CancellationToken cancellationToken = default) =>
         RequestJsonAsync<SettingsLayer>(
             HttpMethod.Patch,
             ["profiles", profileId.ToString("D"), "settings"],
             null,
-            new ProfileTranscodingPatch(transcoding),
+            SettingsPatchBody(patch),
             true,
             cancellationToken);
 
@@ -590,6 +797,169 @@ public sealed class RivuneApiClient : IDisposable
             null,
             true,
             cancellationToken);
+
+    public async Task<IReadOnlyList<Collection>> GetCollectionsAsync(
+        CancellationToken cancellationToken = default) =>
+        (await RequestJsonAsync<CollectionList>(
+            HttpMethod.Get,
+            ["collections"],
+            null,
+            null,
+            true,
+            cancellationToken).ConfigureAwait(false)).Collections;
+    public Task<Collection> GetCollectionAsync(
+        Guid collectionId,
+        CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<Collection>(
+            HttpMethod.Get,
+            ["collections", collectionId.ToString("D")],
+            null,
+            null,
+            true,
+            cancellationToken);
+
+    public async Task<byte[]> GetProfileAvatarAsync(
+        Guid profileId,
+        CancellationToken cancellationToken = default)
+    {
+        var uri = await BuildEndpointAsync(
+            ["profiles", profileId.ToString("D"), "avatar"],
+            query: null,
+            cancellationToken).ConfigureAwait(false);
+        var response = await SendResponseAsync(
+            HttpMethod.Get,
+            uri,
+            body: null,
+            authenticated: true,
+            retryAfterRefresh: true,
+            cancellationToken).ConfigureAwait(false);
+        return response.Body;
+    }
+
+    public async Task<IReadOnlyList<AddonCatalogDescriptor>> GetAddonCatalogsAsync(
+        CancellationToken cancellationToken = default) =>
+        (await RequestJsonAsync<AddonCatalogDescriptorList>(
+            HttpMethod.Get,
+            ["addons", "catalogs"],
+            null,
+            null,
+            true,
+            cancellationToken).ConfigureAwait(false)).Catalogs;
+
+    public Task<AddonResourceBatch> SearchAddonCatalogsAsync(
+        string type,
+        string search,
+        int? skip = null,
+        int? limit = null,
+        IReadOnlyList<KeyValuePair<string, string>>? extras = null,
+        string? language = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(type);
+        ArgumentNullException.ThrowIfNull(search);
+        var query = Query(
+                ("search", search),
+                ("skip", skip?.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                ("limit", limit?.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                ("language", language))
+            .Concat(extras ?? [])
+            .ToArray();
+        return RequestJsonAsync<AddonResourceBatch>(
+            HttpMethod.Get,
+            ["addons", "catalogs", "search", type],
+            query,
+            null,
+            true,
+            cancellationToken);
+    }
+
+    public Task<LibraryPage> GetLibraryAsync(
+        TitleMediaType? mediaType = null,
+        int? page = null,
+        int? pageSize = null,
+        CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<LibraryPage>(
+            HttpMethod.Get,
+            ["library"],
+            Query(
+                ("mediaType", mediaType is null ? null : TitleMediaTypeValue(mediaType.Value)),
+                ("page", page?.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                ("pageSize", pageSize?.ToString(System.Globalization.CultureInfo.InvariantCulture))),
+            null,
+            true,
+            cancellationToken);
+
+    public Task<LibraryItem> AddLibraryTitleAsync(
+        Guid titleId,
+        CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<LibraryItem>(
+            HttpMethod.Put,
+            ["library", titleId.ToString("D")],
+            null,
+            null,
+            true,
+            cancellationToken);
+
+    public Task RemoveLibraryTitleAsync(
+        Guid titleId,
+        CancellationToken cancellationToken = default) =>
+        RequestEmptyAsync(
+            HttpMethod.Delete,
+            ["library", titleId.ToString("D")],
+            authenticated: true,
+            cancellationToken);
+
+    public async Task<IReadOnlyList<CalendarEvent>> GetCalendarAsync(
+        string from,
+        string to,
+        string? language = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(from);
+        ArgumentNullException.ThrowIfNull(to);
+        return (await RequestJsonAsync<CalendarEventList>(
+            HttpMethod.Get,
+            ["calendar"],
+            Query(("from", from), ("to", to), ("language", language)),
+            null,
+            true,
+            cancellationToken).ConfigureAwait(false)).Events;
+    }
+
+
+    public Task<ResolvedCollectionFolder> ResolveCollectionFolderAsync(
+        Guid collectionId,
+        Guid folderId,
+        int? page = null,
+        int? limit = null,
+        string? language = null,
+        string? region = null,
+        CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<ResolvedCollectionFolder>(
+            HttpMethod.Get,
+            ["collections", collectionId.ToString("D"), "folders", folderId.ToString("D"), "items"],
+            Query(
+                ("page", page?.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                ("limit", limit?.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                ("language", language),
+                ("region", region)),
+            null,
+            true,
+            cancellationToken);
+
+    public Task<TitleReference> ResolveTitleAsync(
+        TitleResolveInput input,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        return RequestJsonAsync<TitleReference>(
+            HttpMethod.Post,
+            ["titles", "resolve"],
+            null,
+            input,
+            true,
+            cancellationToken);
+    }
 
     public Task<Movie> GetMovieAsync(
         Guid id,
@@ -856,7 +1226,7 @@ public sealed class RivuneApiClient : IDisposable
         _discoveryGate.Dispose();
         _credentialGate.Dispose();
         _refreshGate.Dispose();
-        _profileRequestGate.Dispose();
+        _profileRequestBarrier.Dispose();
         if (_ownsCredentialStore && _credentialStore is IDisposable disposableStore)
         {
             disposableStore.Dispose();
@@ -1134,44 +1504,40 @@ public sealed class RivuneApiClient : IDisposable
     {
         ThrowIfDisposed();
         EnsureCredentialDestination(uri);
-        var gateProfileRequest = authenticated && UsesProfileContext(uri, method);
-        if (gateProfileRequest)
-        {
-            await _profileRequestGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        }
+        using var profileRequest = authenticated && UsesProfileContext(uri, method)
+            ? await _profileRequestBarrier.AcquireReaderAsync(cancellationToken).ConfigureAwait(false)
+            : default(ProfileRequestBarrier.ProfileRequestLease);
 
-        try
+        AuthenticationSnapshot? authentication = null;
+        if (authenticated)
         {
-            AuthenticationSnapshot? authentication = null;
-            if (authenticated)
+            var currentAuthentication = await GetAuthenticationSnapshotAsync(cancellationToken).ConfigureAwait(false)
+                ?? throw new NotAuthenticatedException();
+            if (expectedAuthentication is { } expected)
             {
-                authentication = await GetAuthenticationSnapshotAsync(cancellationToken).ConfigureAwait(false)
-                    ?? throw new NotAuthenticatedException();
-                if (expectedAuthentication is { } expected && authentication.Value.Epoch != expected.Epoch)
+                if (currentAuthentication.Epoch != expected.Epoch)
                 {
                     throw new NotAuthenticatedException();
                 }
+                authentication = expected;
             }
-
-            return await SendResponseCoreAsync(
-                method,
-                uri,
-                body,
-                authentication?.Credentials.AccessToken,
-                authentication?.ProfileContext,
-                authentication?.Epoch,
-                retryAfterRefresh,
-                completeSuccessfulResponseWithoutCancellation: expectedAuthentication is not null,
-                retryCancellationToken ?? cancellationToken,
-                cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            if (gateProfileRequest)
+            else
             {
-                _profileRequestGate.Release();
+                authentication = currentAuthentication;
             }
         }
+
+        return await SendResponseCoreAsync(
+            method,
+            uri,
+            body,
+            authentication?.Credentials.AccessToken,
+            authentication?.ProfileContext,
+            authentication?.Epoch,
+            retryAfterRefresh,
+            completeSuccessfulResponseWithoutCancellation: expectedAuthentication is not null,
+            retryCancellationToken ?? cancellationToken,
+            cancellationToken).ConfigureAwait(false);
     }
 
     private Task<HttpResponsePayload> SendResponseWithAccessTokenAsync(
@@ -1215,7 +1581,6 @@ public sealed class RivuneApiClient : IDisposable
             request.Headers.Add("X-Rivune-Profile-Context", profileContext);
         }
 
-
         if (body is not null)
         {
             request.Content = new ByteArrayContent(body);
@@ -1229,14 +1594,18 @@ public sealed class RivuneApiClient : IDisposable
             request,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken).ConfigureAwait(false);
-        EnsureCredentialDestination(response.RequestMessage?.RequestUri ?? uri);
         var statusCode = (int)response.StatusCode;
+        var retryAfter = response.IsSuccessStatusCode
+            ? null
+            : ParseRetryAfter(response.Headers);
+        EnsureCredentialDestination(response.RequestMessage?.RequestUri ?? uri);
         if (statusCode is >= 300 and <= 399)
         {
             throw new RivuneServerException(
                 statusCode,
                 "redirect_not_allowed",
-                "Rivune server redirects are not allowed.");
+                "Rivune server redirects are not allowed.",
+                retryAfter);
         }
 
         var responseBody = await ReadResponseBodyAsync(
@@ -1270,7 +1639,7 @@ public sealed class RivuneApiClient : IDisposable
 
         if (!response.IsSuccessStatusCode)
         {
-            var exception = DecodeServerError((int)response.StatusCode, responseBody);
+            var exception = DecodeServerError(statusCode, responseBody, retryAfter);
             CryptographicOperations.ZeroMemory(responseBody);
             throw exception;
         }
@@ -1386,9 +1755,11 @@ public sealed class RivuneApiClient : IDisposable
                 await SetCredentialsAsync(result, expectedEpoch, refreshCancellationToken).ConfigureAwait(false);
                 return result;
             }
-            catch
+            catch (RivuneServerException exception)
+                when (exception.StatusCode == (int)HttpStatusCode.Unauthorized &&
+                      StringComparer.Ordinal.Equals(exception.Code, "invalid_refresh_token"))
             {
-                await ClearCredentialsIfEpochSuppressingStoreErrorsAsync(expectedEpoch).ConfigureAwait(false);
+                await ClearCredentialsIfEpochAsync(expectedEpoch).ConfigureAwait(false);
                 throw;
             }
         }
@@ -1577,7 +1948,7 @@ public sealed class RivuneApiClient : IDisposable
         return null;
     }
 
-    private async Task ClearCredentialsIfEpochSuppressingStoreErrorsAsync(long expectedEpoch)
+    private async Task ClearCredentialsIfEpochAsync(long expectedEpoch)
     {
         await _credentialGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
@@ -1587,19 +1958,10 @@ public sealed class RivuneApiClient : IDisposable
                 return;
             }
 
-            try
-            {
-                await _credentialStore.ClearAsync(CancellationToken.None).ConfigureAwait(false);
-            }
-            catch
-            {
-            }
-            finally
-            {
-                _credentials = null;
-                _profileContext = null;
-                _credentialsLoaded = true;
-            }
+            await _credentialStore.ClearAsync(CancellationToken.None).ConfigureAwait(false);
+            _credentials = null;
+            _profileContext = null;
+            _credentialsLoaded = true;
         }
         finally
         {
@@ -1647,6 +2009,14 @@ public sealed class RivuneApiClient : IDisposable
         _ => throw new ArgumentOutOfRangeException(nameof(provider)),
     };
 
+    private static string TitleMediaTypeValue(TitleMediaType mediaType) => mediaType switch
+    {
+        TitleMediaType.Movie => "movie",
+        TitleMediaType.Series => "series",
+        TitleMediaType.Tv => "tv",
+        _ => throw new ArgumentOutOfRangeException(nameof(mediaType)),
+    };
+
     private static Dictionary<string, object?> CategoryUpdateBody(CategoryUpdateRequest input)
     {
         var body = new Dictionary<string, object?>();
@@ -1667,22 +2037,88 @@ public sealed class RivuneApiClient : IDisposable
         return body;
     }
 
-    private static void AddPatch(
-        IDictionary<string, object?> body,
-        string name,
-        PatchField<string> field)
+    private static Dictionary<string, object?> SettingsPatchBody(SettingsPatch patch)
     {
-        if (field.IsSpecified) body[name] = field.Value;
+        ArgumentNullException.ThrowIfNull(patch);
+        var body = new Dictionary<string, object?>();
+        AddSettingsPatchFields(body, patch);
+        AddPatch(body, "transcoding", patch.Transcoding);
+        return body;
     }
 
-    private static RivuneServerException DecodeServerError(int statusCode, byte[] body)
+    private static Dictionary<string, object?> InstanceSettingsPatchBody(InstanceSettingsPatch patch)
+    {
+        ArgumentNullException.ThrowIfNull(patch);
+        var body = new Dictionary<string, object?>();
+        AddSettingsPatchFields(body, patch);
+        AddPatch(body, "allowTranscoding", patch.AllowTranscoding);
+        AddPatch(body, "notificationsEnabled", patch.NotificationsEnabled);
+        AddPatch(body, "notificationDurationSeconds", patch.NotificationDurationSeconds);
+        AddPatch(body, "notificationPollIntervalSeconds", patch.NotificationPollIntervalSeconds);
+        if (patch.Timezone is not null) body["timezone"] = patch.Timezone;
+        if (patch.JellyfinEnabled is not null) body["jellyfinEnabled"] = patch.JellyfinEnabled;
+        if (patch.JellyfinDebug is not null) body["jellyfinDebug"] = patch.JellyfinDebug;
+        if (patch.HardwareAcceleration is not null) body["hardwareAcceleration"] = patch.HardwareAcceleration;
+        if (patch.PreferredTranscodeVideoCodec is not null) body["preferredTranscodeVideoCodec"] = patch.PreferredTranscodeVideoCodec;
+        if (patch.TranscodeQualityPreset is not null) body["transcodeQualityPreset"] = patch.TranscodeQualityPreset;
+        if (patch.TranscodeConcurrency is not null) body["transcodeConcurrency"] = patch.TranscodeConcurrency;
+        if (patch.TranscodeMaxBitrateKbps is not null) body["transcodeMaxBitrateKbps"] = patch.TranscodeMaxBitrateKbps;
+        if (patch.MediaMaxStorageMB is not null) body["mediaMaxStorageMB"] = patch.MediaMaxStorageMB;
+        if (patch.ArtworkMaxStorageMB is not null) body["artworkMaxStorageMB"] = patch.ArtworkMaxStorageMB;
+        return body;
+    }
+
+    private static void AddSettingsPatchFields(
+        IDictionary<string, object?> body,
+        CommonSettingsPatch patch)
+    {
+        AddPatch(body, "interfaceLanguage", patch.InterfaceLanguage);
+        AddPatch(body, "theme", patch.Theme);
+        AddPatch(body, "maximumResolution", patch.MaximumResolution);
+        AddPatch(body, "maximumCastMembers", patch.MaximumCastMembers);
+        AddPatch(body, "maximumDirectTitles", patch.MaximumDirectTitles);
+        AddPatch(body, "preferDirectPlay", patch.PreferDirectPlay);
+        AddPatch(body, "hideUnreleased", patch.HideUnreleased);
+        AddPatch(body, "metadataLanguage", patch.MetadataLanguage);
+        AddPatch(body, "metadataRegion", patch.MetadataRegion);
+        AddPatch(body, "seriesMappingProvider", patch.SeriesMappingProvider);
+        AddPatch(body, "audioLanguage", patch.AudioLanguage);
+        AddPatch(body, "subtitleLanguage", patch.SubtitleLanguage);
+        AddPatch(body, "forcedSubtitleLanguage", patch.ForcedSubtitleLanguage);
+        AddPatch(body, "autoplayNextEpisode", patch.AutoplayNextEpisode);
+        AddPatch(body, "skipIntroEnabled", patch.SkipIntroEnabled);
+        AddPatch(body, "skipRecapEnabled", patch.SkipRecapEnabled);
+        AddPatch(body, "skipOutroEnabled", patch.SkipOutroEnabled);
+        AddPatch(body, "cardDensity", patch.CardDensity);
+        AddPatch(body, "animationsEnabled", patch.AnimationsEnabled);
+        AddPatch(body, "subtitleSizePercent", patch.SubtitleSizePercent);
+        AddPatch(body, "subtitleTextColor", patch.SubtitleTextColor);
+        AddPatch(body, "subtitleBackgroundOpacityPercent", patch.SubtitleBackgroundOpacityPercent);
+    }
+
+    private static void AddPatch<T>(
+        IDictionary<string, object?> body,
+        string name,
+        PatchField<T> field)
+    {
+        if (field.IsSpecified) body[name] = field.IsNull ? null : field.Value;
+    }
+
+    private static RivuneServerException DecodeServerError(
+        int statusCode,
+        byte[] body,
+        TimeSpan? retryAfter)
     {
         try
         {
             var envelope = JsonSerializer.Deserialize<ErrorEnvelope>(body, JsonOptions);
             if (envelope?.Error is not null)
             {
-                return new RivuneServerException(statusCode, envelope.Error.Code, envelope.Error.Message);
+                return new RivuneServerException(
+                    statusCode,
+                    envelope.Error.Code,
+                    envelope.Error.Message,
+                    retryAfter);
             }
         }
         catch (JsonException)
@@ -1695,7 +2131,32 @@ public sealed class RivuneApiClient : IDisposable
         return new RivuneServerException(
             statusCode,
             $"http_{statusCode}",
-            $"Rivune server returned HTTP {statusCode}.");
+            $"Rivune server returned HTTP {statusCode}.",
+            retryAfter);
+    }
+
+    private static TimeSpan? ParseRetryAfter(HttpResponseHeaders headers)
+    {
+        RetryConditionHeaderValue? value;
+        try
+        {
+            value = headers.RetryAfter;
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+
+        if (value?.Delta is { } delta)
+        {
+            return delta;
+        }
+        if (value?.Date is { } date)
+        {
+            var delay = date - DateTimeOffset.UtcNow;
+            return delay > TimeSpan.Zero ? delay : TimeSpan.Zero;
+        }
+        return null;
     }
 
     private static HttpMessageHandler CreateDefaultHandler() =>
@@ -1742,7 +2203,7 @@ public sealed class RivuneApiClient : IDisposable
     private static Uri ValidateServerUrl(Uri value)
     {
         ArgumentNullException.ThrowIfNull(value);
-        if (!value.IsAbsoluteUri || !IsAllowedServerUrl(value))
+        if (!value.IsAbsoluteUri || !IsAllowedServerUrl(value) || !string.IsNullOrEmpty(value.UserInfo))
         {
             throw new InvalidServerUrlException(value.ToString());
         }
@@ -1810,10 +2271,6 @@ public sealed class RivuneApiClient : IDisposable
     private sealed record LoginRequest(string Username, string Password, LoginDevice Device);
     private sealed record RefreshRequest(string RefreshToken);
     private sealed record SelectProfileRequest(string? Pin);
-    private sealed record InstanceTranscodingPatch(
-        [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] bool? AllowTranscoding);
-    private sealed record ProfileTranscodingPatch(
-        [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? Transcoding);
     private sealed record PlaybackSourcesRequest(
         string MediaType,
         Guid? AddonId,

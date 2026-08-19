@@ -214,7 +214,7 @@ type watchstateService interface {
 	SetWatched(context.Context, auth.Principal, string, bool, watchstate.CompletionInput) (watchstate.Progress, error)
 	SetWatchedBatch(context.Context, auth.Principal, []watchstate.SetWatchedBatchItem) (watchstate.ProgressBatch, error)
 	ClearProgress(context.Context, auth.Principal, string, int64) error
-	ContinueWatching(context.Context, auth.Principal, int) (watchstate.ContinuePage, error)
+	ContinueWatching(context.Context, auth.Principal, string, int) (watchstate.ContinuePage, error)
 	DismissContinue(context.Context, auth.Principal, string) error
 }
 

@@ -126,6 +126,26 @@ public sealed class RedirectSecurityTests
         Assert.False(transport.AllowAutoRedirect);
     }
 
+    [Fact]
+    public async Task ArtworkRedirectIsRejectedWithoutSecondHop()
+    {
+        var target = new Uri("https://provider.test/poster.jpg");
+        var handler = new ResourceRedirectHandler(target);
+        using var client = new RivuneApiClient(
+            "https://rivune.test",
+            handler,
+            new NullCredentialStore());
+
+        var exception = await Assert.ThrowsAsync<RivuneServerException>(() =>
+            client.DownloadSameOriginResourceAsync(
+                "/api/v1/artwork/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                TestContext.Current.CancellationToken));
+
+        Assert.Equal("redirect_not_allowed", exception.Code);
+        Assert.Equal(1, handler.PrimaryRequests);
+        Assert.Equal(0, handler.SecondHopRequests);
+    }
+
     private sealed class RedirectScenarioHandler(
         HttpStatusCode redirectStatus,
         Uri redirectTarget,
@@ -162,6 +182,31 @@ public sealed class RedirectSecurityTests
                 """{"error":{"code":"untrusted","message":"Untrusted redirect body"}}""");
             response.Headers.Location = redirectTarget;
             return response;
+        }
+    }
+
+    private sealed class ResourceRedirectHandler(Uri redirectTarget) : HttpMessageHandler
+    {
+        public int PrimaryRequests { get; private set; }
+        public int SecondHopRequests { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            if (request.RequestUri == redirectTarget)
+            {
+                SecondHopRequests++;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
+            }
+
+            PrimaryRequests++;
+            if (request.RequestUri!.AbsolutePath == "/.well-known/rivune")
+                return Task.FromResult(JsonResponse(HttpStatusCode.OK, DiscoveryBody));
+
+            var response = new HttpResponseMessage(HttpStatusCode.TemporaryRedirect);
+            response.Headers.Location = redirectTarget;
+            return Task.FromResult(response);
         }
     }
 

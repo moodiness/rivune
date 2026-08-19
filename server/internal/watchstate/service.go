@@ -33,9 +33,10 @@ var (
 	ErrOutboxCapacity     = errors.New("tracking synchronization capacity reached")
 	errAddonAccessChanged = fmt.Errorf("%w", ErrNotFound)
 
-	uuidPattern        = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
-	providerPattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
-	artworkPathPattern = regexp.MustCompile(`^/api/v1/artwork/[0-9a-f]{64}$`)
+	uuidPattern                     = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
+	providerPattern                 = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
+	artworkPathPattern              = regexp.MustCompile(`^/api/v1/artwork/[0-9a-f]{64}$`)
+	continueMetadataLanguagePattern = regexp.MustCompile(`^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$`)
 )
 
 const (
@@ -2557,7 +2558,11 @@ func clearContinueDismissalTx(ctx context.Context, tx pgx.Tx, profileID, titleID
 	return nil
 }
 
-func (s *Service) ContinueWatching(ctx context.Context, principal auth.Principal, limit int) (ContinuePage, error) {
+func (s *Service) ContinueWatching(ctx context.Context, principal auth.Principal, metadataLanguage string, limit int) (ContinuePage, error) {
+	metadataLanguage, err := normalizeContinueMetadataLanguage(metadataLanguage)
+	if err != nil {
+		return ContinuePage{}, err
+	}
 	if limit == 0 {
 		limit = defaultPageSize
 	}
@@ -2569,6 +2574,9 @@ func (s *Service) ContinueWatching(ctx context.Context, principal auth.Principal
 		return ContinuePage{}, fmt.Errorf("begin continue watching query: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := disableTransactionJIT(ctx, tx); err != nil {
+		return ContinuePage{}, err
+	}
 	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
 	if err != nil {
 		return ContinuePage{}, err
@@ -2591,10 +2599,239 @@ func (s *Service) ContinueWatching(ctx context.Context, principal auth.Principal
 	if len(items) > limit {
 		items = items[:limit]
 	}
+	if err := overlayLocalizedContinueItems(ctx, tx, metadataLanguage, items); err != nil {
+		return ContinuePage{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return ContinuePage{}, fmt.Errorf("commit continue watching query: %w", err)
 	}
 	return ContinuePage{Items: items}, nil
+}
+
+type continueMetadataSnapshot struct {
+	languageRank int
+	provider     string
+	payload      json.RawMessage
+}
+
+func normalizeContinueMetadataLanguage(language string) (string, error) {
+	language = strings.TrimSpace(language)
+	if language == "" || strings.EqualFold(language, "auto") {
+		return "", nil
+	}
+	if !continueMetadataLanguagePattern.MatchString(language) {
+		return "", fmt.Errorf("%w: metadata language must be a BCP 47 language tag", ErrInvalidInput)
+	}
+	parts := strings.Split(language, "-")
+	for index := range parts {
+		parts[index] = strings.ToLower(parts[index])
+		if index == 0 {
+			continue
+		}
+		if len(parts[index]) == 4 {
+			parts[index] = strings.ToUpper(parts[index][:1]) + parts[index][1:]
+		} else if len(parts[index]) == 2 {
+			parts[index] = strings.ToUpper(parts[index])
+		}
+	}
+	return strings.Join(parts, "-"), nil
+}
+
+func overlayLocalizedContinueItems(ctx context.Context, tx pgx.Tx, language string, items []ContinueItem) error {
+	if language == "" || len(items) == 0 {
+		return nil
+	}
+	titleIDs := make([]string, 0, len(items)*2)
+	seen := make(map[string]struct{}, len(items)*2)
+	for _, item := range items {
+		var itemTitleIDs [2]string
+		count := 1
+		itemTitleIDs[0] = item.TitleID
+		if item.MediaType == "episode" {
+			itemTitleIDs[0], itemTitleIDs[1], count = item.SeriesID, item.SeasonID, 2
+		}
+		for _, titleID := range itemTitleIDs[:count] {
+			if titleID == "" {
+				continue
+			}
+			if _, exists := seen[titleID]; exists {
+				continue
+			}
+			seen[titleID] = struct{}{}
+			titleIDs = append(titleIDs, titleID)
+		}
+	}
+	sort.Strings(titleIDs)
+	rows, err := tx.Query(ctx, `
+		/* watchstate.continue_localization */
+		SELECT title_id::text,
+		       CASE WHEN lower(language) = lower($1) THEN 0
+		            WHEN lower(language) = split_part(lower($1), '-', 1) THEN 1
+		            ELSE 2 END AS language_rank,
+		       provider, payload
+		FROM title_metadata
+		WHERE split_part(lower(language), '-', 1) = split_part(lower($1), '-', 1)
+		  AND title_id = ANY($2::uuid[])
+		ORDER BY title_id, language_rank, language, updated_at DESC, provider
+	`, language, titleIDs)
+	if err != nil {
+		return fmt.Errorf("query localized continue metadata: %w", err)
+	}
+	defer rows.Close()
+	snapshots := make(map[string][]continueMetadataSnapshot, len(titleIDs))
+	for rows.Next() {
+		var titleID string
+		var snapshot continueMetadataSnapshot
+		if err := rows.Scan(&titleID, &snapshot.languageRank, &snapshot.provider, &snapshot.payload); err != nil {
+			return fmt.Errorf("scan localized continue metadata: %w", err)
+		}
+		snapshots[titleID] = append(snapshots[titleID], snapshot)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate localized continue metadata: %w", err)
+	}
+	for index := range items {
+		overlayLocalizedContinueItem(&items[index], snapshots)
+	}
+	return nil
+}
+
+func overlayLocalizedContinueItem(item *ContinueItem, snapshots map[string][]continueMetadataSnapshot) {
+	if item.MediaType == "movie" {
+		if movie, ok := bestLocalizedMovie(snapshots[item.TitleID], item.ResourceProvider); ok {
+			replaceNonEmpty(&item.Title, movie.Title)
+			replaceNonEmpty(&item.PosterURL, movie.PosterURL)
+			replaceNonEmpty(&item.BackgroundURL, movie.BackdropURL)
+			replaceNonEmpty(&item.ReleaseInfo, releaseInfoFromMetadataDate(movie.ReleaseDate))
+		}
+		return
+	}
+	if item.MediaType != "episode" {
+		return
+	}
+	if series, ok := bestLocalizedSeries(snapshots[item.SeriesID], item.ResourceProvider); ok {
+		replaceNonEmpty(&item.Title, series.Name)
+		replaceNonEmpty(&item.PosterURL, series.PosterURL)
+		replaceNonEmpty(&item.BackgroundURL, series.BackdropURL)
+		replaceNonEmpty(&item.ReleaseInfo, releaseInfoFromMetadataDate(series.FirstAirDate))
+	}
+	if episode, ok := bestLocalizedEpisode(snapshots[item.SeasonID], item.ResourceProvider, *item); ok {
+		replaceNonEmpty(&item.EpisodeTitle, episode.Name)
+		replaceNonEmpty(&item.EpisodeStillURL, episode.StillURL)
+		replaceNonEmpty(&item.BackgroundURL, episode.BackdropURL)
+		replaceNonEmpty(&item.EpisodeAirDate, episode.AirDate)
+	}
+}
+
+func bestLocalizedMovie(snapshots []continueMetadataSnapshot, preferredProvider string) (metadata.Movie, bool) {
+	for start := 0; start < len(snapshots); {
+		end := continueMetadataLanguageGroupEnd(snapshots, start)
+		for _, preferred := range []bool{true, false} {
+			for _, snapshot := range snapshots[start:end] {
+				if (snapshot.provider == preferredProvider) != preferred {
+					continue
+				}
+				var movie metadata.Movie
+				if json.Unmarshal(snapshot.payload, &movie) == nil && nonEmptyCount(movie.Title, movie.PosterURL, movie.BackdropURL, movie.ReleaseDate) > 0 {
+					return movie, true
+				}
+			}
+		}
+		start = end
+	}
+	return metadata.Movie{}, false
+}
+
+func bestLocalizedSeries(snapshots []continueMetadataSnapshot, preferredProvider string) (metadata.Series, bool) {
+	for start := 0; start < len(snapshots); {
+		end := continueMetadataLanguageGroupEnd(snapshots, start)
+		for _, preferred := range []bool{true, false} {
+			for _, snapshot := range snapshots[start:end] {
+				if (snapshot.provider == preferredProvider) != preferred {
+					continue
+				}
+				var series metadata.Series
+				if json.Unmarshal(snapshot.payload, &series) == nil && nonEmptyCount(series.Name, series.PosterURL, series.BackdropURL, series.FirstAirDate) > 0 {
+					return series, true
+				}
+			}
+		}
+		start = end
+	}
+	return metadata.Series{}, false
+}
+
+func bestLocalizedEpisode(snapshots []continueMetadataSnapshot, preferredProvider string, item ContinueItem) (metadata.Episode, bool) {
+	for start := 0; start < len(snapshots); {
+		end := continueMetadataLanguageGroupEnd(snapshots, start)
+		for _, preferred := range []bool{true, false} {
+			for _, snapshot := range snapshots[start:end] {
+				if (snapshot.provider == preferredProvider) != preferred {
+					continue
+				}
+				var season metadata.Season
+				if json.Unmarshal(snapshot.payload, &season) != nil {
+					continue
+				}
+				for _, episode := range season.Episodes {
+					if episode.ID != item.TitleID && !matchesContinueEpisodeOrdinal(episode, item) {
+						continue
+					}
+					if nonEmptyCount(episode.Name, episode.StillURL, episode.BackdropURL, episode.AirDate) > 0 {
+						return episode, true
+					}
+				}
+			}
+		}
+		start = end
+	}
+	return metadata.Episode{}, false
+}
+
+func matchesContinueEpisodeOrdinal(episode metadata.Episode, item ContinueItem) bool {
+	return item.SeasonNumber != nil && item.EpisodeNumber != nil &&
+		episode.SeasonNumber == *item.SeasonNumber && episode.EpisodeNumber == *item.EpisodeNumber
+}
+
+func continueMetadataLanguageGroupEnd(snapshots []continueMetadataSnapshot, start int) int {
+	end := start + 1
+	for end < len(snapshots) && snapshots[end].languageRank == snapshots[start].languageRank {
+		end++
+	}
+	return end
+}
+
+func nonEmptyCount(values ...string) int {
+	count := 0
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func replaceNonEmpty(destination *string, value string) {
+	if value = strings.TrimSpace(value); value != "" {
+		*destination = value
+	}
+}
+
+func releaseInfoFromMetadataDate(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) >= 4 {
+		if _, err := strconv.Atoi(value[:4]); err == nil {
+			return value[:4]
+		}
+	}
+	return value
+}
+
+func disableTransactionJIT(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `SET LOCAL jit = off`); err != nil {
+		return fmt.Errorf("disable PostgreSQL JIT for continue transaction: %w", err)
+	}
+	return nil
 }
 
 func resumeItems(ctx context.Context, tx pgx.Tx, profileID string, limit int) ([]ContinueItem, map[string]struct{}, error) {
@@ -2620,6 +2857,9 @@ func resumeItems(ctx context.Context, tx pgx.Tx, profileID string, limit int) ([
 			           ELSE COALESCE(title.resource_id, '')
 			       END AS resource_id,
 			       COALESCE(CASE WHEN title.media_type = 'episode' THEN series.resource_provider ELSE title.resource_provider END, '') AS resource_provider,
+			       COALESCE(CASE WHEN title.media_type = 'episode' THEN title.display_title END, '') AS episode_title,
+			       COALESCE(CASE WHEN title.media_type = 'episode' THEN NULLIF(title.poster_url, '') END, CASE WHEN title.media_type = 'episode' THEN NULLIF(series.background_url, '') END, '') AS episode_still_url,
+			       COALESCE(CASE WHEN title.media_type = 'episode' THEN title.release_date::text END, '') AS episode_air_date,
 			       row_number() OVER (
 			           PARTITION BY CASE
 			               WHEN title.media_type = 'episode' THEN series.id
@@ -2653,7 +2893,8 @@ func resumeItems(ctx context.Context, tx pgx.Tx, profileID string, limit int) ([
 		SELECT id::text, media_type, series_id::text, season_id::text,
 		       season_number, episode_number, position_seconds, duration_seconds,
 		       version, display_title, poster_url, background_url, release_info,
-		       resource_id, resource_provider, last_watched_at
+		       resource_id, resource_provider, episode_title, episode_still_url,
+		       episode_air_date, last_watched_at
 		FROM resumable
 		WHERE series_rank = 1
 		ORDER BY last_watched_at DESC, id
@@ -2673,7 +2914,8 @@ func resumeItems(ctx context.Context, tx pgx.Tx, profileID string, limit int) ([
 			&item.SeasonNumber, &item.EpisodeNumber, &item.PositionSeconds,
 			&item.DurationSeconds, &item.Version, &item.Title, &item.PosterURL,
 			&item.BackgroundURL, &item.ReleaseInfo, &item.ResourceID,
-			&item.ResourceProvider, &item.LastWatchedAt,
+			&item.ResourceProvider, &item.EpisodeTitle, &item.EpisodeStillURL,
+			&item.EpisodeAirDate, &item.LastWatchedAt,
 		); err != nil {
 			return nil, nil, fmt.Errorf("scan resumable title: %w", err)
 		}
@@ -2731,10 +2973,15 @@ const nextEpisodeQuery = `
 		       COALESCE(series_title.release_info, ''),
 		       COALESCE(series_title.resource_id, '') || ':' || next_season.ordinal::text || ':' || next_episode.ordinal::text,
 		       COALESCE(series_title.resource_provider, ''),
+		       COALESCE(next_episode.display_title, ''),
+		       COALESCE(NULLIF(next_episode.poster_url, ''), NULLIF(series_title.background_url, ''), ''),
+		       COALESCE(next_episode.release_date::text, ''),
 		       latest.last_watched_at
 		FROM latest_completed latest
 		JOIN LATERAL (
-			SELECT candidate_episode.id, candidate_episode.parent_id, candidate_episode.ordinal
+			SELECT candidate_episode.id, candidate_episode.parent_id, candidate_episode.ordinal,
+			       candidate_episode.display_title, candidate_episode.poster_url,
+			       candidate_episode.release_date
 			FROM titles candidate_episode
 			JOIN accessible_titles accessible_candidate_episode ON accessible_candidate_episode.id = candidate_episode.id
 			JOIN titles candidate_season
@@ -2780,6 +3027,7 @@ func nextEpisodeItems(ctx context.Context, tx pgx.Tx, profileID string, activeSe
 			&item.TitleID, &item.SeriesID, &item.SeasonID, &item.SeasonNumber,
 			&item.EpisodeNumber, &item.Title, &item.PosterURL, &item.BackgroundURL,
 			&item.ReleaseInfo, &item.ResourceID, &item.ResourceProvider,
+			&item.EpisodeTitle, &item.EpisodeStillURL, &item.EpisodeAirDate,
 			&item.LastWatchedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan next episode: %w", err)

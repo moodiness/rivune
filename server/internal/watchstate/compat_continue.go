@@ -24,6 +24,9 @@ func (s *Service) ListResume(ctx context.Context, principal auth.Principal, offs
 		return ContinueItemsPage{}, fmt.Errorf("begin resume items query: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := disableTransactionJIT(ctx, tx); err != nil {
+		return ContinueItemsPage{}, err
+	}
 	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
 	if err != nil {
 		return ContinueItemsPage{}, err
@@ -63,6 +66,9 @@ func (s *Service) ListNextUp(ctx context.Context, principal auth.Principal, seri
 		return ContinueItemsPage{}, fmt.Errorf("begin next-up items query: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := disableTransactionJIT(ctx, tx); err != nil {
+		return ContinueItemsPage{}, err
+	}
 	profileID, err := authorizedActiveProfileID(ctx, tx, principal)
 	if err != nil {
 		return ContinueItemsPage{}, err
@@ -125,6 +131,9 @@ const resumeItemsCTE = `
 		           ELSE COALESCE(title.resource_id, '')
 		       END AS resource_id,
 		       COALESCE(CASE WHEN title.media_type = 'episode' THEN series.resource_provider ELSE title.resource_provider END, '') AS resource_provider,
+		       COALESCE(CASE WHEN title.media_type = 'episode' THEN title.display_title END, '') AS episode_title,
+		       COALESCE(CASE WHEN title.media_type = 'episode' THEN NULLIF(title.poster_url, '') END, CASE WHEN title.media_type = 'episode' THEN NULLIF(series.background_url, '') END, '') AS episode_still_url,
+		       COALESCE(CASE WHEN title.media_type = 'episode' THEN title.release_date::text END, '') AS episode_air_date,
 		       row_number() OVER (
 		           PARTITION BY CASE WHEN title.media_type = 'episode' THEN series.id ELSE title.id END
 		           ORDER BY progress.last_watched_at DESC, title.id
@@ -160,7 +169,8 @@ func queryResumeItems(ctx context.Context, tx pgx.Tx, profileID string, offset, 
 		SELECT id::text, media_type, series_id::text, season_id::text,
 		       season_number, episode_number, position_seconds, duration_seconds,
 		       version, display_title, poster_url, background_url, release_info,
-		       resource_id, resource_provider, last_watched_at
+		       resource_id, resource_provider, episode_title, episode_still_url,
+		       episode_air_date, last_watched_at
 		FROM selected
 		ORDER BY last_watched_at DESC, id
 		LIMIT $2 OFFSET $3
@@ -178,7 +188,8 @@ func queryResumeItems(ctx context.Context, tx pgx.Tx, profileID string, offset, 
 			&item.SeasonNumber, &item.EpisodeNumber, &item.PositionSeconds,
 			&item.DurationSeconds, &item.Version, &item.Title, &item.PosterURL,
 			&item.BackgroundURL, &item.ReleaseInfo, &item.ResourceID,
-			&item.ResourceProvider, &item.LastWatchedAt,
+			&item.ResourceProvider, &item.EpisodeTitle, &item.EpisodeStillURL,
+			&item.EpisodeAirDate, &item.LastWatchedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan resume item: %w", err)
 		}
@@ -260,10 +271,15 @@ const nextUpItemsCTE = `
 		       COALESCE(series_title.release_info, '') AS release_info,
 		       COALESCE(series_title.resource_id, '') || ':' || next_season.ordinal::text || ':' || next_episode.ordinal::text AS resource_id,
 		       COALESCE(series_title.resource_provider, '') AS resource_provider,
+		       COALESCE(next_episode.display_title, '') AS episode_title,
+		       COALESCE(NULLIF(next_episode.poster_url, ''), NULLIF(series_title.background_url, ''), '') AS episode_still_url,
+		       COALESCE(next_episode.release_date::text, '') AS episode_air_date,
 		       COALESCE(eligible.last_watched_at, '0001-01-01T00:00:00Z'::timestamptz) AS last_watched_at
 		FROM eligible_series eligible
 		JOIN LATERAL (
-			SELECT candidate_episode.id, candidate_episode.parent_id, candidate_episode.ordinal
+			SELECT candidate_episode.id, candidate_episode.parent_id, candidate_episode.ordinal,
+			       candidate_episode.display_title, candidate_episode.poster_url,
+			       candidate_episode.release_date
 			FROM titles candidate_episode
 			JOIN accessible_titles accessible_candidate_episode ON accessible_candidate_episode.id = candidate_episode.id
 			JOIN titles candidate_season
@@ -296,7 +312,8 @@ func queryNextUpItems(ctx context.Context, tx pgx.Tx, profileID string, seriesID
 	rows, err := tx.Query(ctx, nextUpItemsCTE+`
 		SELECT id::text, series_id::text, season_id::text, season_number,
 		       episode_number, display_title, poster_url, background_url,
-		       release_info, resource_id, resource_provider, last_watched_at
+		       release_info, resource_id, resource_provider, episode_title,
+		       episode_still_url, episode_air_date, last_watched_at
 		FROM selected
 		ORDER BY last_watched_at DESC NULLS LAST, series_id, season_number, episode_number, id
 		LIMIT $3 OFFSET $4
@@ -312,6 +329,7 @@ func queryNextUpItems(ctx context.Context, tx pgx.Tx, profileID string, seriesID
 			&item.TitleID, &item.SeriesID, &item.SeasonID, &item.SeasonNumber,
 			&item.EpisodeNumber, &item.Title, &item.PosterURL, &item.BackgroundURL,
 			&item.ReleaseInfo, &item.ResourceID, &item.ResourceProvider,
+			&item.EpisodeTitle, &item.EpisodeStillURL, &item.EpisodeAirDate,
 			&item.LastWatchedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan next-up item: %w", err)

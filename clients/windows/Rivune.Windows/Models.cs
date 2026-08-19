@@ -181,19 +181,21 @@ internal interface IAuthorizationContext : IJsonOnDeserialized
     AuthorizationScope AuthorizationScope { get; }
     CategoryRef? Category { get; }
 
-    void IJsonOnDeserialized.OnDeserialized()
+    void IJsonOnDeserialized.OnDeserialized() => Validate(this);
+
+    internal static void Validate(IAuthorizationContext context)
     {
-        switch (AuthorizationScope)
+        switch (context.AuthorizationScope)
         {
-            case global::Rivune.Windows.AuthorizationScope.GlobalAdministrator when Category is null:
-            case global::Rivune.Windows.AuthorizationScope.Category when Category is not null:
+            case global::Rivune.Windows.AuthorizationScope.GlobalAdministrator when context.Category is null:
+            case global::Rivune.Windows.AuthorizationScope.Category when context.Category is not null:
                 return;
             case global::Rivune.Windows.AuthorizationScope.GlobalAdministrator:
                 throw new JsonException("A global_admin authorization context cannot include a category.");
             case global::Rivune.Windows.AuthorizationScope.Category:
                 throw new JsonException("A category authorization context requires a category.");
             default:
-                throw new JsonException($"Unsupported authorization scope '{AuthorizationScope}'.");
+                throw new JsonException($"Unsupported authorization scope '{context.AuthorizationScope}'.");
         }
     }
 }
@@ -220,17 +222,19 @@ public sealed record CategoryList
 
 public readonly record struct PatchField<T>
 {
-    private PatchField(bool isSpecified, T? value)
+    private PatchField(bool isSpecified, bool isNull, T? value)
     {
         IsSpecified = isSpecified;
+        IsNull = isNull;
         Value = value;
     }
 
     public bool IsSpecified { get; }
+    public bool IsNull { get; }
     public T? Value { get; }
     public static PatchField<T> Omitted => default;
-    public static PatchField<T> Null => new(true, default);
-    public static PatchField<T> FromValue(T value) => new(true, value);
+    public static PatchField<T> Null => new(true, true, default);
+    public static PatchField<T> FromValue(T value) => new(true, false, value);
 }
 
 public sealed record CategoryCreateRequest
@@ -283,7 +287,7 @@ public sealed record DeviceUpdateRequest
     public PatchField<string> InternalNote { get; init; }
 }
 
-public sealed record TokenPair : IAuthorizationContext
+public sealed record TokenPair : IAuthorizationContext, IJsonOnDeserialized
 {
     public required string TokenType { get; init; }
     public required string AccessToken { get; init; }
@@ -294,6 +298,19 @@ public sealed record TokenPair : IAuthorizationContext
     public required Guid DeviceId { get; init; }
     public required AuthorizationScope AuthorizationScope { get; init; }
     public required CategoryRef? Category { get; init; }
+
+    void IJsonOnDeserialized.OnDeserialized()
+    {
+        if (!StringComparer.Ordinal.Equals(TokenType, "Bearer") ||
+            string.IsNullOrEmpty(AccessToken) ||
+            AccessTokenExpiresAt is null ||
+            string.IsNullOrEmpty(RefreshToken) ||
+            RefreshTokenExpiresAt is null)
+        {
+            throw new JsonException("The token response contains invalid required fields.");
+        }
+        IAuthorizationContext.Validate(this);
+    }
 }
 
 public sealed record Account
@@ -460,29 +477,238 @@ public sealed record DeviceCodeTokenRequest
 
 public sealed record SettingsValues
 {
+    public string? InterfaceLanguage { get; init; }
+    public string? Theme { get; init; }
+    public string? MaximumResolution { get; init; }
+    public int? MaximumCastMembers { get; init; }
+    public int? MaximumDirectTitles { get; init; }
     public bool? AllowTranscoding { get; init; }
     public string? Transcoding { get; init; }
+    public bool? PreferDirectPlay { get; init; }
+    public bool? HideUnreleased { get; init; }
+    public string? MetadataLanguage { get; init; }
+    public string? MetadataRegion { get; init; }
+    public string? SeriesMappingProvider { get; init; }
+    public string? AudioLanguage { get; init; }
+    public string? SubtitleLanguage { get; init; }
+    public string? ForcedSubtitleLanguage { get; init; }
+    public bool? AutoplayNextEpisode { get; init; }
+    public bool? SkipIntroEnabled { get; init; }
+    public bool? SkipRecapEnabled { get; init; }
+    public bool? SkipOutroEnabled { get; init; }
+    public string? CardDensity { get; init; }
+    public bool? AnimationsEnabled { get; init; }
+    public int? SubtitleSizePercent { get; init; }
+    public string? SubtitleTextColor { get; init; }
+    public int? SubtitleBackgroundOpacityPercent { get; init; }
+    public bool? NotificationsEnabled { get; init; }
+    public int? NotificationDurationSeconds { get; init; }
+    public int? NotificationPollIntervalSeconds { get; init; }
+}
+
+public record CommonSettingsPatch
+{
+    public PatchField<string> InterfaceLanguage { get; init; }
+    public PatchField<string> Theme { get; init; }
+    public PatchField<string> MaximumResolution { get; init; }
+    public PatchField<int> MaximumCastMembers { get; init; }
+    public PatchField<int> MaximumDirectTitles { get; init; }
+    public PatchField<bool> PreferDirectPlay { get; init; }
+    public PatchField<bool> HideUnreleased { get; init; }
+    public PatchField<string> MetadataLanguage { get; init; }
+    public PatchField<string> MetadataRegion { get; init; }
+    public PatchField<string> SeriesMappingProvider { get; init; }
+    public PatchField<string> AudioLanguage { get; init; }
+    public PatchField<string> SubtitleLanguage { get; init; }
+    public PatchField<string> ForcedSubtitleLanguage { get; init; }
+    public PatchField<bool> AutoplayNextEpisode { get; init; }
+    public PatchField<bool> SkipIntroEnabled { get; init; }
+    public PatchField<bool> SkipRecapEnabled { get; init; }
+    public PatchField<bool> SkipOutroEnabled { get; init; }
+    public PatchField<string> CardDensity { get; init; }
+    public PatchField<bool> AnimationsEnabled { get; init; }
+    public PatchField<int> SubtitleSizePercent { get; init; }
+    public PatchField<string> SubtitleTextColor { get; init; }
+    public PatchField<int> SubtitleBackgroundOpacityPercent { get; init; }
+}
+
+public sealed record SettingsPatch : CommonSettingsPatch
+{
+    public PatchField<string> Transcoding { get; init; }
+}
+
+public sealed record InstanceSettingsPatch : CommonSettingsPatch
+{
+    public PatchField<bool> AllowTranscoding { get; init; }
+    public PatchField<bool> NotificationsEnabled { get; init; }
+    public PatchField<int> NotificationDurationSeconds { get; init; }
+    public PatchField<int> NotificationPollIntervalSeconds { get; init; }
+    public string? Timezone { get; init; }
+    public bool? JellyfinEnabled { get; init; }
+    public bool? JellyfinDebug { get; init; }
+    public string? HardwareAcceleration { get; init; }
+    public string? PreferredTranscodeVideoCodec { get; init; }
+    public string? TranscodeQualityPreset { get; init; }
+    public int? TranscodeConcurrency { get; init; }
+    public int? TranscodeMaxBitrateKbps { get; init; }
+    public int? MediaMaxStorageMB { get; init; }
+    public int? ArtworkMaxStorageMB { get; init; }
+}
+
+public sealed record InstanceSettingsValues
+{
+    public string? InterfaceLanguage { get; init; }
+    public string? Theme { get; init; }
+    public string? MaximumResolution { get; init; }
     public int? MaximumCastMembers { get; init; }
+    public int? MaximumDirectTitles { get; init; }
+    public required bool AllowTranscoding { get; init; }
+    public string? Transcoding { get; init; }
+    public bool? PreferDirectPlay { get; init; }
+    public bool? HideUnreleased { get; init; }
+    public string? MetadataLanguage { get; init; }
+    public string? MetadataRegion { get; init; }
+    public string? SeriesMappingProvider { get; init; }
+    public string? AudioLanguage { get; init; }
+    public string? SubtitleLanguage { get; init; }
+    public string? ForcedSubtitleLanguage { get; init; }
+    public bool? AutoplayNextEpisode { get; init; }
+    public bool? SkipIntroEnabled { get; init; }
+    public bool? SkipRecapEnabled { get; init; }
+    public bool? SkipOutroEnabled { get; init; }
+    public string? CardDensity { get; init; }
+    public bool? AnimationsEnabled { get; init; }
+    public int? SubtitleSizePercent { get; init; }
+    public string? SubtitleTextColor { get; init; }
+    public int? SubtitleBackgroundOpacityPercent { get; init; }
+    public bool? NotificationsEnabled { get; init; }
+    public int? NotificationDurationSeconds { get; init; }
+    public int? NotificationPollIntervalSeconds { get; init; }
+    public required string Timezone { get; init; }
+    public required bool JellyfinEnabled { get; init; }
+    public required bool JellyfinDebug { get; init; }
+    public required string HardwareAcceleration { get; init; }
+    public required string PreferredTranscodeVideoCodec { get; init; }
+    public required string TranscodeQualityPreset { get; init; }
+    public required int TranscodeConcurrency { get; init; }
+    public required int TranscodeMaxBitrateKbps { get; init; }
+    public required int MediaMaxStorageMB { get; init; }
+    public required int ArtworkMaxStorageMB { get; init; }
+}
+
+public sealed record RuntimeSettingsValues
+{
+    public required string Timezone { get; init; }
+    public required bool JellyfinEnabled { get; init; }
+    public required bool JellyfinDebug { get; init; }
+    public required string HardwareAcceleration { get; init; }
+    public required string PreferredTranscodeVideoCodec { get; init; }
+    public required string TranscodeQualityPreset { get; init; }
+    public required int TranscodeConcurrency { get; init; }
+    public required int TranscodeMaxBitrateKbps { get; init; }
+    public required int MediaMaxStorageMB { get; init; }
+    public required int ArtworkMaxStorageMB { get; init; }
+    public required bool AllowTranscoding { get; init; }
+}
+
+public sealed record RuntimeSettingsApplication
+{
+    public required RuntimeSettingsValues Active { get; init; }
+    public required RuntimeSettingsValues Requested { get; init; }
+    public required IReadOnlyList<string> PendingRestart { get; init; }
+}
+
+public sealed record InstanceSettingsLayer
+{
+    public required int SchemaVersion { get; init; }
+    public required long Revision { get; init; }
+    public required InstanceSettingsValues Settings { get; init; }
+    public required RuntimeSettingsApplication Runtime { get; init; }
+    public required string? UpdatedAt { get; init; }
 }
 
 public sealed record SettingsLayer
 {
     public required int SchemaVersion { get; init; }
     public required SettingsValues Settings { get; init; }
-    public string? UpdatedAt { get; init; }
+    public required string? UpdatedAt { get; init; }
+}
+
+public sealed record EffectiveSettingsValues
+{
+    public required string InterfaceLanguage { get; init; }
+    public required string Theme { get; init; }
+    public required string MaximumResolution { get; init; }
+    public required int? MaximumCastMembers { get; init; }
+    public required int? MaximumDirectTitles { get; init; }
+    public bool? AllowTranscoding { get; init; }
+    public string? Transcoding { get; init; }
+    public required bool PreferDirectPlay { get; init; }
+    public required bool HideUnreleased { get; init; }
+    public required string MetadataLanguage { get; init; }
+    public required string MetadataRegion { get; init; }
+    public required string SeriesMappingProvider { get; init; }
+    public required string AudioLanguage { get; init; }
+    public required string SubtitleLanguage { get; init; }
+    public required string ForcedSubtitleLanguage { get; init; }
+    public required bool AutoplayNextEpisode { get; init; }
+    public required bool SkipIntroEnabled { get; init; }
+    public required bool SkipRecapEnabled { get; init; }
+    public required bool SkipOutroEnabled { get; init; }
+    public required string CardDensity { get; init; }
+    public required bool AnimationsEnabled { get; init; }
+    public required int SubtitleSizePercent { get; init; }
+    public required string SubtitleTextColor { get; init; }
+    public required int SubtitleBackgroundOpacityPercent { get; init; }
+    public required bool NotificationsEnabled { get; init; }
+    public required int NotificationDurationSeconds { get; init; }
+    public required int NotificationPollIntervalSeconds { get; init; }
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<SettingSource>))]
+public enum SettingSource
+{
+    [JsonStringEnumMemberName("default")] Default,
+    [JsonStringEnumMemberName("instance")] Instance,
+    [JsonStringEnumMemberName("profile")] Profile,
+    [JsonStringEnumMemberName("device")] Device,
 }
 
 public sealed record EffectiveSettingsSources
 {
-    public string? AllowTranscoding { get; init; }
-    public string? Transcoding { get; init; }
-    public string? MaximumCastMembers { get; init; }
+    public required SettingSource InterfaceLanguage { get; init; }
+    public required SettingSource Theme { get; init; }
+    public required SettingSource MaximumResolution { get; init; }
+    public required SettingSource MaximumCastMembers { get; init; }
+    public required SettingSource MaximumDirectTitles { get; init; }
+    public SettingSource? AllowTranscoding { get; init; }
+    public SettingSource? Transcoding { get; init; }
+    public required SettingSource PreferDirectPlay { get; init; }
+    public required SettingSource HideUnreleased { get; init; }
+    public required SettingSource MetadataLanguage { get; init; }
+    public required SettingSource MetadataRegion { get; init; }
+    public required SettingSource SeriesMappingProvider { get; init; }
+    public required SettingSource AudioLanguage { get; init; }
+    public required SettingSource SubtitleLanguage { get; init; }
+    public required SettingSource ForcedSubtitleLanguage { get; init; }
+    public required SettingSource AutoplayNextEpisode { get; init; }
+    public required SettingSource SkipIntroEnabled { get; init; }
+    public required SettingSource SkipRecapEnabled { get; init; }
+    public required SettingSource SkipOutroEnabled { get; init; }
+    public required SettingSource CardDensity { get; init; }
+    public required SettingSource AnimationsEnabled { get; init; }
+    public required SettingSource SubtitleSizePercent { get; init; }
+    public required SettingSource SubtitleTextColor { get; init; }
+    public required SettingSource SubtitleBackgroundOpacityPercent { get; init; }
+    public required SettingSource NotificationsEnabled { get; init; }
+    public required SettingSource NotificationDurationSeconds { get; init; }
+    public required SettingSource NotificationPollIntervalSeconds { get; init; }
 }
 
 public sealed record EffectiveSettings
 {
     public required int SchemaVersion { get; init; }
-    public required SettingsValues Settings { get; init; }
+    public required EffectiveSettingsValues Settings { get; init; }
     public required EffectiveSettingsSources Sources { get; init; }
 }
 
@@ -497,6 +723,379 @@ public enum MediaType
     Season,
     [JsonStringEnumMemberName("episode")]
     Episode,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<CollectionViewMode>))]
+public enum CollectionViewMode
+{
+    [JsonStringEnumMemberName("tabbed_grid")]
+    TabbedGrid,
+    [JsonStringEnumMemberName("rows")]
+    Rows,
+    [JsonStringEnumMemberName("follow_layout")]
+    FollowLayout,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<CollectionTileShape>))]
+public enum CollectionTileShape
+{
+    [JsonStringEnumMemberName("poster")]
+    Poster,
+    [JsonStringEnumMemberName("landscape")]
+    Landscape,
+    [JsonStringEnumMemberName("square")]
+    Square,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<CollectionSourceView>))]
+public enum CollectionSourceView
+{
+    [JsonStringEnumMemberName("merged")]
+    Merged,
+    [JsonStringEnumMemberName("categories")]
+    Categories,
+    [JsonStringEnumMemberName("folders")]
+    Folders,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<CollectionSourceKind>))]
+public enum CollectionSourceKind
+{
+    [JsonStringEnumMemberName("addon_catalog")]
+    AddonCatalog,
+    [JsonStringEnumMemberName("tmdb")]
+    Tmdb,
+    [JsonStringEnumMemberName("trakt")]
+    Trakt,
+    [JsonStringEnumMemberName("mdblist")]
+    Mdblist,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<CollectionSourceFailureCode>))]
+public enum CollectionSourceFailureCode
+{
+    [JsonStringEnumMemberName("collection_provider_unavailable")]
+    ProviderUnavailable,
+    [JsonStringEnumMemberName("collection_addon_not_found")]
+    AddonNotFound,
+    [JsonStringEnumMemberName("collection_source_unsupported")]
+    SourceUnsupported,
+    [JsonStringEnumMemberName("collection_source_timeout")]
+    SourceTimeout,
+    [JsonStringEnumMemberName("collection_source_failed")]
+    SourceFailed,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<TitleResolveMediaType>))]
+public enum TitleResolveMediaType
+{
+    [JsonStringEnumMemberName("movie")]
+    Movie,
+    [JsonStringEnumMemberName("series")]
+    Series,
+    [JsonStringEnumMemberName("tv")]
+    Tv,
+}
+
+public sealed record CollectionList
+{
+    public required IReadOnlyList<Collection> Collections { get; init; }
+}
+
+public sealed record Collection
+{
+    public required Guid Id { get; init; }
+    public required string Title { get; init; }
+    public string? BackdropImageUrl { get; init; }
+    public required bool HeroEnabled { get; init; }
+    public required bool PinToTop { get; init; }
+    public required bool FocusGlowEnabled { get; init; }
+    public required CollectionViewMode ViewMode { get; init; }
+    public required CollectionTileShape FolderCoverShape { get; init; }
+    public required IReadOnlyList<CollectionFolder> Folders { get; init; }
+    public required IReadOnlyList<Guid> ProfileIds { get; init; }
+    public required IReadOnlyList<Guid> CategoryIds { get; init; }
+    public required int Position { get; init; }
+    public required long Version { get; init; }
+    public required string CreatedAt { get; init; }
+    public required string UpdatedAt { get; init; }
+}
+
+public sealed record CollectionFolder
+{
+    public Guid? Id { get; init; }
+    public required string Title { get; init; }
+    public required CollectionTileShape TileShape { get; init; }
+    public CollectionSourceView? SourceView { get; init; }
+    public string? CoverImageUrl { get; init; }
+    public string? CoverEmoji { get; init; }
+    public string? TitleLogoUrl { get; init; }
+    public string? HeroBackdropUrl { get; init; }
+    public string? HeroVideoUrl { get; init; }
+    public string? FocusGifUrl { get; init; }
+    public required bool FocusGifEnabled { get; init; }
+    public required bool HideTitle { get; init; }
+    public required IReadOnlyList<CollectionSource> Sources { get; init; }
+}
+
+public sealed record CollectionSource
+{
+    public Guid? Id { get; init; }
+    public required CollectionSourceKind Kind { get; init; }
+    public required string Title { get; init; }
+    public CollectionAddonCatalogSource? AddonCatalog { get; init; }
+    public JsonElement? Tmdb { get; init; }
+    public JsonElement? Trakt { get; init; }
+    public JsonElement? Mdblist { get; init; }
+}
+
+public sealed record CollectionAddonCatalogSource
+{
+    public required Guid AddonId { get; init; }
+    public string? ManifestId { get; init; }
+    public required string Type { get; init; }
+    public required string CatalogId { get; init; }
+    public IReadOnlyList<CollectionExtraValue>? Extra { get; init; }
+}
+
+public sealed record CollectionExtraValue
+{
+    public required string Name { get; init; }
+    public required string Value { get; init; }
+}
+
+public sealed record ResolvedCollectionFolder
+{
+    public required Guid CollectionId { get; init; }
+    public required CollectionFolder Folder { get; init; }
+    public IReadOnlyDictionary<Guid, string>? SourcePosterUrls { get; init; }
+    public required IReadOnlyList<CollectionItem> Items { get; init; }
+    public required int Page { get; init; }
+    public required bool HasMore { get; init; }
+    public required IReadOnlyList<CollectionSourceFailure> Errors { get; init; }
+}
+
+public sealed record CollectionItem
+{
+    public required string Id { get; init; }
+    public required string MediaType { get; init; }
+    public required string Title { get; init; }
+    public string? PosterUrl { get; init; }
+    public string? BackgroundUrl { get; init; }
+    public string? LogoUrl { get; init; }
+    public string? Description { get; init; }
+    public string? ReleaseInfo { get; init; }
+    public string? Released { get; init; }
+    public double? VoteAverage { get; init; }
+    public long? VoteCount { get; init; }
+    public double? Popularity { get; init; }
+    public required IReadOnlyDictionary<string, string> ExternalIds { get; init; }
+    public required IReadOnlyList<CollectionSourceReference> Sources { get; init; }
+    public JsonElement? Raw { get; init; }
+}
+
+public sealed record CollectionSourceReference
+{
+    public required Guid Id { get; init; }
+    public required CollectionSourceKind Kind { get; init; }
+    public required string Title { get; init; }
+    public Guid? AddonId { get; init; }
+    public string? ManifestId { get; init; }
+    public string? CatalogId { get; init; }
+}
+
+public sealed record CollectionSourceFailure
+{
+    public required Guid SourceId { get; init; }
+    public required CollectionSourceKind Kind { get; init; }
+    public required CollectionSourceFailureCode Code { get; init; }
+    public required string Message { get; init; }
+}
+[JsonConverter(typeof(JsonStringEnumConverter<CalendarEventMediaType>))]
+public enum CalendarEventMediaType
+{
+    [JsonStringEnumMemberName("movie")]
+    Movie,
+    [JsonStringEnumMemberName("episode")]
+    Episode,
+}
+
+public sealed record CalendarEventList
+{
+    public required IReadOnlyList<CalendarEvent> Events { get; init; }
+}
+
+public sealed record CalendarEvent
+{
+    public required string Id { get; init; }
+    public required Guid TitleId { get; init; }
+    public required CalendarEventMediaType MediaType { get; init; }
+    public required string Title { get; init; }
+    public required string ReleaseDate { get; init; }
+    public string? PosterUrl { get; init; }
+    public string? ResourceId { get; init; }
+    public string? ResourceProvider { get; init; }
+    public string? SeriesTitle { get; init; }
+    public Guid? SeriesId { get; init; }
+    public Guid? SeasonId { get; init; }
+    public int? SeasonNumber { get; init; }
+    public int? EpisodeNumber { get; init; }
+}
+
+public sealed record StremioExtraProperty
+{
+    public required string Name { get; init; }
+    public bool? IsRequired { get; init; }
+    public string? Default { get; init; }
+    public IReadOnlyList<string>? Options { get; init; }
+    public int? OptionsLimit { get; init; }
+}
+
+public sealed record StremioManifestCatalog
+{
+    public required string Type { get; init; }
+    public required string Id { get; init; }
+    public string? Name { get; init; }
+    public IReadOnlyList<string>? Genres { get; init; }
+    public IReadOnlyList<StremioExtraProperty>? Extra { get; init; }
+    public IReadOnlyList<string>? ExtraRequired { get; init; }
+    public IReadOnlyList<string>? ExtraSupported { get; init; }
+}
+
+public sealed record AddonCatalogDescriptorList
+{
+    public required IReadOnlyList<AddonCatalogDescriptor> Catalogs { get; init; }
+}
+
+public sealed record AddonCatalogDescriptor
+{
+    public required Guid AddonId { get; init; }
+    public string? AddonName { get; init; }
+    public string? AddonLogoUrl { get; init; }
+    public required string ManifestId { get; init; }
+    public required int Position { get; init; }
+    public required StremioManifestCatalog Catalog { get; init; }
+    public required bool AddonCatalog { get; init; }
+    public required bool Searchable { get; init; }
+}
+
+public sealed record AddonCachePolicy
+{
+    public long? MaxAgeSeconds { get; init; }
+    public long? StaleWhileRevalidateSeconds { get; init; }
+    public long? StaleIfErrorSeconds { get; init; }
+}
+
+public sealed record AddonExtraValue
+{
+    public required string Name { get; init; }
+    public required string Value { get; init; }
+}
+
+public sealed record AddonResourceResult
+{
+    public required Guid AddonId { get; init; }
+    public required string ManifestId { get; init; }
+    public required string Resource { get; init; }
+    public required string Type { get; init; }
+    public required string Id { get; init; }
+    public required JsonElement Payload { get; init; }
+    public required AddonCachePolicy Cache { get; init; }
+    public IReadOnlyList<AddonExtraValue>? Extra { get; init; }
+}
+
+public sealed record AddonResourceFailure
+{
+    public required Guid AddonId { get; init; }
+    public required string ManifestId { get; init; }
+    public required string Code { get; init; }
+    public required string Message { get; init; }
+}
+
+public sealed record AddonResourceBatch
+{
+    public required IReadOnlyList<AddonResourceResult> Results { get; init; }
+    public required IReadOnlyList<AddonResourceFailure> Errors { get; init; }
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<TitleMediaType>))]
+public enum TitleMediaType
+{
+    [JsonStringEnumMemberName("movie")]
+    Movie,
+    [JsonStringEnumMemberName("series")]
+    Series,
+    [JsonStringEnumMemberName("tv")]
+    Tv,
+}
+
+public sealed record LibraryItem
+{
+    public required Guid TitleId { get; init; }
+    public required TitleMediaType MediaType { get; init; }
+    public string? Provider { get; init; }
+    public string? ExternalId { get; init; }
+    public string? ResourceId { get; init; }
+    public string? Title { get; init; }
+    public string? PosterUrl { get; init; }
+    public string? BackgroundUrl { get; init; }
+    public string? ReleaseInfo { get; init; }
+    public Guid? SourceAddonId { get; init; }
+    public string? SourceCatalogId { get; init; }
+    public string? SourceName { get; init; }
+    public string? Country { get; init; }
+    public string? Language { get; init; }
+    public string? Category { get; init; }
+    public required bool Available { get; init; }
+    public required string AddedAt { get; init; }
+    public required string UpdatedAt { get; init; }
+}
+
+public sealed record LibraryPage
+{
+    public required IReadOnlyList<LibraryItem> Items { get; init; }
+    public required int Page { get; init; }
+    public required int TotalPages { get; init; }
+    public required int TotalResults { get; init; }
+}
+
+
+public sealed record TitleResolveInput
+{
+    public required TitleResolveMediaType MediaType { get; init; }
+    public required string Provider { get; init; }
+    public string? ExternalId { get; init; }
+    public required string ResourceId { get; init; }
+    public required string Title { get; init; }
+    public string? PosterUrl { get; init; }
+    public string? BackgroundUrl { get; init; }
+    public string? ReleaseInfo { get; init; }
+    public string? Released { get; init; }
+    public Guid? SourceAddonId { get; init; }
+    public string? SourceCatalogId { get; init; }
+    public string? SourceName { get; init; }
+    public string? Country { get; init; }
+    public string? Language { get; init; }
+    public string? Category { get; init; }
+}
+
+public sealed record TitleReference
+{
+    public required Guid TitleId { get; init; }
+    public required TitleResolveMediaType MediaType { get; init; }
+    public required string Provider { get; init; }
+    public required string ExternalId { get; init; }
+    public required string ResourceId { get; init; }
+    public required string Title { get; init; }
+    public string? PosterUrl { get; init; }
+    public string? BackgroundUrl { get; init; }
+    public string? ReleaseInfo { get; init; }
+    public Guid? SourceAddonId { get; init; }
+    public string? SourceCatalogId { get; init; }
+    public string? SourceName { get; init; }
+    public string? Country { get; init; }
+    public string? Language { get; init; }
+    public string? Category { get; init; }
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<SeriesMappingProvider>))]
@@ -689,16 +1288,23 @@ public sealed record PlaybackCapabilities
     public IReadOnlyList<PlaybackMediaProfile>? MediaProfiles { get; init; }
 }
 
-public sealed record PlaybackSourceList
+public sealed record PlaybackSourceList : IJsonOnDeserialized
 {
     public required IReadOnlyList<PlaybackSourceOption> Sources { get; init; }
     public required IReadOnlyList<PlaybackProviderError> ProviderErrors { get; init; }
+
+    void IJsonOnDeserialized.OnDeserialized()
+    {
+        if (Sources is null || ProviderErrors is null || Sources.Any(source => source is null))
+            throw new JsonException("The playback source response contains null required collections.");
+    }
 }
 
-public sealed record PlaybackSourceOption
+public sealed record PlaybackSourceOption : IJsonOnDeserialized
 {
     public required string Id { get; init; }
     public required string SourceRef { get; init; }
+    public string StableIdentity { get; init; } = string.Empty;
     public required Guid AddonId { get; init; }
     public string? AddonName { get; init; }
     public required string ManifestId { get; init; }
@@ -710,6 +1316,21 @@ public sealed record PlaybackSourceOption
     public PlaybackMode? Mode { get; init; }
     public string? Container { get; init; }
     public required string ExpiresAt { get; init; }
+
+    void IJsonOnDeserialized.OnDeserialized()
+    {
+        if (Id is null ||
+            SourceRef is null ||
+            StableIdentity is null ||
+            ManifestId is null ||
+            StreamIndex < 0 ||
+            Name is null ||
+            Protocol is null ||
+            ExpiresAt is null)
+        {
+            throw new JsonException("The playback source contains invalid required fields.");
+        }
+    }
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<PlaybackMode>))]
@@ -774,7 +1395,7 @@ public enum PlaybackTrackType
     [JsonStringEnumMemberName("subtitle")] Subtitle,
 }
 
-public sealed record PlaybackPreparation
+public sealed record PlaybackPreparation : IJsonOnDeserialized
 {
     public required string SourceRef { get; init; }
     public required PlaybackMode Mode { get; init; }
@@ -784,9 +1405,20 @@ public sealed record PlaybackPreparation
     public required int SubtitleCount { get; init; }
     public required string ExpiresAt { get; init; }
     public PlaybackDecision? Decision { get; init; }
+
+    void IJsonOnDeserialized.OnDeserialized()
+    {
+        if (SourceRef is null ||
+            Protocol is null ||
+            SubtitleCount < 0 ||
+            ExpiresAt is null)
+        {
+            throw new JsonException("The playback preparation contains invalid required fields.");
+        }
+    }
 }
 
-public sealed record PlaybackSession
+public sealed record PlaybackSession : IJsonOnDeserialized
 {
     public required Guid Id { get; init; }
     public required string SelectedSourceId { get; init; }
@@ -796,9 +1428,23 @@ public sealed record PlaybackSession
     public required IReadOnlyList<PlaybackSubtitle> Subtitles { get; init; }
     public required IReadOnlyList<PlaybackProviderError> ProviderErrors { get; init; }
     public required string ExpiresAt { get; init; }
+
+    void IJsonOnDeserialized.OnDeserialized()
+    {
+        if (SelectedSourceId is null ||
+            Sources is null ||
+            Subtitles is null ||
+            ProviderErrors is null ||
+            Sources.Any(source => source is null) ||
+            Subtitles.Any(subtitle => subtitle is null) ||
+            ExpiresAt is null)
+        {
+            throw new JsonException("The playback session contains invalid required fields.");
+        }
+    }
 }
 
-public sealed record PlaybackSource
+public sealed record PlaybackSource : IJsonOnDeserialized
 {
     public required string Id { get; init; }
     public required Guid AddonId { get; init; }
@@ -816,6 +1462,16 @@ public sealed record PlaybackSource
     public required bool Compatible { get; init; }
     public PlaybackMediaInspection? Media { get; init; }
     public PlaybackDecision? Decision { get; init; }
+
+    void IJsonOnDeserialized.OnDeserialized()
+    {
+        if (Id is null ||
+            ManifestId is null ||
+            Protocol is null)
+        {
+            throw new JsonException("The resolved playback source contains invalid required fields.");
+        }
+    }
 }
 
 public sealed record PlaybackMediaInspection
@@ -1183,6 +1839,15 @@ public sealed record ContinueWatchingItem
     public Guid? SeasonId { get; init; }
     public int? SeasonNumber { get; init; }
     public int? EpisodeNumber { get; init; }
+    public string? Title { get; init; }
+    public string? PosterUrl { get; init; }
+    public string? BackgroundUrl { get; init; }
+    public string? ReleaseInfo { get; init; }
+    public string? ResourceId { get; init; }
+    public string? ResourceProvider { get; init; }
+    public string? EpisodeTitle { get; init; }
+    public string? EpisodeStillUrl { get; init; }
+    public string? EpisodeAirDate { get; init; }
     public required int PositionSeconds { get; init; }
     public required int DurationSeconds { get; init; }
     public required long Version { get; init; }

@@ -108,7 +108,7 @@ test("profile changes purge principal-owned routes, history, and media caches", 
   await page.goto("/");
   await rivune.waitForRequest("/api/v1/collections", "GET");
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
-  await expect(page.getByRole("heading", { name: "Signal Horizon" }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();
   await page.evaluate(() => {
     localStorage.setItem("rivune.home-cache.v2.alice.scope", "alice-home");
     localStorage.setItem("rivune.metadata-cache.v1", "alice-metadata");

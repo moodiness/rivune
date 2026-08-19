@@ -241,6 +241,396 @@ public sealed class ProfileContextLifecycleTests
     }
 
     [Fact]
+    public async Task ProfileScopedReadersDispatchConcurrently()
+    {
+        var firstReaderStarted = NewSignal();
+        var bothReadersStarted = NewSignal();
+        var allowReaders = NewSignal();
+        var dispatchedReaders = 0;
+        var store = new MemoryCredentialStore(Stored(profileContext: "context-one"));
+        var handler = new DelegateHandler(async (request, cancellationToken) =>
+        {
+            switch (request.RequestUri!.AbsolutePath)
+            {
+                case "/.well-known/rivune":
+                    return JsonResponse(HttpStatusCode.OK, DiscoveryBody);
+                case "/api/v1/categories":
+                    var ordinal = Interlocked.Increment(ref dispatchedReaders);
+                    if (ordinal == 1)
+                    {
+                        firstReaderStarted.TrySetResult();
+                    }
+                    else if (ordinal == 2)
+                    {
+                        bothReadersStarted.TrySetResult();
+                    }
+                    await allowReaders.Task.WaitAsync(cancellationToken);
+                    return JsonResponse(HttpStatusCode.OK, "{\"categories\":[]}");
+                default:
+                    throw new InvalidOperationException(
+                        $"Unexpected request path {request.RequestUri.AbsolutePath}.");
+            }
+        });
+        using var client = CreateClient(handler, store);
+        await client.DiscoverAsync(TestContext.Current.CancellationToken);
+
+        var firstReader = client.GetCategoriesAsync(TestContext.Current.CancellationToken);
+        await firstReaderStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        var secondReader = client.GetCategoriesAsync(TestContext.Current.CancellationToken);
+        await bothReadersStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+        Assert.False(firstReader.IsCompleted);
+        Assert.False(secondReader.IsCompleted);
+        Assert.Equal(2, Volatile.Read(ref dispatchedReaders));
+        allowReaders.TrySetResult();
+        await Task.WhenAll(firstReader, secondReader);
+    }
+
+    [Fact]
+    public async Task ClearDrainsAdmittedReaderAndBlocksNewReaderUntilCommit()
+    {
+        var oldReaderStarted = NewSignal();
+        var allowOldReader = NewSignal();
+        var clearStarted = NewSignal();
+        var allowClear = NewSignal();
+        var newReaderStarted = NewSignal();
+        var dispatchedReaders = 0;
+        string? oldReaderContext = null;
+        string? newReaderContext = "not-observed";
+        var store = new MemoryCredentialStore(Stored(profileContext: "context-one"));
+        var handler = new DelegateHandler(async (request, cancellationToken) =>
+        {
+            switch (request.RequestUri!.AbsolutePath)
+            {
+                case "/.well-known/rivune":
+                    return JsonResponse(HttpStatusCode.OK, DiscoveryBody);
+                case "/api/v1/categories":
+                    if (Interlocked.Increment(ref dispatchedReaders) == 1)
+                    {
+                        oldReaderContext = Header(request, "X-Rivune-Profile-Context");
+                        oldReaderStarted.TrySetResult();
+                        await allowOldReader.Task.WaitAsync(cancellationToken);
+                    }
+                    else
+                    {
+                        newReaderContext = Header(request, "X-Rivune-Profile-Context");
+                        newReaderStarted.TrySetResult();
+                    }
+                    return JsonResponse(HttpStatusCode.OK, "{\"categories\":[]}");
+                case "/api/v1/profiles/selection":
+                    clearStarted.TrySetResult();
+                    await allowClear.Task.WaitAsync(cancellationToken);
+                    return new HttpResponseMessage(HttpStatusCode.NoContent);
+                default:
+                    throw new InvalidOperationException(
+                        $"Unexpected request path {request.RequestUri.AbsolutePath}.");
+            }
+        });
+        using var client = CreateClient(handler, store);
+        await client.DiscoverAsync(TestContext.Current.CancellationToken);
+
+        var oldReader = client.GetCategoriesAsync(TestContext.Current.CancellationToken);
+        await oldReaderStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        var clear = client.ClearProfileSelectionAsync(TestContext.Current.CancellationToken);
+        var newReader = client.GetCategoriesAsync(TestContext.Current.CancellationToken);
+
+        Assert.False(clearStarted.Task.IsCompleted);
+        Assert.False(newReaderStarted.Task.IsCompleted);
+        allowOldReader.TrySetResult();
+        await oldReader;
+        await clearStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.False(newReaderStarted.Task.IsCompleted);
+
+        allowClear.TrySetResult();
+        await clear;
+        await newReaderStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        await newReader;
+
+        Assert.Equal("context-one", oldReaderContext);
+        Assert.Null(store.Credentials?.ProfileContext);
+        Assert.Null(newReaderContext);
+    }
+
+    [Fact]
+    public async Task SelectionDrainsOldContextAndReleasesBlockedReaderUnderNewContext()
+    {
+        var oldReaderStarted = NewSignal();
+        var allowOldReader = NewSignal();
+        var selectionStarted = NewSignal();
+        var allowSelection = NewSignal();
+        var newReaderStarted = NewSignal();
+        var dispatchedReaders = 0;
+        string? oldReaderContext = null;
+        string? newReaderContext = null;
+        var store = new MemoryCredentialStore(Stored(profileContext: "context-one"));
+        var handler = new DelegateHandler(async (request, cancellationToken) =>
+        {
+            switch (request.RequestUri!.AbsolutePath)
+            {
+                case "/.well-known/rivune":
+                    return JsonResponse(HttpStatusCode.OK, DiscoveryBody);
+                case "/api/v1/categories":
+                    if (Interlocked.Increment(ref dispatchedReaders) == 1)
+                    {
+                        oldReaderContext = Header(request, "X-Rivune-Profile-Context");
+                        oldReaderStarted.TrySetResult();
+                        await allowOldReader.Task.WaitAsync(cancellationToken);
+                    }
+                    else
+                    {
+                        newReaderContext = Header(request, "X-Rivune-Profile-Context");
+                        newReaderStarted.TrySetResult();
+                    }
+                    return JsonResponse(HttpStatusCode.OK, "{\"categories\":[]}");
+                case var path when path.EndsWith("/select", StringComparison.Ordinal):
+                    selectionStarted.TrySetResult();
+                    await allowSelection.Task.WaitAsync(cancellationToken);
+                    return JsonResponse(
+                        HttpStatusCode.OK,
+                        SelectionBody.Replace("context-one", "context-two", StringComparison.Ordinal));
+                default:
+                    throw new InvalidOperationException(
+                        $"Unexpected request path {request.RequestUri.AbsolutePath}.");
+            }
+        });
+        using var client = CreateClient(handler, store);
+        await client.DiscoverAsync(TestContext.Current.CancellationToken);
+
+        var oldReader = client.GetCategoriesAsync(TestContext.Current.CancellationToken);
+        await oldReaderStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        var selection = client.SelectProfileAsync(
+            ProfileId,
+            cancellationToken: TestContext.Current.CancellationToken);
+        var newReader = client.GetCategoriesAsync(TestContext.Current.CancellationToken);
+
+        Assert.False(selectionStarted.Task.IsCompleted);
+        Assert.False(newReaderStarted.Task.IsCompleted);
+        allowOldReader.TrySetResult();
+        await oldReader;
+        await selectionStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.False(newReaderStarted.Task.IsCompleted);
+
+        allowSelection.TrySetResult();
+        await selection;
+        await newReaderStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        await newReader;
+
+        Assert.Equal("context-one", oldReaderContext);
+        Assert.Equal("context-two", store.Credentials?.ProfileContext);
+        Assert.Equal("context-two", newReaderContext);
+    }
+
+    [Fact]
+    public async Task ProfileReaderRetainsSnapshotAndLeaseThroughRefreshRetry()
+    {
+        var refreshStarted = NewSignal();
+        var allowRefresh = NewSignal();
+        var retryStarted = NewSignal();
+        var allowRetryResponse = NewSignal();
+        var clearStarted = NewSignal();
+        var categoryRequests = 0;
+        string? initialContext = null;
+        string? initialToken = null;
+        string? retryContext = null;
+        string? retryToken = null;
+        var store = new MemoryCredentialStore(Stored(profileContext: "context-one"));
+        var handler = new DelegateHandler(async (request, cancellationToken) =>
+        {
+            switch (request.RequestUri!.AbsolutePath)
+            {
+                case "/.well-known/rivune":
+                    return JsonResponse(HttpStatusCode.OK, DiscoveryBody);
+                case "/api/v1/categories":
+                    if (Interlocked.Increment(ref categoryRequests) == 1)
+                    {
+                        initialContext = Header(request, "X-Rivune-Profile-Context");
+                        initialToken = request.Headers.Authorization?.Parameter;
+                        return JsonResponse(
+                            HttpStatusCode.Unauthorized,
+                            "{\"error\":{\"code\":\"unauthorized\",\"message\":\"Unauthorized\"}}");
+                    }
+                    retryContext = Header(request, "X-Rivune-Profile-Context");
+                    retryToken = request.Headers.Authorization?.Parameter;
+                    retryStarted.TrySetResult();
+                    await allowRetryResponse.Task.WaitAsync(cancellationToken);
+                    return JsonResponse(HttpStatusCode.OK, "{\"categories\":[]}");
+                case "/api/v1/auth/refresh":
+                    refreshStarted.TrySetResult();
+                    await allowRefresh.Task.WaitAsync(cancellationToken);
+                    return JsonResponse(HttpStatusCode.OK, RefreshedTokenBody);
+                case "/api/v1/profiles/selection":
+                    clearStarted.TrySetResult();
+                    return new HttpResponseMessage(HttpStatusCode.NoContent);
+                default:
+                    throw new InvalidOperationException(
+                        $"Unexpected request path {request.RequestUri.AbsolutePath}.");
+            }
+        });
+        using var client = CreateClient(handler, store);
+        await client.DiscoverAsync(TestContext.Current.CancellationToken);
+
+        var reader = client.GetCategoriesAsync(TestContext.Current.CancellationToken);
+        await refreshStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        var clear = client.ClearProfileSelectionAsync(TestContext.Current.CancellationToken);
+        Assert.False(clearStarted.Task.IsCompleted);
+
+        allowRefresh.TrySetResult();
+        await retryStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.False(clearStarted.Task.IsCompleted);
+        Assert.Equal("context-one", initialContext);
+        Assert.Equal("old-access", initialToken);
+        Assert.Equal("context-one", retryContext);
+        Assert.Equal("refreshed-access", retryToken);
+
+        allowRetryResponse.TrySetResult();
+        await reader;
+        await clearStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        await clear;
+        Assert.Null(store.Credentials?.ProfileContext);
+    }
+
+    [Fact]
+    public async Task CanceledWaitingMutationReopensReaderAdmission()
+    {
+        using var mutationCancellation = new CancellationTokenSource();
+        var oldReaderStarted = NewSignal();
+        var allowOldReader = NewSignal();
+        var newReaderStarted = NewSignal();
+        var dispatchedReaders = 0;
+        var store = new MemoryCredentialStore(Stored(profileContext: "context-one"));
+        var handler = new DelegateHandler(async (request, cancellationToken) =>
+        {
+            switch (request.RequestUri!.AbsolutePath)
+            {
+                case "/.well-known/rivune":
+                    return JsonResponse(HttpStatusCode.OK, DiscoveryBody);
+                case "/api/v1/categories":
+                    if (Interlocked.Increment(ref dispatchedReaders) == 1)
+                    {
+                        oldReaderStarted.TrySetResult();
+                        await allowOldReader.Task.WaitAsync(cancellationToken);
+                    }
+                    else
+                    {
+                        newReaderStarted.TrySetResult();
+                    }
+                    return JsonResponse(HttpStatusCode.OK, "{\"categories\":[]}");
+                default:
+                    throw new InvalidOperationException(
+                        $"Unexpected request path {request.RequestUri.AbsolutePath}.");
+            }
+        });
+        using var client = CreateClient(handler, store);
+        await client.DiscoverAsync(TestContext.Current.CancellationToken);
+
+        var oldReader = client.GetCategoriesAsync(TestContext.Current.CancellationToken);
+        await oldReaderStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        var mutation = client.ClearProfileSelectionAsync(mutationCancellation.Token);
+        var newReader = client.GetCategoriesAsync(TestContext.Current.CancellationToken);
+        Assert.False(newReaderStarted.Task.IsCompleted);
+
+        mutationCancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => mutation);
+        await newReaderStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        await newReader;
+
+        allowOldReader.TrySetResult();
+        await oldReader;
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AuthenticationBoundaryDoesNotWaitForProfileReader(bool credentialReplacement)
+    {
+        var readerStarted = NewSignal();
+        var allowReader = NewSignal();
+        var authenticationRequestStarted = NewSignal();
+        var store = new MemoryCredentialStore(Stored(profileContext: "context-one"));
+        var handler = new DelegateHandler(async (request, cancellationToken) =>
+        {
+            switch (request.RequestUri!.AbsolutePath)
+            {
+                case "/.well-known/rivune":
+                    return JsonResponse(HttpStatusCode.OK, DiscoveryBody);
+                case "/api/v1/categories":
+                    readerStarted.TrySetResult();
+                    await allowReader.Task.WaitAsync(cancellationToken);
+                    return JsonResponse(HttpStatusCode.OK, "{\"categories\":[]}");
+                case "/api/v1/auth/logout":
+                    authenticationRequestStarted.TrySetResult();
+                    return new HttpResponseMessage(HttpStatusCode.NoContent);
+                case "/api/v1/auth/device-code/token":
+                    authenticationRequestStarted.TrySetResult();
+                    return JsonResponse(HttpStatusCode.OK, RefreshedTokenBody);
+                default:
+                    throw new InvalidOperationException(
+                        $"Unexpected request path {request.RequestUri.AbsolutePath}.");
+            }
+        });
+        using var client = CreateClient(handler, store);
+        await client.DiscoverAsync(TestContext.Current.CancellationToken);
+
+        var reader = client.GetCategoriesAsync(TestContext.Current.CancellationToken);
+        await readerStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        Task authenticationChange = credentialReplacement
+            ? client.ExchangeDeviceAuthorizationAsync(
+                "device-code",
+                TestContext.Current.CancellationToken)
+            : client.LogoutAsync(TestContext.Current.CancellationToken);
+
+        await authenticationRequestStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        await authenticationChange;
+        Assert.False(reader.IsCompleted);
+        Assert.Null(store.Credentials?.ProfileContext);
+
+        allowReader.TrySetResult();
+        await reader;
+    }
+    [Fact]
+    public async Task FailedMutationReleasesBlockedReader()
+    {
+        var selectionStarted = NewSignal();
+        var allowSelectionFailure = NewSignal();
+        var readerStarted = NewSignal();
+        var store = new MemoryCredentialStore(Stored(profileContext: "context-one"));
+        var handler = new DelegateHandler(async (request, cancellationToken) =>
+        {
+            switch (request.RequestUri!.AbsolutePath)
+            {
+                case "/.well-known/rivune":
+                    return JsonResponse(HttpStatusCode.OK, DiscoveryBody);
+                case var path when path.EndsWith("/select", StringComparison.Ordinal):
+                    selectionStarted.TrySetResult();
+                    await allowSelectionFailure.Task.WaitAsync(cancellationToken);
+                    return JsonResponse(
+                        HttpStatusCode.BadRequest,
+                        "{\"error\":{\"code\":\"invalid_profile\",\"message\":\"Invalid profile\"}}");
+                case "/api/v1/categories":
+                    readerStarted.TrySetResult();
+                    return JsonResponse(HttpStatusCode.OK, "{\"categories\":[]}");
+                default:
+                    throw new InvalidOperationException(
+                        $"Unexpected request path {request.RequestUri.AbsolutePath}.");
+            }
+        });
+        using var client = CreateClient(handler, store);
+        await client.DiscoverAsync(TestContext.Current.CancellationToken);
+
+        var selection = client.SelectProfileAsync(
+            ProfileId,
+            cancellationToken: TestContext.Current.CancellationToken);
+        await selectionStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        var reader = client.GetCategoriesAsync(TestContext.Current.CancellationToken);
+        Assert.False(readerStarted.Task.IsCompleted);
+
+        allowSelectionFailure.TrySetResult();
+        await Assert.ThrowsAsync<RivuneServerException>(() => selection);
+        await readerStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        await reader;
+    }
+
+    [Fact]
     public async Task SelectionCancellationAtResponseReconcilesPersistedAndInMemoryContext()
     {
         using var callerCancellation = new CancellationTokenSource();

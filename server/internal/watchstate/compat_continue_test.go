@@ -69,8 +69,8 @@ func TestQueryResumeItemsOrdersDeduplicatesAndPaginates(t *testing.T) {
 		CREATE TEMPORARY TABLE titles (
 			id uuid PRIMARY KEY, media_type text NOT NULL, parent_id uuid, ordinal integer,
 			display_title text, poster_url text, background_url text, release_info text,
-			resource_id text, resource_provider text, is_current boolean NOT NULL DEFAULT true,
-			source_addon_id uuid
+			resource_id text, resource_provider text, release_date date,
+			is_current boolean NOT NULL DEFAULT true, source_addon_id uuid
 		);
 		CREATE TEMPORARY TABLE profiles (id uuid PRIMARY KEY, category_id uuid);
 		CREATE TEMPORARY TABLE profile_title_external_ids (profile_id uuid, title_id uuid, provider text, namespace text, external_id text);
@@ -87,14 +87,14 @@ func TestQueryResumeItemsOrdersDeduplicatesAndPaginates(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO profiles (id) VALUES ('11111111-1111-4111-8111-111111111111');
-		INSERT INTO titles (id, media_type, display_title, resource_id, resource_provider) VALUES
-			('00000000-0000-4000-8000-000000000001', 'movie', 'Older movie', 'older', 'tmdb'),
-			('00000000-0000-4000-8000-000000000002', 'movie', 'Newest movie', 'newest', 'tmdb'),
-			('00000000-0000-4000-8000-000000000100', 'series', 'Series', 'series', 'tmdb');
-		INSERT INTO titles (id, media_type, parent_id, ordinal, display_title) VALUES
-			('00000000-0000-4000-8000-000000000110', 'season', '00000000-0000-4000-8000-000000000100', 1, 'Season 1'),
-			('00000000-0000-4000-8000-000000000111', 'episode', '00000000-0000-4000-8000-000000000110', 1, 'Episode 1'),
-			('00000000-0000-4000-8000-000000000112', 'episode', '00000000-0000-4000-8000-000000000110', 2, 'Episode 2');
+		INSERT INTO titles (id, media_type, display_title, poster_url, background_url, release_info, resource_id, resource_provider) VALUES
+			('00000000-0000-4000-8000-000000000001', 'movie', 'Older movie', NULL, NULL, NULL, 'older', 'tmdb'),
+			('00000000-0000-4000-8000-000000000002', 'movie', 'Newest movie', NULL, NULL, NULL, 'newest', 'tmdb'),
+			('00000000-0000-4000-8000-000000000100', 'series', 'Series', 'https://images.example/series-poster.jpg', 'https://images.example/series-background.jpg', '2026', 'series', 'tmdb');
+		INSERT INTO titles (id, media_type, parent_id, ordinal, display_title, poster_url, release_date) VALUES
+			('00000000-0000-4000-8000-000000000110', 'season', '00000000-0000-4000-8000-000000000100', 1, 'Season 1', NULL, NULL),
+			('00000000-0000-4000-8000-000000000111', 'episode', '00000000-0000-4000-8000-000000000110', 1, 'Episode 1', 'https://images.example/episode-1.jpg', '2026-01-01'),
+			('00000000-0000-4000-8000-000000000112', 'episode', '00000000-0000-4000-8000-000000000110', 2, 'Episode 2', 'https://images.example/episode-2.jpg', '2026-01-02');
 		INSERT INTO profile_progress (profile_id, title_id, position_seconds, duration_seconds, completed, version, last_watched_at) VALUES
 			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000001', 10, 100, false, 1, '2026-01-01T00:00:00Z'),
 			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000002', 20, 100, false, 1, '2026-01-04T00:00:00Z'),
@@ -119,6 +119,14 @@ func TestQueryResumeItemsOrdersDeduplicatesAndPaginates(t *testing.T) {
 	}
 	if total != 3 || len(items) != 1 || items[0].TitleID != "00000000-0000-4000-8000-000000000112" {
 		t.Fatalf("resume page total=%d items=%+v", total, items)
+	}
+	item := items[0]
+	if item.Title != "Series" || item.PosterURL != "https://images.example/series-poster.jpg" ||
+		item.BackgroundURL != "https://images.example/series-background.jpg" || item.ReleaseInfo != "2026" ||
+		item.ResourceID != "series:1:2" || item.ResourceProvider != "tmdb" ||
+		item.EpisodeTitle != "Episode 2" || item.EpisodeStillURL != "https://images.example/episode-2.jpg" ||
+		item.EpisodeAirDate != "2026-01-02" {
+		t.Fatalf("resume snapshot contract mismatch: %+v", item)
 	}
 }
 
@@ -165,19 +173,19 @@ func TestQueryNextUpIncludesNeverStartedSeriesOnceAndPaginates(t *testing.T) {
 		INSERT INTO profiles (id) VALUES
 			('11111111-1111-4111-8111-111111111111'),
 			('22222222-2222-4222-8222-222222222222');
-		INSERT INTO titles (id, media_type, display_title, resource_id, resource_provider) VALUES
-			('00000000-0000-4000-8000-000000000100', 'series', 'Started', 'started', 'tmdb'),
-			('00000000-0000-4000-8000-000000000200', 'series', 'Never started', 'never', 'tmdb'),
-			('00000000-0000-4000-8000-000000000300', 'series', 'Partially started', 'partial', 'tmdb');
-		INSERT INTO titles (id, media_type, parent_id, ordinal, display_title) VALUES
-			('00000000-0000-4000-8000-000000000110', 'season', '00000000-0000-4000-8000-000000000100', 1, 'Season 1'),
-			('00000000-0000-4000-8000-000000000111', 'episode', '00000000-0000-4000-8000-000000000110', 1, 'Episode 1'),
-			('00000000-0000-4000-8000-000000000112', 'episode', '00000000-0000-4000-8000-000000000110', 2, 'Episode 2'),
-			('00000000-0000-4000-8000-000000000210', 'season', '00000000-0000-4000-8000-000000000200', 1, 'Season 1'),
-			('00000000-0000-4000-8000-000000000211', 'episode', '00000000-0000-4000-8000-000000000210', 1, 'Episode 1'),
-			('00000000-0000-4000-8000-000000000212', 'episode', '00000000-0000-4000-8000-000000000210', 2, 'Episode 2'),
-			('00000000-0000-4000-8000-000000000310', 'season', '00000000-0000-4000-8000-000000000300', 1, 'Season 1'),
-			('00000000-0000-4000-8000-000000000311', 'episode', '00000000-0000-4000-8000-000000000310', 1, 'Episode 1');
+		INSERT INTO titles (id, media_type, display_title, poster_url, background_url, release_info, resource_id, resource_provider) VALUES
+			('00000000-0000-4000-8000-000000000100', 'series', 'Started', 'https://images.example/started-poster.jpg', 'https://images.example/started-background.jpg', '2026', 'started', 'tmdb'),
+			('00000000-0000-4000-8000-000000000200', 'series', 'Never started', NULL, 'https://images.example/never-background.jpg', '2025', 'never', 'tmdb'),
+			('00000000-0000-4000-8000-000000000300', 'series', 'Partially started', NULL, NULL, NULL, 'partial', 'tmdb');
+		INSERT INTO titles (id, media_type, parent_id, ordinal, display_title, poster_url, background_url, release_date) VALUES
+			('00000000-0000-4000-8000-000000000110', 'season', '00000000-0000-4000-8000-000000000100', 1, 'Season 1', NULL, NULL, NULL),
+			('00000000-0000-4000-8000-000000000111', 'episode', '00000000-0000-4000-8000-000000000110', 1, 'Episode 1', NULL, NULL, '2026-01-01'),
+			('00000000-0000-4000-8000-000000000112', 'episode', '00000000-0000-4000-8000-000000000110', 2, 'Episode 2', 'https://images.example/started-episode-2.jpg', NULL, '2026-01-02'),
+			('00000000-0000-4000-8000-000000000210', 'season', '00000000-0000-4000-8000-000000000200', 1, 'Season 1', NULL, NULL, NULL),
+			('00000000-0000-4000-8000-000000000211', 'episode', '00000000-0000-4000-8000-000000000210', 1, 'Episode 1', NULL, NULL, '2025-02-03'),
+			('00000000-0000-4000-8000-000000000212', 'episode', '00000000-0000-4000-8000-000000000210', 2, 'Episode 2', NULL, NULL, '2025-02-10'),
+			('00000000-0000-4000-8000-000000000310', 'season', '00000000-0000-4000-8000-000000000300', 1, 'Season 1', NULL, NULL, NULL),
+			('00000000-0000-4000-8000-000000000311', 'episode', '00000000-0000-4000-8000-000000000310', 1, 'Episode 1', NULL, NULL, NULL);
 		INSERT INTO profile_progress (profile_id, title_id, position_seconds, duration_seconds, completed, version, last_watched_at) VALUES
 			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000111', 100, 100, true, 1, '2026-01-04T00:00:00Z'),
 			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000311', 20, 100, false, 1, '2026-01-03T00:00:00Z'),
@@ -207,6 +215,10 @@ func TestQueryNextUpIncludesNeverStartedSeriesOnceAndPaginates(t *testing.T) {
 		len(second) != 1 || second[0].TitleID != "00000000-0000-4000-8000-000000000211" {
 		t.Fatalf("next-up total=%d first=%+v second=%+v", total, first, second)
 	}
+	if first[0].Title != "Started" || first[0].EpisodeTitle != "Episode 2" ||
+		first[0].EpisodeStillURL != "https://images.example/started-episode-2.jpg" || first[0].EpisodeAirDate != "2026-01-02" {
+		t.Fatalf("started next-up snapshot contract mismatch: %+v", first[0])
+	}
 	neverStarted, err := queryNextUpItems(ctx, tx, "11111111-1111-4111-8111-111111111111",
 		"00000000-0000-4000-8000-000000000200", 0, 10)
 	if err != nil {
@@ -214,5 +226,62 @@ func TestQueryNextUpIncludesNeverStartedSeriesOnceAndPaginates(t *testing.T) {
 	}
 	if len(neverStarted) != 1 || neverStarted[0].TitleID != "00000000-0000-4000-8000-000000000211" {
 		t.Fatalf("never-started next-up items=%+v", neverStarted)
+	}
+	if neverStarted[0].Title != "Never started" || neverStarted[0].EpisodeTitle != "Episode 1" ||
+		neverStarted[0].EpisodeStillURL != "https://images.example/never-background.jpg" ||
+		neverStarted[0].EpisodeAirDate != "2025-02-03" {
+		t.Fatalf("never-started snapshot fallback mismatch: %+v", neverStarted[0])
+	}
+}
+
+func TestDisableTransactionJITIsLocal(t *testing.T) {
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = os.Getenv("RIVUNE_DATABASE_URL")
+	}
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL or RIVUNE_DATABASE_URL to run transaction JIT test")
+	}
+	pool, err := pgxpool.New(context.Background(), databaseURL)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer pool.Close()
+	ctx := context.Background()
+	connection, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire database connection: %v", err)
+	}
+	defer connection.Release()
+	defer func() { _, _ = connection.Exec(ctx, `RESET jit`) }()
+	if _, err := connection.Exec(ctx, `SET jit = on`); err != nil {
+		t.Fatalf("enable session JIT: %v", err)
+	}
+	tx, err := connection.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+	if err := disableTransactionJIT(ctx, tx); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("disable transaction JIT: %v", err)
+	}
+	var transactionJIT string
+	if err := tx.QueryRow(ctx, `SHOW jit`).Scan(&transactionJIT); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("show transaction JIT: %v", err)
+	}
+	if transactionJIT != "off" {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("transaction JIT = %q, want off", transactionJIT)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("rollback transaction: %v", err)
+	}
+	var sessionJIT string
+	if err := connection.QueryRow(ctx, `SHOW jit`).Scan(&sessionJIT); err != nil {
+		t.Fatalf("show session JIT: %v", err)
+	}
+	if sessionJIT != "on" {
+		t.Fatalf("session JIT = %q after rollback, want on", sessionJIT)
 	}
 }

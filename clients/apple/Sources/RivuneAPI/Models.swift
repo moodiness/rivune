@@ -1511,6 +1511,15 @@ public struct ContinueWatchingItem: Codable, Sendable, Equatable, Identifiable {
     public let seasonId: UUID?
     public let seasonNumber: Int?
     public let episodeNumber: Int?
+    public let title: String?
+    public let posterUrl: String?
+    public let backgroundUrl: String?
+    public let releaseInfo: String?
+    public let resourceId: String?
+    public let resourceProvider: String?
+    public let episodeTitle: String?
+    public let episodeStillUrl: String?
+    public let episodeAirDate: String?
     public let positionSeconds: Int
     public let durationSeconds: Int
     public let version: Int64

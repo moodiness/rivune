@@ -9,8 +9,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/settings"
 	"github.com/moodiness/rivune/server/internal/watchstate"
 )
 
@@ -52,7 +54,9 @@ type fakeWatchstateService struct {
 	clearTitleID          string
 	clearVersion          int64
 	clearErr              error
+	continueCalls         int
 	continueLimit         int
+	continueLanguage      string
 	continueValue         watchstate.ContinuePage
 	continueErr           error
 	dismissTitleID        string
@@ -119,8 +123,9 @@ func (f *fakeWatchstateService) ClearProgress(_ context.Context, _ auth.Principa
 	return f.clearErr
 }
 
-func (f *fakeWatchstateService) ContinueWatching(_ context.Context, _ auth.Principal, limit int) (watchstate.ContinuePage, error) {
-	f.continueLimit = limit
+func (f *fakeWatchstateService) ContinueWatching(_ context.Context, _ auth.Principal, language string, limit int) (watchstate.ContinuePage, error) {
+	f.continueCalls++
+	f.continueLanguage, f.continueLimit = language, limit
 	return f.continueValue, f.continueErr
 }
 
@@ -488,6 +493,76 @@ func TestWatchedAndClearHandlersPassVersions(t *testing.T) {
 	api.clearProgress(clearResponse, clearRequest, auth.Principal{})
 	if clearResponse.Code != http.StatusNoContent || service.clearTitleID != "episode-id" || service.clearVersion != 4 {
 		t.Fatalf("unexpected clear request status=%d id=%q version=%d", clearResponse.Code, service.clearTitleID, service.clearVersion)
+	}
+}
+
+func TestContinueWatchingReturnsEpisodeSnapshots(t *testing.T) {
+	watchedAt := time.Date(2026, time.January, 4, 5, 6, 7, 0, time.UTC)
+	service := &fakeWatchstateService{continueValue: watchstate.ContinuePage{Items: []watchstate.ContinueItem{{
+		TitleID: "00000000-0000-4000-8000-000000000112", MediaType: "episode",
+		SeriesID: "00000000-0000-4000-8000-000000000100", SeasonID: "00000000-0000-4000-8000-000000000110",
+		PositionSeconds: 42, DurationSeconds: 120, Version: 3, Reason: "resume",
+		Title: "Series", PosterURL: "/api/v1/artwork/series-poster", BackgroundURL: "/api/v1/artwork/series-background",
+		ReleaseInfo: "2026", ResourceID: "series:1:2", ResourceProvider: "tmdb",
+		EpisodeTitle: "Episode 2", EpisodeStillURL: "/api/v1/artwork/episode-still", EpisodeAirDate: "2026-01-02",
+		LastWatchedAt: watchedAt,
+	}}}}
+	api := watchstateAPI(service)
+	profileID := "00000000-0000-4000-8000-000000000100"
+	settingsService := &fakeSettingsService{effective: settings.Effective{Values: settings.EffectiveValues{
+		InterfaceLanguage: "en",
+		MetadataLanguage:  "fr-FR",
+	}}}
+	api.settings = settingsService
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/continue-watching?limit=12", nil)
+	response := httptest.NewRecorder()
+	api.continueWatching(response, request, auth.Principal{ActiveProfileID: &profileID})
+	if response.Code != http.StatusOK || service.continueLimit != 12 || service.continueLanguage != "fr-FR" || settingsService.requestedProfileID != profileID {
+		t.Fatalf("continue response status=%d limit=%d language=%q profile=%q", response.Code, service.continueLimit, service.continueLanguage, settingsService.requestedProfileID)
+	}
+	var page watchstate.ContinuePage
+	decodeResponse(t, response, &page)
+	if len(page.Items) != 1 {
+		t.Fatalf("continue response items=%+v", page.Items)
+	}
+	item := page.Items[0]
+	if item.Title != "Series" || item.EpisodeTitle != "Episode 2" ||
+		item.EpisodeStillURL != "/api/v1/artwork/episode-still" || item.EpisodeAirDate != "2026-01-02" ||
+		item.ResourceID != "series:1:2" || item.ResourceProvider != "tmdb" {
+		t.Fatalf("continue HTTP snapshot contract mismatch: %+v", item)
+	}
+}
+
+func TestContinueWatchingTreatsAutomaticMetadataLanguageAsCanonicalFallback(t *testing.T) {
+	profileID := "00000000-0000-4000-8000-000000000100"
+	service := &fakeWatchstateService{continueValue: watchstate.ContinuePage{Items: []watchstate.ContinueItem{}}}
+	api := watchstateAPI(service)
+	api.settings = &fakeSettingsService{effective: settings.Effective{Values: settings.EffectiveValues{
+		InterfaceLanguage: "fr",
+		MetadataLanguage:  "auto",
+	}}}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/continue-watching", nil)
+	response := httptest.NewRecorder()
+
+	api.continueWatching(response, request, auth.Principal{ActiveProfileID: &profileID})
+
+	if response.Code != http.StatusOK || service.continueLanguage != "" {
+		t.Fatalf("automatic metadata language response status=%d language=%q", response.Code, service.continueLanguage)
+	}
+}
+
+func TestContinueWatchingStopsWhenEffectiveSettingsFail(t *testing.T) {
+	profileID := "00000000-0000-4000-8000-000000000100"
+	service := &fakeWatchstateService{}
+	api := watchstateAPI(service)
+	api.settings = &fakeSettingsService{effectiveErr: settings.ErrSelectionRequired}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/continue-watching", nil)
+	response := httptest.NewRecorder()
+
+	api.continueWatching(response, request, auth.Principal{ActiveProfileID: &profileID})
+
+	if response.Code != http.StatusConflict || service.continueCalls != 0 {
+		t.Fatalf("settings failure response status=%d watchstate calls=%d", response.Code, service.continueCalls)
 	}
 }
 

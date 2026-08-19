@@ -1,0 +1,614 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="HighContrast">
+            <SolidColorBrush x:Key="RivuneCanvasBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivuneCanvasSoftBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivuneSurfaceBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivuneRaisedSurfaceBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivuneInteractiveSurfaceBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivuneFunctionalLayerBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivuneSourceCardBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivuneArtworkPlaceholderBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivuneBrandMarkBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivuneSelectedSurfaceBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+            <SolidColorBrush x:Key="RivuneHairlineBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+            <SolidColorBrush x:Key="RivuneStrongOutlineBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+            <SolidColorBrush x:Key="RivunePrimaryTextBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+            <SolidColorBrush x:Key="RivuneSecondaryTextBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+            <SolidColorBrush x:Key="RivuneMutedTextBrush" Color="{ThemeResource SystemColorGrayTextColor}" />
+            <SolidColorBrush x:Key="RivuneAccentBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+            <SolidColorBrush x:Key="RivuneAccentStrongBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+            <SolidColorBrush x:Key="RivuneAccentPressedBrush" Color="{ThemeResource SystemColorHotlightColor}" />
+            <SolidColorBrush x:Key="RivuneAccentInkBrush" Color="{ThemeResource SystemColorHighlightTextColor}" />
+            <SolidColorBrush x:Key="RivuneAccentContainerBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+            <SolidColorBrush x:Key="RivuneAccentHairlineBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+            <SolidColorBrush x:Key="RivuneDangerBrush" Color="{ThemeResource SystemColorHotlightColor}" />
+            <SolidColorBrush x:Key="RivuneDangerContainerBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivuneDangerTextBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+            <SolidColorBrush x:Key="RivuneSuccessBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+            <SolidColorBrush x:Key="RivuneWarningBrush" Color="{ThemeResource SystemColorHotlightColor}" />
+            <SolidColorBrush x:Key="RivuneScrimBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivunePlayerCanvasBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivunePlayerChromeBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivuneArtworkFallbackBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivuneHeroScrimBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivuneHeroCompactScrimBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivuneHeroBottomScrimBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivuneDetailScrimBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivuneDockBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivuneTvDockBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivunePlayerTopScrimBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RivuneActionPressedBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+        </ResourceDictionary>
+    </ResourceDictionary.ThemeDictionaries>
+
+    <Color x:Key="RivuneCanvasColor">#050505</Color>
+    <Color x:Key="RivuneCanvasSoftColor">#080808</Color>
+    <Color x:Key="RivuneSurfaceColor">#0D0D0D</Color>
+    <Color x:Key="RivuneRaisedSurfaceColor">#141414</Color>
+    <Color x:Key="RivuneInteractiveSurfaceColor">#1B1B1B</Color>
+    <Color x:Key="RivuneFunctionalLayerColor">#F20C0C0C</Color>
+    <Color x:Key="RivuneSourceCardColor">#B80D0D0D</Color>
+    <Color x:Key="RivuneBrandMarkColor">#FF000000</Color>
+    <Color x:Key="RivuneArtworkPlaceholderColor">#151515</Color>
+    <Color x:Key="RivuneSelectedSurfaceColor">#202020</Color>
+    <Color x:Key="RivuneHairlineColor">#242424</Color>
+    <Color x:Key="RivuneStrongOutlineColor">#393939</Color>
+    <Color x:Key="RivunePrimaryTextColor">#F5F3EF</Color>
+    <Color x:Key="RivuneSecondaryTextColor">#C9C6C1</Color>
+    <Color x:Key="RivuneMutedTextColor">#929298</Color>
+    <Color x:Key="RivuneAccentColor">#77A7FF</Color>
+    <Color x:Key="RivuneAccentStrongColor">#A9C5FF</Color>
+    <Color x:Key="RivuneAccentPressedColor">#5F8FEA</Color>
+    <Color x:Key="RivuneAccentInkColor">#07152E</Color>
+    <Color x:Key="RivuneAccentContainerColor">#17243D</Color>
+    <Color x:Key="RivuneAccentHairlineColor">#7377A7FF</Color>
+    <Color x:Key="RivuneDangerColor">#FF8D92</Color>
+    <Color x:Key="RivuneDangerContainerColor">#3B1C23</Color>
+    <Color x:Key="RivuneDangerTextColor">#FFDADD</Color>
+    <Color x:Key="RivuneSuccessColor">#79D5AE</Color>
+    <Color x:Key="RivuneWarningColor">#E8B870</Color>
+    <Color x:Key="RivuneScrimColor">#CC000000</Color>
+    <Color x:Key="RivunePlayerCanvasColor">#050505</Color>
+    <Color x:Key="RivunePlayerChromeColor">#61000000</Color>
+    <Color x:Key="RivuneArtworkFallbackTopColor">#FF151515</Color>
+    <Color x:Key="RivuneArtworkFallbackBottomColor">#FF080808</Color>
+    <Color x:Key="RivuneHeroLandscapeStartColor">#F5050505</Color>
+    <Color x:Key="RivuneHeroLandscapeMiddleColor">#B8050505</Color>
+    <Color x:Key="RivuneHeroLandscapeEndColor">#00050505</Color>
+    <Color x:Key="RivuneHeroCompactTopColor">#52050505</Color>
+    <Color x:Key="RivuneHeroCompactMiddleColor">#18050505</Color>
+    <Color x:Key="RivuneHeroCompactBottomColor">#F5050505</Color>
+    <Color x:Key="RivuneHeroBottomStartColor">#00050505</Color>
+    <Color x:Key="RivuneHeroBottomEndColor">#B8050505</Color>
+    <Color x:Key="RivuneDetailScrimColor">#B8050505</Color>
+    <Color x:Key="RivuneDockColor">#A3141414</Color>
+    <Color x:Key="RivuneTvDockColor">#EB141414</Color>
+    <Color x:Key="RivunePlayerTopScrimStartColor">#F0000000</Color>
+    <Color x:Key="RivunePlayerTopScrimMiddleColor">#94000000</Color>
+    <Color x:Key="RivunePlayerTopScrimEndColor">#00000000</Color>
+    <Color x:Key="RivuneActionPressedColor">#1FF5F3EF</Color>
+
+    <SolidColorBrush x:Key="RivuneCanvasBrush" Color="{StaticResource RivuneCanvasColor}" />
+    <SolidColorBrush x:Key="RivuneCanvasSoftBrush" Color="{StaticResource RivuneCanvasSoftColor}" />
+    <SolidColorBrush x:Key="RivuneSurfaceBrush" Color="{StaticResource RivuneSurfaceColor}" />
+    <SolidColorBrush x:Key="RivuneRaisedSurfaceBrush" Color="{StaticResource RivuneRaisedSurfaceColor}" />
+    <SolidColorBrush x:Key="RivuneInteractiveSurfaceBrush" Color="{StaticResource RivuneInteractiveSurfaceColor}" />
+    <SolidColorBrush x:Key="RivuneFunctionalLayerBrush" Color="{StaticResource RivuneFunctionalLayerColor}" />
+    <SolidColorBrush x:Key="RivuneSourceCardBrush" Color="{StaticResource RivuneSourceCardColor}" />
+    <SolidColorBrush x:Key="RivuneArtworkPlaceholderBrush" Color="{StaticResource RivuneArtworkPlaceholderColor}" />
+    <SolidColorBrush x:Key="RivuneBrandMarkBrush" Color="{StaticResource RivuneBrandMarkColor}" />
+    <SolidColorBrush x:Key="RivuneSelectedSurfaceBrush" Color="{StaticResource RivuneSelectedSurfaceColor}" />
+    <SolidColorBrush x:Key="RivuneHairlineBrush" Color="{StaticResource RivuneHairlineColor}" />
+    <SolidColorBrush x:Key="RivuneStrongOutlineBrush" Color="{StaticResource RivuneStrongOutlineColor}" />
+    <SolidColorBrush x:Key="RivunePrimaryTextBrush" Color="{StaticResource RivunePrimaryTextColor}" />
+    <SolidColorBrush x:Key="RivuneSecondaryTextBrush" Color="{StaticResource RivuneSecondaryTextColor}" />
+    <SolidColorBrush x:Key="RivuneMutedTextBrush" Color="{StaticResource RivuneMutedTextColor}" />
+    <SolidColorBrush x:Key="RivuneAccentBrush" Color="{StaticResource RivuneAccentColor}" />
+    <SolidColorBrush x:Key="RivuneAccentStrongBrush" Color="{StaticResource RivuneAccentStrongColor}" />
+    <SolidColorBrush x:Key="RivuneAccentPressedBrush" Color="{StaticResource RivuneAccentPressedColor}" />
+    <SolidColorBrush x:Key="RivuneAccentInkBrush" Color="{StaticResource RivuneAccentInkColor}" />
+    <SolidColorBrush x:Key="RivuneAccentContainerBrush" Color="{StaticResource RivuneAccentContainerColor}" />
+    <SolidColorBrush x:Key="RivuneAccentHairlineBrush" Color="{StaticResource RivuneAccentHairlineColor}" />
+    <SolidColorBrush x:Key="RivuneDangerBrush" Color="{StaticResource RivuneDangerColor}" />
+    <SolidColorBrush x:Key="RivuneDangerContainerBrush" Color="{StaticResource RivuneDangerContainerColor}" />
+    <SolidColorBrush x:Key="RivuneDangerTextBrush" Color="{StaticResource RivuneDangerTextColor}" />
+    <SolidColorBrush x:Key="RivuneSuccessBrush" Color="{StaticResource RivuneSuccessColor}" />
+    <SolidColorBrush x:Key="RivuneWarningBrush" Color="{StaticResource RivuneWarningColor}" />
+    <SolidColorBrush x:Key="RivuneScrimBrush" Color="{StaticResource RivuneScrimColor}" />
+    <SolidColorBrush x:Key="RivunePlayerCanvasBrush" Color="{StaticResource RivunePlayerCanvasColor}" />
+    <SolidColorBrush x:Key="RivunePlayerChromeBrush" Color="{StaticResource RivunePlayerChromeColor}" />
+    <SolidColorBrush x:Key="RivuneActionPressedBrush" Color="{StaticResource RivuneActionPressedColor}" />
+    <LinearGradientBrush x:Key="RivuneArtworkFallbackBrush" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="{ThemeResource RivuneArtworkFallbackTopColor}" Offset="0" />
+        <GradientStop Color="{ThemeResource RivuneArtworkFallbackBottomColor}" Offset="1" />
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="RivuneHeroScrimBrush" StartPoint="0,0.5" EndPoint="1,0.5">
+        <GradientStop Color="{ThemeResource RivuneHeroLandscapeStartColor}" Offset="0" />
+        <GradientStop Color="{ThemeResource RivuneHeroLandscapeMiddleColor}" Offset="0.55" />
+        <GradientStop Color="{ThemeResource RivuneHeroLandscapeEndColor}" Offset="1" />
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="RivuneHeroCompactScrimBrush" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="{ThemeResource RivuneHeroCompactTopColor}" Offset="0" />
+        <GradientStop Color="{ThemeResource RivuneHeroCompactMiddleColor}" Offset="0.45" />
+        <GradientStop Color="{ThemeResource RivuneHeroCompactBottomColor}" Offset="1" />
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="RivuneHeroBottomScrimBrush" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="{ThemeResource RivuneHeroBottomStartColor}" Offset="0" />
+        <GradientStop Color="{ThemeResource RivuneHeroBottomEndColor}" Offset="1" />
+    </LinearGradientBrush>
+    <SolidColorBrush x:Key="RivuneDetailScrimBrush" Color="{ThemeResource RivuneDetailScrimColor}" />
+    <SolidColorBrush x:Key="RivuneDockBrush" Color="{ThemeResource RivuneDockColor}" />
+    <SolidColorBrush x:Key="RivuneTvDockBrush" Color="{ThemeResource RivuneTvDockColor}" />
+    <LinearGradientBrush x:Key="RivunePlayerTopScrimBrush" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="{ThemeResource RivunePlayerTopScrimStartColor}" Offset="0" />
+        <GradientStop Color="{ThemeResource RivunePlayerTopScrimMiddleColor}" Offset="0.6" />
+        <GradientStop Color="{ThemeResource RivunePlayerTopScrimEndColor}" Offset="1" />
+    </LinearGradientBrush>
+
+    <x:Double x:Key="RivuneSpace04">4</x:Double>
+    <x:Double x:Key="RivuneSpace08">8</x:Double>
+    <x:Double x:Key="RivuneSpace12">12</x:Double>
+    <x:Double x:Key="RivuneSpace16">16</x:Double>
+    <x:Double x:Key="RivuneSpace20">20</x:Double>
+    <x:Double x:Key="RivuneSpace24">24</x:Double>
+    <x:Double x:Key="RivuneSpace32">32</x:Double>
+    <x:Double x:Key="RivuneSpace40">40</x:Double>
+    <x:Double x:Key="RivuneSpace48">48</x:Double>
+    <x:Double x:Key="RivuneSpace64">64</x:Double>
+    <x:Double x:Key="RivuneTouchTarget">48</x:Double>
+    <x:Double x:Key="RivuneButtonHeight">52</x:Double>
+    <x:Double x:Key="RivuneFieldHeight">52</x:Double>
+    <x:Double x:Key="RivuneTouchTargetTv">56</x:Double>
+    <x:Double x:Key="RivuneButtonHeightTv">60</x:Double>
+    <x:Double x:Key="RivuneFieldHeightTv">64</x:Double>
+    <x:Double x:Key="RivuneContentMax">560</x:Double>
+    <x:Double x:Key="RivuneContentMaxTablet">720</x:Double>
+    <x:Double x:Key="RivuneContentMaxWide">1120</x:Double>
+    <x:Double x:Key="RivunePreferencesMax">920</x:Double>
+    <x:Double x:Key="RivuneBottomBarHeight">56</x:Double>
+    <x:Double x:Key="RivuneNavigationRailTv">104</x:Double>
+    <CornerRadius x:Key="RivuneRadiusSmall">6</CornerRadius>
+    <CornerRadius x:Key="RivuneRadiusMedium">10</CornerRadius>
+    <CornerRadius x:Key="RivuneRadiusLarge">16</CornerRadius>
+    <CornerRadius x:Key="RivuneRadiusExtraLarge">20</CornerRadius>
+
+    <Style x:Key="RivuneDisplayLargeTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" /><Setter Property="FontSize" Value="52" /><Setter Property="FontWeight" Value="Bold" /><Setter Property="LineHeight" Value="56" /><Setter Property="LineStackingStrategy" Value="BlockLineHeight" /><Setter Property="CharacterSpacing" Value="-27" /><Setter Property="Foreground" Value="{ThemeResource RivunePrimaryTextBrush}" /><Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style x:Key="RivuneDisplayMediumTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" /><Setter Property="FontSize" Value="44" /><Setter Property="FontWeight" Value="Bold" /><Setter Property="LineHeight" Value="48" /><Setter Property="LineStackingStrategy" Value="BlockLineHeight" /><Setter Property="CharacterSpacing" Value="-23" /><Setter Property="Foreground" Value="{ThemeResource RivunePrimaryTextBrush}" /><Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style x:Key="RivuneHeadlineLargeTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" /><Setter Property="FontSize" Value="34" /><Setter Property="FontWeight" Value="Bold" /><Setter Property="LineHeight" Value="38" /><Setter Property="LineStackingStrategy" Value="BlockLineHeight" /><Setter Property="CharacterSpacing" Value="-18" /><Setter Property="Foreground" Value="{ThemeResource RivunePrimaryTextBrush}" /><Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style x:Key="RivuneHeadlineMediumTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" /><Setter Property="FontSize" Value="27" /><Setter Property="FontWeight" Value="Bold" /><Setter Property="LineHeight" Value="32" /><Setter Property="LineStackingStrategy" Value="BlockLineHeight" /><Setter Property="CharacterSpacing" Value="-13" /><Setter Property="Foreground" Value="{ThemeResource RivunePrimaryTextBrush}" /><Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style x:Key="RivuneHeadlineSmallTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" /><Setter Property="FontSize" Value="23" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="LineHeight" Value="28" /><Setter Property="LineStackingStrategy" Value="BlockLineHeight" /><Setter Property="CharacterSpacing" Value="-7" /><Setter Property="Foreground" Value="{ThemeResource RivunePrimaryTextBrush}" /><Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style x:Key="RivuneTitleLargeTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" /><Setter Property="FontSize" Value="20" /><Setter Property="FontWeight" Value="Bold" /><Setter Property="LineHeight" Value="25" /><Setter Property="LineStackingStrategy" Value="BlockLineHeight" /><Setter Property="CharacterSpacing" Value="-8" /><Setter Property="Foreground" Value="{ThemeResource RivunePrimaryTextBrush}" /><Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style x:Key="RivuneTitleMediumTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" /><Setter Property="FontSize" Value="16" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="LineHeight" Value="21" /><Setter Property="LineStackingStrategy" Value="BlockLineHeight" /><Setter Property="Foreground" Value="{ThemeResource RivunePrimaryTextBrush}" /><Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style x:Key="RivuneTitleSmallTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" /><Setter Property="FontSize" Value="14" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="LineHeight" Value="19" /><Setter Property="LineStackingStrategy" Value="BlockLineHeight" /><Setter Property="Foreground" Value="{ThemeResource RivunePrimaryTextBrush}" /><Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style x:Key="RivuneBodyLargeTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" /><Setter Property="FontSize" Value="16" /><Setter Property="LineHeight" Value="23" /><Setter Property="LineStackingStrategy" Value="BlockLineHeight" /><Setter Property="Foreground" Value="{ThemeResource RivunePrimaryTextBrush}" /><Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style x:Key="RivuneBodyMediumTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" /><Setter Property="FontSize" Value="14" /><Setter Property="LineHeight" Value="20" /><Setter Property="LineStackingStrategy" Value="BlockLineHeight" /><Setter Property="Foreground" Value="{ThemeResource RivuneSecondaryTextBrush}" /><Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style x:Key="RivuneBodySmallTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" /><Setter Property="FontSize" Value="12" /><Setter Property="LineHeight" Value="17" /><Setter Property="LineStackingStrategy" Value="BlockLineHeight" /><Setter Property="Foreground" Value="{ThemeResource RivuneMutedTextBrush}" /><Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style x:Key="RivuneLabelLargeTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" /><Setter Property="FontSize" Value="14" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="LineHeight" Value="19" /><Setter Property="LineStackingStrategy" Value="BlockLineHeight" /><Setter Property="CharacterSpacing" Value="7" /><Setter Property="Foreground" Value="{ThemeResource RivunePrimaryTextBrush}" /><Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style x:Key="RivuneLabelMediumTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" /><Setter Property="FontSize" Value="12" /><Setter Property="FontWeight" Value="Bold" /><Setter Property="LineHeight" Value="16" /><Setter Property="LineStackingStrategy" Value="BlockLineHeight" /><Setter Property="CharacterSpacing" Value="54" /><Setter Property="Foreground" Value="{ThemeResource RivunePrimaryTextBrush}" /><Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+    <Style x:Key="RivuneLabelSmallTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" /><Setter Property="FontSize" Value="11" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="LineHeight" Value="15" /><Setter Property="LineStackingStrategy" Value="BlockLineHeight" /><Setter Property="CharacterSpacing" Value="32" /><Setter Property="Foreground" Value="{ThemeResource RivuneSecondaryTextBrush}" /><Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+    <Style x:Key="RivuneHeadlineStyle" TargetType="TextBlock" BasedOn="{StaticResource RivuneHeadlineLargeTextStyle}" />
+    <Style x:Key="RivuneTitleStyle" TargetType="TextBlock" BasedOn="{StaticResource RivuneTitleLargeTextStyle}" />
+    <Style x:Key="RivuneBodyStyle" TargetType="TextBlock" BasedOn="{StaticResource RivuneBodyMediumTextStyle}" />
+    <Style x:Key="RivuneLabelStyle" TargetType="TextBlock" BasedOn="{StaticResource RivuneLabelLargeTextStyle}" />
+    <Style x:Key="RivuneEyebrowStyle" TargetType="TextBlock" BasedOn="{StaticResource RivuneLabelMediumTextStyle}">
+        <Setter Property="Foreground" Value="{ThemeResource RivuneAccentBrush}" />
+        <Setter Property="CharacterSpacing" Value="80" />
+    </Style>
+
+    <Style x:Key="RivunePrimaryButton" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="MinHeight" Value="{StaticResource RivuneButtonHeight}" /><Setter Property="MinWidth" Value="{StaticResource RivuneTouchTarget}" /><Setter Property="Padding" Value="20,4" /><Setter Property="CornerRadius" Value="{StaticResource RivuneRadiusMedium}" /><Setter Property="Background" Value="{ThemeResource RivuneAccentBrush}" /><Setter Property="Foreground" Value="{ThemeResource RivuneAccentInkBrush}" /><Setter Property="BorderThickness" Value="0" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="HorizontalAlignment" Value="Stretch" /><Setter Property="FocusVisualPrimaryBrush" Value="{ThemeResource RivuneAccentBrush}" /><Setter Property="FocusVisualSecondaryBrush" Value="{ThemeResource RivuneCanvasBrush}" />
+    </Style>
+    <Style x:Key="RivuneSecondaryButton" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="MinHeight" Value="{StaticResource RivuneButtonHeight}" /><Setter Property="MinWidth" Value="{StaticResource RivuneTouchTarget}" /><Setter Property="Padding" Value="20,4" /><Setter Property="CornerRadius" Value="{StaticResource RivuneRadiusMedium}" /><Setter Property="Background" Value="{ThemeResource RivuneRaisedSurfaceBrush}" /><Setter Property="Foreground" Value="{ThemeResource RivuneAccentBrush}" /><Setter Property="BorderBrush" Value="{ThemeResource RivuneHairlineBrush}" /><Setter Property="BorderThickness" Value="1" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="FocusVisualPrimaryBrush" Value="{ThemeResource RivuneAccentBrush}" /><Setter Property="FocusVisualSecondaryBrush" Value="{ThemeResource RivuneCanvasBrush}" />
+    </Style>
+    <Style x:Key="RivuneTextButton" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="MinHeight" Value="{StaticResource RivuneTouchTarget}" /><Setter Property="MinWidth" Value="{StaticResource RivuneTouchTarget}" /><Setter Property="Padding" Value="12,8" /><Setter Property="CornerRadius" Value="{StaticResource RivuneRadiusSmall}" /><Setter Property="Background" Value="Transparent" /><Setter Property="Foreground" Value="{ThemeResource RivuneAccentBrush}" /><Setter Property="BorderThickness" Value="0" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="FocusVisualPrimaryBrush" Value="{ThemeResource RivuneAccentBrush}" /><Setter Property="FocusVisualSecondaryBrush" Value="{ThemeResource RivuneCanvasBrush}" />
+    </Style>
+    <Style x:Key="RivuneLabeledActionButton" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="MinHeight" Value="{StaticResource RivuneTouchTarget}" />
+        <Setter Property="MinWidth" Value="{StaticResource RivuneTouchTarget}" />
+        <Setter Property="Padding" Value="12,0" />
+        <Setter Property="CornerRadius" Value="24" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Foreground" Value="{ThemeResource RivunePrimaryTextBrush}" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="FocusVisualPrimaryBrush" Value="{ThemeResource RivuneAccentBrush}" />
+        <Setter Property="FocusVisualSecondaryBrush" Value="{ThemeResource RivuneCanvasBrush}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <ContentPresenter
+                        x:Name="ActionPresenter"
+                        Padding="{TemplateBinding Padding}"
+                        HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                        VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                        Background="{TemplateBinding Background}"
+                        BorderBrush="{TemplateBinding BorderBrush}"
+                        BorderThickness="{TemplateBinding BorderThickness}"
+                        CornerRadius="{TemplateBinding CornerRadius}"
+                        Content="{TemplateBinding Content}"
+                        ContentTemplate="{TemplateBinding ContentTemplate}"
+                        ContentTransitions="{TemplateBinding ContentTransitions}"
+                        FontFamily="{TemplateBinding FontFamily}"
+                        FontSize="{TemplateBinding FontSize}"
+                        FontWeight="{TemplateBinding FontWeight}"
+                        Foreground="{TemplateBinding Foreground}">
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CommonStates">
+                                <VisualState x:Name="Normal" />
+                                <VisualState x:Name="PointerOver" />
+                                <VisualState x:Name="Pressed">
+                                    <VisualState.Setters>
+                                        <Setter Target="ActionPresenter.Background" Value="{ThemeResource RivuneActionPressedBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Disabled">
+                                    <VisualState.Setters>
+                                        <Setter Target="ActionPresenter.Opacity" Value="0.5" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                    </ContentPresenter>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    <Style x:Key="RivuneDangerTextButton" TargetType="Button" BasedOn="{StaticResource RivuneLabeledActionButton}">
+        <Setter Property="Foreground" Value="{ThemeResource RivuneDangerBrush}" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+    </Style>
+    <Style x:Key="RivuneHeaderActionButton" TargetType="Button" BasedOn="{StaticResource RivuneLabeledActionButton}">
+        <Setter Property="Width" Value="48" />
+        <Setter Property="Height" Value="48" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="UseSystemFocusVisuals" Value="False" />
+    </Style>
+    <Style x:Key="RivuneZoomTextButton" TargetType="Button" BasedOn="{StaticResource RivuneLabeledActionButton}">
+        <Setter Property="Width" Value="168" />
+        <Setter Property="Height" Value="52" />
+        <Setter Property="Padding" Value="12,0" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Foreground" Value="White" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="UseSystemFocusVisuals" Value="False" />
+    </Style>
+    <Style x:Key="RivuneZoomDangerButton" TargetType="Button" BasedOn="{StaticResource RivuneZoomTextButton}">
+        <Setter Property="Foreground" Value="{ThemeResource RivuneDangerBrush}" />
+    </Style>
+    <Style x:Key="RivuneLabeledActionToggleButton" TargetType="ToggleButton" BasedOn="{StaticResource DefaultToggleButtonStyle}">
+        <Setter Property="MinHeight" Value="{StaticResource RivuneTouchTarget}" />
+        <Setter Property="MinWidth" Value="{StaticResource RivuneTouchTarget}" />
+        <Setter Property="Padding" Value="12,0" />
+        <Setter Property="CornerRadius" Value="24" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Foreground" Value="{ThemeResource RivunePrimaryTextBrush}" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="FocusVisualPrimaryBrush" Value="{ThemeResource RivuneAccentBrush}" />
+        <Setter Property="FocusVisualSecondaryBrush" Value="{ThemeResource RivuneCanvasBrush}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ToggleButton">
+                    <ContentPresenter
+                        x:Name="ActionPresenter"
+                        Padding="{TemplateBinding Padding}"
+                        HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                        VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                        Background="{TemplateBinding Background}"
+                        BorderBrush="{TemplateBinding BorderBrush}"
+                        BorderThickness="{TemplateBinding BorderThickness}"
+                        CornerRadius="{TemplateBinding CornerRadius}"
+                        Content="{TemplateBinding Content}"
+                        ContentTemplate="{TemplateBinding ContentTemplate}"
+                        ContentTransitions="{TemplateBinding ContentTransitions}"
+                        FontFamily="{TemplateBinding FontFamily}"
+                        FontSize="{TemplateBinding FontSize}"
+                        FontWeight="{TemplateBinding FontWeight}"
+                        Foreground="{TemplateBinding Foreground}">
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CommonStates">
+                                <VisualState x:Name="Normal" />
+                                <VisualState x:Name="PointerOver" />
+                                <VisualState x:Name="Pressed">
+                                    <VisualState.Setters>
+                                        <Setter Target="ActionPresenter.Background" Value="{ThemeResource RivuneActionPressedBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Disabled">
+                                    <VisualState.Setters>
+                                        <Setter Target="ActionPresenter.Opacity" Value="0.5" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+                            <VisualStateGroup x:Name="CheckStates">
+                                <VisualState x:Name="Unchecked" />
+                                <VisualState x:Name="Checked" />
+                                <VisualState x:Name="Indeterminate" />
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                    </ContentPresenter>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    <Style x:Key="RivuneCatalogFilterToggle" TargetType="ToggleButton" BasedOn="{StaticResource DefaultToggleButtonStyle}">
+        <Setter Property="MinHeight" Value="{StaticResource RivuneTouchTarget}" />
+        <Setter Property="MinWidth" Value="{StaticResource RivuneTouchTarget}" />
+        <Setter Property="Width" Value="Auto" />
+        <Setter Property="Padding" Value="12,8" />
+        <Setter Property="CornerRadius" Value="{StaticResource RivuneRadiusSmall}" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Foreground" Value="{ThemeResource RivuneSecondaryTextBrush}" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="FocusVisualPrimaryBrush" Value="{ThemeResource RivuneAccentBrush}" />
+        <Setter Property="FocusVisualSecondaryBrush" Value="{ThemeResource RivuneCanvasBrush}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ToggleButton">
+                    <ContentPresenter
+                        x:Name="FilterPresenter"
+                        Padding="{TemplateBinding Padding}"
+                        HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                        VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        CornerRadius="{TemplateBinding CornerRadius}"
+                        Content="{TemplateBinding Content}"
+                        ContentTemplate="{TemplateBinding ContentTemplate}"
+                        ContentTransitions="{TemplateBinding ContentTransitions}"
+                        FontFamily="{TemplateBinding FontFamily}"
+                        FontSize="{TemplateBinding FontSize}"
+                        FontWeight="{TemplateBinding FontWeight}"
+                        Foreground="{TemplateBinding Foreground}">
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CommonStates">
+                                <VisualState x:Name="Normal" />
+                                <VisualState x:Name="PointerOver">
+                                    <VisualState.Setters>
+                                        <Setter Target="FilterPresenter.Foreground" Value="{ThemeResource RivuneAccentBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Pressed">
+                                    <VisualState.Setters>
+                                        <Setter Target="FilterPresenter.Foreground" Value="{ThemeResource RivuneAccentStrongBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Disabled">
+                                    <VisualState.Setters>
+                                        <Setter Target="FilterPresenter.Opacity" Value="0.5" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+                            <VisualStateGroup x:Name="FocusStates">
+                                <VisualState x:Name="Unfocused" />
+                                <VisualState x:Name="PointerFocused">
+                                    <VisualState.Setters>
+                                        <Setter Target="FilterPresenter.Foreground" Value="{ThemeResource RivuneAccentBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Focused">
+                                    <VisualState.Setters>
+                                        <Setter Target="FilterPresenter.Foreground" Value="{ThemeResource RivuneAccentBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+                            <VisualStateGroup x:Name="CheckStates">
+                                <VisualState x:Name="Unchecked" />
+                                <VisualState x:Name="Checked">
+                                    <VisualState.Setters>
+                                        <Setter Target="FilterPresenter.Foreground" Value="{ThemeResource RivuneAccentBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Indeterminate" />
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                    </ContentPresenter>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+
+
+    <Style x:Key="RivuneIconButton" TargetType="Button" BasedOn="{StaticResource RivuneTextButton}">
+        <Setter Property="Width" Value="{StaticResource RivuneTouchTarget}" /><Setter Property="Height" Value="{StaticResource RivuneTouchTarget}" /><Setter Property="Padding" Value="0" /><Setter Property="CornerRadius" Value="24" /><Setter Property="HorizontalContentAlignment" Value="Center" /><Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style x:Key="RivuneNavToggle" TargetType="ToggleButton" BasedOn="{StaticResource DefaultToggleButtonStyle}">
+        <Setter Property="Width" Value="{StaticResource RivuneTouchTarget}" /><Setter Property="Height" Value="{StaticResource RivuneTouchTarget}" /><Setter Property="Padding" Value="0" /><Setter Property="CornerRadius" Value="{StaticResource RivuneRadiusMedium}" /><Setter Property="Background" Value="Transparent" /><Setter Property="Foreground" Value="{ThemeResource RivuneSecondaryTextBrush}" /><Setter Property="BorderThickness" Value="0" /><Setter Property="FocusVisualPrimaryBrush" Value="{ThemeResource RivuneAccentBrush}" /><Setter Property="FocusVisualSecondaryBrush" Value="{ThemeResource RivuneCanvasBrush}" />
+    </Style>
+    <Style x:Key="RivuneTextField" TargetType="TextBox" BasedOn="{StaticResource DefaultTextBoxStyle}">
+        <Setter Property="MinHeight" Value="{StaticResource RivuneFieldHeight}" /><Setter Property="CornerRadius" Value="{StaticResource RivuneRadiusMedium}" /><Setter Property="Background" Value="{ThemeResource RivuneSurfaceBrush}" /><Setter Property="Foreground" Value="{ThemeResource RivunePrimaryTextBrush}" /><Setter Property="BorderBrush" Value="{ThemeResource RivuneStrongOutlineBrush}" /><Setter Property="FocusVisualPrimaryBrush" Value="{ThemeResource RivuneAccentBrush}" /><Setter Property="FocusVisualSecondaryBrush" Value="{ThemeResource RivuneCanvasBrush}" />
+    </Style>
+    <Style x:Key="RivuneFunctionalSurface" TargetType="Border">
+        <Setter Property="Background" Value="{ThemeResource RivuneFunctionalLayerBrush}" /><Setter Property="BorderBrush" Value="{ThemeResource RivuneHairlineBrush}" /><Setter Property="BorderThickness" Value="1" /><Setter Property="CornerRadius" Value="{StaticResource RivuneRadiusLarge}" /><Setter Property="Padding" Value="16" />
+    </Style>
+    <Style x:Key="RivuneMediaCard" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="Padding" Value="0" /><Setter Property="Background" Value="Transparent" /><Setter Property="BorderThickness" Value="0" /><Setter Property="CornerRadius" Value="{StaticResource RivuneRadiusMedium}" /><Setter Property="HorizontalContentAlignment" Value="Stretch" /><Setter Property="VerticalContentAlignment" Value="Stretch" /><Setter Property="FocusVisualPrimaryBrush" Value="{ThemeResource RivuneAccentBrush}" /><Setter Property="FocusVisualSecondaryBrush" Value="{ThemeResource RivuneCanvasBrush}" />
+    </Style>
+    <Style x:Key="RivuneSourceFilterToggle" TargetType="ToggleButton" BasedOn="{StaticResource DefaultToggleButtonStyle}">
+        <Setter Property="MinWidth" Value="{StaticResource RivuneTouchTarget}" />
+        <Setter Property="Height" Value="{StaticResource RivuneTouchTarget}" />
+        <Setter Property="Width" Value="Auto" />
+        <Setter Property="Padding" Value="8,0" />
+        <Setter Property="CornerRadius" Value="24" />
+        <Setter Property="Background" Value="{ThemeResource RivuneSourceCardBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource RivunePrimaryTextBrush}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource RivuneHairlineBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="FocusVisualPrimaryBrush" Value="{ThemeResource RivuneAccentBrush}" />
+        <Setter Property="FocusVisualSecondaryBrush" Value="{ThemeResource RivuneCanvasBrush}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ToggleButton">
+                    <Grid Height="{TemplateBinding Height}" MinWidth="{TemplateBinding MinWidth}" Background="Transparent">
+                        <Border x:Name="SourceFilterPresenter" Height="28" MinWidth="40" Padding="8,0" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="14">
+                            <ContentPresenter HorizontalContentAlignment="Center" VerticalContentAlignment="Center" Content="{TemplateBinding Content}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" FontWeight="{TemplateBinding FontWeight}" Foreground="{TemplateBinding Foreground}" />
+                        </Border>
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CommonStates">
+                                <VisualState x:Name="Normal" />
+                                <VisualState x:Name="PointerOver"><VisualState.Setters><Setter Target="SourceFilterPresenter.Background" Value="{ThemeResource RivuneSelectedSurfaceBrush}" /></VisualState.Setters></VisualState>
+                                <VisualState x:Name="Pressed"><VisualState.Setters><Setter Target="SourceFilterPresenter.Background" Value="{ThemeResource RivuneInteractiveSurfaceBrush}" /></VisualState.Setters></VisualState>
+                                <VisualState x:Name="Disabled"><VisualState.Setters><Setter Target="SourceFilterPresenter.Opacity" Value="0.5" /></VisualState.Setters></VisualState>
+                            </VisualStateGroup>
+                            <VisualStateGroup x:Name="FocusStates">
+                                <VisualState x:Name="Unfocused" />
+                                <VisualState x:Name="PointerFocused"><VisualState.Setters><Setter Target="SourceFilterPresenter.BorderBrush" Value="{ThemeResource RivuneAccentBrush}" /><Setter Target="SourceFilterPresenter.BorderThickness" Value="2" /></VisualState.Setters></VisualState>
+                                <VisualState x:Name="Focused"><VisualState.Setters><Setter Target="SourceFilterPresenter.BorderBrush" Value="{ThemeResource RivuneAccentBrush}" /><Setter Target="SourceFilterPresenter.BorderThickness" Value="2" /></VisualState.Setters></VisualState>
+                            </VisualStateGroup>
+                            <VisualStateGroup x:Name="CheckStates">
+                                <VisualState x:Name="Unchecked" />
+                                <VisualState x:Name="Checked"><VisualState.Setters><Setter Target="SourceFilterPresenter.Background" Value="{ThemeResource RivuneAccentContainerBrush}" /><Setter Target="SourceFilterPresenter.Foreground" Value="{ThemeResource RivuneAccentStrongBrush}" /></VisualState.Setters></VisualState>
+                                <VisualState x:Name="Indeterminate" />
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    <Style x:Key="RivuneSourceRefreshButton" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="Width" Value="{StaticResource RivuneTouchTarget}" />
+        <Setter Property="Height" Value="{StaticResource RivuneTouchTarget}" />
+        <Setter Property="MinWidth" Value="{StaticResource RivuneTouchTarget}" />
+        <Setter Property="MinHeight" Value="{StaticResource RivuneTouchTarget}" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="CornerRadius" Value="28" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Foreground" Value="{ThemeResource RivunePrimaryTextBrush}" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="FocusVisualPrimaryBrush" Value="{ThemeResource RivuneAccentBrush}" />
+        <Setter Property="FocusVisualSecondaryBrush" Value="{ThemeResource RivuneCanvasBrush}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <ContentPresenter
+                        x:Name="SourceRefreshPresenter"
+                        Padding="{TemplateBinding Padding}"
+                        HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                        VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                        Background="{TemplateBinding Background}"
+                        BorderBrush="{TemplateBinding BorderBrush}"
+                        BorderThickness="{TemplateBinding BorderThickness}"
+                        CornerRadius="{TemplateBinding CornerRadius}"
+                        Content="{TemplateBinding Content}"
+                        ContentTemplate="{TemplateBinding ContentTemplate}"
+                        Foreground="{TemplateBinding Foreground}">
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CommonStates">
+                                <VisualState x:Name="Normal" />
+                                <VisualState x:Name="PointerOver"><VisualState.Setters><Setter Target="SourceRefreshPresenter.Background" Value="{ThemeResource RivuneSelectedSurfaceBrush}" /></VisualState.Setters></VisualState>
+                                <VisualState x:Name="Pressed"><VisualState.Setters><Setter Target="SourceRefreshPresenter.Background" Value="{ThemeResource RivuneInteractiveSurfaceBrush}" /></VisualState.Setters></VisualState>
+                                <VisualState x:Name="Disabled"><VisualState.Setters><Setter Target="SourceRefreshPresenter.Opacity" Value="0.5" /></VisualState.Setters></VisualState>
+                            </VisualStateGroup>
+                            <VisualStateGroup x:Name="FocusStates">
+                                <VisualState x:Name="Unfocused" />
+                                <VisualState x:Name="PointerFocused"><VisualState.Setters><Setter Target="SourceRefreshPresenter.Background" Value="{ThemeResource RivuneSelectedSurfaceBrush}" /></VisualState.Setters></VisualState>
+                                <VisualState x:Name="Focused"><VisualState.Setters><Setter Target="SourceRefreshPresenter.Background" Value="{ThemeResource RivuneSelectedSurfaceBrush}" /></VisualState.Setters></VisualState>
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                    </ContentPresenter>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    <Style x:Key="RivuneProfileCard" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Top" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="FocusVisualPrimaryBrush" Value="{ThemeResource RivuneAccentBrush}" />
+        <Setter Property="FocusVisualSecondaryBrush" Value="{ThemeResource RivuneCanvasBrush}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <ContentPresenter
+                        x:Name="ProfilePresenter"
+                        Padding="{TemplateBinding Padding}"
+                        HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                        VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        Content="{TemplateBinding Content}"
+                        ContentTemplate="{TemplateBinding ContentTemplate}"
+                        ContentTransitions="{TemplateBinding ContentTransitions}">
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CommonStates">
+                                <VisualState x:Name="Normal" />
+                                <VisualState x:Name="PointerOver" />
+                                <VisualState x:Name="Pressed">
+                                    <VisualState.Setters>
+                                        <Setter Target="ProfilePresenter.Opacity" Value="0.82" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Disabled" />
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                    </ContentPresenter>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+</ResourceDictionary>

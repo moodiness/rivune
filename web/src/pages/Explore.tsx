@@ -513,26 +513,25 @@ function remainingLabel(item: EnrichedContinueItem): string {
 }
 
 function mediaFromContinue(item: EnrichedContinueItem): MediaItem {
-  const episodeLabel = item.seasonNumber !== undefined && item.episodeNumber !== undefined
-    ? `S${String(item.seasonNumber).padStart(2, "0")}E${String(item.episodeNumber).padStart(2, "0")}`
-    : "";
   const episodeCardLabel = item.seasonNumber !== undefined && item.episodeNumber !== undefined
     ? `S${String(item.seasonNumber).padStart(2, "0")} · E${String(item.episodeNumber).padStart(2, "0")}`
     : "";
   const progress = item.durationSeconds > 0 ? Math.min(100, Math.round(item.positionSeconds / item.durationSeconds * 100)) : 0;
   const seriesTitle = item.title || t("media.type.series");
+  const episodeTitle = item.episodeTitle
+    || (item.episodeNumber !== undefined ? t("media.episode.fallbackTitle", { number: item.episodeNumber }) : t("media.type.episode"));
   return {
     id: item.resourceId || item.titleId,
     titleId: item.titleId,
     mediaType: item.mediaType,
-    title: item.mediaType === "episode" ? `${seriesTitle} · ${episodeLabel}${item.episodeTitle ? ` · ${item.episodeTitle}` : ""}` : item.title || t("media.untitled"),
+    seasonNumber: item.seasonNumber,
+    episodeNumber: item.episodeNumber,
+    title: item.mediaType === "episode" ? episodeTitle : item.title || t("media.untitled"),
     posterUrl: item.episodeStillUrl || item.posterUrl,
     backgroundUrl: item.episodeStillUrl || item.backgroundUrl || item.posterUrl,
-    description: item.episodeOverview || (item.reason === "resume" ? t("home.continue.resumeFromPercent", { progress }) : t("home.continue.nextEpisodeReady")),
-    releaseInfo: item.reason === "resume"
-      ? episodeLabel ? t("home.continue.episodeProgress", { episodeCode: episodeLabel, progress }) : t("home.continue.percentWatched", { progress })
-      : t("home.continue.episodeUpNext", { episodeCode: episodeLabel }),
-    released: item.episodeAirDate,
+    description: item.reason === "resume" ? t("home.continue.resumeFromPercent", { progress }) : t("home.continue.nextEpisodeReady"),
+    releaseInfo: item.mediaType === "episode" ? item.episodeAirDate || item.releaseInfo : item.releaseInfo,
+    released: item.mediaType === "episode" ? item.episodeAirDate : undefined,
     externalIds: item.resourceProvider && item.resourceId ? { [item.resourceProvider]: item.resourceId } : {},
     raw: {
       progress,
@@ -542,8 +541,11 @@ function mediaFromContinue(item: EnrichedContinueItem): MediaItem {
       continueSeasonNumber: item.seasonNumber,
       continueEpisodeNumber: item.episodeNumber,
       continueEpisodeId: item.titleId,
-      continueCardTitle: seriesTitle,
-      continueCardSubtitle: [episodeCardLabel, item.episodeTitle].filter(Boolean).join(" · ") || item.releaseInfo || "",
+      episodeSeriesName: item.mediaType === "episode" ? seriesTitle : undefined,
+      continueCardTitle: item.mediaType === "episode" ? seriesTitle : item.title || t("media.untitled"),
+      continueCardSubtitle: item.mediaType === "episode"
+        ? [episodeCardLabel, item.episodeTitle].filter(Boolean).join(" · ") || item.releaseInfo || ""
+        : item.releaseInfo || "",
       continueCardBadge: item.reason === "resume"
         ? remainingLabel(item)
         : item.episodeNumber === 1 && (item.seasonNumber ?? 0) > 1 ? t("home.continue.newSeason") : t("home.continue.nextUp"),
@@ -554,17 +556,21 @@ function mediaFromContinue(item: EnrichedContinueItem): MediaItem {
 async function loadContinueItems(signal?: AbortSignal, cachedItems: EnrichedContinueItem[] = []): Promise<EnrichedContinueItem[]> {
   const response = await api.continueWatching(signal);
   const cachedByTitleID = new Map(cachedItems.map((item) => [item.titleId, item]));
-  const reusable = response.items.map((item) => {
+  return response.items.map((item) => {
     const cached = cachedByTitleID.get(item.titleId);
-    return cached && cached.seasonId === item.seasonId && cached.seasonNumber === item.seasonNumber && cached.episodeNumber === item.episodeNumber ? cached : undefined;
-  });
-  const seasonIDs = Array.from(new Set(response.items.flatMap((item, index) => !reusable[index] && item.seasonId ? [item.seasonId] : [])));
-  const seasons = new Map((await Promise.all(seasonIDs.map(async (seasonID) => [seasonID, await api.seasonDetails(seasonID, signal).catch(() => undefined)] as const))).filter((entry) => entry[1] !== undefined));
-  return response.items.map((item, index) => {
-    const cached = reusable[index];
-    if (cached) return { ...item, episodeTitle: cached.episodeTitle, episodeOverview: cached.episodeOverview, episodeStillUrl: cached.episodeStillUrl, episodeAirDate: cached.episodeAirDate };
-    const episode = item.seasonId ? seasons.get(item.seasonId)?.episodes.find((candidate) => candidate.id === item.titleId) : undefined;
-    return episode ? { ...item, episodeTitle: episode.name, episodeOverview: episode.overview, episodeStillUrl: episode.stillUrl, episodeAirDate: episode.airDate } : item;
+    if (!cached || cached.seasonId !== item.seasonId || cached.seasonNumber !== item.seasonNumber || cached.episodeNumber !== item.episodeNumber) return item;
+    return {
+      ...item,
+      title: item.title ?? cached.title,
+      posterUrl: item.posterUrl ?? cached.posterUrl,
+      backgroundUrl: item.backgroundUrl ?? cached.backgroundUrl,
+      releaseInfo: item.releaseInfo ?? cached.releaseInfo,
+      resourceId: item.resourceId ?? cached.resourceId,
+      resourceProvider: item.resourceProvider ?? cached.resourceProvider,
+      episodeTitle: item.episodeTitle ?? cached.episodeTitle,
+      episodeStillUrl: item.episodeStillUrl ?? cached.episodeStillUrl,
+      episodeAirDate: item.episodeAirDate ?? cached.episodeAirDate,
+    };
   });
 }
 
@@ -647,7 +653,7 @@ export function HomePage({ onOpenMedia, mediaRevision, mediaPreferences }: { onO
       setLoading(true);
     }
 
-    void loadContinueItems(controller.signal, cachedContinue?.fresh ? cachedContinue.items : []).then((items) => {
+    void loadContinueItems(controller.signal, cachedContinue?.items ?? []).then((items) => {
       if (!isCurrent()) return;
       setContinueItems(items);
       writeContinueCache(profileID, cacheScope, items);
@@ -782,7 +788,7 @@ export function HomePage({ onOpenMedia, mediaRevision, mediaPreferences }: { onO
     const cacheScope = api.metadataScope();
     const cached = readContinueCache(profileID, cacheScope);
     let active = true;
-    void loadContinueItems(profileRequestSignal, cached?.fresh ? cached.items : []).then((items) => {
+    void loadContinueItems(profileRequestSignal, cached?.items ?? []).then((items) => {
       if (!active) return;
       setContinueItems(items);
       writeContinueCache(profileID, cacheScope, items);

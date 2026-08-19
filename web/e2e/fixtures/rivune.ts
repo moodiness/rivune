@@ -1594,8 +1594,8 @@ export class RivuneHarness {
     }
     if (path === "/continue-watching") {
       const items = profileAtRequest === "bob"
-        ? [{ titleId: "bob-episode", mediaType: "episode", seriesId: "bob-series", seasonId: "bob-season", seasonNumber: 1, episodeNumber: 1, positionSeconds: 60, durationSeconds: 1200, version: 1, reason: "resume", title: "Bob Queue", resourceId: "bob-resource", resourceProvider: "imdb", lastWatchedAt: createdAt }]
-        : [{ titleId: "episode-1", mediaType: "episode", seriesId: "series-1", seasonId: "season-1", seasonNumber: 1, episodeNumber: 1, positionSeconds: 321, durationSeconds: 1800, version: 4, reason: "resume", title: "Signal Horizon", resourceId: "tt9000:1:1", resourceProvider: "imdb", lastWatchedAt: createdAt }];
+        ? [{ titleId: "bob-episode", mediaType: "episode", seriesId: "bob-series", seasonId: "bob-season", seasonNumber: 1, episodeNumber: 1, positionSeconds: 60, durationSeconds: 1200, version: 1, reason: "resume", title: "Bob Queue", posterUrl: "https://fixtures.rivune.test/bob-series-poster.svg", backgroundUrl: "https://fixtures.rivune.test/bob-series-backdrop.svg", releaseInfo: "2024", resourceId: "bob-resource", resourceProvider: "imdb", episodeTitle: "Bob Pilot", episodeStillUrl: "https://fixtures.rivune.test/bob-episode-still.svg", episodeAirDate: "2024-01-02", lastWatchedAt: createdAt }]
+        : [{ titleId: "episode-1", mediaType: "episode", seriesId: "series-1", seasonId: "season-1", seasonNumber: 1, episodeNumber: 1, positionSeconds: 321, durationSeconds: 1800, version: 4, reason: "resume", title: "Signal Horizon", posterUrl: "https://fixtures.rivune.test/series-poster.svg", backgroundUrl: "https://fixtures.rivune.test/series-backdrop.svg", releaseInfo: "2024", resourceId: "tt9000:1:1", resourceProvider: "imdb", episodeTitle: "First Light", episodeStillUrl: "https://fixtures.rivune.test/episode-1-still.svg", episodeAirDate: "2024-01-03", lastWatchedAt: createdAt }];
       await json(route, { items });
       return;
     }

@@ -1,0 +1,658 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="Rivune.App.MainPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:local="using:Rivune.App"
+    xmlns:media="using:Rivune.Windows"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    Background="{ThemeResource RivuneCanvasBrush}"
+    KeyDown="Page_KeyDown"
+    mc:Ignorable="d">
+    <Page.Resources>
+        <ControlTemplate x:Key="RivuneMarkTemplate" TargetType="ContentControl">
+            <Viewbox Stretch="Uniform">
+                <Canvas Width="64" Height="64">
+                    <Path Fill="White" Data="M14 12.55H38.48L41.21 13.15 43.77 14.43 45.05 15.36 47.27 17.75 48.46 19.72 49.66 23.13 50 25.86 49.74 29.18 49.06 31.57 47.78 34.13 46.42 35.92 44.54 37.63 42.58 38.82 40.27 39.51 33.45 33.28 33.36 33.02 34.39 32.68 37.63 32.43 39.17 32 40.27 31.32 41.47 30.12 42.41 28.25 42.66 27.05 42.66 25.69 42.32 24.24 41.38 22.53 39.93 21.17 38.91 20.65 37.37 20.31 24.32 20.31 23.13 19.97 21.68 19.2 19.8 17.84Z" />
+                    <Path Fill="White" Data="M16.39 22.02 16.64 21.51 16.99 21.34 17.58 21.42 27.99 29.01 27.82 29.95 17.41 37.12 16.73 37.03 16.39 36.52Z" />
+                    <Path Fill="White" Data="M21.08 38.65 26.37 34.82 27.65 34.3 28.84 34.47 31.23 36.27 43.94 48.12 47.27 51.45 36.18 51.45 34.82 51.11 33.54 50.26 30.89 47.87 27.56 44.63 21.42 39.17Z" />
+                </Canvas>
+            </Viewbox>
+        </ControlTemplate>
+    </Page.Resources>
+
+
+    <Grid x:Name="Root" Background="{ThemeResource RivuneCanvasBrush}" XYFocusKeyboardNavigation="Enabled">
+        <VisualStateManager.VisualStateGroups>
+            <VisualStateGroup x:Name="ResponsiveStates">
+                <VisualState x:Name="Compact">
+                    <VisualState.StateTriggers><AdaptiveTrigger MinWindowWidth="0" /></VisualState.StateTriggers>
+                    <VisualState.Setters>
+                        <Setter Target="PageInset.Margin" Value="16" />
+                        <Setter Target="ProfileInset.Margin" Value="16,20,16,48" />
+                        <Setter Target="DashboardInset.Margin" Value="16,8,16,48" />
+                        <Setter Target="SearchInset.Margin" Value="16,16,16,48" />
+                        <Setter Target="LibraryInset.Margin" Value="16,16,16,48" />
+                        <Setter Target="CalendarInset.Margin" Value="16,16,16,48" />
+                        <Setter Target="SearchRouteHeading.Visibility" Value="Collapsed" />
+                        <Setter Target="LibraryRouteHeading.Visibility" Value="Collapsed" />
+                        <Setter Target="CalendarHeading.(AutomationProperties.HeadingLevel)" Value="None" />
+                        <Setter Target="HeroPanel.Margin" Value="-16,0,-16,0" />
+                        <Setter Target="HeroPanel.CornerRadius" Value="0" />
+                        <Setter Target="HeroCopy.HorizontalAlignment" Value="Center" />
+                        <Setter Target="HeroCopy.MaxWidth" Value="480" />
+                        <Setter Target="HeroTitle.TextAlignment" Value="Center" />
+                        <Setter Target="HeroMetadata.TextAlignment" Value="Center" />
+                        <Setter Target="HeroLogo.HorizontalAlignment" Value="Center" />
+                        <Setter Target="HeroDescription.Visibility" Value="Collapsed" />
+                        <Setter Target="HeroPlayButton.Visibility" Value="Collapsed" />
+                        <Setter Target="HeroMainScrim.Fill" Value="{ThemeResource RivuneHeroCompactScrimBrush}" />
+                        <Setter Target="HeroTitle.(AutomationProperties.HeadingLevel)" Value="None" />
+                        <Setter Target="HeroInfoButton.(AutomationProperties.Name)" Value="View details" />
+                        <Setter Target="HeroInfoButton.Style" Value="{StaticResource RivunePrimaryButton}" />
+                        <Setter Target="HeroInfoButton.MinHeight" Value="48" />
+                        <Setter Target="HeroInfoButton.Padding" Value="16,4" />
+                        <Setter Target="HeroActions.HorizontalAlignment" Value="Center" />
+                        <Setter Target="DetailOverviewScroller.MaxHeight" Value="144" />
+                        <Setter Target="HeroBottomScrim.Visibility" Value="Collapsed" />
+                        <Setter Target="ViewerPageRoot.Margin" Value="0,0,0,56" />
+                        <Setter Target="CompactHeader.Visibility" Value="Visible" />
+                        <Setter Target="TabletDock.Visibility" Value="Collapsed" />
+                        <Setter Target="BottomNav.Visibility" Value="Visible" />
+                        <Setter Target="AuthIntro.Visibility" Value="Collapsed" />
+                        <Setter Target="AuthForm.(Grid.Column)" Value="0" />
+                        <Setter Target="AuthForm.(Grid.ColumnSpan)" Value="2" />
+                        <Setter Target="AuthColumns.ColumnSpacing" Value="0" />
+                        <Setter Target="PairingActions.ColumnSpacing" Value="0" />
+                        <Setter Target="CopyCodeButton.(Grid.Column)" Value="0" />
+                        <Setter Target="CopyCodeButton.(Grid.ColumnSpan)" Value="2" />
+                        <Setter Target="PairingDisconnectButton.(Grid.Row)" Value="1" />
+                        <Setter Target="PairingDisconnectButton.(Grid.Column)" Value="0" />
+                        <Setter Target="PairingDisconnectButton.(Grid.ColumnSpan)" Value="2" />
+                        <Setter Target="DetailSummary.Margin" Value="16,112,16,24" />
+                        <Setter Target="DetailSummary.MaxWidth" Value="560" />
+                        <Setter Target="DetailStatus.Margin" Value="16,0" />
+                        <Setter Target="DetailSections.Margin" Value="16,0" />
+                        <Setter Target="SettingsContent.Margin" Value="16,16,16,48" />
+                        <Setter Target="PlayerTopBar.Padding" Value="4,4,16,16" />
+                        <Setter Target="PlayerBottomBar.Padding" Value="16,32,16,8" />
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="Medium">
+                    <VisualState.StateTriggers><AdaptiveTrigger MinWindowWidth="600" /></VisualState.StateTriggers>
+                    <VisualState.Setters>
+                        <Setter Target="PageInset.Margin" Value="24" />
+                        <Setter Target="ProfileInset.Margin" Value="24,20,24,48" />
+                        <Setter Target="DashboardInset.Margin" Value="24,88,24,48" />
+                        <Setter Target="SearchInset.Margin" Value="24,88,24,48" />
+                        <Setter Target="LibraryInset.Margin" Value="24,88,24,48" />
+                        <Setter Target="CalendarInset.Margin" Value="24,88,24,48" />
+                        <Setter Target="SearchRouteHeading.Visibility" Value="Collapsed" />
+                        <Setter Target="LibraryRouteHeading.Visibility" Value="Collapsed" />
+                        <Setter Target="CalendarHeading.(AutomationProperties.HeadingLevel)" Value="Level1" />
+                        <Setter Target="HeroPanel.Margin" Value="0" />
+                        <Setter Target="HeroPanel.CornerRadius" Value="{StaticResource RivuneRadiusExtraLarge}" />
+                        <Setter Target="HeroCopy.HorizontalAlignment" Value="Left" />
+                        <Setter Target="HeroCopy.MaxWidth" Value="560" />
+                        <Setter Target="HeroTitle.TextAlignment" Value="Left" />
+                        <Setter Target="HeroMetadata.TextAlignment" Value="Left" />
+                        <Setter Target="HeroLogo.HorizontalAlignment" Value="Left" />
+                        <Setter Target="HeroDescription.Visibility" Value="Visible" />
+                        <Setter Target="HeroPlayButton.Visibility" Value="Visible" />
+                        <Setter Target="HeroMainScrim.Fill" Value="{ThemeResource RivuneHeroScrimBrush}" />
+                        <Setter Target="HeroTitle.(AutomationProperties.HeadingLevel)" Value="Level1" />
+                        <Setter Target="HeroInfoButton.(AutomationProperties.Name)" Value="More information" />
+                        <Setter Target="HeroInfoButton.Style" Value="{StaticResource RivuneLabeledActionButton}" />
+                        <Setter Target="HeroActions.HorizontalAlignment" Value="Left" />
+                        <Setter Target="DetailOverviewScroller.MaxHeight" Value="96" />
+                        <Setter Target="HeroBottomScrim.Visibility" Value="Visible" />
+                        <Setter Target="ViewerPageRoot.Margin" Value="0" />
+                        <Setter Target="CompactHeader.Visibility" Value="Collapsed" />
+                        <Setter Target="TabletDock.Visibility" Value="Visible" />
+                        <Setter Target="BottomNav.Visibility" Value="Collapsed" />
+                        <Setter Target="DetailSummary.Margin" Value="24,176,24,32" />
+                        <Setter Target="DetailStatus.Margin" Value="24,0" />
+                        <Setter Target="DetailSections.Margin" Value="24,0" />
+                        <Setter Target="SettingsContent.Margin" Value="24,88,24,48" />
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="Expanded">
+                    <VisualState.StateTriggers><AdaptiveTrigger MinWindowWidth="840" /></VisualState.StateTriggers>
+                    <VisualState.Setters>
+                        <Setter Target="TabletDock.Visibility" Value="Visible" />
+                        <Setter Target="PageInset.Margin" Value="32" />
+                        <Setter Target="DashboardInset.Margin" Value="32,88,32,48" />
+                        <Setter Target="ProfileInset.Margin" Value="32,20,32,48" />
+                        <Setter Target="SearchInset.Margin" Value="32,88,32,48" />
+                        <Setter Target="LibraryInset.Margin" Value="32,88,32,48" />
+                        <Setter Target="CalendarInset.Margin" Value="32,88,32,48" />
+                        <Setter Target="AuthIntro.Visibility" Value="Visible" />
+                        <Setter Target="AuthForm.(Grid.Column)" Value="1" />
+                        <Setter Target="AuthForm.(Grid.ColumnSpan)" Value="1" />
+                        <Setter Target="AuthColumns.ColumnSpacing" Value="40" />
+                        <Setter Target="DetailSummary.Margin" Value="32,176,32,40" />
+                        <Setter Target="DetailSummary.MaxWidth" Value="720" />
+                        <Setter Target="DetailStatus.Margin" Value="32,0" />
+                        <Setter Target="DetailSections.Margin" Value="32,0" />
+                        <Setter Target="SettingsContent.Margin" Value="32,88,32,48" />
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="Wide">
+                    <VisualState.StateTriggers><AdaptiveTrigger MinWindowWidth="1200" /></VisualState.StateTriggers>
+                    <VisualState.Setters>
+                        <Setter Target="TabletDock.Visibility" Value="Visible" />
+                        <Setter Target="PageInset.Margin" Value="48" />
+                        <Setter Target="DashboardInset.Margin" Value="48,88,48,48" />
+                        <Setter Target="ProfileInset.Margin" Value="48,20,48,48" />
+                        <Setter Target="SearchInset.Margin" Value="48,88,48,48" />
+                        <Setter Target="LibraryInset.Margin" Value="48,88,48,48" />
+                        <Setter Target="CalendarInset.Margin" Value="48,88,48,48" />
+                        <Setter Target="DetailSummary.Margin" Value="48,176,48,40" />
+                        <Setter Target="DetailStatus.Margin" Value="48,0" />
+                        <Setter Target="DetailSections.Margin" Value="48,0" />
+                        <Setter Target="SettingsContent.Margin" Value="48,88,48,48" />
+                    </VisualState.Setters>
+                </VisualState>
+            </VisualStateGroup>
+            <VisualStateGroup x:Name="InputStates">
+                <VisualState x:Name="PointerMode" />
+                <VisualState x:Name="TvMode">
+                    <VisualState.Setters>
+                        <Setter Target="CompactHeader.Visibility" Value="Collapsed" />
+                        <Setter Target="BottomNav.Visibility" Value="Collapsed" />
+                        <Setter Target="TabletDock.Visibility" Value="Visible" />
+                        <Setter Target="TabletDock.HorizontalAlignment" Value="Left" />
+                        <Setter Target="TabletDock.VerticalAlignment" Value="Center" />
+                        <Setter Target="TabletDock.Width" Value="72" />
+                        <Setter Target="TabletDock.Height" Value="NaN" />
+                        <Setter Target="TabletDock.Margin" Value="12" />
+                        <Setter Target="TabletDock.Padding" Value="8" />
+                        <Setter Target="TabletDock.Background" Value="{ThemeResource RivuneTvDockBrush}" />
+                        <Setter Target="TabletDock.BorderBrush" Value="{ThemeResource RivuneHairlineBrush}" />
+                        <Setter Target="TabletDock.BorderThickness" Value="1" />
+                        <Setter Target="TabletDockStack.Orientation" Value="Vertical" />
+                        <Setter Target="ViewerPageRoot.Margin" Value="96,0,0,0" />
+                        <Setter Target="HomeNav.Width" Value="56" />
+                        <Setter Target="HomeNav.Height" Value="56" />
+                        <Setter Target="SearchNav.Width" Value="56" />
+                        <Setter Target="SearchNav.Height" Value="56" />
+                        <Setter Target="LibraryNav.Width" Value="56" />
+                        <Setter Target="LibraryNav.Height" Value="56" />
+                        <Setter Target="CalendarNav.Width" Value="56" />
+                        <Setter Target="CalendarNav.Height" Value="56" />
+                        <Setter Target="DockDivider.Width" Value="56" />
+                        <Setter Target="DockDivider.Height" Value="1" />
+                        <Setter Target="DockDivider.Margin" Value="0,8" />
+                        <Setter Target="DockAccountButton.Width" Value="56" />
+                        <Setter Target="DockAccountButton.Height" Value="56" />
+                        <Setter Target="HeroPlayButton.MinHeight" Value="56" />
+                        <Setter Target="HeroPlayButton.CornerRadius" Value="28" />
+                        <Setter Target="HeroPlayButton.Padding" Value="16,0" />
+                        <Setter Target="HeroPlayButton.FontSize" Value="16" />
+                        <Setter Target="HeroInfoButton.MinHeight" Value="56" />
+                        <Setter Target="HeroInfoButton.CornerRadius" Value="28" />
+                        <Setter Target="HeroInfoButton.Padding" Value="16,0" />
+                        <Setter Target="HeroInfoButton.FontSize" Value="16" />
+                        <Setter Target="ServerAddressBox.MinHeight" Value="64" />
+                        <Setter Target="SearchBox.MinHeight" Value="64" />
+                        <Setter Target="ConnectButton.MinHeight" Value="60" />
+                        <Setter Target="PlaySourceButton.MinHeight" Value="60" />
+                        <Setter Target="RefreshSourcesButton.Width" Value="56" />
+                        <Setter Target="RefreshSourcesButton.Height" Value="56" />
+                        <Setter Target="PlayerTopBar.Padding" Value="48,12,48,32" />
+                        <Setter Target="PlayerBottomBar.Padding" Value="48,40,48,32" />
+                        <Setter Target="PlayerAudioButton.Width" Value="56" />
+                        <Setter Target="PlayerAudioButton.Height" Value="56" />
+                        <Setter Target="PlayerSubtitlesButton.Width" Value="56" />
+                        <Setter Target="PlayerSubtitlesButton.Height" Value="56" />
+                        <Setter Target="PlayerAspectButton.Width" Value="56" />
+                        <Setter Target="PlayerAspectButton.Height" Value="56" />
+                        <Setter Target="PlayerSpeedButton.Width" Value="56" />
+                        <Setter Target="PlayerSpeedButton.Height" Value="56" />
+                        <Setter Target="PlayerMiniPlayerButton.Width" Value="56" />
+                        <Setter Target="PlayerMiniPlayerButton.Height" Value="56" />
+                        <Setter Target="PlayerFullscreenButton.Width" Value="56" />
+                        <Setter Target="PlayerFullscreenButton.Height" Value="56" />
+                        <Setter Target="PlayerLockButton.Width" Value="56" />
+                        <Setter Target="PlayerLockButton.Height" Value="56" />
+                        <Setter Target="PlayerNextButton.Width" Value="56" />
+                        <Setter Target="PlayerNextButton.Height" Value="56" />
+                        <Setter Target="PlayerTransportControls.Spacing" Value="24" />
+                        <Setter Target="SeekBackButton.Width" Value="56" />
+                        <Setter Target="SeekBackButton.Height" Value="56" />
+                        <Setter Target="SeekBackButton.CornerRadius" Value="28" />
+                        <Setter Target="PlayPauseButton.Width" Value="64" />
+                        <Setter Target="PlayPauseButton.Height" Value="64" />
+                        <Setter Target="PlayPauseButton.MinWidth" Value="64" />
+                        <Setter Target="PlayPauseButton.CornerRadius" Value="32" />
+                        <Setter Target="SeekForwardButton.Width" Value="56" />
+                        <Setter Target="SeekForwardButton.Height" Value="56" />
+                        <Setter Target="SeekForwardButton.CornerRadius" Value="28" />
+                    </VisualState.Setters>
+                </VisualState>
+            </VisualStateGroup>
+        </VisualStateManager.VisualStateGroups>
+
+        <!-- Opening Rivune -->
+        <Grid x:Name="BootView" Visibility="Visible">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8" MaxWidth="420">
+                <Border Width="48" Height="48" Margin="0,0,0,8" Background="{ThemeResource RivuneBrandMarkBrush}" BorderBrush="{ThemeResource RivuneStrongOutlineBrush}" BorderThickness="1" CornerRadius="{StaticResource RivuneRadiusSmall}">
+                    <ContentControl Width="48" Height="48" IsTabStop="False" Template="{StaticResource RivuneMarkTemplate}" />
+                </Border>
+                <TextBlock x:Name="BootStatus" Text="Opening Rivune…" Style="{StaticResource RivuneTitleLargeTextStyle}" TextAlignment="Center" AutomationProperties.LiveSetting="Polite" />
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="12">
+                    <ProgressRing IsActive="True" Width="16" Height="16" Foreground="{ThemeResource RivuneAccentBrush}" />
+                    <TextBlock Text="In progress" Style="{StaticResource RivuneBodyMediumTextStyle}" VerticalAlignment="Center" />
+                </StackPanel>
+                <Button Click="UseAnotherServer_Click" Style="{StaticResource RivuneDangerTextButton}" HorizontalAlignment="Center" Margin="0,8,0,0" AutomationProperties.Name="Disconnect and use another server"><StackPanel Orientation="Horizontal" Spacing="8"><FontIcon Glyph="&#xE8AC;" FontSize="20" /><TextBlock Text="Disconnect" VerticalAlignment="Center" /></StackPanel></Button>
+            </StackPanel>
+        </Grid>
+
+        <!-- First connection and pairing -->
+        <ScrollViewer x:Name="AuthView" Visibility="Collapsed" HorizontalScrollMode="Disabled" VerticalScrollBarVisibility="Auto">
+            <Grid x:Name="PageInset" HorizontalAlignment="Center" MaxWidth="1120" VerticalAlignment="Center" MinHeight="640">
+                <Grid x:Name="AuthColumns" ColumnSpacing="0">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="2*" /><ColumnDefinition Width="3*" /></Grid.ColumnDefinitions>
+                    <StackPanel x:Name="AuthIntro" Visibility="Collapsed" VerticalAlignment="Center" Margin="0,0,32,0" Spacing="16" MaxWidth="400">
+                        <StackPanel Orientation="Horizontal" Spacing="12">
+                            <Border Width="48" Height="48" Background="{ThemeResource RivuneBrandMarkBrush}" BorderBrush="{ThemeResource RivuneStrongOutlineBrush}" BorderThickness="1" CornerRadius="{StaticResource RivuneRadiusSmall}"><ContentControl Width="48" Height="48" IsTabStop="False" Template="{StaticResource RivuneMarkTemplate}" /></Border>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="Rivune" Style="{StaticResource RivuneTitleMediumTextStyle}" CharacterSpacing="-9" />
+                                <TextBlock Text="Your stories, gathered in one place." Style="{StaticResource RivuneBodySmallTextStyle}" />
+                            </StackPanel>
+                        </StackPanel>
+                    </StackPanel>
+                    <Border x:Name="AuthForm" Grid.Column="0" Grid.ColumnSpan="2" Style="{StaticResource RivuneFunctionalSurface}" MaxWidth="560" HorizontalAlignment="Stretch" VerticalAlignment="Center" Padding="24">
+                        <Grid>
+                            <StackPanel x:Name="ServerPanel" Spacing="12">
+                                <TextBlock Text="FIRST CONNECTION" Style="{StaticResource RivuneEyebrowStyle}" />
+                                <TextBlock Text="Where does your Rivune live?" Style="{StaticResource RivuneHeadlineMediumTextStyle}" AutomationProperties.HeadingLevel="Level1" />
+                                <TextBlock Text="Enter the address of your Rivune server. Your library stays on your server." Style="{StaticResource RivuneBodyMediumTextStyle}" Margin="0,0,0,4" />
+                                <StackPanel Spacing="6">
+                                    <TextBlock Text="Server address" Style="{StaticResource RivuneBodyMediumTextStyle}" Foreground="{ThemeResource RivunePrimaryTextBrush}" />
+                                    <TextBox x:Name="ServerAddressBox" Height="52" PlaceholderText="https://rivune.example" InputScope="Url" Style="{StaticResource RivuneTextField}" VerticalContentAlignment="Center" Padding="12,14,12,6" AutomationProperties.Name="Server address" KeyDown="ServerAddressBox_KeyDown" TextChanged="ServerAddressBox_TextChanged" />
+                                </StackPanel>
+                                <TextBlock x:Name="ServerSupportText" Text="Example: https://media.example.com. HTTPS is required except for localhost." Style="{StaticResource RivuneBodySmallTextStyle}" />
+                                <InfoBar x:Name="ServerError" IsOpen="False" Severity="Error" IsClosable="False" />
+                                <Grid HorizontalAlignment="Center" ColumnSpacing="24">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                    <Button x:Name="ConnectButton" Click="Connect_Click" Style="{StaticResource RivuneZoomTextButton}"><StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8"><FontIcon Glyph="&#xE72A;" FontSize="20" /><TextBlock x:Name="ConnectButtonLabel" Text="Continue" VerticalAlignment="Center" /></StackPanel></Button>
+                                    <Button x:Name="CheckUpdatesButton" Grid.Column="1" Click="CheckUpdates_Click" Style="{StaticResource RivuneZoomTextButton}">
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8"><FontIcon Glyph="&#xE895;" FontSize="20" /><TextBlock Text="Check now" VerticalAlignment="Center" /></StackPanel>
+                                    </Button>
+                                </Grid>
+                            </StackPanel>
+
+                            <StackPanel x:Name="PairingPanel" Visibility="Collapsed" Spacing="20">
+                                <StackPanel Spacing="8" HorizontalAlignment="Center" MaxWidth="480">
+                                    <TextBlock Text="DEVICE PAIRING" Style="{StaticResource RivuneEyebrowStyle}" TextAlignment="Center" />
+                                    <TextBlock Text="Connect this device to Rivune." Style="{StaticResource RivuneHeadlineMediumTextStyle}" TextAlignment="Center" AutomationProperties.HeadingLevel="Level1" />
+                                    <TextBlock Text="Ask an administrator to approve this one-time code in Rivune." Style="{StaticResource RivuneBodyMediumTextStyle}" TextAlignment="Center" />
+                                </StackPanel>
+                                <Border Background="{ThemeResource RivuneSurfaceBrush}" BorderBrush="{ThemeResource RivuneHairlineBrush}" BorderThickness="1" CornerRadius="{StaticResource RivuneRadiusLarge}" Padding="24">
+                                    <StackPanel Spacing="12" HorizontalAlignment="Stretch">
+                                        <TextBlock Text="ONE-TIME CODE" Style="{StaticResource RivuneEyebrowStyle}" TextAlignment="Center" />
+                                        <TextBlock x:Name="UserCodeText" FontFamily="Consolas" FontSize="44" FontWeight="SemiBold" CharacterSpacing="45" FlowDirection="LeftToRight" Foreground="{ThemeResource RivunePrimaryTextBrush}" TextWrapping="Wrap" TextAlignment="Center" HorizontalAlignment="Stretch" />
+                                        <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
+                                            <ProgressRing x:Name="PairingProgress" IsActive="True" Width="16" Height="16" Foreground="{ThemeResource RivuneAccentBrush}" />
+                                            <TextBlock x:Name="PairingStatus" Text="Creating a new code…" Style="{StaticResource RivuneBodyMediumTextStyle}" AutomationProperties.LiveSetting="Polite" VerticalAlignment="Center" TextAlignment="Center" />
+                                        </StackPanel>
+                                        <TextBlock x:Name="PairingExpiry" Style="{StaticResource RivuneBodySmallTextStyle}" FlowDirection="LeftToRight" Visibility="Collapsed" TextAlignment="Center" />
+                                    </StackPanel>
+                                </Border>
+                                <InfoBar x:Name="PairingError" IsOpen="False" IsClosable="False" Severity="Error" AutomationProperties.LiveSetting="Assertive" />
+                                <Button x:Name="NewCodeButton" Content="Get a new code" Visibility="Collapsed" Click="NewCode_Click" Style="{StaticResource RivunePrimaryButton}" />
+                                <Grid x:Name="PairingActions" HorizontalAlignment="Center" ColumnSpacing="24" RowSpacing="8">
+                                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                    <Button x:Name="CopyCodeButton" Click="CopyCode_Click" Style="{StaticResource RivuneZoomTextButton}" IsEnabled="False" AutomationProperties.Name="Copy code"><StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8"><FontIcon Glyph="&#xE8C8;" FontSize="20" /><TextBlock Text="Copy code" VerticalAlignment="Center" /></StackPanel></Button>
+                                    <Button x:Name="PairingDisconnectButton" Grid.Column="1" Click="ChangeServer_Click" Style="{StaticResource RivuneZoomDangerButton}" AutomationProperties.Name="Disconnect"><StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8"><FontIcon Glyph="&#xE8AC;" FontSize="20" /><TextBlock Text="Disconnect" VerticalAlignment="Center" /></StackPanel></Button>
+                                </Grid>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </Grid>
+            </Grid>
+        </ScrollViewer>
+
+        <!-- Profiles -->
+        <Grid x:Name="ProfileView" Visibility="Collapsed">
+            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+            <Grid Height="64" Padding="16,8" BorderBrush="{ThemeResource RivuneHairlineBrush}" BorderThickness="0,0,0,1">
+                <Border Width="40" Height="40" Background="{ThemeResource RivuneBrandMarkBrush}" BorderBrush="{ThemeResource RivuneStrongOutlineBrush}" BorderThickness="1" CornerRadius="{StaticResource RivuneRadiusSmall}" HorizontalAlignment="Center" VerticalAlignment="Center"><ContentControl Width="40" Height="40" IsTabStop="False" Template="{StaticResource RivuneMarkTemplate}" /></Border>
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <Button x:Name="RefreshProfilesButton" Click="RefreshProfiles_Click" Style="{StaticResource RivuneHeaderActionButton}" Foreground="White" AutomationProperties.Name="Refresh profiles"><FontIcon Glyph="&#xE72C;" FontSize="20" /></Button>
+                    <Button x:Name="ProfileLogoutButton" Click="ProfileLogout_Click" Style="{StaticResource RivuneHeaderActionButton}" Foreground="{ThemeResource RivuneDangerBrush}" AutomationProperties.Name="Disconnect"><FontIcon Glyph="&#xE8AC;" FontSize="20" /></Button>
+                </StackPanel>
+            </Grid>
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                <StackPanel x:Name="ProfileInset" Margin="24,20,24,48" MaxWidth="920" HorizontalAlignment="Center" Spacing="20">
+                    <StackPanel Spacing="8" MaxWidth="640" HorizontalAlignment="Center">
+                        <TextBlock Text="WHO’S WATCHING?" Style="{StaticResource RivuneEyebrowStyle}" TextAlignment="Center" />
+                        <TextBlock Text="Choose a profile." Style="{StaticResource RivuneHeadlineMediumTextStyle}" TextAlignment="Center" AutomationProperties.HeadingLevel="Level1" />
+                        <TextBlock Text="Recommendations and access follow the selected profile." Style="{StaticResource RivuneBodyMediumTextStyle}" TextAlignment="Center" />
+                    </StackPanel>
+                    <InfoBar x:Name="ProfileBanner" IsOpen="False" IsClosable="True" AutomationProperties.LiveSetting="Assertive" />
+                    <Grid HorizontalAlignment="Stretch" MaxWidth="320" ColumnSpacing="12">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                        <ProgressRing x:Name="ProfileProgress" IsActive="False" Width="20" Height="20" />
+                        <TextBlock Grid.Column="1" x:Name="ProfileLoadingStatus" Text="Loading profiles…" Style="{StaticResource RivuneBodyMediumTextStyle}" AutomationProperties.LiveSetting="Polite" Visibility="Collapsed" VerticalAlignment="Center" />
+                    </Grid>
+                    <GridView x:Name="ProfileGrid" IsItemClickEnabled="True" ItemClick="ProfileGrid_ItemClick" SelectionMode="None" HorizontalAlignment="Stretch" AutomationProperties.Name="Profiles">
+                        <GridView.ItemsPanel><ItemsPanelTemplate><ItemsWrapGrid Orientation="Horizontal" /></ItemsPanelTemplate></GridView.ItemsPanel>
+                    </GridView>
+                    <StackPanel x:Name="ProfileEmpty" Visibility="Collapsed" Spacing="8" HorizontalAlignment="Stretch" Padding="8,16">
+                        <TextBlock Text="No profile is available." Style="{StaticResource RivuneTitleMediumTextStyle}" TextAlignment="Center" AutomationProperties.HeadingLevel="Level2" />
+                        <TextBlock Text="Ask the server administrator to create or enable a profile." Style="{StaticResource RivuneBodyMediumTextStyle}" TextAlignment="Center" />
+                    </StackPanel>
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+
+        <!-- Main four-tab Android viewer shell -->
+        <Grid x:Name="DashboardView" Visibility="Collapsed">
+            <Grid x:Name="ViewerPageRoot">
+                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                <Grid x:Name="CompactHeader" Visibility="Collapsed" MinHeight="48" Padding="16,0">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <TextBlock x:Name="DashboardHeading" Text="Home" Style="{StaticResource RivuneTitleLargeTextStyle}" VerticalAlignment="Center" AutomationProperties.HeadingLevel="Level1" />
+                    <Button Grid.Column="1" x:Name="ProfileMenuButton" Click="ProfileMenu_Click" Style="{StaticResource RivuneIconButton}" AutomationProperties.Name="Current profile"><Grid Width="32" Height="32"><TextBlock x:Name="CompactProfileInitial" Text="P" Style="{StaticResource RivuneTitleSmallTextStyle}" HorizontalAlignment="Center" VerticalAlignment="Center" /><Image x:Name="CompactProfileImage" Width="32" Height="32" HorizontalAlignment="Center" VerticalAlignment="Center" Stretch="UniformToFill" Opacity="0"><Image.Clip><RectangleGeometry Rect="0,0,32,32" /></Image.Clip></Image></Grid></Button>
+                </Grid>
+                <Grid Grid.Row="1">
+                    <ScrollViewer x:Name="HomeView" HorizontalContentAlignment="Stretch" HorizontalScrollMode="Disabled" VerticalScrollBarVisibility="Auto">
+                        <StackPanel x:Name="DashboardInset" HorizontalAlignment="Stretch" Spacing="24">
+                            <InfoBar x:Name="DashboardBanner" IsOpen="False" IsClosable="False" />
+                            <Button x:Name="DashboardRetryButton" Content="Retry" Click="DashboardRetry_Click" Style="{StaticResource RivuneTextButton}" HorizontalAlignment="Left" Visibility="Collapsed" />
+                            <Grid HorizontalAlignment="Center" ColumnSpacing="12">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                <ProgressRing x:Name="DashboardProgress" IsActive="False" Width="20" Height="20" />
+                                <TextBlock Grid.Column="1" x:Name="DashboardLoadingStatus" Text="Loading your home" Style="{StaticResource RivuneBodyMediumTextStyle}" AutomationProperties.LiveSetting="Polite" Visibility="Collapsed" VerticalAlignment="Center" />
+                            </Grid>
+                            <Border x:Name="HeroPanel" Height="420" Background="{ThemeResource RivuneArtworkFallbackBrush}" CornerRadius="{StaticResource RivuneRadiusExtraLarge}" Visibility="Collapsed" PointerEntered="HeroPanel_PointerEntered" GotFocus="HeroPanel_GotFocus">
+                                <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                                    <Image x:Name="HeroImage" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Stretch="UniformToFill" Opacity="0" />
+                                    <Rectangle x:Name="HeroMainScrim" Fill="{ThemeResource RivuneHeroScrimBrush}" />
+                                    <Rectangle x:Name="HeroBottomScrim" VerticalAlignment="Bottom" Height="180" Fill="{ThemeResource RivuneHeroBottomScrimBrush}" />
+                                    <StackPanel x:Name="HeroCopy" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="24" Spacing="12" MaxWidth="560">
+                                        <Image x:Name="HeroLogo" Height="52" HorizontalAlignment="Left" Stretch="Uniform" Visibility="Collapsed" />
+                                        <TextBlock x:Name="HeroTitle" Style="{StaticResource RivuneHeadlineLargeTextStyle}" MaxLines="2" TextTrimming="CharacterEllipsis" AutomationProperties.HeadingLevel="Level1" />
+                                        <TextBlock x:Name="HeroMetadata" Style="{StaticResource RivuneBodyMediumTextStyle}" Foreground="{ThemeResource RivunePrimaryTextBrush}" />
+                                        <TextBlock x:Name="HeroDescription" Style="{StaticResource RivuneBodyMediumTextStyle}" Foreground="{ThemeResource RivunePrimaryTextBrush}" MaxLines="3" TextTrimming="CharacterEllipsis" />
+                                        <StackPanel x:Name="HeroActions" Orientation="Horizontal" Spacing="8">
+                                            <Button x:Name="HeroPlayButton" Click="HeroPlay_Click" Style="{StaticResource RivuneLabeledActionButton}" AutomationProperties.Name="Play">
+                                                <StackPanel Orientation="Horizontal" Spacing="8"><FontIcon Glyph="&#xE768;" FontSize="20" /><TextBlock x:Name="HeroPlayLabel" Text="Play" /></StackPanel>
+                                            </Button>
+                                            <Button x:Name="HeroInfoButton" Click="HeroInfo_Click" Style="{StaticResource RivuneLabeledActionButton}" AutomationProperties.Name="More information">
+                                                <StackPanel Orientation="Horizontal" Spacing="8"><FontIcon Glyph="&#xE946;" FontSize="20" /><TextBlock x:Name="HeroInfoLabel" Text="Info" /></StackPanel>
+                                            </Button>
+                                        </StackPanel>
+                                    </StackPanel>
+                                    <StackPanel x:Name="HeroCarouselControls" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="16" Visibility="Collapsed">
+                                        <Button Click="HeroPrevious_Click" Style="{StaticResource RivuneIconButton}" Width="44" Height="44" AutomationProperties.Name="Previous featured title"><FontIcon Glyph="&#xE76B;" /></Button>
+                                        <TextBlock x:Name="HeroPosition" MinWidth="48" TextAlignment="Center" VerticalAlignment="Center" Style="{StaticResource RivuneLabelLargeTextStyle}" />
+                                        <Button Click="HeroNext_Click" Style="{StaticResource RivuneIconButton}" Width="44" Height="44" AutomationProperties.Name="Next featured title"><FontIcon Glyph="&#xE76C;" /></Button>
+                                        <Button x:Name="HeroRotationButton" Content="Pause" Click="HeroRotation_Click" Style="{StaticResource RivuneTextButton}" AutomationProperties.Name="Pause featured title rotation" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                            <StackPanel x:Name="DashboardSections" Spacing="40" />
+                            <StackPanel x:Name="DashboardEmpty" Visibility="Collapsed" Spacing="8" Padding="8,16">
+                                <TextBlock Text="Your home is ready for its first collection." Style="{StaticResource RivuneTitleMediumTextStyle}" AutomationProperties.HeadingLevel="Level2" />
+                                <TextBlock Text="Collections configured on your Rivune server will appear here." Style="{StaticResource RivuneBodyMediumTextStyle}" />
+                            </StackPanel>
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <Grid x:Name="SearchView" Visibility="Collapsed">
+                        <ScrollViewer HorizontalContentAlignment="Stretch" HorizontalScrollMode="Disabled" VerticalScrollBarVisibility="Auto">
+                            <Grid x:Name="SearchInset" Margin="24,88,24,48" HorizontalAlignment="Stretch">
+                                <StackPanel MaxWidth="720" HorizontalAlignment="Stretch" Spacing="20">
+                                    <TextBlock x:Name="SearchRouteHeading" Text="Search" Style="{StaticResource RivuneHeadlineMediumTextStyle}" Visibility="Collapsed" AutomationProperties.HeadingLevel="None" />
+                                    <Grid ColumnSpacing="8" HorizontalAlignment="Stretch">
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                        <Grid VerticalAlignment="Center">
+                                            <TextBox x:Name="SearchBox" PlaceholderText="Movie or series title" Style="{StaticResource RivuneTextField}" Padding="44,14,12,6" VerticalContentAlignment="Center" AutomationProperties.Name="Search Rivune" KeyDown="SearchBox_KeyDown" />
+                                            <FontIcon Glyph="&#xE721;" FontSize="20" Margin="16,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" IsHitTestVisible="False" Foreground="{ThemeResource RivuneSecondaryTextBrush}" />
+                                        </Grid>
+                                        <Button Grid.Column="1" Click="Search_Click" Style="{StaticResource RivunePrimaryButton}" MinWidth="52" Padding="14,4" VerticalAlignment="Center" AutomationProperties.Name="Search"><FontIcon Glyph="&#xE721;" FontSize="20" /></Button>
+                                    </Grid>
+                                    <InfoBar x:Name="SearchBanner" IsOpen="False" IsClosable="False" />
+                                    <Button x:Name="SearchRetryButton" Content="Retry" Click="SearchRetry_Click" Style="{StaticResource RivuneTextButton}" HorizontalAlignment="Left" Visibility="Collapsed" />
+                                    <Grid x:Name="SearchLoading" Visibility="Collapsed" ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><ProgressRing IsActive="True" Width="20" Height="20" /><TextBlock Grid.Column="1" Text="Searching your sources" Style="{StaticResource RivuneBodyMediumTextStyle}" VerticalAlignment="Center" /></Grid>
+                                    <Grid>
+                                        <StackPanel x:Name="SearchResultContent" Spacing="20" Visibility="Collapsed">
+                                            <TextBlock x:Name="SearchResultCount" Style="{StaticResource RivuneLabelLargeTextStyle}" />
+                                            <GridView x:Name="SearchResults" SelectionMode="None" HorizontalAlignment="Stretch">
+                                                <GridView.ItemContainerStyle><Style TargetType="GridViewItem"><Setter Property="IsTabStop" Value="False" /></Style></GridView.ItemContainerStyle>
+                                            </GridView>
+                                            <Button x:Name="SearchMoreButton" Content="Load more" Click="SearchMore_Click" Style="{StaticResource RivuneTextButton}" HorizontalAlignment="Center" Visibility="Collapsed" />
+                                        </StackPanel>
+                                        <StackPanel x:Name="SearchEmpty" Spacing="8" Padding="8"><TextBlock Text="What would you like to watch?" Style="{StaticResource RivuneTitleMediumTextStyle}" /><TextBlock Text="Enter at least two characters to search movies and series." Style="{StaticResource RivuneBodyMediumTextStyle}" /></StackPanel>
+                                    </Grid>
+                                </StackPanel>
+                            </Grid>
+                        </ScrollViewer>
+                    </Grid>
+
+                    <Grid x:Name="LibraryView" Visibility="Collapsed">
+                        <ScrollViewer HorizontalContentAlignment="Stretch" HorizontalScrollMode="Disabled" VerticalScrollBarVisibility="Auto">
+                            <StackPanel x:Name="LibraryInset" Margin="24,88,24,48" MaxWidth="1120" HorizontalAlignment="Stretch" Spacing="20">
+                                <TextBlock x:Name="LibraryRouteHeading" Text="Library" Style="{StaticResource RivuneHeadlineMediumTextStyle}" Visibility="Collapsed" AutomationProperties.HeadingLevel="None" />
+                                <ScrollViewer HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Auto" VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Disabled" BringIntoViewOnFocusChange="True" HorizontalAlignment="Stretch">
+                                    <Border Background="{ThemeResource RivuneRaisedSurfaceBrush}" CornerRadius="24" Padding="4" HorizontalAlignment="Center">
+                                        <StackPanel Orientation="Horizontal" Spacing="4">
+                                            <ToggleButton x:Name="LibraryAllButton" Tag="" Click="LibraryFilter_Click" IsChecked="True" Style="{StaticResource RivuneNavToggle}" Width="Auto" MinWidth="72"><StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE8A9;" FontSize="16" /><TextBlock Text="All" /></StackPanel></ToggleButton>
+                                            <ToggleButton Tag="movie" Click="LibraryFilter_Click" Style="{StaticResource RivuneNavToggle}" Width="Auto" MinWidth="96"><StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE8B2;" FontSize="16" /><TextBlock Text="Movies" /></StackPanel></ToggleButton>
+                                            <ToggleButton Tag="series" Click="LibraryFilter_Click" Style="{StaticResource RivuneNavToggle}" Width="Auto" MinWidth="96"><StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE8B7;" FontSize="16" /><TextBlock Text="Series" /></StackPanel></ToggleButton>
+                                            <ToggleButton Tag="tv" Click="LibraryFilter_Click" Style="{StaticResource RivuneNavToggle}" Width="Auto" MinWidth="104"><StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE7F4;" FontSize="16" /><TextBlock Text="Live TV" /></StackPanel></ToggleButton>
+                                        </StackPanel>
+                                    </Border>
+                                </ScrollViewer>
+                                <InfoBar x:Name="LibraryBanner" IsOpen="False" IsClosable="False" />
+                                <Button x:Name="LibraryRetryButton" Content="Retry" Click="LibraryRetry_Click" Style="{StaticResource RivuneTextButton}" HorizontalAlignment="Left" Visibility="Collapsed" />
+                                <Grid x:Name="LibraryLoading" Visibility="Collapsed" ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><ProgressRing IsActive="True" Width="20" Height="20" /><TextBlock Grid.Column="1" Text="Loading your library" Style="{StaticResource RivuneBodyMediumTextStyle}" VerticalAlignment="Center" /></Grid>
+                                <TextBlock x:Name="LibraryResultCount" Style="{StaticResource RivuneLabelLargeTextStyle}" />
+                                <GridView x:Name="LibraryResults" SelectionMode="None" HorizontalAlignment="Stretch">
+                                    <GridView.ItemContainerStyle><Style TargetType="GridViewItem"><Setter Property="IsTabStop" Value="False" /></Style></GridView.ItemContainerStyle>
+                                </GridView>
+                                <StackPanel x:Name="LibraryEmpty" Spacing="8" Padding="8,16"><TextBlock Text="Your library is ready" Style="{StaticResource RivuneTitleMediumTextStyle}" /><TextBlock Text="Save movies and series from their details to find them here." Style="{StaticResource RivuneBodyMediumTextStyle}" /></StackPanel>
+                                <Button x:Name="LibraryMoreButton" Content="Load more" Click="LibraryMore_Click" Style="{StaticResource RivuneTextButton}" HorizontalAlignment="Center" Visibility="Collapsed" />
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Grid>
+
+                    <Grid x:Name="CalendarView" Visibility="Collapsed">
+                        <ScrollViewer HorizontalContentAlignment="Stretch" HorizontalScrollMode="Disabled" VerticalScrollBarVisibility="Auto">
+                            <StackPanel x:Name="CalendarInset" Margin="24,88,24,48" HorizontalAlignment="Stretch" Spacing="20">
+                                <Border BorderBrush="{ThemeResource RivuneHairlineBrush}" BorderThickness="1" CornerRadius="{StaticResource RivuneRadiusLarge}" Padding="8">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                        <Button Click="CalendarPrevious_Click" Style="{StaticResource RivuneIconButton}" AutomationProperties.Name="Previous month"><FontIcon Glyph="&#xE76B;" /></Button>
+                                        <TextBlock Grid.Column="1" x:Name="CalendarHeading" Text="Calendar" Style="{StaticResource RivuneTitleLargeTextStyle}" HorizontalAlignment="Center" VerticalAlignment="Center" AutomationProperties.HeadingLevel="Level1" />
+                                        <Button Grid.Column="2" Click="CalendarNext_Click" Style="{StaticResource RivuneIconButton}" AutomationProperties.Name="Next month"><FontIcon Glyph="&#xE76C;" /></Button>
+                                    </Grid>
+                                </Border>
+                                <InfoBar x:Name="CalendarBanner" IsOpen="False" IsClosable="False" />
+                                <Button x:Name="CalendarRetryButton" Content="Retry" Click="CalendarRetry_Click" Style="{StaticResource RivuneTextButton}" HorizontalAlignment="Left" Visibility="Collapsed" />
+                                <Grid x:Name="CalendarLoading" Visibility="Collapsed" ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><ProgressRing IsActive="True" Width="20" Height="20" /><TextBlock Grid.Column="1" Text="Loading this month" Style="{StaticResource RivuneBodyMediumTextStyle}" VerticalAlignment="Center" /></Grid>
+                                <StackPanel x:Name="CalendarEvents" Spacing="20" />
+                                <StackPanel x:Name="CalendarEmpty" Spacing="8" Padding="8,16"><TextBlock Text="Nothing scheduled this month" Style="{StaticResource RivuneTitleMediumTextStyle}" /><TextBlock Text="Upcoming episodes and releases will appear here." Style="{StaticResource RivuneBodyMediumTextStyle}" /></StackPanel>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Grid>
+                </Grid>
+            </Grid>
+
+            <Border x:Name="TabletDock" VerticalAlignment="Top" HorizontalAlignment="Center" Margin="0,12,0,0" Height="56" Padding="4" Background="{ThemeResource RivuneDockBrush}" CornerRadius="{StaticResource RivuneRadiusExtraLarge}" Visibility="Collapsed">
+                <StackPanel x:Name="TabletDockStack" Orientation="Horizontal" Spacing="4">
+                    <ToggleButton x:Name="HomeNav" IsChecked="True" Tag="Home" Click="ViewerNav_Click" Style="{StaticResource RivuneNavToggle}" AutomationProperties.Name="Home" XYFocusRight="{x:Bind SearchNav}" XYFocusDown="{x:Bind SearchNav}"><FontIcon Glyph="&#xE80F;" FontSize="20" /></ToggleButton>
+                    <ToggleButton x:Name="SearchNav" Tag="Search" Click="ViewerNav_Click" Style="{StaticResource RivuneNavToggle}" AutomationProperties.Name="Search" XYFocusLeft="{x:Bind HomeNav}" XYFocusUp="{x:Bind HomeNav}" XYFocusRight="{x:Bind LibraryNav}" XYFocusDown="{x:Bind LibraryNav}"><FontIcon Glyph="&#xE721;" FontSize="20" /></ToggleButton>
+                    <ToggleButton x:Name="LibraryNav" Tag="Library" Click="ViewerNav_Click" Style="{StaticResource RivuneNavToggle}" AutomationProperties.Name="Library" XYFocusLeft="{x:Bind SearchNav}" XYFocusUp="{x:Bind SearchNav}" XYFocusRight="{x:Bind CalendarNav}" XYFocusDown="{x:Bind CalendarNav}"><FontIcon Glyph="&#xE8F1;" FontSize="20" /></ToggleButton>
+                    <ToggleButton x:Name="CalendarNav" Tag="Calendar" Click="ViewerNav_Click" Style="{StaticResource RivuneNavToggle}" AutomationProperties.Name="Calendar" XYFocusLeft="{x:Bind LibraryNav}" XYFocusUp="{x:Bind LibraryNav}" XYFocusRight="{x:Bind DockAccountButton}" XYFocusDown="{x:Bind DockAccountButton}"><FontIcon Glyph="&#xE787;" FontSize="20" /></ToggleButton>
+                    <Rectangle x:Name="DockDivider" Width="1" Height="32" Fill="{ThemeResource RivuneHairlineBrush}" Margin="4,8" />
+                    <Button x:Name="DockAccountButton" Click="ProfileMenu_Click" Style="{StaticResource RivuneIconButton}" Width="48" Height="48" AutomationProperties.Name="Account" XYFocusLeft="{x:Bind CalendarNav}" XYFocusUp="{x:Bind CalendarNav}"><Grid Width="36" Height="36"><TextBlock x:Name="DockProfileInitial" Text="P" Style="{StaticResource RivuneTitleSmallTextStyle}" HorizontalAlignment="Center" VerticalAlignment="Center" /><Image x:Name="DockProfileImage" Width="36" Height="36" HorizontalAlignment="Center" VerticalAlignment="Center" Stretch="UniformToFill" Opacity="0"><Image.Clip><RectangleGeometry Rect="0,0,36,36" /></Image.Clip></Image></Grid></Button>
+                </StackPanel>
+            </Border>
+
+            <Border x:Name="BottomNav" Height="56" VerticalAlignment="Bottom" Background="{ThemeResource RivuneCanvasBrush}" BorderBrush="{ThemeResource RivuneHairlineBrush}" BorderThickness="0,1,0,0" Visibility="Collapsed">
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <ToggleButton x:Name="BottomHomeNav" IsChecked="True" Tag="Home" Click="ViewerNav_Click" Style="{StaticResource RivuneNavToggle}" Width="Auto" Height="56" XYFocusRight="{x:Bind BottomSearchNav}"><StackPanel Spacing="2"><FontIcon Glyph="&#xE80F;" FontSize="20" /><TextBlock Text="Home" Style="{StaticResource RivuneLabelSmallTextStyle}" /></StackPanel></ToggleButton>
+                    <ToggleButton Grid.Column="1" x:Name="BottomSearchNav" Tag="Search" Click="ViewerNav_Click" Style="{StaticResource RivuneNavToggle}" Width="Auto" Height="56" XYFocusLeft="{x:Bind BottomHomeNav}" XYFocusRight="{x:Bind BottomLibraryNav}"><StackPanel Spacing="2"><FontIcon Glyph="&#xE721;" FontSize="20" /><TextBlock Text="Search" Style="{StaticResource RivuneLabelSmallTextStyle}" /></StackPanel></ToggleButton>
+                    <ToggleButton Grid.Column="2" x:Name="BottomLibraryNav" Tag="Library" Click="ViewerNav_Click" Style="{StaticResource RivuneNavToggle}" Width="Auto" Height="56" XYFocusLeft="{x:Bind BottomSearchNav}" XYFocusRight="{x:Bind BottomCalendarNav}"><StackPanel Spacing="2"><FontIcon Glyph="&#xE8F1;" FontSize="20" /><TextBlock Text="Library" Style="{StaticResource RivuneLabelSmallTextStyle}" /></StackPanel></ToggleButton>
+                    <ToggleButton Grid.Column="3" x:Name="BottomCalendarNav" Tag="Calendar" Click="ViewerNav_Click" Style="{StaticResource RivuneNavToggle}" Width="Auto" Height="56" XYFocusLeft="{x:Bind BottomLibraryNav}"><StackPanel Spacing="2"><FontIcon Glyph="&#xE787;" FontSize="20" /><TextBlock Text="Calendar" Style="{StaticResource RivuneLabelSmallTextStyle}" /></StackPanel></ToggleButton>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <!-- Title detail -->
+        <Grid x:Name="DetailView" Visibility="Collapsed" Background="{ThemeResource RivuneCanvasBrush}" SizeChanged="DetailView_SizeChanged">
+            <Grid x:Name="DetailBackdropHost" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                <Image x:Name="DetailBackdrop" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Stretch="UniformToFill" Opacity="0" />
+            </Grid>
+            <Rectangle Fill="{ThemeResource RivuneDetailScrimBrush}" />
+            <ScrollViewer HorizontalContentAlignment="Stretch" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+                <Grid x:Name="DetailLayout" HorizontalAlignment="Stretch">
+                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                    <StackPanel x:Name="DetailSummary" Spacing="12" HorizontalAlignment="Left">
+                        <TextBlock x:Name="DetailTitle" Style="{StaticResource RivuneHeadlineLargeTextStyle}" MaxLines="3" TextTrimming="CharacterEllipsis" AutomationProperties.HeadingLevel="Level1" />
+                        <TextBlock x:Name="DetailTagline" Style="{StaticResource RivuneBodyLargeTextStyle}" Foreground="{ThemeResource RivuneSecondaryTextBrush}" MaxLines="2" TextTrimming="CharacterEllipsis" />
+                        <TextBlock x:Name="DetailEpisodeCoordinates" Style="{StaticResource RivuneTitleSmallTextStyle}" Visibility="Collapsed" />
+                        <TextBlock x:Name="DetailMetadata" Style="{StaticResource RivuneLabelLargeTextStyle}" Foreground="{ThemeResource RivuneSecondaryTextBrush}" />
+                        <TextBlock x:Name="DetailSecondaryMetadata" Style="{StaticResource RivuneBodyMediumTextStyle}" MaxLines="2" TextTrimming="CharacterEllipsis" />
+                        <ScrollViewer HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Auto" VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Disabled" BringIntoViewOnFocusChange="True">
+                            <ItemsControl x:Name="DetailActions"><ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal" /></ItemsPanelTemplate></ItemsControl.ItemsPanel></ItemsControl>
+                        </ScrollViewer>
+                        <ScrollViewer x:Name="DetailOverviewScroller" MaxWidth="560" MaxHeight="96" HorizontalAlignment="Stretch" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" VerticalScrollMode="Auto" VerticalScrollBarVisibility="Auto" IsTabStop="True" UseSystemFocusVisuals="True" AutomationProperties.Name="Description, scrollable" AutomationProperties.HelpText="Use the arrow keys to read the full description.">
+                            <TextBlock x:Name="DetailOverview" Style="{StaticResource RivuneBodyLargeTextStyle}" />
+                        </ScrollViewer>
+                    </StackPanel>
+                    <Button x:Name="DetailBackButton" Click="DetailBack_Click" Style="{StaticResource RivuneIconButton}" Margin="16" HorizontalAlignment="Left" VerticalAlignment="Top" AutomationProperties.Name="Back"><FontIcon Glyph="&#xE72B;" FontSize="20" /></Button>
+                    <StackPanel Grid.Row="1" x:Name="DetailStatus" Margin="24,0" MaxWidth="560" HorizontalAlignment="Center" Visibility="Collapsed" Spacing="12">
+                        <ProgressRing x:Name="DetailProgress" IsActive="False" Width="20" Height="20" HorizontalAlignment="Center" />
+                        <InfoBar x:Name="DetailBanner" IsOpen="False" IsClosable="False" HorizontalAlignment="Stretch" />
+                        <Button x:Name="DetailRetryButton" Content="Retry" Click="DetailRetry_Click" Style="{StaticResource RivuneTextButton}" HorizontalAlignment="Center" Visibility="Collapsed" />
+                    </StackPanel>
+                    <StackPanel Grid.Row="2" x:Name="DetailSections" Margin="24,0" Spacing="24" HorizontalAlignment="Stretch" />
+                </Grid>
+            </ScrollViewer>
+        </Grid>
+
+        <!-- Settings -->
+        <Grid x:Name="SettingsView" Visibility="Collapsed" Background="{ThemeResource RivuneCanvasBrush}">
+            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+            <Grid Padding="16,8" BorderBrush="{ThemeResource RivuneHairlineBrush}" BorderThickness="0,0,0,1">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                <Button x:Name="SettingsBackButton" Click="SettingsBack_Click" Style="{StaticResource RivuneIconButton}" AutomationProperties.Name="Back"><FontIcon Glyph="&#xE72B;" /></Button>
+                <TextBlock Grid.Column="1" x:Name="SettingsHeading" Text="Settings" Style="{StaticResource RivuneTitleLargeTextStyle}" VerticalAlignment="Center" AutomationProperties.HeadingLevel="Level1" />
+            </Grid>
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+                <Grid HorizontalAlignment="Stretch">
+                <StackPanel x:Name="SettingsContent" MaxWidth="920" HorizontalAlignment="Stretch" Spacing="16">
+                    <StackPanel x:Name="SettingsCategories" Spacing="12">
+                        <TextBlock Text="Rivune Settings" Style="{StaticResource RivuneHeadlineMediumTextStyle}" AutomationProperties.HeadingLevel="Level2" />
+                        <TextBlock Text="Choose a category. App and profile settings stay separate and easy to find." Style="{StaticResource RivuneBodyMediumTextStyle}" Margin="0,0,0,8" />
+                    </StackPanel>
+                    <StackPanel x:Name="SettingsPanelHost" Visibility="Collapsed" HorizontalAlignment="Stretch" Spacing="16" />
+                </StackPanel>
+                </Grid>
+            </ScrollViewer>
+        </Grid>
+
+        <!-- Source side sheet over detail -->
+        <Grid x:Name="SourceOverlay" Visibility="Collapsed" AutomationProperties.IsDialog="True" AutomationProperties.Name="Playback sources">
+            <Button x:Name="CloseSourcesButton" Click="CloseSources_Click" Style="{StaticResource RivuneIconButton}" Margin="16" HorizontalAlignment="Left" VerticalAlignment="Top" AutomationProperties.Name="Back"><FontIcon Glyph="&#xE72B;" FontSize="20" /></Button>
+            <Border x:Name="SourcePane" Width="400" MaxWidth="440" MaxHeight="680" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="48,32" Background="Transparent" BorderThickness="0" Padding="0" TabFocusNavigation="Cycle">
+                <Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                    <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <ScrollViewer x:Name="SourceFilterScrollViewer" HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Auto" VerticalScrollMode="Disabled" BringIntoViewOnFocusChange="True"><StackPanel x:Name="SourceFilters" Orientation="Horizontal" Spacing="8"><ToggleButton Content="All" IsChecked="True" Style="{StaticResource RivuneSourceFilterToggle}" /></StackPanel></ScrollViewer>
+                        <Button Grid.Column="1" x:Name="RefreshSourcesButton" Click="RefreshSources_Click" Style="{StaticResource RivuneSourceRefreshButton}" AutomationProperties.Name="Refresh sources" XYFocusDown="{x:Bind SourceList}"><Grid><FontIcon x:Name="RefreshSourcesIcon" Glyph="&#xE72C;" FontSize="20" HorizontalAlignment="Center" VerticalAlignment="Center" /><ProgressRing x:Name="RefreshSourcesProgress" Width="20" Height="20" IsActive="False" Visibility="Collapsed" Foreground="{ThemeResource RivunePrimaryTextBrush}" /></Grid></Button>
+                    </Grid>
+                    <StackPanel Grid.Row="1" Spacing="8">
+                        <TextBlock x:Name="SourceTitle" Style="{StaticResource RivuneTitleLargeTextStyle}" Visibility="Collapsed" />
+                        <InfoBar x:Name="SourceBanner" IsOpen="False" IsClosable="False" />
+                        <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><ProgressRing x:Name="SourceProgress" IsActive="False" Width="20" Height="20" /><TextBlock Grid.Column="1" x:Name="SourceStatus" Style="{StaticResource RivuneBodyMediumTextStyle}" AutomationProperties.LiveSetting="Polite" VerticalAlignment="Center" /></Grid>
+                    </StackPanel>
+                    <ListView Grid.Row="2" x:Name="SourceList" IsItemClickEnabled="True" ItemClick="SourceList_ItemClick" SelectionMode="None" Margin="0,8" AutomationProperties.Name="Playback sources" XYFocusUp="{x:Bind RefreshSourcesButton}" XYFocusDown="{x:Bind PlaySourceButton}">
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="media:PlaybackSourceOption">
+                                <Border MinHeight="64" Margin="0,3" Padding="12,8" Background="{ThemeResource RivuneSourceCardBrush}" BorderBrush="{ThemeResource RivuneHairlineBrush}" BorderThickness="1" CornerRadius="{StaticResource RivuneRadiusSmall}">
+                                    <Grid ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                        <StackPanel Spacing="4"><TextBlock Text="{x:Bind Name}" Style="{StaticResource RivuneTitleSmallTextStyle}" /><TextBlock Text="{x:Bind Description}" Style="{StaticResource RivuneBodySmallTextStyle}" /><TextBlock Text="{x:Bind local:MainPage.SourceFooter(AddonName, ManifestId, AddonId, Mode, Protocol, Container)}" Style="{StaticResource RivuneLabelSmallTextStyle}" /></StackPanel>
+                                        <FontIcon Grid.Column="1" Glyph="&#xE76C;" Foreground="{ThemeResource RivuneAccentBrush}" VerticalAlignment="Center" />
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                    <Button Grid.Row="3" x:Name="PlaySourceButton" Content="Play inside Rivune" IsEnabled="False" Click="PlaySource_Click" Style="{StaticResource RivunePrimaryButton}" Visibility="Collapsed" XYFocusUp="{x:Bind SourceList}" />
+                </Grid>
+            </Border>
+        </Grid>
+
+        <!-- Native Windows player with Android chrome hierarchy -->
+        <Grid x:Name="PlayerView" Visibility="Collapsed" Background="{ThemeResource RivunePlayerCanvasBrush}">
+            <MediaPlayerElement x:Name="PlayerElement" AreTransportControlsEnabled="False" Stretch="Uniform" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" />
+            <Grid x:Name="PlayerChrome" Background="{ThemeResource RivunePlayerChromeBrush}" PointerMoved="PlayerChrome_PointerMoved" GotFocus="PlayerChrome_GotFocus">
+                <Grid x:Name="PlayerTopBar" Padding="4,4,16,16" Background="{ThemeResource RivunePlayerTopScrimBrush}" HorizontalAlignment="Stretch" VerticalAlignment="Top">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <Button x:Name="ClosePlayerButton" Click="ClosePlayer_Click" Style="{StaticResource RivuneIconButton}" Foreground="{ThemeResource RivunePrimaryTextBrush}" AutomationProperties.Name="Close player" XYFocusDown="{x:Bind PlayPauseButton}"><FontIcon Glyph="&#xE72B;" FontSize="20" /></Button>
+                    <TextBlock Grid.Column="1" x:Name="PlayerTitle" Style="{StaticResource RivuneTitleMediumTextStyle}" VerticalAlignment="Center" Margin="8,0" MaxLines="1" TextTrimming="CharacterEllipsis" AutomationProperties.HeadingLevel="Level1" />
+                </Grid>
+
+                <Border x:Name="PlayerStatusBanner" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="16,88,16,0" Background="{ThemeResource RivuneRaisedSurfaceBrush}" CornerRadius="{StaticResource RivuneRadiusExtraLarge}" Padding="16,8">
+                    <StackPanel Orientation="Horizontal" Spacing="8"><ProgressRing x:Name="PlayerProgress" IsActive="True" Width="20" Height="20" Foreground="{ThemeResource RivuneAccentBrush}" /><TextBlock x:Name="PlayerStatus" Text="Preparing video" Style="{StaticResource RivuneBodyMediumTextStyle}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite" /></StackPanel>
+                </Border>
+
+                <StackPanel x:Name="PlayerTransportControls" HorizontalAlignment="Center" VerticalAlignment="Center" Orientation="Horizontal" Spacing="16">
+                    <Button x:Name="SeekBackButton" Click="SeekBack_Click" Style="{StaticResource RivuneIconButton}" Width="48" Height="48" CornerRadius="24" Background="{ThemeResource RivuneSourceCardBrush}" Foreground="{ThemeResource RivunePrimaryTextBrush}" AutomationProperties.Name="Rewind 10 seconds" ToolTipService.ToolTip="Rewind 10 seconds" XYFocusUp="{x:Bind ClosePlayerButton}" XYFocusRight="{x:Bind PlayPauseButton}" XYFocusDown="{x:Bind TimelineSlider}"><FontIcon Glyph="&#xED3C;" FontSize="24" /></Button>
+                    <Button x:Name="PlayPauseButton" Click="PlayPause_Click" Style="{StaticResource RivunePrimaryButton}" Width="52" Height="52" MinWidth="52" CornerRadius="26" Padding="0" AutomationProperties.Name="Play" XYFocusUp="{x:Bind ClosePlayerButton}" XYFocusLeft="{x:Bind SeekBackButton}" XYFocusRight="{x:Bind SeekForwardButton}" XYFocusDown="{x:Bind TimelineSlider}"><FontIcon x:Name="PlayPauseIcon" Glyph="&#xE769;" FontSize="32" /></Button>
+                    <Button x:Name="SeekForwardButton" Click="SeekForward_Click" Style="{StaticResource RivuneIconButton}" Width="48" Height="48" CornerRadius="24" Background="{ThemeResource RivuneSourceCardBrush}" Foreground="{ThemeResource RivunePrimaryTextBrush}" AutomationProperties.Name="Forward 10 seconds" ToolTipService.ToolTip="Forward 10 seconds" XYFocusUp="{x:Bind ClosePlayerButton}" XYFocusLeft="{x:Bind PlayPauseButton}" XYFocusDown="{x:Bind TimelineSlider}">
+                        <Viewbox Width="28" Height="28">
+                            <Grid Width="24" Height="24">
+                                <Path Data="M19,15 A7.5,7.5 0 1 1 17.5,6.5" Stroke="{ThemeResource RivunePrimaryTextBrush}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
+                                <Path Data="M14.5,3.5 L18.5,7.5 L14.5,11.5" Stroke="{ThemeResource RivunePrimaryTextBrush}" StrokeThickness="2" StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
+                                <TextBlock Text="10" FontSize="8.5" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,2,0,0" />
+                            </Grid>
+                        </Viewbox>
+                    </Button>
+                </StackPanel>
+
+                <StackPanel x:Name="PlayerBottomBar" Padding="32,32,32,16" HorizontalAlignment="Stretch" VerticalAlignment="Bottom">
+                    <StackPanel x:Name="PlayerTimelinePanel" HorizontalAlignment="Stretch" Spacing="0">
+                        <Slider x:Name="TimelineSlider" Minimum="0" Maximum="1" ValueChanged="TimelineSlider_ValueChanged" AutomationProperties.Name="Playback position" MinHeight="48" XYFocusUp="{x:Bind PlayPauseButton}" XYFocusDown="{x:Bind PlayerAudioButton}" />
+                        <Grid Margin="4,0,4,0" VerticalAlignment="Center">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                            <TextBlock VerticalAlignment="Center" Style="{StaticResource RivuneBodySmallTextStyle}" Foreground="{ThemeResource RivuneSecondaryTextBrush}"><Run x:Name="ElapsedText" Text="0:00" /><Run Text=" / " /><Run x:Name="DurationText" Text="0:00" /></TextBlock>
+                            <ScrollViewer Grid.Column="1" HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Hidden" VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Disabled" HorizontalAlignment="Stretch" HorizontalContentAlignment="Right" VerticalAlignment="Center" BringIntoViewOnFocusChange="True">
+                                <StackPanel x:Name="PlayerOptionActions" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Spacing="4">
+                                    <Button x:Name="PlayerAudioButton" Click="PlayerAudio_Click" Style="{StaticResource RivuneIconButton}" Foreground="{ThemeResource RivunePrimaryTextBrush}" AutomationProperties.Name="Audio tracks" ToolTipService.ToolTip="Audio" XYFocusUp="{x:Bind TimelineSlider}" XYFocusRight="{x:Bind PlayerSubtitlesButton}"><FontIcon Glyph="&#xE8D6;" FontSize="20" /></Button>
+                                    <Button x:Name="PlayerSubtitlesButton" Click="PlayerSubtitles_Click" Style="{StaticResource RivuneIconButton}" Foreground="{ThemeResource RivunePrimaryTextBrush}" AutomationProperties.Name="Subtitles" ToolTipService.ToolTip="Subtitles" XYFocusUp="{x:Bind TimelineSlider}" XYFocusLeft="{x:Bind PlayerAudioButton}" XYFocusRight="{x:Bind PlayerAspectButton}"><FontIcon Glyph="&#xF15F;" FontSize="20" /></Button>
+                                    <Button x:Name="PlayerAspectButton" Click="PlayerAspect_Click" Style="{StaticResource RivuneIconButton}" Foreground="{ThemeResource RivunePrimaryTextBrush}" AutomationProperties.Name="Video aspect, fit" ToolTipService.ToolTip="Video aspect: Fit" XYFocusUp="{x:Bind TimelineSlider}" XYFocusLeft="{x:Bind PlayerSubtitlesButton}" XYFocusRight="{x:Bind PlayerSpeedButton}"><FontIcon x:Name="PlayerAspectIcon" Glyph="&#xE9A6;" FontSize="20" /></Button>
+                                    <Button x:Name="PlayerSpeedButton" Click="PlayerSpeed_Click" Style="{StaticResource RivuneIconButton}" Foreground="{ThemeResource RivunePrimaryTextBrush}" AutomationProperties.Name="Playback speed, 1 times" ToolTipService.ToolTip="Playback speed: 1×" XYFocusUp="{x:Bind TimelineSlider}" XYFocusLeft="{x:Bind PlayerAspectButton}" XYFocusRight="{x:Bind PlayerMiniPlayerButton}"><FontIcon x:Name="PlayerSpeedIcon" Glyph="&#xEC57;" FontSize="20" /></Button>
+                                    <Button x:Name="PlayerMiniPlayerButton" Click="PlayerMiniPlayer_Click" Style="{StaticResource RivuneIconButton}" Foreground="{ThemeResource RivunePrimaryTextBrush}" AutomationProperties.Name="Enter mini-player" ToolTipService.ToolTip="Mini-player" XYFocusUp="{x:Bind TimelineSlider}" XYFocusLeft="{x:Bind PlayerSpeedButton}" XYFocusRight="{x:Bind PlayerFullscreenButton}">
+                                        <Grid Width="22" Height="18">
+                                            <Grid x:Name="PlayerMiniEnterIcon">
+                                                <Border BorderBrush="{ThemeResource RivunePrimaryTextBrush}" BorderThickness="1.5" CornerRadius="2" />
+                                                <Border Width="9" Height="7" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,2,2" Background="{ThemeResource RivunePrimaryTextBrush}" CornerRadius="1" />
+                                            </Grid>
+                                            <FontIcon x:Name="PlayerMiniExitIcon" Glyph="&#xE944;" FontSize="20" Visibility="Collapsed" />
+                                        </Grid>
+                                    </Button>
+                                    <Button x:Name="PlayerFullscreenButton" Click="PlayerFullscreen_Click" Style="{StaticResource RivuneIconButton}" Foreground="{ThemeResource RivunePrimaryTextBrush}" AutomationProperties.Name="Enter full screen" ToolTipService.ToolTip="Full screen" XYFocusUp="{x:Bind TimelineSlider}" XYFocusLeft="{x:Bind PlayerMiniPlayerButton}" XYFocusRight="{x:Bind PlayerLockButton}"><FontIcon x:Name="PlayerFullscreenIcon" Glyph="&#xE740;" FontSize="20" /></Button>
+                                    <Button x:Name="PlayerLockButton" Click="PlayerLock_Click" Style="{StaticResource RivuneIconButton}" Foreground="{ThemeResource RivunePrimaryTextBrush}" AutomationProperties.Name="Lock player controls" ToolTipService.ToolTip="Lock controls" XYFocusUp="{x:Bind TimelineSlider}" XYFocusLeft="{x:Bind PlayerFullscreenButton}" XYFocusRight="{x:Bind PlayerNextButton}"><FontIcon Glyph="&#xE72E;" FontSize="20" /></Button>
+                                    <Button x:Name="PlayerNextButton" Click="PlayerNext_Click" Style="{StaticResource RivuneIconButton}" Foreground="{ThemeResource RivunePrimaryTextBrush}" AutomationProperties.Name="Next episode" ToolTipService.ToolTip="Next episode" XYFocusUp="{x:Bind TimelineSlider}" XYFocusLeft="{x:Bind PlayerLockButton}" Visibility="Collapsed"><FontIcon Glyph="&#xE893;" FontSize="22" /></Button>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </Grid>
+                    </StackPanel>
+                </StackPanel>
+            </Grid>
+            <Button x:Name="PlayerUnlockButton" Click="PlayerLock_Click" Style="{StaticResource RivunePrimaryButton}" Width="64" Height="64" MinWidth="64" Padding="0" CornerRadius="32" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed" AutomationProperties.Name="Unlock player controls" ToolTipService.ToolTip="Unlock controls"><FontIcon Glyph="&#xE785;" FontSize="28" /></Button>
+        </Grid>
+    </Grid>
+</Page>

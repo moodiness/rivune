@@ -370,7 +370,18 @@ func (a *API) continueWatching(w http.ResponseWriter, r *http.Request, principal
 		writeError(w, http.StatusUnprocessableEntity, "invalid_watch_state", err.Error())
 		return
 	}
-	result, err := a.watchstate.ContinueWatching(r.Context(), principal, limit)
+	metadataLanguage := ""
+	if a.settings != nil && principal.ActiveProfileID != nil {
+		effective, settingsErr := a.settings.Effective(r.Context(), principal, *principal.ActiveProfileID)
+		if writeSettingsError(a, w, settingsErr, "resolve continue watching metadata language") {
+			return
+		}
+		metadataLanguage = strings.TrimSpace(effective.Values.MetadataLanguage)
+		if strings.EqualFold(metadataLanguage, "auto") {
+			metadataLanguage = ""
+		}
+	}
+	result, err := a.watchstate.ContinueWatching(r.Context(), principal, metadataLanguage, limit)
 	if err != nil {
 		a.writeWatchstateError(w, "list continue watching", err)
 		return

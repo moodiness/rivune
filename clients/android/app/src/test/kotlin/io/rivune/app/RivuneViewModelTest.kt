@@ -236,12 +236,12 @@ class RivuneViewModelTest {
     }
 
     @Test
-    fun continueWatchingEpisodeTitleKeepsCoordinatesInMetadataOnly() = runTest(dispatcher) {
+    fun continueWatchingMapsPayloadLocallyWithoutMetadataRequests() = runTest(dispatcher) {
         val profile = profile(hasPin = false)
         val seriesId = UUID.randomUUID()
         val episodeId = UUID.randomUUID()
-        val seriesFixture = series(seriesId)
-        val seasonFixture = season(seriesId, listOf(episode(episodeId, seriesId, 1)))
+        val movieId = UUID.randomUUID()
+        val seasonId = UUID.randomUUID()
         val gateway = FakeGateway(
             restored = true,
             account = account(profile, active = true),
@@ -253,28 +253,127 @@ class RivuneViewModelTest {
                         titleId = episodeId,
                         mediaType = io.rivune.api.PlaybackProgressMediaType.EPISODE,
                         seriesId = seriesId,
-                        seasonId = UUID.randomUUID(),
-                        seasonNumber = 1,
-                        episodeNumber = 1,
+                        seasonId = seasonId,
+                        seasonNumber = 2,
+                        episodeNumber = 3,
+                        title = "Signal Horizon",
+                        posterUrl = "/series-poster",
+                        backgroundUrl = "/series-background",
+                        releaseInfo = "2026",
+                        resourceId = "tt9000:2:3",
+                        resourceProvider = "imdb",
+                        episodeTitle = "Moonrise",
+                        episodeStillUrl = "/episode-still",
+                        episodeAirDate = "2026-08-15",
                         positionSeconds = 120,
                         durationSeconds = 1_800,
                         version = 1,
                         reason = io.rivune.api.ContinueWatchingReason.RESUME,
                         lastWatchedAt = "2026-08-15T00:00:00Z",
                     ),
+                    io.rivune.api.ContinueWatchingItem(
+                        titleId = movieId,
+                        mediaType = io.rivune.api.PlaybackProgressMediaType.MOVIE,
+                        title = "The Film",
+                        posterUrl = "/movie-poster",
+                        backgroundUrl = "/movie-background",
+                        releaseInfo = "2025",
+                        resourceId = "movie-42",
+                        resourceProvider = "tmdb",
+                        positionSeconds = 600,
+                        durationSeconds = 7_200,
+                        version = 2,
+                        reason = io.rivune.api.ContinueWatchingReason.RESUME,
+                        lastWatchedAt = "2026-08-14T00:00:00Z",
+                    ),
                 ),
             )
-            seriesResult = seriesFixture
-            seasons = mapOf("season-1" to seasonFixture)
         }
 
         val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
         advanceUntilIdle()
 
-        val target = viewModel.state.value.viewer.continueWatching.single()
-        assertEquals("Series · Episode 1", target.title)
-        assertEquals(1, target.seasonNumber)
-        assertEquals(1, target.episodeNumber)
+        val episode = viewModel.state.value.viewer.continueWatching[0]
+        assertEquals("Signal Horizon · Moonrise", episode.title)
+        assertEquals(episodeId.toString(), episode.id)
+        assertEquals("tt9000:2:3", episode.resourceId)
+        assertEquals("imdb", episode.provider)
+        assertEquals(mapOf("imdb" to "tt9000:2:3"), episode.externalIds)
+        assertEquals("/episode-still", episode.posterUrl)
+        assertEquals("/episode-still", episode.backgroundUrl)
+        assertEquals("2026-08-15", episode.releaseInfo)
+        assertEquals("2026-08-15", episode.released)
+        assertEquals(seriesId, episode.seriesId)
+        assertEquals(seasonId.toString(), episode.seasonId)
+        assertEquals(2, episode.seasonNumber)
+        assertEquals(3, episode.episodeNumber)
+        assertEquals(120, episode.resumePositionSeconds)
+        assertEquals(1_800, episode.durationSeconds)
+
+        val movie = viewModel.state.value.viewer.continueWatching[1]
+        assertEquals("The Film", movie.title)
+        assertEquals(movieId.toString(), movie.id)
+        assertEquals("movie-42", movie.resourceId)
+        assertEquals("tmdb", movie.provider)
+        assertEquals("/movie-poster", movie.posterUrl)
+        assertEquals("/movie-background", movie.backgroundUrl)
+        assertEquals("2025", movie.releaseInfo)
+        assertEquals(listOf<Int?>(30), gateway.continueWatchingLimits)
+        assertTrue(gateway.metadataRequests.none { it.first in setOf("movie", "series", "season") })
+    }
+
+    @Test
+    fun homeRevalidationKeepsRenderedStateUntilReplacementIsReady() = runTest(dispatcher) {
+        fun continueMovie(id: UUID, title: String, resourceId: String) = io.rivune.api.ContinueWatchingItem(
+            titleId = id,
+            mediaType = io.rivune.api.PlaybackProgressMediaType.MOVIE,
+            title = title,
+            resourceId = resourceId,
+            resourceProvider = "tmdb",
+            positionSeconds = 120,
+            durationSeconds = 7_200,
+            version = 1,
+            reason = io.rivune.api.ContinueWatchingReason.RESUME,
+            lastWatchedAt = "2026-08-15T00:00:00Z",
+        )
+        val initialFolder = folder()
+        val initialItem = mediaItem("initial", "Initial Hero")
+        val initialContinue = continueMovie(UUID.randomUUID(), "Initial Continue", "initial-continue")
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile(hasPin = false), active = true),
+            collections = listOf(collection(initialFolder)),
+            resolvedFolders = mapOf(
+                requireNotNull(initialFolder.id) to listOf(
+                    resolvedFolder(initialFolder, page = 1, hasMore = false, items = listOf(initialItem)),
+                ),
+            ),
+        ).apply {
+            continueWatchingPage = io.rivune.api.ContinueWatchingPage(listOf(initialContinue))
+        }
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+        val renderedCollections = viewModel.state.value.collections
+        val renderedHero = viewModel.state.value.viewer.heroSlides
+        val renderedContinue = viewModel.state.value.viewer.continueWatching
+        assertTrue(renderedHero.isNotEmpty())
+
+        gateway.collections = listOf(collection().copy(title = "Replacement Home"))
+        gateway.continueWatchingPage = io.rivune.api.ContinueWatchingPage(
+            listOf(continueMovie(UUID.randomUUID(), "Replacement Continue", "replacement-continue")),
+        )
+        gateway.continueWatchingDelayMillis = 1_000
+        viewModel.refreshViewer()
+        runCurrent()
+
+        assertEquals(renderedCollections, viewModel.state.value.collections)
+        assertEquals(renderedHero, viewModel.state.value.viewer.heroSlides)
+        assertEquals(renderedContinue, viewModel.state.value.viewer.continueWatching)
+
+        advanceTimeBy(1_000)
+        runCurrent()
+        assertEquals("Replacement Home", viewModel.state.value.collections.single().title)
+        assertEquals("Replacement Continue", viewModel.state.value.viewer.continueWatching.single().title)
     }
 
     @Test
@@ -498,6 +597,47 @@ class RivuneViewModelTest {
         assertTrue(viewModel.state.value.collections.isEmpty())
         assertEquals(1, gateway.clearSelectionCount)
         assertFalse(gateway.loggedOut)
+    }
+
+    @Test
+    fun changingProfileFencesDelayedHomeBeforeClearingSelection() = runTest(dispatcher) {
+        val profile = profile(hasPin = false)
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile, active = true),
+            collections = listOf(collection()),
+        ).apply {
+            continueWatchingDelayMillis = 1_000
+            continueWatchingPage = io.rivune.api.ContinueWatchingPage(
+                listOf(
+                    io.rivune.api.ContinueWatchingItem(
+                        titleId = UUID.randomUUID(),
+                        mediaType = io.rivune.api.PlaybackProgressMediaType.MOVIE,
+                        title = "Delayed Home",
+                        resourceId = "delayed-home",
+                        positionSeconds = 120,
+                        durationSeconds = 7_200,
+                        version = 1,
+                        reason = io.rivune.api.ContinueWatchingReason.RESUME,
+                        lastWatchedAt = "2026-08-15T00:00:00Z",
+                    ),
+                ),
+            )
+        }
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        runCurrent()
+        assertEquals(listOf<Int?>(30), gateway.continueWatchingLimits)
+
+        viewModel.changeProfile()
+        runCurrent()
+        assertIs<AppDestination.Profiles>(viewModel.state.value.destination)
+        assertTrue(viewModel.state.value.viewer.continueWatching.isEmpty())
+
+        advanceTimeBy(1_000)
+        runCurrent()
+        assertIs<AppDestination.Profiles>(viewModel.state.value.destination)
+        assertTrue(viewModel.state.value.collections.isEmpty())
+        assertTrue(viewModel.state.value.viewer.continueWatching.isEmpty())
     }
     @Test
     fun profilePreferencesLoadPersistAndCloseWithoutLeavingViewer() = runTest(dispatcher) {
@@ -2984,7 +3124,7 @@ private class FakeGateway(
     private val discovery: Discovery = discovery(),
     private val restored: Boolean = false,
     private val account: Account = account(profile()),
-    private val collections: List<Collection> = emptyList(),
+    var collections: List<Collection> = emptyList(),
     private val resolvedFolders: Map<UUID, List<ResolvedCollectionFolder>> = emptyMap(),
     private val accountFailure: Throwable? = null,
     private val collectionFailure: Throwable? = null,
@@ -3047,6 +3187,8 @@ private class FakeGateway(
     var seasonDelayMillis: Long = 0
     var searchDelayMillis: Long = 0
     var trailerResults = emptyMap<Int?, List<io.rivune.api.Trailer>>()
+    var continueWatchingDelayMillis: Long = 0
+    val continueWatchingLimits = mutableListOf<Int?>()
     var continueWatchingPage = io.rivune.api.ContinueWatchingPage(emptyList())
     val trailerRequests = mutableListOf<Pair<UUID, Int?>>()
     val metadataRequests = mutableListOf<Pair<String, String?>>()
@@ -3126,7 +3268,11 @@ private class FakeGateway(
         return libraryPages.values.flatMap { it.items }.first { it.titleId == titleId }
     }
     override suspend fun removeLibraryTitle(titleId: UUID) { libraryRemoved = titleId }
-    override suspend fun continueWatching(limit: Int?) = continueWatchingPage
+    override suspend fun continueWatching(limit: Int?): io.rivune.api.ContinueWatchingPage {
+        continueWatchingLimits += limit
+        if (continueWatchingDelayMillis > 0) delay(continueWatchingDelayMillis)
+        return continueWatchingPage
+    }
     override suspend fun playbackProgress(titleId: UUID) = progressByTitle[titleId] ?: progress?.takeIf { it.titleId == titleId }
     override suspend fun playbackProgressBatch(titleIds: List<UUID>): io.rivune.api.PlaybackProgressBatch {
         progressBatchFailure?.let { throw it }

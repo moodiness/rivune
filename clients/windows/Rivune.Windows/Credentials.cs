@@ -74,7 +74,7 @@ public sealed class DpapiCredentialStore : ICredentialStore, IDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            DeleteLegacyCredentials();
+            DeleteLegacyCredentialsOrThrow();
             if (!File.Exists(_filePath))
             {
                 return null;
@@ -110,7 +110,7 @@ public sealed class DpapiCredentialStore : ICredentialStore, IDisposable
                     ?? throw new CredentialStoreException("Stored Rivune credentials are empty.");
                 if (!StringComparer.Ordinal.Equals(credentials.Issuer, _issuer))
                 {
-                    DeleteCredentialFile();
+                    DeleteCredentialFileOrThrow();
                     return null;
                 }
 
@@ -143,7 +143,7 @@ public sealed class DpapiCredentialStore : ICredentialStore, IDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            DeleteLegacyCredentials();
+            DeleteLegacyCredentialsOrThrow();
             var directory = Path.GetDirectoryName(_filePath)!;
             Directory.CreateDirectory(directory);
 
@@ -218,14 +218,10 @@ public sealed class DpapiCredentialStore : ICredentialStore, IDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            try
+            DeleteFileIfPresentOrThrow(_filePath, "Unable to clear Rivune credentials.");
+            if (_legacyFilePath is not null)
             {
-                File.Delete(_filePath);
-                DeleteLegacyCredentials();
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-            {
-                throw new CredentialStoreException("Unable to clear Rivune credentials.", exception);
+                DeleteFileIfPresentOrThrow(_legacyFilePath, "Unable to clear Rivune credentials.");
             }
         }
         finally
@@ -245,36 +241,29 @@ public sealed class DpapiCredentialStore : ICredentialStore, IDisposable
         _gate.Dispose();
     }
 
-    private void DeleteCredentialFile()
+    private void DeleteCredentialFileOrThrow() =>
+        DeleteFileIfPresentOrThrow(_filePath, "Unable to remove invalid Rivune credentials.");
+
+    private void DeleteLegacyCredentialsOrThrow()
     {
-        try
+        if (_legacyFilePath is not null)
         {
-            File.Delete(_filePath);
-        }
-        catch (IOException)
-        {
-        }
-        catch (UnauthorizedAccessException)
-        {
+            DeleteFileIfPresentOrThrow(_legacyFilePath, "Unable to remove legacy Rivune credentials.");
         }
     }
 
-    private void DeleteLegacyCredentials()
+    private static void DeleteFileIfPresentOrThrow(string filePath, string failureMessage)
     {
-        if (_legacyFilePath is null)
-        {
-            return;
-        }
-
         try
         {
-            File.Delete(_legacyFilePath);
+            File.Delete(filePath);
         }
-        catch (IOException)
+        catch (DirectoryNotFoundException)
         {
         }
-        catch (UnauthorizedAccessException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            throw new CredentialStoreException(failureMessage, exception);
         }
     }
 

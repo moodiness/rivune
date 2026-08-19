@@ -232,6 +232,9 @@ type ContinueItem struct {
 	ReleaseInfo      string    `json:"releaseInfo,omitempty"`
 	ResourceID       string    `json:"resourceId,omitempty"`
 	ResourceProvider string    `json:"resourceProvider,omitempty"`
+	EpisodeTitle     string    `json:"episodeTitle,omitempty"`
+	EpisodeStillURL  string    `json:"episodeStillUrl,omitempty"`
+	EpisodeAirDate   string    `json:"episodeAirDate,omitempty"`
 	LastWatchedAt    time.Time `json:"lastWatchedAt"`
 }
 

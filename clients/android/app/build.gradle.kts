@@ -32,18 +32,6 @@ val releaseVersionCode = System.getenv("RIVUNE_ANDROID_VERSION_CODE")?.let { val
     }
 } ?: 1
 
-val signingEnvironment = mapOf(
-    "storeFile" to System.getenv("RIVUNE_ANDROID_KEYSTORE_PATH"),
-    "storePassword" to System.getenv("RIVUNE_ANDROID_KEYSTORE_PASSWORD"),
-    "keyAlias" to System.getenv("RIVUNE_ANDROID_KEY_ALIAS"),
-    "keyPassword" to System.getenv("RIVUNE_ANDROID_KEY_PASSWORD"),
-)
-val configuredSigningValues = signingEnvironment.values.count { !it.isNullOrBlank() }
-require(configuredSigningValues == 0 || configuredSigningValues == signingEnvironment.size) {
-    "Android release signing requires all RIVUNE_ANDROID_KEYSTORE_PATH, " +
-        "RIVUNE_ANDROID_KEYSTORE_PASSWORD, RIVUNE_ANDROID_KEY_ALIAS, and RIVUNE_ANDROID_KEY_PASSWORD variables"
-}
-val releaseSigningEnabled = configuredSigningValues == signingEnvironment.size
 val localLibmpvAarFile = providers.gradleProperty("RIVUNE_LIBMPV_AAR_PATH")
     .orElse(providers.environmentVariable("RIVUNE_LIBMPV_AAR_PATH"))
     .orNull
@@ -128,21 +116,11 @@ android {
         buildConfigField(
             "String",
             "UPDATE_MANIFEST_URL",
-            buildConfigString("https://github.com/moodiness/rivune/releases/latest/download/rivune-android-update.json"),
+            buildConfigString("https://github.com/moodiness/rivune/releases/latest/download/rivune-update.json"),
         )
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
-    signingConfigs {
-        if (releaseSigningEnabled) {
-            create("release") {
-                storeFile = file(requireNotNull(signingEnvironment["storeFile"]))
-                storePassword = signingEnvironment["storePassword"]
-                keyAlias = signingEnvironment["keyAlias"]
-                keyPassword = signingEnvironment["keyPassword"]
-            }
-        }
-    }
 
     buildTypes {
         getByName("debug") {
@@ -151,17 +129,6 @@ android {
                 "APP_UPDATES_ENABLED",
                 optionalBooleanEnvironment("RIVUNE_ANDROID_UPDATES_ENABLED", false).toString(),
             )
-            System.getenv("RIVUNE_ANDROID_UPDATE_MANIFEST_URL")?.let { manifestUrl ->
-                require(manifestUrl.startsWith("https://")) {
-                    "RIVUNE_ANDROID_UPDATE_MANIFEST_URL must use HTTPS"
-                }
-                buildConfigField("String", "UPDATE_MANIFEST_URL", buildConfigString(manifestUrl))
-            }
-        }
-        getByName("release") {
-            if (releaseSigningEnabled) {
-                signingConfig = signingConfigs.getByName("release")
-            }
         }
     }
 

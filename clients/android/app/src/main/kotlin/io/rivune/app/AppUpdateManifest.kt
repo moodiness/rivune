@@ -45,6 +45,7 @@ internal class InvalidUpdateManifest(message: String) : Exception(message)
 internal object AppUpdateManifestParser {
     private val semVer = Regex("^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$")
     private val sha256 = Regex("^[0-9a-f]{64}$")
+    private val safeApkFileName = Regex("^[0-9A-Za-z][0-9A-Za-z._+-]*\\.apk$")
     private val json = Json { ignoreUnknownKeys = true }
 
     fun parse(value: String): AppUpdateManifest {
@@ -53,7 +54,7 @@ internal object AppUpdateManifestParser {
         } catch (error: Exception) {
             throw InvalidUpdateManifest("The update manifest is not valid JSON")
         }
-        if (root.requiredInt("schemaVersion") != 1) throw InvalidUpdateManifest("Unsupported update manifest schema")
+        if (root.requiredInt("schemaVersion") != 2) throw InvalidUpdateManifest("Unsupported update manifest schema")
         val channel = root.requiredString("channel")
         if (channel != "stable" && channel != "prerelease") throw InvalidUpdateManifest("Invalid release channel")
         val version = root.requiredString("version")
@@ -73,8 +74,12 @@ internal object AppUpdateManifestParser {
         } catch (_: DateTimeParseException) {
             throw InvalidUpdateManifest("Invalid publication date")
         }
-        val releaseUrl = root.requiredString("releaseUrl").also(::requireGithubReleaseUrl)
-        val entry = root.requiredObject("package")
+        val releaseUrl = root.requiredString("releaseUrl")
+        if (releaseUrl != "https://github.com/moodiness/rivune/releases/tag/$tagName") {
+            throw InvalidUpdateManifest("Release URL does not match the Rivune release tag")
+        }
+        val packages = root.requiredObject("packages")
+        val entry = packages.requiredObject("android")
         if (entry.requiredString("format") != "apk") throw InvalidUpdateManifest("Invalid Android package format")
         val architectures = try { entry["architectures"]?.jsonArray } catch (_: Exception) { null }
             ?: throw InvalidUpdateManifest("Missing Android architectures")
@@ -89,13 +94,16 @@ internal object AppUpdateManifestParser {
         val digest = entry.requiredString("sha256")
         val certificate = entry.requiredString("signingCertificateSha256")
         if (!sha256.matches(digest) || !sha256.matches(certificate)) throw InvalidUpdateManifest("Invalid Android package digest")
-        val url = entry.requiredString("url").also(::requireGithubReleaseAssetUrl)
         val fileName = entry.requiredString("fileName")
-        if (fileName != java.io.File(fileName).name || fileName != url.toHttpUrlOrNull()?.pathSegments?.lastOrNull()) {
-            throw InvalidUpdateManifest("Invalid Android package file name")
+        if (!safeApkFileName.matches(fileName)) throw InvalidUpdateManifest("Invalid Android package file name")
+        val url = entry.requiredString("url")
+        if (url != "https://github.com/moodiness/rivune/releases/download/$tagName/$fileName") {
+            throw InvalidUpdateManifest("Android package URL does not match the Rivune release tag and file name")
         }
+        val applicationId = entry.requiredString("applicationId")
+        if (applicationId != "io.rivune.app") throw InvalidUpdateManifest("Invalid Android application ID")
         val androidPackage = AndroidUpdatePackage(
-            applicationId = entry.requiredString("applicationId"),
+            applicationId = applicationId,
             buildVersion = buildVersionText.toLongOrNull() ?: throw InvalidUpdateManifest("Invalid Android build version"),
             fileName = fileName,
             url = url,
@@ -107,30 +115,26 @@ internal object AppUpdateManifestParser {
     }
 
     private fun JsonObject.requiredString(name: String): String =
-        (get(name) as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+        (get(name) as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull?.takeIf { it.isNotBlank() }
             ?: throw InvalidUpdateManifest("Missing $name")
 
     private fun JsonObject.requiredInt(name: String): Int =
-        (get(name) as? JsonPrimitive)?.intOrNull ?: throw InvalidUpdateManifest("Missing $name")
+        (get(name) as? JsonPrimitive)?.takeUnless { it.isString }?.intOrNull
+            ?: throw InvalidUpdateManifest("Missing $name")
 
     private fun JsonObject.requiredLong(name: String): Long =
-        (get(name) as? JsonPrimitive)?.longOrNull ?: throw InvalidUpdateManifest("Missing $name")
+        (get(name) as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull
+            ?: throw InvalidUpdateManifest("Missing $name")
 
     private fun JsonObject.requiredObject(name: String): JsonObject =
         get(name) as? JsonObject ?: throw InvalidUpdateManifest("Missing $name")
 }
 
-internal fun requireGithubReleaseUrl(value: String) {
-    val url = value.toHttpUrlOrNull() ?: throw InvalidUpdateManifest("Invalid release URL")
-    if (!url.isHttps || url.host != "github.com" || !Regex("^/[^/]+/[^/]+/releases/(?:tag/[^/]+|latest)/?$").matches(url.encodedPath)) {
-        throw InvalidUpdateManifest("Release URL must be an HTTPS GitHub release URL")
-    }
-}
 
 internal fun requireGithubReleaseAssetUrl(value: String) {
     val url = value.toHttpUrlOrNull() ?: throw InvalidUpdateManifest("Invalid package URL")
-    if (!url.isHttps || url.host != "github.com" || !Regex("^/[^/]+/[^/]+/releases/download/[^/]+/[^/]+$").matches(url.encodedPath)) {
-        throw InvalidUpdateManifest("Package URL must be an HTTPS GitHub release asset URL")
+    if (!url.isHttps || url.host != "github.com" || !Regex("^/moodiness/rivune/releases/download/[^/]+/[^/]+$").matches(url.encodedPath)) {
+        throw InvalidUpdateManifest("Package URL must be an HTTPS Rivune GitHub release asset URL")
     }
 }
 
@@ -171,7 +175,7 @@ internal class AppUpdateManifestClient(
                     cache.lastSuccessfulCheckAt = checkedAt
                     ManifestFetchResult.Manifest(parsed)
                 } ?: throw InvalidUpdateManifest("The update cache is empty")
-                404 -> throw InvalidUpdateManifest("No Android update manifest is published")
+                404 -> throw InvalidUpdateManifest("No application update manifest is published")
                 200 -> {
                     val body = response.body ?: throw InvalidUpdateManifest("The update manifest is empty")
                     val declaredLength = body.contentLength()
@@ -192,8 +196,8 @@ internal class AppUpdateManifestClient(
     }
 
     private fun requireAllowedManifestUrl(url: HttpUrl) {
-        if (!url.isHttps || url.host != "github.com" || !url.encodedPath.endsWith("/releases/latest/download/rivune-android-update.json")) {
-            throw InvalidUpdateManifest("The update manifest URL is not an HTTPS GitHub Android latest-release asset")
+        if (!url.isHttps || url.host != "github.com" || url.encodedPath != "/moodiness/rivune/releases/latest/download/rivune-update.json") {
+            throw InvalidUpdateManifest("The update manifest URL is not the HTTPS Rivune global latest-release asset")
         }
     }
 

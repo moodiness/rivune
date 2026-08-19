@@ -50,6 +50,20 @@ public sealed class CredentialIsolationTests
         Assert.True(await client.RestoreSessionAsync(TestContext.Current.CancellationToken));
     }
 
+    [Fact]
+    public async Task ClearCredentialStoreWithMissingDirectoryIsSuccessfulNoOp()
+    {
+        var credentialPath = Path.Combine(
+            Path.GetTempPath(),
+            $"rivune-credential-clear-{Guid.NewGuid():N}",
+            "credentials.dat");
+        using var store = new DpapiCredentialStore(new Uri("https://rivune.test"), credentialPath);
+
+        await store.ClearAsync(TestContext.Current.CancellationToken);
+
+        Assert.False(File.Exists(credentialPath));
+    }
+
     [Theory]
     [InlineData("http://rivune.test")]
     [InlineData("http://192.0.2.10:8080")]
@@ -63,6 +77,20 @@ public sealed class CredentialIsolationTests
                 new MemoryCredentialStore(null));
         });
     }
+    [Theory]
+    [InlineData("https://user:secret@rivune.test")]
+    [InlineData("http://user:secret@localhost:8080")]
+    public void ServerUrlWithUserInfoIsRejected(string serverUrl)
+    {
+        Assert.Throws<InvalidServerUrlException>(() =>
+        {
+            using var client = new RivuneApiClient(
+                serverUrl,
+                new RecordingHandler(),
+                new MemoryCredentialStore(null));
+        });
+    }
+
 
     [Theory]
     [InlineData("http://localhost:8080")]
