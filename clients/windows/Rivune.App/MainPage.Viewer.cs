@@ -209,7 +209,7 @@ public sealed partial class MainPage
             {
                 XamlRoot = XamlRoot,
                 Title = $"Rivune {result.LatestVersion} is available",
-                Content = $"You are using Rivune {result.CurrentVersion}. Download the portable Rivune.exe from GitHub, verify its published size and SHA-256, then close and restart Rivune to replace this executable?",
+                Content = $"You are using Rivune {result.CurrentVersion}. Download the portable {result.Package.FileName} from GitHub, verify its published size and SHA-256, then close and restart Rivune to replace this executable?",
                 PrimaryButtonText = "Download update",
                 CloseButtonText = "Not now",
                 DefaultButton = ContentDialogButton.Primary,
@@ -222,7 +222,7 @@ public sealed partial class MainPage
             {
                 XamlRoot = XamlRoot,
                 Title = $"Downloading Rivune {result.LatestVersion}",
-                Content = "Downloading Rivune.exe over HTTPS and verifying its exact size and SHA-256 before any update is started.",
+                Content = $"Downloading {result.Package.FileName} over HTTPS and verifying its exact size and SHA-256 before any update is started.",
             };
             var downloadingOpened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             downloading.Opened += (_, _) => downloadingOpened.TrySetResult();
@@ -237,13 +237,16 @@ public sealed partial class MainPage
             string? updatePath = null;
             try
             {
+                var processPath = Environment.ProcessPath ??
+                    throw new InvalidOperationException("Windows did not report the running Rivune executable path. The current app is unchanged.");
+                var targetFileName = Path.GetFileName(processPath);
                 var updateDirectory = Path.Combine(
                     Path.GetTempPath(),
                     "Rivune",
                     "updates",
                     Guid.NewGuid().ToString("N"));
                 Directory.CreateDirectory(updateDirectory);
-                updatePath = Path.Combine(updateDirectory, result.Package.FileName);
+                updatePath = Path.Combine(updateDirectory, targetFileName);
                 await using (var destination = new FileStream(
                                  updatePath,
                                  FileMode.CreateNew,
@@ -263,8 +266,6 @@ public sealed partial class MainPage
                     return;
                 }
 
-                var processPath = Environment.ProcessPath ??
-                    throw new InvalidOperationException("Windows did not report the running Rivune.exe path. The current app is unchanged.");
                 PortableAppUpdate.StartHandoff(
                     updatePath,
                     processPath,

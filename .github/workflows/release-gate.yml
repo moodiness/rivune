@@ -174,8 +174,24 @@ jobs:
         run: bash clients/android/gradlew -p clients/android --no-daemon :rivune-api:testDebugUnitTest :rivune-api:assembleRelease :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
 
   windows-client:
-    name: Windows x64 portable client
-    runs-on: windows-latest
+    name: Windows ${{ matrix.label }} portable client
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: x64
+            runner: windows-latest
+            runtime: win-x64
+            platform: x64
+            file_name: Rivune-x64.exe
+            machine: '0x8664'
+          - label: ARM64
+            runner: ${{ format('windows-{0}-arm', 11) }} # windows-11-arm native runner
+            runtime: win-arm64
+            platform: ARM64
+            file_name: Rivune-arm64.exe
+            machine: '0xAA64'
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -184,17 +200,24 @@ jobs:
         with:
           dotnet-version: 10.0.x
       - name: Test private Windows environment-file creation
+        if: matrix.label == 'x64'
         run: pwsh -NoProfile -File scripts/create-env.Tests.ps1
       - name: Test Windows library
+        if: matrix.label == 'x64'
         run: dotnet test clients/windows/Rivune.Windows.slnx --configuration Release --nologo
-      - name: Publish, inspect, and smoke the unsigned x64 executable
+      - name: Publish, inspect, and smoke the unsigned executable
+        env:
+          ASSET_FILE_NAME: ${{ matrix.file_name }}
+          EXPECTED_MACHINE: ${{ matrix.machine }}
+          PLATFORM: ${{ matrix.platform }}
+          RUNTIME: ${{ matrix.runtime }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $project = Join-Path $env:GITHUB_WORKSPACE 'clients/windows/Rivune.App/Rivune.App.csproj'
           $publish = Join-Path $env:RUNNER_TEMP 'rivune-portable-publish'
-          & dotnet publish $project --configuration Release --runtime win-x64 --output $publish --nologo `
-            -p:Platform=x64 `
+          & dotnet publish $project --configuration Release --runtime $env:RUNTIME --output $publish --nologo `
+            -p:Platform=$env:PLATFORM `
             -p:WindowsPackageType=None `
             -p:PublishSingleFile=true `
             -p:IncludeAllContentForSelfExtract=true `
@@ -205,7 +228,7 @@ jobs:
             -p:FileVersion=1.8.0.0 `
             -p:InformationalVersion=1.8.0 `
             -p:IncludeSourceRevisionInInformationalVersion=false
-          if ($LASTEXITCODE -ne 0) { throw 'Windows x64 portable publish failed.' }
+          if ($LASTEXITCODE -ne 0) { throw "Windows $env:PLATFORM portable publish failed." }
 
           $distributable = @(Get-ChildItem -LiteralPath $publish -File -Recurse |
             Where-Object { $_.Extension -ne '.pdb' })
@@ -214,11 +237,11 @@ jobs:
           }
           $stage = Join-Path $env:RUNNER_TEMP 'rivune-portable-stage'
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          $executable = Join-Path $stage 'Rivune.exe'
+          $executable = Join-Path $stage $env:ASSET_FILE_NAME
           Copy-Item -LiteralPath $distributable[0].FullName -Destination $executable
           $stagedFiles = @(Get-ChildItem -LiteralPath $stage -File)
-          if ($stagedFiles.Count -ne 1 -or $stagedFiles[0].Name -cne 'Rivune.exe') {
-            throw 'Portable staging must contain exactly Rivune.exe.'
+          if ($stagedFiles.Count -ne 1 -or $stagedFiles[0].Name -cne $env:ASSET_FILE_NAME) {
+            throw "Portable staging must contain exactly $env:ASSET_FILE_NAME."
           }
           $stream = [IO.File]::OpenRead($executable)
           try {
@@ -228,7 +251,9 @@ jobs:
             $peOffset = $reader.ReadUInt32()
             $stream.Position = $peOffset
             if ($reader.ReadUInt32() -ne 0x00004550) { throw 'Portable executable has no PE signature.' }
-            if ($reader.ReadUInt16() -ne 0x8664) { throw 'Portable executable PE machine is not x64.' }
+            if ($reader.ReadUInt16() -ne [Convert]::ToUInt16($env:EXPECTED_MACHINE.Substring(2), 16)) {
+              throw "Portable executable PE machine is not $env:PLATFORM."
+            }
           } finally {
             if ($null -ne $reader) { $reader.Dispose() } else { $stream.Dispose() }
           }

@@ -139,7 +139,7 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
   windows-asset:
-    name: Build and verify Windows x64 portable executable
+    name: Build and verify Windows portable executables
     if: needs.authorize.outputs.authorized == 'true'
     needs:
       - authorize
@@ -158,7 +158,7 @@ jobs:
         uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: 10.0.x
-      - name: Publish and inspect unsigned x64 executable
+      - name: Publish and inspect unsigned x64 and ARM64 executables
         env:
           RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
         shell: pwsh
@@ -174,61 +174,79 @@ jobs:
           $versionName = $env:RELEASE_TAG.Substring(1)
           $fileVersion = "$($components[0]).$($components[1]).$($components[2]).0"
           $project = Join-Path $env:GITHUB_WORKSPACE 'clients/windows/Rivune.App/Rivune.App.csproj'
-          $publish = Join-Path $env:RUNNER_TEMP 'rivune-portable-publish'
           $artifactDirectory = Join-Path $env:GITHUB_WORKSPACE 'windows-release-asset'
           New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
+          $targets = @(
+            @{ Runtime = 'win-x64'; Platform = 'x64'; FileName = 'Rivune-x64.exe'; Machine = [uint16]0x8664; Label = 'x64' },
+            @{ Runtime = 'win-arm64'; Platform = 'ARM64'; FileName = 'Rivune-arm64.exe'; Machine = [uint16]0xAA64; Label = 'ARM64' }
+          )
 
-          & dotnet publish $project --configuration Release --runtime win-x64 --output $publish --nologo `
-            -p:Platform=x64 `
-            -p:WindowsPackageType=None `
-            -p:PublishSingleFile=true `
-            -p:IncludeAllContentForSelfExtract=true `
-            -p:SelfContained=true `
-            -p:WindowsAppSDKSelfContained=true `
-            -p:Version=$versionName `
-            -p:AssemblyVersion=$fileVersion `
-            -p:FileVersion=$fileVersion `
-            -p:InformationalVersion=$versionName `
-            -p:IncludeSourceRevisionInInformationalVersion=false
-          if ($LASTEXITCODE -ne 0) { throw 'Windows x64 portable publish failed.' }
+          foreach ($target in $targets) {
+            $publish = Join-Path $env:RUNNER_TEMP "rivune-portable-publish-$($target.Label.ToLowerInvariant())"
+            & dotnet publish $project --configuration Release --runtime $target.Runtime --output $publish --nologo `
+              -p:Platform=$($target.Platform) `
+              -p:WindowsPackageType=None `
+              -p:PublishSingleFile=true `
+              -p:IncludeAllContentForSelfExtract=true `
+              -p:SelfContained=true `
+              -p:WindowsAppSDKSelfContained=true `
+              -p:Version=$versionName `
+              -p:AssemblyVersion=$fileVersion `
+              -p:FileVersion=$fileVersion `
+              -p:InformationalVersion=$versionName `
+              -p:IncludeSourceRevisionInInformationalVersion=false
+            if ($LASTEXITCODE -ne 0) { throw "Windows $($target.Label) portable publish failed." }
 
-          $distributable = @(Get-ChildItem -LiteralPath $publish -File -Recurse |
-            Where-Object { $_.Extension -ne '.pdb' })
-          if ($distributable.Count -ne 1 -or $distributable[0].Extension -ne '.exe') {
-            throw "Portable publish must contain exactly one distributable executable; found: $($distributable.Name -join ', ')."
+            $distributable = @(Get-ChildItem -LiteralPath $publish -File -Recurse |
+              Where-Object { $_.Extension -ne '.pdb' })
+            if ($distributable.Count -ne 1 -or $distributable[0].Extension -ne '.exe') {
+              throw "Windows $($target.Label) publish must contain exactly one distributable executable; found: $($distributable.Name -join ', ')."
+            }
+            $asset = Join-Path $artifactDirectory $target.FileName
+            Copy-Item -LiteralPath $distributable[0].FullName -Destination $asset
+            $stream = [IO.File]::OpenRead($asset)
+            try {
+              $reader = [IO.BinaryReader]::new($stream)
+              if ($reader.ReadUInt16() -ne 0x5a4d) { throw "$($target.FileName) has no DOS PE header." }
+              $stream.Position = 0x3c
+              $peOffset = $reader.ReadUInt32()
+              $stream.Position = $peOffset
+              if ($reader.ReadUInt32() -ne 0x00004550) { throw "$($target.FileName) has no PE signature." }
+              if ($reader.ReadUInt16() -ne $target.Machine) { throw "$($target.FileName) PE machine is not $($target.Label)." }
+            } finally {
+              if ($null -ne $reader) { $reader.Dispose() } else { $stream.Dispose() }
+            }
+            $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($asset)
+            if ($version.FileVersion -ne $fileVersion -or $version.ProductVersion -ne $versionName) {
+              throw "$($target.FileName) version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
+            }
+            if ((Get-AuthenticodeSignature -FilePath $asset).Status -ne 'NotSigned') {
+              throw "$($target.FileName) must be unsigned."
+            }
+            $size = (Get-Item -LiteralPath $asset).Length
+            if ($size -le 0 -or $size -gt 2147483647) { throw "$($target.FileName) size is invalid: $size bytes." }
           }
-          $asset = Join-Path $artifactDirectory 'Rivune.exe'
-          Copy-Item -LiteralPath $distributable[0].FullName -Destination $asset
-          $stream = [IO.File]::OpenRead($asset)
-          try {
-            $reader = [IO.BinaryReader]::new($stream)
-            if ($reader.ReadUInt16() -ne 0x5a4d) { throw 'Rivune.exe has no DOS PE header.' }
-            $stream.Position = 0x3c
-            $peOffset = $reader.ReadUInt32()
-            $stream.Position = $peOffset
-            if ($reader.ReadUInt32() -ne 0x00004550) { throw 'Rivune.exe has no PE signature.' }
-            if ($reader.ReadUInt16() -ne 0x8664) { throw 'Rivune.exe PE machine is not x64.' }
-          } finally {
-            if ($null -ne $reader) { $reader.Dispose() } else { $stream.Dispose() }
+          $canonicalX64 = Join-Path $artifactDirectory 'Rivune-x64.exe'
+          $legacyX64 = Join-Path $artifactDirectory 'Rivune.exe'
+          Copy-Item -LiteralPath $canonicalX64 -Destination $legacyX64
+          $canonicalHash = (Get-FileHash -LiteralPath $canonicalX64 -Algorithm SHA256).Hash
+          $legacyHash = (Get-FileHash -LiteralPath $legacyX64 -Algorithm SHA256).Hash
+          if ($canonicalHash -cne $legacyHash -or
+              (Get-Item -LiteralPath $canonicalX64).Length -ne (Get-Item -LiteralPath $legacyX64).Length) {
+            throw 'Rivune.exe must be byte-identical to Rivune-x64.exe.'
           }
-          $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($asset)
-          if ($version.FileVersion -ne $fileVersion -or $version.ProductVersion -ne $versionName) {
-            throw "Rivune.exe version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
+
+
+          $files = @((Get-ChildItem -LiteralPath $artifactDirectory -File).Name | Sort-Object)
+          $expectedFiles = @('Rivune-arm64.exe', 'Rivune-x64.exe', 'Rivune.exe')
+          if (Compare-Object -ReferenceObject $expectedFiles -DifferenceObject $files -CaseSensitive) {
+            throw "Windows release artifact must contain exactly: $($expectedFiles -join ', ')."
           }
-          if ((Get-AuthenticodeSignature -FilePath $asset).Status -ne 'NotSigned') {
-            throw 'Rivune.exe must be unsigned.'
-          }
-          $size = (Get-Item -LiteralPath $asset).Length
-          if ($size -le 0 -or $size -gt 2147483647) { throw "Rivune.exe size is invalid: $size bytes." }
-          $files = @(Get-ChildItem -LiteralPath $artifactDirectory -File)
-          if ($files.Count -ne 1 -or $files[0].Name -cne 'Rivune.exe') {
-            throw 'Windows release artifact must contain exactly Rivune.exe.'
-          }
-      - name: Upload immutable Windows release executable
+      - name: Upload immutable Windows release executables
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-release-asset-${{ github.run_id }}-${{ github.run_attempt }}
-          path: windows-release-asset/Rivune.exe
+          path: windows-release-asset/
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
@@ -251,9 +269,13 @@ jobs:
       android_asset_name: ${{ steps.metadata.outputs.android_asset_name }}
       source_asset_name: ${{ steps.metadata.outputs.source_asset_name }}
       windows_asset_name: ${{ steps.metadata.outputs.windows_asset_name }}
+      windows_x64_asset_name: ${{ steps.metadata.outputs.windows_x64_asset_name }}
+      windows_arm64_asset_name: ${{ steps.metadata.outputs.windows_arm64_asset_name }}
       release_url: ${{ steps.metadata.outputs.release_url }}
       android_asset_url: ${{ steps.metadata.outputs.android_asset_url }}
       windows_asset_url: ${{ steps.metadata.outputs.windows_asset_url }}
+      windows_x64_asset_url: ${{ steps.metadata.outputs.windows_x64_asset_url }}
+      windows_arm64_asset_url: ${{ steps.metadata.outputs.windows_arm64_asset_url }}
     permissions:
       contents: read
     steps:
@@ -263,7 +285,7 @@ jobs:
           ref: ${{ needs.authorize.outputs.sha }}
           persist-credentials: false
           fetch-depth: 0
-      - name: Download immutable Windows release executable
+      - name: Download immutable Windows release executables
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ needs.windows-asset.outputs.artifact_name }}
@@ -325,14 +347,24 @@ jobs:
           asset_name="rivune-android-${version_name}.apk"
           source_asset_name="rivune-android-${version_name}-corresponding-source.tar.gz"
           windows_asset_name='Rivune.exe'
+          windows_x64_asset_name='Rivune-x64.exe'
+          windows_arm64_asset_name='Rivune-arm64.exe'
           release_url="https://github.com/${REPOSITORY}/releases/tag/${RELEASE_TAG}"
           asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${asset_name}"
           windows_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_asset_name}"
-          windows_size="$(stat -c %s "release-assets/${windows_asset_name}")"
-          if (( windows_size <= 0 || windows_size > 2147483647 )); then
-            echo "Rivune.exe size is invalid: ${windows_size} bytes." >&2
+          windows_x64_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_x64_asset_name}"
+          windows_arm64_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_arm64_asset_name}"
+          for windows_asset in "${windows_asset_name}" "${windows_x64_asset_name}" "${windows_arm64_asset_name}"; do
+            windows_size="$(stat -c %s "release-assets/${windows_asset}")"
+            if (( windows_size <= 0 || windows_size > 2147483647 )); then
+              echo "${windows_asset} size is invalid: ${windows_size} bytes." >&2
+              exit 1
+            fi
+          done
+          cmp --silent "release-assets/${windows_asset_name}" "release-assets/${windows_x64_asset_name}" || {
+            echo 'Rivune.exe must be byte-identical to Rivune-x64.exe.' >&2
             exit 1
-          fi
+          }
 
           mkdir -p release-assets .release-private release-inputs unsigned-android-input
           {
@@ -343,9 +375,13 @@ jobs:
             echo "android_asset_name=${asset_name}"
             echo "source_asset_name=${source_asset_name}"
             echo "windows_asset_name=${windows_asset_name}"
+            echo "windows_x64_asset_name=${windows_x64_asset_name}"
+            echo "windows_arm64_asset_name=${windows_arm64_asset_name}"
             echo "release_url=${release_url}"
             echo "android_asset_url=${asset_url}"
             echo "windows_asset_url=${windows_asset_url}"
+            echo "windows_x64_asset_url=${windows_x64_asset_url}"
+            echo "windows_arm64_asset_url=${windows_arm64_asset_url}"
           } >> "${GITHUB_OUTPUT}"
 
           export RIVUNE_ANDROID_VERSION_NAME="${version_name}"
@@ -917,6 +953,8 @@ jobs:
           done
           mv "release-assets/${source_asset_name}" release-inputs/
           mv "release-assets/${windows_asset_name}" release-inputs/
+          mv "release-assets/${windows_x64_asset_name}" release-inputs/
+          mv "release-assets/${windows_arm64_asset_name}" release-inputs/
           rm -rf .release-private
           trap - EXIT
       - name: Upload immutable unsigned Android input
@@ -1126,9 +1164,13 @@ jobs:
           RIVUNE_RELEASE_ANDROID_ASSET_NAME: ${{ needs.build-assets.outputs.android_asset_name }}
           RIVUNE_RELEASE_SOURCE_ASSET_NAME: ${{ needs.build-assets.outputs.source_asset_name }}
           RIVUNE_RELEASE_WINDOWS_ASSET_NAME: ${{ needs.build-assets.outputs.windows_asset_name }}
+          RIVUNE_RELEASE_WINDOWS_X64_ASSET_NAME: ${{ needs.build-assets.outputs.windows_x64_asset_name }}
+          RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_NAME: ${{ needs.build-assets.outputs.windows_arm64_asset_name }}
           RIVUNE_RELEASE_URL: ${{ needs.build-assets.outputs.release_url }}
           RIVUNE_RELEASE_ANDROID_ASSET_URL: ${{ needs.build-assets.outputs.android_asset_url }}
           RIVUNE_RELEASE_WINDOWS_ASSET_URL: ${{ needs.build-assets.outputs.windows_asset_url }}
+          RIVUNE_RELEASE_WINDOWS_X64_ASSET_URL: ${{ needs.build-assets.outputs.windows_x64_asset_url }}
+          RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_URL: ${{ needs.build-assets.outputs.windows_arm64_asset_url }}
           RIVUNE_RELEASE_SIGNING_CERT_SHA256: ${{ needs.sign-android.outputs.signing_certificate_sha256 }}
         shell: bash
         run: |
@@ -1141,9 +1183,13 @@ jobs:
             RIVUNE_RELEASE_ANDROID_ASSET_NAME \
             RIVUNE_RELEASE_SOURCE_ASSET_NAME \
             RIVUNE_RELEASE_WINDOWS_ASSET_NAME \
+            RIVUNE_RELEASE_WINDOWS_X64_ASSET_NAME \
+            RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_NAME \
             RIVUNE_RELEASE_URL \
             RIVUNE_RELEASE_ANDROID_ASSET_URL \
             RIVUNE_RELEASE_WINDOWS_ASSET_URL \
+            RIVUNE_RELEASE_WINDOWS_X64_ASSET_URL \
+            RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_URL \
             RIVUNE_RELEASE_SIGNING_CERT_SHA256; do
             if [[ -z "${!name:-}" ]]; then
               echo "Required release metadata is missing: ${name}" >&2
@@ -1165,7 +1211,11 @@ jobs:
               --build-version "${RIVUNE_RELEASE_VERSION_CODE}" \
               --signing-certificate-sha256 "${RIVUNE_RELEASE_SIGNING_CERT_SHA256}" \
               --windows-executable "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_WINDOWS_ASSET_NAME}" \
-              --windows-executable-url "${RIVUNE_RELEASE_WINDOWS_ASSET_URL}"
+              --windows-executable-url "${RIVUNE_RELEASE_WINDOWS_ASSET_URL}" \
+              --windows-x64-executable "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_WINDOWS_X64_ASSET_NAME}" \
+              --windows-x64-executable-url "${RIVUNE_RELEASE_WINDOWS_X64_ASSET_URL}" \
+              --windows-arm64-executable "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_NAME}" \
+              --windows-arm64-executable-url "${RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_URL}"
             go run . validate \
               --apk "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_ANDROID_ASSET_NAME}" \
               --channel "${RIVUNE_RELEASE_CHANNEL}" \
@@ -1177,18 +1227,12 @@ jobs:
               --signing-certificate-sha256 "${RIVUNE_RELEASE_SIGNING_CERT_SHA256}" \
               --windows-executable "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_WINDOWS_ASSET_NAME}" \
               --windows-executable-url "${RIVUNE_RELEASE_WINDOWS_ASSET_URL}" \
+              --windows-x64-executable "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_WINDOWS_X64_ASSET_NAME}" \
+              --windows-x64-executable-url "${RIVUNE_RELEASE_WINDOWS_X64_ASSET_URL}" \
+              --windows-arm64-executable "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_NAME}" \
+              --windows-arm64-executable-url "${RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_URL}" \
               --legacy-android-manifest "${GITHUB_WORKSPACE}/release-assets/rivune-android-update.json" \
               "${GITHUB_WORKSPACE}/release-assets/rivune-update.json"
-          )
-          (
-            cd release-assets
-            sha256sum \
-              "${RIVUNE_RELEASE_ANDROID_ASSET_NAME}" \
-              "${RIVUNE_RELEASE_SOURCE_ASSET_NAME}" \
-              "${RIVUNE_RELEASE_WINDOWS_ASSET_NAME}" \
-              rivune-update.json \
-              rivune-android-update.json > SHA256SUMS
-            sha256sum --check --strict SHA256SUMS
           )
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
@@ -1309,27 +1353,25 @@ jobs:
           asset_name="rivune-android-${version_name}.apk"
           source_asset_name="rivune-android-${version_name}-corresponding-source.tar.gz"
           windows_asset_name='Rivune.exe'
-          expected_files="$(printf '%s\n' SHA256SUMS rivune-update.json rivune-android-update.json "${asset_name}" "${source_asset_name}" "${windows_asset_name}" | sort)"
+          windows_x64_asset_name='Rivune-x64.exe'
+          windows_arm64_asset_name='Rivune-arm64.exe'
+          expected_files="$(printf '%s\n' rivune-update.json rivune-android-update.json "${asset_name}" "${source_asset_name}" "${windows_asset_name}" "${windows_x64_asset_name}" "${windows_arm64_asset_name}" | sort)"
           actual_files="$(find release-assets -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
           if [[ "${actual_files}" != "${expected_files}" ]]; then
             echo "Immutable artifact does not contain the exact release asset set." >&2
             exit 1
           fi
-          checksum_files="$(sed -nE 's/^[0-9a-f]{64}  (.+)$/\1/p' release-assets/SHA256SUMS | sort)"
-          expected_checksum_files="$(printf '%s\n' rivune-update.json rivune-android-update.json "${asset_name}" "${source_asset_name}" "${windows_asset_name}" | sort)"
-          if [[ "${checksum_files}" != "${expected_checksum_files}" ]]; then
-            echo "SHA256SUMS must contain exactly the APK, Corresponding Source, Rivune.exe, and both update manifests." >&2
+          for windows_asset in "${windows_asset_name}" "${windows_x64_asset_name}" "${windows_arm64_asset_name}"; do
+            windows_size="$(stat -c %s "release-assets/${windows_asset}")"
+            if (( windows_size <= 0 || windows_size > 2147483647 )); then
+              echo "${windows_asset} size is invalid: ${windows_size} bytes." >&2
+              exit 1
+            fi
+          done
+          cmp --silent "release-assets/${windows_asset_name}" "release-assets/${windows_x64_asset_name}" || {
+            echo 'Rivune.exe must be byte-identical to Rivune-x64.exe.' >&2
             exit 1
-          fi
-          (
-            cd release-assets
-            sha256sum --check --strict SHA256SUMS
-          )
-          windows_size="$(stat -c %s "release-assets/${windows_asset_name}")"
-          if (( windows_size <= 0 || windows_size > 2147483647 )); then
-            echo "Rivune.exe size is invalid: ${windows_size} bytes." >&2
-            exit 1
-          fi
+          }
           if (( $(stat -c %s "release-assets/${source_asset_name}") > 2040109465 )); then
             echo "Corresponding Source archive exceeds the 1.9 GiB release-asset safety limit." >&2
             exit 1
@@ -1380,6 +1422,8 @@ jobs:
           expected_release_url="https://github.com/${REPOSITORY}/releases/tag/${RELEASE_TAG}"
           expected_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${asset_name}"
           expected_windows_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_asset_name}"
+          expected_windows_x64_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_x64_asset_name}"
+          expected_windows_arm64_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_arm64_asset_name}"
           (
             cd clients/update
             go run . validate \
@@ -1393,6 +1437,10 @@ jobs:
               --signing-certificate-sha256 "$(jq -er '.packages.android.signingCertificateSha256' "${GITHUB_WORKSPACE}/release-assets/rivune-update.json")" \
               --windows-executable "${GITHUB_WORKSPACE}/release-assets/${windows_asset_name}" \
               --windows-executable-url "${expected_windows_asset_url}" \
+              --windows-x64-executable "${GITHUB_WORKSPACE}/release-assets/${windows_x64_asset_name}" \
+              --windows-x64-executable-url "${expected_windows_x64_asset_url}" \
+              --windows-arm64-executable "${GITHUB_WORKSPACE}/release-assets/${windows_arm64_asset_name}" \
+              --windows-arm64-executable-url "${expected_windows_arm64_asset_url}" \
               --legacy-android-manifest "${GITHUB_WORKSPACE}/release-assets/rivune-android-update.json" \
               "${GITHUB_WORKSPACE}/release-assets/rivune-update.json"
           )
@@ -1541,9 +1589,10 @@ jobs:
             fi
           }
           upload_release_asset() {
-            local asset_path="$1" content_type="$2" asset_name expected_size response
+            local asset_path="$1" content_type="$2" asset_id asset_name asset_digest attempt expected_size expected_sha response
             asset_name="${asset_path##*/}"
             expected_size="$(stat -c '%s' "${asset_path}")"
+            expected_sha="$(sha256sum "${asset_path}" | cut -d ' ' -f1)"
             response="$(curl --fail-with-body --silent --show-error \
               --request POST \
               --header 'Accept: application/vnd.github+json' \
@@ -1559,26 +1608,47 @@ jobs:
               ($id > 0) and
               .name == $name and
               .size == $size and
-              .state == "uploaded"
+              .state == "uploaded" and
+              ((.digest == null) or (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")))
             ' <<<"${response}" >/dev/null; then
               echo "The uploaded GitHub Release asset response is invalid for ${asset_name}." >&2
               return 1
             fi
+            asset_id="$(jq -er '.id | select(type == "number" and . > 0)' <<<"${response}")"
+            for attempt in {1..12}; do
+              asset_digest="$(jq -r '.digest // empty' <<<"${response}")"
+              if [[ "${asset_digest}" == "sha256:${expected_sha}" ]]; then
+                return 0
+              fi
+              if [[ -n "${asset_digest}" ]]; then
+                echo "The uploaded GitHub Release asset digest differs from trusted bytes for ${asset_name}." >&2
+                return 1
+              fi
+              if (( attempt < 12 )); then
+                sleep 1
+                response="$(gh api "repos/${REPOSITORY}/releases/assets/${asset_id}")"
+              fi
+            done
+            echo "GitHub did not publish a SHA-256 digest for ${asset_name} after the bounded wait." >&2
+            return 1
           }
           complete_partial_release_assets() {
-            local release_json="$1" release_asset_id release_asset_name adopted_sha trusted_sha
+            local release_json="$1" release_asset_id release_asset_name release_asset_digest adopted_sha trusted_sha
             local candidate_release_id content_type expected_upload_url upload_url
             local version_name="${RELEASE_TAG#v}"
             local apk_name="rivune-android-${version_name}.apk"
             local source_name="rivune-android-${version_name}-corresponding-source.tar.gz"
             local windows_name='Rivune.exe'
+            local windows_x64_name='Rivune-x64.exe'
+            local windows_arm64_name='Rivune-arm64.exe'
             local -a expected_names=(
-              SHA256SUMS
               rivune-update.json
               rivune-android-update.json
               "${apk_name}"
               "${source_name}"
               "${windows_name}"
+              "${windows_x64_name}"
+              "${windows_arm64_name}"
             )
             local -A seen=()
 
@@ -1599,7 +1669,7 @@ jobs:
                 return 1
               fi
               case "${release_asset_name}" in
-                SHA256SUMS|rivune-update.json|rivune-android-update.json|"${apk_name}"|"${source_name}"|"${windows_name}") ;;
+                rivune-update.json|rivune-android-update.json|"${apk_name}"|"${source_name}"|"${windows_name}"|"${windows_x64_name}"|"${windows_arm64_name}") ;;
                 *)
                   echo "The partial GitHub Release contains an unexpected asset: ${release_asset_name}" >&2
                   return 1
@@ -1622,7 +1692,7 @@ jobs:
 
             rm -rf partial-release-assets
             mkdir partial-release-assets
-            while IFS=$'\t' read -r release_asset_id release_asset_name; do
+            while IFS=$'\t' read -r release_asset_id release_asset_name release_asset_digest; do
               gh api \
                 --header 'Accept: application/octet-stream' \
                 "repos/${REPOSITORY}/releases/assets/${release_asset_id}" > "partial-release-assets/${release_asset_name}"
@@ -1632,7 +1702,11 @@ jobs:
                 echo "The partial ${release_asset_name} differs from the trusted release artifact." >&2
                 return 1
               fi
-            done < <(jq -r '.assets[] | [.id, .name] | @tsv' <<<"${release_json}")
+              if [[ "${release_asset_digest}" != "sha256:${trusted_sha}" ]]; then
+                echo "The partial ${release_asset_name} metadata digest differs from trusted bytes." >&2
+                return 1
+              fi
+            done < <(jq -r '.assets[] | [.id, .name, (.digest // "")] | @tsv' <<<"${release_json}")
 
             candidate_release_id="$(jq -er '.id | select(type == "number" and . > 0)' <<<"${release_json}")"
             if [[ "${candidate_release_id}" != "${release_id}" ]]; then
@@ -1651,11 +1725,10 @@ jobs:
                 continue
               fi
               case "${release_asset_name}" in
-                SHA256SUMS) content_type='text/plain' ;;
                 rivune-update.json|rivune-android-update.json) content_type='application/json' ;;
                 "${apk_name}") content_type='application/vnd.android.package-archive' ;;
                 "${source_name}") content_type='application/gzip' ;;
-                "${windows_name}") content_type='application/vnd.microsoft.portable-executable' ;;
+                "${windows_name}"|"${windows_x64_name}"|"${windows_arm64_name}") content_type='application/vnd.microsoft.portable-executable' ;;
               esac
               upload_release_asset "release-assets/${release_asset_name}" "${content_type}"
             done
@@ -1695,13 +1768,15 @@ jobs:
               ' <<<"${release_json}" >/dev/null
           }
           validate_remote_assets() {
-            local release_json="$1" asset_id asset_name
+            local release_json="$1" asset_id asset_name asset_digest trusted_asset_sha
             local version_name="${RELEASE_TAG#v}"
             local apk_name="rivune-android-${version_name}.apk"
             local source_name="rivune-android-${version_name}-corresponding-source.tar.gz"
             local windows_name='Rivune.exe'
-            local expected_assets actual_assets expected_channel expected_release_url expected_apk_url expected_windows_url
-            expected_assets="$(printf '%s\n' SHA256SUMS rivune-update.json rivune-android-update.json "${apk_name}" "${source_name}" "${windows_name}" | sort)"
+            local windows_x64_name='Rivune-x64.exe'
+            local windows_arm64_name='Rivune-arm64.exe'
+            local expected_assets actual_assets expected_channel expected_release_url expected_apk_url expected_windows_url expected_windows_x64_url expected_windows_arm64_url
+            expected_assets="$(printf '%s\n' rivune-update.json rivune-android-update.json "${apk_name}" "${source_name}" "${windows_name}" "${windows_x64_name}" "${windows_arm64_name}" | sort)"
             actual_assets="$(jq -r '.assets[].name' <<<"${release_json}" | sort)"
             if [[ "${actual_assets}" != "${expected_assets}" ]]; then
               echo "The GitHub Release asset set is incomplete or contains unexpected files." >&2
@@ -1710,7 +1785,7 @@ jobs:
 
             rm -rf adopted-release-assets
             mkdir adopted-release-assets
-            while IFS=$'\t' read -r asset_id asset_name; do
+            while IFS=$'\t' read -r asset_id asset_name asset_digest; do
               if [[ ! "${asset_id}" =~ ^[1-9][0-9]*$ ]]; then
                 echo "The GitHub Release contains an invalid asset ID." >&2
                 return 1
@@ -1718,34 +1793,35 @@ jobs:
               gh api \
                 --header 'Accept: application/octet-stream' \
                 "repos/${REPOSITORY}/releases/assets/${asset_id}" > "adopted-release-assets/${asset_name}"
-            done < <(jq -r '.assets[] | [.id, .name] | @tsv' <<<"${release_json}")
+              trusted_asset_sha="$(sha256sum "release-assets/${asset_name}" | cut -d ' ' -f1)"
+              if [[ "${asset_digest}" != "sha256:${trusted_asset_sha}" ]]; then
+                echo "The GitHub asset metadata digest differs from trusted bytes for ${asset_name}." >&2
+                return 1
+              fi
+            done < <(jq -r '.assets[] | [.id, .name, (.digest // "")] | @tsv' <<<"${release_json}")
 
-            local checksum_files expected_checksum_files
-            checksum_files="$(sed -nE 's/^[0-9a-f]{64}  (.+)$/\1/p' adopted-release-assets/SHA256SUMS | sort)"
-            expected_checksum_files="$(printf '%s\n' rivune-update.json rivune-android-update.json "${apk_name}" "${source_name}" "${windows_name}" | sort)"
-            if [[ "${checksum_files}" != "${expected_checksum_files}" ]]; then
-              echo "The adopted SHA256SUMS must contain exactly the APK, Corresponding Source, Rivune.exe, and both update manifests." >&2
-              return 1
-            fi
-            (
-              cd adopted-release-assets
-              sha256sum --check --strict SHA256SUMS
-            )
             local adopted_windows_size
-            adopted_windows_size="$(stat -c %s "adopted-release-assets/${windows_name}")"
-            if (( adopted_windows_size <= 0 || adopted_windows_size > 2147483647 )); then
-              echo "The adopted Rivune.exe size is invalid: ${adopted_windows_size} bytes." >&2
+            for windows_asset in "${windows_name}" "${windows_x64_name}" "${windows_arm64_name}"; do
+              adopted_windows_size="$(stat -c %s "adopted-release-assets/${windows_asset}")"
+              if (( adopted_windows_size <= 0 || adopted_windows_size > 2147483647 )); then
+                echo "The adopted ${windows_asset} size is invalid: ${adopted_windows_size} bytes." >&2
+                return 1
+              fi
+            done
+            cmp --silent "adopted-release-assets/${windows_name}" "adopted-release-assets/${windows_x64_name}" || {
+              echo 'The adopted Rivune.exe must be byte-identical to Rivune-x64.exe.' >&2
               return 1
-            fi
+            }
 
             local trusted_asset adopted_asset_sha trusted_asset_sha archive_entries
             for trusted_asset in \
-              SHA256SUMS \
               rivune-update.json \
               rivune-android-update.json \
               "${apk_name}" \
               "${source_name}" \
-              "${windows_name}"; do
+              "${windows_name}" \
+              "${windows_x64_name}" \
+              "${windows_arm64_name}"; do
               adopted_asset_sha="$(sha256sum "adopted-release-assets/${trusted_asset}" | cut -d ' ' -f1)"
               trusted_asset_sha="$(sha256sum "release-assets/${trusted_asset}" | cut -d ' ' -f1)"
               if [[ "${adopted_asset_sha}" != "${trusted_asset_sha}" ]]; then
@@ -1805,6 +1881,8 @@ jobs:
             expected_release_url="https://github.com/${REPOSITORY}/releases/tag/${RELEASE_TAG}"
             expected_apk_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${apk_name}"
             expected_windows_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_name}"
+            expected_windows_x64_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_x64_name}"
+            expected_windows_arm64_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_arm64_name}"
             (
               cd clients/update
               go run . validate \
@@ -1815,6 +1893,10 @@ jobs:
                 --apk-url "${expected_apk_url}" \
                 --windows-executable "${GITHUB_WORKSPACE}/adopted-release-assets/${windows_name}" \
                 --windows-executable-url "${expected_windows_url}" \
+                --windows-x64-executable "${GITHUB_WORKSPACE}/adopted-release-assets/${windows_x64_name}" \
+                --windows-x64-executable-url "${expected_windows_x64_url}" \
+                --windows-arm64-executable "${GITHUB_WORKSPACE}/adopted-release-assets/${windows_arm64_name}" \
+                --windows-arm64-executable-url "${expected_windows_arm64_url}" \
                 --application-id io.rivune.app \
                 --build-version "$(jq -er '.packages.android.buildVersion' "${GITHUB_WORKSPACE}/adopted-release-assets/rivune-update.json")" \
                 --signing-certificate-sha256 "$(jq -er '.packages.android.signingCertificateSha256' "${GITHUB_WORKSPACE}/adopted-release-assets/rivune-update.json")" \
@@ -1939,7 +2021,7 @@ jobs:
           trap - EXIT
 
   verify-windows-release:
-    name: Verify adopted Windows x64 executable
+    name: Verify adopted Windows executables
     if: needs.authorize.outputs.authorized == 'true'
     needs:
       - authorize
@@ -1949,7 +2031,7 @@ jobs:
       # GitHub exposes draft release assets only to tokens with contents: write.
       contents: write
     steps:
-      - name: Verify remote executable architecture, version, hash, and unsigned state
+      - name: Verify remote executable architectures, versions, hashes, and unsigned state
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ needs.release.outputs.release_id }}
@@ -1976,15 +2058,23 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $release.tag_name -ne $env:RELEASE_TAG) {
             throw 'Could not retrieve the validated GitHub Release.'
           }
-          $asset = @($release.assets | Where-Object { $_.name -ceq 'Rivune.exe' })
           $manifestAsset = @($release.assets | Where-Object { $_.name -ceq 'rivune-update.json' })
-          if ($asset.Count -ne 1 -or $manifestAsset.Count -ne 1 -or
-              $asset[0].id -notmatch '^[1-9][0-9]*$' -or $manifestAsset[0].id -notmatch '^[1-9][0-9]*$') {
-            throw 'GitHub Release must contain exactly one Rivune.exe and one global update manifest.'
+          $targets = @(
+            @{ AssetName = 'Rivune.exe'; Package = 'windows'; Architecture = 'x64'; Machine = [uint16]0x8664 },
+            @{ AssetName = 'Rivune-x64.exe'; Package = 'windowsX64'; Architecture = 'x64'; Machine = [uint16]0x8664 },
+            @{ AssetName = 'Rivune-arm64.exe'; Package = 'windowsArm64'; Architecture = 'arm64'; Machine = [uint16]0xAA64 }
+          )
+          if ($manifestAsset.Count -ne 1 -or $manifestAsset[0].id -notmatch '^[1-9][0-9]*$') {
+            throw 'GitHub Release must contain exactly one global update manifest.'
+          }
+          foreach ($target in $targets) {
+            $target['Asset'] = @($release.assets | Where-Object { $_.name -ceq $target.AssetName })
+            if ($target.Asset.Count -ne 1 -or $target.Asset[0].id -notmatch '^[1-9][0-9]*$') {
+              throw "GitHub Release must contain exactly one $($target.AssetName)."
+            }
           }
           $root = Join-Path $env:RUNNER_TEMP 'rivune-adopted-windows'
           New-Item -ItemType Directory -Force -Path $root | Out-Null
-          $executable = Join-Path $root 'Rivune.exe'
           $manifestPath = Join-Path $root 'rivune-update.json'
           $headers = @{
             Accept = 'application/octet-stream'
@@ -1992,45 +2082,58 @@ jobs:
             'X-GitHub-Api-Version' = '2022-11-28'
           }
           Invoke-WebRequest `
-            -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$($asset[0].id)" `
-            -Headers $headers -OutFile $executable
-          Invoke-WebRequest `
             -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$($manifestAsset[0].id)" `
             -Headers $headers -OutFile $manifestPath
 
           $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-          $windows = $manifest.packages.windows
-          $expectedUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/Rivune.exe"
-          if ($windows.format -cne 'exe' -or $windows.fileName -cne 'Rivune.exe' -or
-              $windows.url -cne $expectedUrl -or @($windows.architectures).Count -ne 1 -or
-              $windows.architectures[0] -cne 'x64' -or $windows.minimumOsVersion -cne '10.0.19041.0' -or
-              $windows.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
-              $windows.size -isnot [long] -or $windows.size -le 0 -or $windows.size -gt 2147483647) {
-            throw 'Global update manifest has invalid Windows executable metadata.'
+          if ($manifest.schemaVersion -ne 2) { throw 'Global update manifest schemaVersion must be 2.' }
+          foreach ($target in $targets) {
+            $executable = Join-Path $root $target.AssetName
+            Invoke-WebRequest `
+              -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$($target.Asset[0].id)" `
+              -Headers $headers -OutFile $executable
+            $package = $manifest.packages.($target.Package)
+            $expectedUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/$($target.AssetName)"
+            if ($package.format -cne 'exe' -or $package.fileName -cne $target.AssetName -or
+                $package.url -cne $expectedUrl -or @($package.architectures).Count -ne 1 -or
+                $package.architectures[0] -cne $target.Architecture -or $package.minimumOsVersion -cne '10.0.19041.0' -or
+                $package.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $package.size -isnot [long] -or $package.size -le 0 -or $package.size -gt 2147483647) {
+              throw "Global update manifest has invalid $($target.Package) executable metadata."
+            }
+            $actualSize = (Get-Item -LiteralPath $executable).Length
+            $actualHash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualSize -ne $package.size -or $actualHash -cne $package.sha256) {
+              throw "$($target.AssetName) size or SHA-256 does not match the global update manifest."
+            }
+            $metadataDigest = $target.Asset[0].digest
+            if ($metadataDigest -cne "sha256:$actualHash") {
+              throw "$($target.AssetName) GitHub asset digest does not match its downloaded bytes."
+            }
+            $stream = [IO.File]::OpenRead($executable)
+            try {
+              $reader = [IO.BinaryReader]::new($stream)
+              if ($reader.ReadUInt16() -ne 0x5a4d) { throw "$($target.AssetName) has no DOS PE header." }
+              $stream.Position = 0x3c
+              $peOffset = $reader.ReadUInt32()
+              $stream.Position = $peOffset
+              if ($reader.ReadUInt32() -ne 0x00004550) { throw "$($target.AssetName) has no PE signature." }
+              if ($reader.ReadUInt16() -ne $target.Machine) { throw "$($target.AssetName) has the wrong PE machine." }
+            } finally {
+              if ($null -ne $reader) { $reader.Dispose() } else { $stream.Dispose() }
+            }
+            $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($executable)
+            if ($version.FileVersion -ne $fileVersion -or $version.ProductVersion -ne $versionName) {
+              throw "$($target.AssetName) version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
+            }
+            if ((Get-AuthenticodeSignature -FilePath $executable).Status -ne 'NotSigned') {
+              throw "Adopted $($target.AssetName) must be unsigned."
+            }
           }
-          $actualSize = (Get-Item -LiteralPath $executable).Length
-          $actualHash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actualSize -ne $windows.size -or $actualHash -cne $windows.sha256) {
-            throw 'Rivune.exe size or SHA-256 does not match the global update manifest.'
-          }
-          $stream = [IO.File]::OpenRead($executable)
-          try {
-            $reader = [IO.BinaryReader]::new($stream)
-            if ($reader.ReadUInt16() -ne 0x5a4d) { throw 'Rivune.exe has no DOS PE header.' }
-            $stream.Position = 0x3c
-            $peOffset = $reader.ReadUInt32()
-            $stream.Position = $peOffset
-            if ($reader.ReadUInt32() -ne 0x00004550) { throw 'Rivune.exe has no PE signature.' }
-            if ($reader.ReadUInt16() -ne 0x8664) { throw 'Rivune.exe PE machine is not x64.' }
-          } finally {
-            if ($null -ne $reader) { $reader.Dispose() } else { $stream.Dispose() }
-          }
-          $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($executable)
-          if ($version.FileVersion -ne $fileVersion -or $version.ProductVersion -ne $versionName) {
-            throw "Rivune.exe version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
-          }
-          if ((Get-AuthenticodeSignature -FilePath $executable).Status -ne 'NotSigned') {
-            throw 'Adopted Rivune.exe must be unsigned.'
+          $legacyHash = (Get-FileHash -LiteralPath (Join-Path $root 'Rivune.exe') -Algorithm SHA256).Hash
+          $canonicalHash = (Get-FileHash -LiteralPath (Join-Path $root 'Rivune-x64.exe') -Algorithm SHA256).Hash
+          if ($legacyHash -cne $canonicalHash) {
+            throw 'Adopted Rivune.exe must be byte-identical to Rivune-x64.exe.'
           }
 
   promote:
@@ -2142,7 +2245,7 @@ jobs:
             echo "The prepared GitHub Release does not record the effective OCI image digest exactly once." >&2
             exit 1
           fi
-          expected_assets="$(printf '%s\n' SHA256SUMS rivune-update.json rivune-android-update.json "rivune-android-${RELEASE_TAG#v}.apk" "rivune-android-${RELEASE_TAG#v}-corresponding-source.tar.gz" Rivune.exe | sort)"
+          expected_assets="$(printf '%s\n' rivune-update.json rivune-android-update.json "rivune-android-${RELEASE_TAG#v}.apk" "rivune-android-${RELEASE_TAG#v}-corresponding-source.tar.gz" Rivune.exe Rivune-x64.exe Rivune-arm64.exe | sort)"
           actual_assets="$(jq -r '.assets[].name' <<<"${release}" | sort)"
           if [[ "${actual_assets}" != "${expected_assets}" ]]; then
             echo "The prepared GitHub Release asset set is incomplete or contains unexpected files." >&2
@@ -2275,7 +2378,7 @@ jobs:
             echo "Final published release metadata does not match the authorized release." >&2
             exit 1
           fi
-          expected_assets="$(printf '%s\n' SHA256SUMS rivune-update.json rivune-android-update.json "rivune-android-${RELEASE_TAG#v}.apk" "rivune-android-${RELEASE_TAG#v}-corresponding-source.tar.gz" Rivune.exe | sort)"
+          expected_assets="$(printf '%s\n' rivune-update.json rivune-android-update.json "rivune-android-${RELEASE_TAG#v}.apk" "rivune-android-${RELEASE_TAG#v}-corresponding-source.tar.gz" Rivune.exe Rivune-x64.exe Rivune-arm64.exe | sort)"
           actual_assets="$(jq -r '.assets[].name' <<<"${final_release}" | sort)"
           if [[ "${actual_assets}" != "${expected_assets}" ]]; then
             echo "Final published release asset set is incomplete or contains unexpected files." >&2

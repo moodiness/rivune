@@ -11,10 +11,14 @@
     <FileVersion>1.8.0.0</FileVersion>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>Rivune</AssemblyName>
-    <Platforms>x64</Platforms>
-    <PlatformTarget>x64</PlatformTarget>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <PublishProfile>win-x64.pubxml</PublishProfile>
+    <Platforms>x64;ARM64</Platforms>
+    <Platform Condition="'$(Platform)' == '' or '$(Platform)' == 'AnyCPU'">x64</Platform>
+    <PlatformTarget Condition="'$(Platform)' == 'x64'">x64</PlatformTarget>
+    <PlatformTarget Condition="'$(Platform)' == 'ARM64'">ARM64</PlatformTarget>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and '$(Platform)' == 'x64'">win-x64</RuntimeIdentifier>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and '$(Platform)' == 'ARM64'">win-arm64</RuntimeIdentifier>
+    <PublishProfile Condition="'$(PublishProfile)' == '' and '$(Platform)' == 'x64'">win-x64.pubxml</PublishProfile>
+    <PublishProfile Condition="'$(PublishProfile)' == '' and '$(Platform)' == 'ARM64'">win-arm64.pubxml</PublishProfile>
     <WindowsPackageType>None</WindowsPackageType>
     <EnableMsixTooling>true</EnableMsixTooling>
     <SelfContained>true</SelfContained>

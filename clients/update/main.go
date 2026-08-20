@@ -60,6 +60,8 @@ func runGenerate(arguments []string) error {
 	}{
 		{"apk", options.apk},
 		{"windows-executable", options.windowsExecutable},
+		{"windows-x64-executable", options.windowsX64Executable},
+		{"windows-arm64-executable", options.windowsArm64Executable},
 		{"output", options.output},
 		{"legacy-android-output", options.legacyAndroidOutput},
 		{"channel", options.channel},
@@ -71,6 +73,8 @@ func runGenerate(arguments []string) error {
 		{"build-version", options.buildVersion},
 		{"signing-certificate-sha256", options.signingCertificateSHA256},
 		{"windows-executable-url", options.windowsExecutableURL},
+		{"windows-x64-executable-url", options.windowsX64ExecutableURL},
+		{"windows-arm64-executable-url", options.windowsArm64ExecutableURL},
 	}
 	for _, option := range required {
 		if option.value == "" {
@@ -96,7 +100,9 @@ func runGenerate(arguments []string) error {
 
 func addGenerateFlags(flags *flag.FlagSet, options *generateOptions) {
 	flags.StringVar(&options.apk, "apk", "", "path to the signed universal APK")
-	flags.StringVar(&options.windowsExecutable, "windows-executable", "", "path to the Windows x64 executable")
+	flags.StringVar(&options.windowsExecutable, "windows-executable", "", "path to the legacy-compatible Windows x64 executable")
+	flags.StringVar(&options.windowsX64Executable, "windows-x64-executable", "", "path to the canonical Windows x64 executable")
+	flags.StringVar(&options.windowsArm64Executable, "windows-arm64-executable", "", "path to the Windows ARM64 executable")
 	flags.StringVar(&options.output, "output", "", "path for the generated global manifest")
 	flags.StringVar(&options.legacyAndroidOutput, "legacy-android-output", "", "path for the generated legacy Android manifest")
 	flags.StringVar(&options.channel, "channel", "", "release channel: stable or prerelease")
@@ -107,7 +113,9 @@ func addGenerateFlags(flags *flag.FlagSet, options *generateOptions) {
 	flags.StringVar(&options.applicationID, "application-id", "", "Android application ID")
 	flags.StringVar(&options.buildVersion, "build-version", "", "positive Android versionCode")
 	flags.StringVar(&options.signingCertificateSHA256, "signing-certificate-sha256", "", "lowercase Android signing certificate SHA-256")
-	flags.StringVar(&options.windowsExecutableURL, "windows-executable-url", "", "exact HTTPS Windows executable release asset URL")
+	flags.StringVar(&options.windowsExecutableURL, "windows-executable-url", "", "exact HTTPS legacy-compatible Windows executable release asset URL")
+	flags.StringVar(&options.windowsX64ExecutableURL, "windows-x64-executable-url", "", "exact HTTPS canonical Windows x64 executable release asset URL")
+	flags.StringVar(&options.windowsArm64ExecutableURL, "windows-arm64-executable-url", "", "exact HTTPS Windows ARM64 executable release asset URL")
 }
 
 func outputPathsAlias(left, right string) (bool, error) {
@@ -203,8 +211,20 @@ func runValidate(arguments []string) error {
 	if options.windowsExecutable == "" {
 		return fmt.Errorf("--windows-executable is required")
 	}
+	if options.windowsX64Executable == "" {
+		return fmt.Errorf("--windows-x64-executable is required")
+	}
+	if options.windowsArm64Executable == "" {
+		return fmt.Errorf("--windows-arm64-executable is required")
+	}
 	if options.windowsExecutableURL == "" {
 		return fmt.Errorf("--windows-executable-url is required")
+	}
+	if options.windowsX64ExecutableURL == "" {
+		return fmt.Errorf("--windows-x64-executable-url is required")
+	}
+	if options.windowsArm64ExecutableURL == "" {
+		return fmt.Errorf("--windows-arm64-executable-url is required")
 	}
 	if options.legacyAndroidManifest == "" {
 		return fmt.Errorf("--legacy-android-manifest is required")
@@ -214,7 +234,9 @@ func runValidate(arguments []string) error {
 
 func addValidateFlags(flags *flag.FlagSet, options *validateOptions) {
 	flags.StringVar(&options.apk, "apk", "", "APK whose file name, size, and SHA-256 must match")
-	flags.StringVar(&options.windowsExecutable, "windows-executable", "", "Windows executable whose file name, size, and SHA-256 must match")
+	flags.StringVar(&options.windowsExecutable, "windows-executable", "", "Legacy-compatible Windows executable whose file name, size, and SHA-256 must match")
+	flags.StringVar(&options.windowsX64Executable, "windows-x64-executable", "", "Canonical Windows x64 executable whose file name, size, and SHA-256 must match")
+	flags.StringVar(&options.windowsArm64Executable, "windows-arm64-executable", "", "Windows ARM64 executable whose file name, size, and SHA-256 must match")
 	flags.StringVar(&options.legacyAndroidManifest, "legacy-android-manifest", "", "legacy Android manifest that must match the global Android package")
 	flags.StringVar(&options.channel, "channel", "", "expected release channel")
 	flags.StringVar(&options.tagName, "tag-name", "", "expected release tag")
@@ -224,7 +246,9 @@ func addValidateFlags(flags *flag.FlagSet, options *validateOptions) {
 	flags.StringVar(&options.applicationID, "application-id", "", "expected Android application ID")
 	flags.StringVar(&options.buildVersion, "build-version", "", "expected Android versionCode")
 	flags.StringVar(&options.signingCertificateSHA256, "signing-certificate-sha256", "", "expected Android signing certificate SHA-256")
-	flags.StringVar(&options.windowsExecutableURL, "windows-executable-url", "", "expected Windows executable URL")
+	flags.StringVar(&options.windowsExecutableURL, "windows-executable-url", "", "expected legacy-compatible Windows executable URL")
+	flags.StringVar(&options.windowsX64ExecutableURL, "windows-x64-executable-url", "", "expected canonical Windows x64 executable URL")
+	flags.StringVar(&options.windowsArm64ExecutableURL, "windows-arm64-executable-url", "", "expected Windows ARM64 executable URL")
 }
 
 func printUsage(output *os.File) {
@@ -234,11 +258,11 @@ func printUsage(output *os.File) {
 }
 
 func printGenerateUsage(output anyWriter) {
-	fmt.Fprintln(output, "Usage: go run . generate --apk <path> --windows-executable <path> --output <path> --legacy-android-output <path> --channel <channel> --tag-name <tag> --published-at <timestamp> --release-url <url> --apk-url <url> --application-id <id> --build-version <version> --signing-certificate-sha256 <digest> --windows-executable-url <url>")
+	fmt.Fprintln(output, "Usage: go run . generate --apk <path> --windows-executable <path> --windows-x64-executable <path> --windows-arm64-executable <path> --output <path> --legacy-android-output <path> --channel <channel> --tag-name <tag> --published-at <timestamp> --release-url <url> --apk-url <url> --application-id <id> --build-version <version> --signing-certificate-sha256 <digest> --windows-executable-url <url> --windows-x64-executable-url <url> --windows-arm64-executable-url <url>")
 }
 
 func printValidateUsage(output anyWriter) {
-	fmt.Fprintln(output, "Usage: go run . validate --apk <path> --windows-executable <path> --windows-executable-url <url> --legacy-android-manifest <path> [expected-value options] <global-manifest>")
+	fmt.Fprintln(output, "Usage: go run . validate --apk <path> --windows-executable <path> --windows-x64-executable <path> --windows-arm64-executable <path> --windows-executable-url <url> --windows-x64-executable-url <url> --windows-arm64-executable-url <url> --legacy-android-manifest <path> [expected-value options] <global-manifest>")
 }
 
 type anyWriter interface {

@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Globalization;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -37,7 +38,7 @@ internal static partial class AppUpdateChecker
     public static Task<AppUpdateCheckResult> CheckAsync(
         string currentVersion,
         CancellationToken cancellationToken = default) =>
-        CheckAsync(SharedClient, currentVersion, cancellationToken);
+        CheckAsync(SharedClient, currentVersion, RuntimeInformation.ProcessArchitecture, cancellationToken);
 
     public static Task DownloadPackageAsync(
         WindowsUpdatePackage package,
@@ -76,12 +77,26 @@ internal static partial class AppUpdateChecker
         }
     }
 
+    internal static Task<AppUpdateCheckResult> CheckAsync(
+        HttpClient client,
+        string currentVersion,
+        CancellationToken cancellationToken = default) =>
+        CheckAsync(client, currentVersion, RuntimeInformation.ProcessArchitecture, cancellationToken);
+
     internal static async Task<AppUpdateCheckResult> CheckAsync(
         HttpClient client,
         string currentVersion,
+        Architecture processArchitecture,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(client);
+        var (packageName, architecture, fileName) = processArchitecture switch
+        {
+            Architecture.X64 => ("windowsX64", "x64", "Rivune-x64.exe"),
+            Architecture.Arm64 => ("windowsArm64", "arm64", "Rivune-arm64.exe"),
+            _ => throw new InvalidOperationException(
+                $"Rivune updates do not support the current process architecture ({processArchitecture})."),
+        };
         var current = ParseSemanticVersion(currentVersion, "The installed Rivune version is invalid.");
         var payload = await FetchManifestAsync(client, cancellationToken).ConfigureAwait(false);
 
@@ -135,10 +150,14 @@ internal static partial class AppUpdateChecker
                 "The Rivune update manifest release URL is not trusted.");
 
             var packages = root.GetProperty("packages");
-            RequireProperties(packages, "manifest packages", "android", "windows");
+            RequireProperties(packages, "manifest packages", "android", packageName);
             if (packages.GetProperty("android").ValueKind != JsonValueKind.Object)
                 throw new InvalidOperationException("The Rivune update manifest Android package is invalid.");
-            var package = ParseWindowsPackage(packages.GetProperty("windows"), tagName);
+            var package = ParseWindowsPackage(
+                packages.GetProperty(packageName),
+                tagName,
+                architecture,
+                fileName);
 
             return new AppUpdateCheckResult(
                 currentVersion,
@@ -155,7 +174,11 @@ internal static partial class AppUpdateChecker
             ParseSemanticVersion(left, "The left semantic version is invalid."),
             ParseSemanticVersion(right, "The right semantic version is invalid."));
 
-    private static WindowsUpdatePackage ParseWindowsPackage(JsonElement package, string tagName)
+    private static WindowsUpdatePackage ParseWindowsPackage(
+        JsonElement package,
+        string tagName,
+        string expectedArchitecture,
+        string expectedFileName)
     {
         RequireProperties(package, "Windows package",
             "format", "architectures", "minimumOsVersion", "fileName", "url", "size", "sha256");
@@ -166,16 +189,15 @@ internal static partial class AppUpdateChecker
         if (architectures.ValueKind != JsonValueKind.Array ||
             architectures.GetArrayLength() != 1 ||
             architectures[0].ValueKind != JsonValueKind.String ||
-            architectures[0].GetString() != "x64")
+            architectures[0].GetString() != expectedArchitecture)
         {
             throw new InvalidOperationException("The Windows update package architectures are invalid.");
         }
 
-        const string fileName = "Rivune.exe";
-        if (!RequiredString(package, "fileName", "Windows package").Equals(fileName, StringComparison.Ordinal))
+        if (!RequiredString(package, "fileName", "Windows package").Equals(expectedFileName, StringComparison.Ordinal))
             throw new InvalidOperationException("The Windows update package file name is invalid.");
 
-        var expectedPackageUrl = $"https://github.com/moodiness/rivune/releases/download/{tagName}/{fileName}";
+        var expectedPackageUrl = $"https://github.com/moodiness/rivune/releases/download/{tagName}/{expectedFileName}";
         var packageUri = RequireExactUri(
             RequiredString(package, "url", "Windows package"),
             expectedPackageUrl,
@@ -197,9 +219,9 @@ internal static partial class AppUpdateChecker
         return new WindowsUpdatePackage(
             packageUri,
             "exe",
-            ["x64"],
+            [expectedArchitecture],
             "10.0.19041.0",
-            fileName,
+            expectedFileName,
             size,
             sha256);
     }

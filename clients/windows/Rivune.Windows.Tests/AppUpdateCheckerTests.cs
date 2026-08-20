@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 using Rivune.App;
 using Xunit;
 
@@ -49,22 +50,80 @@ public sealed class AppUpdateCheckerTests
         var result = await AppUpdateChecker.CheckAsync(
             client,
             currentVersion,
+            Architecture.X64,
             TestContext.Current.CancellationToken);
 
         Assert.Equal(currentVersion, result.CurrentVersion);
         Assert.Equal("1.7.2", result.LatestVersion);
         Assert.Equal(DateTimeOffset.Parse("2026-08-14T12:34:56Z"), result.PublishedAt);
         Assert.Equal(new Uri("https://github.com/moodiness/rivune/releases/tag/v1.7.2"), result.ReleaseUri);
-        Assert.Equal(new Uri("https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune.exe"), result.Package.Uri);
+        Assert.Equal(new Uri("https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-x64.exe"), result.Package.Uri);
         Assert.Equal("exe", result.Package.Format);
         Assert.Equal(new[] { "x64" }, result.Package.Architectures);
         Assert.Equal("10.0.19041.0", result.Package.MinimumOsVersion);
-        Assert.Equal("Rivune.exe", result.Package.FileName);
+        Assert.Equal("Rivune-x64.exe", result.Package.FileName);
         Assert.Equal(123456L, result.Package.Size);
         Assert.Equal(PackageSha256, result.Package.Sha256);
         Assert.Equal(available, result.IsUpdateAvailable);
         Assert.Equal(new[] { ManifestUri }, handler.RequestUris);
         Assert.Equal("application/json", handler.Accepts.Single());
+    }
+
+    [Fact]
+    public async Task Arm64ProcessSelectsArm64Package()
+    {
+        var handler = new SequenceHandler(Response(HttpStatusCode.OK, Manifest()));
+        using var client = new HttpClient(handler);
+
+        var result = await AppUpdateChecker.CheckAsync(
+            client,
+            "1.7.1",
+            Architecture.Arm64,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(new Uri("https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-arm64.exe"), result.Package.Uri);
+        Assert.Equal(new[] { "arm64" }, result.Package.Architectures);
+        Assert.Equal("Rivune-arm64.exe", result.Package.FileName);
+        Assert.Equal(234567L, result.Package.Size);
+    }
+
+    [Theory]
+    [InlineData(Architecture.X86)]
+    [InlineData(Architecture.Arm)]
+    [InlineData(Architecture.Wasm)]
+    public async Task RejectsUnsupportedProcessArchitectureBeforeNetworkRequest(Architecture architecture)
+    {
+        var handler = new SequenceHandler();
+        using var client = new HttpClient(handler);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => AppUpdateChecker.CheckAsync(
+            client,
+            "1.7.1",
+            architecture,
+            TestContext.Current.CancellationToken));
+
+        Assert.Contains("architecture", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(handler.RequestUris);
+    }
+
+    [Theory]
+    [InlineData("\"architectures\":[\"arm64\"]", "\"architectures\":[\"x64\"]")]
+    [InlineData("\"fileName\":\"Rivune-arm64.exe\"", "\"fileName\":\"Rivune.exe\"")]
+    [InlineData("/Rivune-arm64.exe\"", "/Rivune.exe\"")]
+    public async Task RejectsWrongArm64PackageMetadata(string expected, string replacement)
+    {
+        var armPackageStart = Manifest().IndexOf("\"windowsArm64\"", StringComparison.Ordinal);
+        var invalid = Manifest();
+        var metadataIndex = invalid.IndexOf(expected, armPackageStart, StringComparison.Ordinal);
+        Assert.True(metadataIndex >= armPackageStart);
+        invalid = invalid.Remove(metadataIndex, expected.Length).Insert(metadataIndex, replacement);
+        using var client = new HttpClient(new SequenceHandler(Response(HttpStatusCode.OK, invalid)));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => AppUpdateChecker.CheckAsync(
+            client,
+            "1.7.1",
+            Architecture.Arm64,
+            TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -78,7 +137,8 @@ public sealed class AppUpdateCheckerTests
             Response(HttpStatusCode.OK, Manifest()));
         using var client = new HttpClient(handler);
 
-        var result = await AppUpdateChecker.CheckAsync(client, "1.7.1", TestContext.Current.CancellationToken);
+        var result = await AppUpdateChecker.CheckAsync(
+            client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken);
 
         Assert.True(result.IsUpdateAvailable);
         Assert.Equal(new[] { ManifestUri, releaseUri, assetUri }, handler.RequestUris);
@@ -95,7 +155,7 @@ public sealed class AppUpdateCheckerTests
         using var client = new HttpClient(handler);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            AppUpdateChecker.CheckAsync(client, "1.7.1", TestContext.Current.CancellationToken));
+            AppUpdateChecker.CheckAsync(client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken));
 
         Assert.Contains("untrusted host", exception.Message);
         Assert.Single(handler.RequestUris);
@@ -111,7 +171,7 @@ public sealed class AppUpdateCheckerTests
         using var client = new HttpClient(handler);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            AppUpdateChecker.CheckAsync(client, "1.7.1", TestContext.Current.CancellationToken));
+            AppUpdateChecker.CheckAsync(client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken));
     }
 
     [Theory]
@@ -127,16 +187,16 @@ public sealed class AppUpdateCheckerTests
     [InlineData("\"channel\":\"stable\"", "\"channel\":\"prerelease\"")]
     [InlineData("\"publishedAt\":\"2026-08-14T12:34:56Z\"", "\"publishedAt\":\"not-a-timestamp\"")]
     [InlineData("\"tagName\":\"v1.7.2\"", "\"tagName\":\"v1.7.3\"")]
-    [InlineData("\"fileName\":\"Rivune.exe\"", "\"fileName\":\"other.exe\"")]
+    [InlineData("\"fileName\":\"Rivune-x64.exe\"", "\"fileName\":\"other.exe\"")]
     public async Task RejectsInvalidGlobalOrWindowsContract(string expected, string replacement)
     {
         await AssertInvalidManifestAsync(Manifest().Replace(expected, replacement, StringComparison.Ordinal));
     }
 
     [Fact]
-    public async Task RejectsManifestWithoutWindowsPackage()
+    public async Task RejectsManifestWithoutWindowsX64Package()
     {
-        var invalid = Manifest().Replace("\"windows\":{", "\"other\":{", StringComparison.Ordinal);
+        var invalid = Manifest().Replace("\"windowsX64\":{", "\"other\":{", StringComparison.Ordinal);
 
         await AssertInvalidManifestAsync(invalid);
     }
@@ -153,14 +213,14 @@ public sealed class AppUpdateCheckerTests
     }
 
     [Theory]
-    [InlineData("https://evil.example/Rivune.exe")]
-    [InlineData("http://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune.exe")]
-    [InlineData("https://github.com/moodiness/rivune/releases/download/v1.7.3/Rivune.exe")]
-    [InlineData("https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune.exe?download=1")]
+    [InlineData("https://evil.example/Rivune-x64.exe")]
+    [InlineData("http://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-x64.exe")]
+    [InlineData("https://github.com/moodiness/rivune/releases/download/v1.7.3/Rivune-x64.exe")]
+    [InlineData("https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-x64.exe?download=1")]
     public async Task RejectsUntrustedPackageUrl(string packageUrl)
     {
         var invalid = Manifest().Replace(
-            "https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune.exe",
+            "https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-x64.exe",
             packageUrl,
             StringComparison.Ordinal);
 
@@ -194,7 +254,8 @@ public sealed class AppUpdateCheckerTests
             .Replace("\"format\":\"exe\"", "\"format\":\"exe\",\"futureWindowsField\":true", StringComparison.Ordinal);
         using var client = new HttpClient(new SequenceHandler(Response(HttpStatusCode.OK, manifest)));
 
-        var result = await AppUpdateChecker.CheckAsync(client, "1.7.1", TestContext.Current.CancellationToken);
+        var result = await AppUpdateChecker.CheckAsync(
+            client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken);
 
         Assert.True(result.IsUpdateAvailable);
     }
@@ -207,7 +268,7 @@ public sealed class AppUpdateCheckerTests
         using var client = new HttpClient(handler);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            AppUpdateChecker.CheckAsync(client, "1.7.1", TestContext.Current.CancellationToken));
+            AppUpdateChecker.CheckAsync(client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken));
 
         Assert.Equal("The Rivune update manifest is too large.", exception.Message);
     }
@@ -322,11 +383,14 @@ public sealed class AppUpdateCheckerTests
             AppUpdateChecker.CompareSemanticVersions(version, "1.7.2"));
     }
 
-    [Fact]
-    public void ParsesExactPortableApplyArguments()
+    [Theory]
+    [InlineData("Rivune.exe")]
+    [InlineData("Rivune-x64.exe")]
+    [InlineData("Rivune-arm64.exe")]
+    public void ParsesExactPortableApplyArguments(string fileName)
     {
-        var source = Path.Combine(Path.GetTempPath(), "Rivune", "updates", "test", "Rivune.exe");
-        var target = Path.Combine(Path.GetTempPath(), "Rivune-installed", "Rivune.exe");
+        var source = Path.Combine(Path.GetTempPath(), "Rivune", "updates", "test", fileName);
+        var target = Path.Combine(Path.GetTempPath(), "Rivune-installed", fileName);
 
         var command = PortableAppUpdate.ParseStartupCommand(
             [
@@ -370,6 +434,29 @@ public sealed class AppUpdateCheckerTests
             PortableAppUpdate.ParseStartupCommand(arguments, source));
     }
 
+    [Theory]
+    [InlineData("Rivune.exe", "Rivune-arm64.exe")]
+    [InlineData("Rivune.exe", "Rivune-x64.exe")]
+    [InlineData("Rivune-x64.exe", "Rivune-arm64.exe")]
+    [InlineData("Rivune-arm64.exe", "Rivune.exe")]
+    [InlineData("other.exe", "other.exe")]
+    public void RejectsMismatchedOrUnsupportedPortableHandoffNames(string sourceName, string targetName)
+    {
+        var source = Path.Combine(Path.GetTempPath(), "Rivune", "updates", "test", sourceName);
+        var target = Path.Combine(Path.GetTempPath(), "Rivune-installed", targetName);
+
+        Assert.Throws<InvalidOperationException>(() => PortableAppUpdate.ParseStartupCommand(
+            [
+                PortableAppUpdate.ApplySwitch,
+                "--source", source,
+                "--target", target,
+                "--wait-pid", "12345",
+                "--size", "42",
+                "--sha256", PackageSha256,
+            ],
+            source));
+    }
+
     [Fact]
     public void RejectsCleanupOutsideTemporaryDirectory()
     {
@@ -381,16 +468,19 @@ public sealed class AppUpdateCheckerTests
             current));
     }
 
-    [Fact]
-    public void PreparesQuotedHandoffWithoutChangingCurrentExecutable()
+    [Theory]
+    [InlineData("Rivune.exe")]
+    [InlineData("Rivune-x64.exe")]
+    [InlineData("Rivune-arm64.exe")]
+    public void PreparesQuotedHandoffWithoutChangingCurrentExecutable(string fileName)
     {
         var root = Path.Combine(Path.GetTempPath(), "Rivune tests", Guid.NewGuid().ToString("N"));
         var sourceDirectory = Path.Combine(root, "updates", "source with spaces");
         var targetDirectory = Path.Combine(root, "installed with spaces");
         Directory.CreateDirectory(sourceDirectory);
         Directory.CreateDirectory(targetDirectory);
-        var source = Path.Combine(sourceDirectory, "Rivune.exe");
-        var target = Path.Combine(targetDirectory, "Rivune.exe");
+        var source = Path.Combine(sourceDirectory, fileName);
+        var target = Path.Combine(targetDirectory, fileName);
         var currentContents = Encoding.UTF8.GetBytes("current executable");
         var updateContents = Encoding.UTF8.GetBytes("verified update");
         File.WriteAllBytes(source, updateContents);
@@ -434,7 +524,8 @@ public sealed class AppUpdateCheckerTests
                 updateContents.Length,
                 Convert.ToHexStringLower(SHA256.HashData(updateContents)));
 
-            await Assert.ThrowsAnyAsync<Exception>(() => PortableAppUpdate.ApplyAsync(request));
+            await Assert.ThrowsAnyAsync<Exception>(() =>
+                PortableAppUpdate.ApplyAsync(request, TestContext.Current.CancellationToken));
 
             Assert.Equal(currentContents, File.ReadAllBytes(target));
         }
@@ -449,7 +540,7 @@ public sealed class AppUpdateCheckerTests
     {
         using var client = new HttpClient(new SequenceHandler(Response(HttpStatusCode.OK, manifest)));
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            AppUpdateChecker.CheckAsync(client, "1.7.1", TestContext.Current.CancellationToken));
+            AppUpdateChecker.CheckAsync(client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken));
     }
 
     private static string Manifest() => $$"""
@@ -480,6 +571,24 @@ public sealed class AppUpdateCheckerTests
               "fileName":"Rivune.exe",
               "url":"https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune.exe",
               "size":123456,
+              "sha256":"{{PackageSha256}}"
+            },
+            "windowsX64":{
+              "format":"exe",
+              "architectures":["x64"],
+              "minimumOsVersion":"10.0.19041.0",
+              "fileName":"Rivune-x64.exe",
+              "url":"https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-x64.exe",
+              "size":123456,
+              "sha256":"{{PackageSha256}}"
+            },
+            "windowsArm64":{
+              "format":"exe",
+              "architectures":["arm64"],
+              "minimumOsVersion":"10.0.19041.0",
+              "fileName":"Rivune-arm64.exe",
+              "url":"https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-arm64.exe",
+              "size":234567,
               "sha256":"{{PackageSha256}}"
             }
           }

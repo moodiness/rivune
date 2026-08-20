@@ -33,6 +33,7 @@ project.lock.json
 # Publish output
 publish/
 *.pubxml
+!Properties/PublishProfiles/win-arm64.pubxml
 PublishScripts/
 
 # Code analysis and tooling
