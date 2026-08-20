@@ -10,8 +10,8 @@
 
 ## Windows installation
 
-- Download `Rivune.exe` and `SHA256SUMS` from this release. Windows 10 build 19041 or newer on x64 is required.
-- Verify the published SHA-256, place `Rivune.exe` in a user-writable folder, and run it directly; no installer or administrator access is required.
+- Download `Rivune.exe` from this release. Windows 10 build 19041 or newer on x64 is required.
+- Compare its SHA-256 with the digest GitHub publishes for the asset, place `Rivune.exe` in a user-writable folder, and run it directly; no installer or administrator access is required.
 - The executable is intentionally unsigned so distribution remains free. Microsoft Defender SmartScreen may show an unknown-publisher warning; continue only for the exact file from this official release after its SHA-256 matches.
 - Later checks are automatic at most once every 24 hours or manual from About. Rivune never updates without consent and contains no GitHub token.
 
@@ -26,7 +26,7 @@
 
 - Server operators can pull and recreate Rivune normally. This release adds no database migration and requires no new server environment variable.
 - Continue Watching responses add optional episode metadata; protocol version 20 and existing clients remain compatible.
-- `SHA256SUMS` covers exactly `Rivune.exe`, the APK, the corresponding-source archive, `rivune-update.json`, and `rivune-android-update.json`.
+- GitHub publishes a SHA-256 digest for every release asset.
 
 ## Container image
 

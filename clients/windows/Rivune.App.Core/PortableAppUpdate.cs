@@ -63,8 +63,9 @@ internal static partial class PortableAppUpdate
         var targetPath = NormalizeAbsolutePath(arguments[4], "The portable update target path is invalid.");
         if (!PathsEqual(sourcePath, currentPath) || PathsEqual(sourcePath, targetPath))
             throw new InvalidOperationException("The portable update paths are invalid.");
-        if (!Path.GetFileName(targetPath).Equals("Rivune.exe", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("The portable update target must be named Rivune.exe.");
+        if (!HaveMatchingAllowedFileNames(sourcePath, targetPath))
+            throw new InvalidOperationException(
+                "The portable update source and target must have the same supported Rivune executable name.");
         if (!int.TryParse(arguments[6], out var parentProcessId) || parentProcessId <= 0 || parentProcessId == Environment.ProcessId)
             throw new InvalidOperationException("The portable update process identifier is invalid.");
         if (!long.TryParse(arguments[8], out var size) || size is <= 0 or > int.MaxValue)
@@ -95,10 +96,10 @@ internal static partial class PortableAppUpdate
             throw new InvalidOperationException("The running Rivune executable could not be found.");
         if (PathsEqual(sourcePath, targetPath))
             throw new InvalidOperationException("The update cannot replace its download source.");
-        if (!Path.GetFileName(sourcePath).Equals("Rivune.exe", StringComparison.OrdinalIgnoreCase) ||
-            !Path.GetFileName(targetPath).Equals("Rivune.exe", StringComparison.OrdinalIgnoreCase))
+        if (!HaveMatchingAllowedFileNames(sourcePath, targetPath))
         {
-            throw new InvalidOperationException("Portable updates require the app and downloaded file to be named Rivune.exe.");
+            throw new InvalidOperationException(
+                "Portable updates require the app and downloaded file to have the same supported Rivune executable name.");
         }
         if (!IsPathWithinDirectory(sourcePath, Path.GetTempPath()))
             throw new InvalidOperationException("The verified update file is not in the trusted temporary directory.");
@@ -320,7 +321,7 @@ internal static partial class PortableAppUpdate
         catch (Exception exception) when (exception is UnauthorizedAccessException or IOException or NotSupportedException)
         {
             throw new InvalidOperationException(
-                "Rivune cannot safely replace files in this folder. Move Rivune.exe to a writable local folder, such as Downloads, then try again.",
+                $"Rivune cannot safely replace files in this folder. Move {Path.GetFileName(targetPath)} to a writable local folder, such as Downloads, then try again.",
                 exception);
         }
         finally
@@ -352,6 +353,18 @@ internal static partial class PortableAppUpdate
 
     private static bool PathsEqual(string left, string right) =>
         string.Equals(Path.TrimEndingDirectorySeparator(left), Path.TrimEndingDirectorySeparator(right), StringComparison.OrdinalIgnoreCase);
+
+    private static bool HaveMatchingAllowedFileNames(string leftPath, string rightPath)
+    {
+        var leftName = Path.GetFileName(leftPath);
+        var rightName = Path.GetFileName(rightPath);
+        return IsAllowedExecutableFileName(leftName) && leftName.Equals(rightName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsAllowedExecutableFileName(string fileName) =>
+        fileName.Equals("Rivune.exe", StringComparison.OrdinalIgnoreCase) ||
+        fileName.Equals("Rivune-x64.exe", StringComparison.OrdinalIgnoreCase) ||
+        fileName.Equals("Rivune-arm64.exe", StringComparison.OrdinalIgnoreCase);
 
     private static void TryDeleteFile(string path)
     {
