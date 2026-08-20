@@ -12,8 +12,7 @@ The exact GPLv3 text is in licenses/GPL-3.0.txt.
 The libmpv-android wrapper remains licensed under the MIT License. mpv remains
 licensed GPL-2.0-or-later by its copyright holders. The FFmpeg build included in
 the pinned artifact is GPLv3. Component copyright notices, license distinctions,
-authoritative upstream links, and Corresponding Source directions are in
-THIRD_PARTY_NOTICES.txt.
+authoritative upstream links, and attributions are in THIRD_PARTY_NOTICES.txt.
 
 Rivune files remain available under the repository's Apache License 2.0 when
 distributed separately. The GPLv3 terms stated here govern the combined Android

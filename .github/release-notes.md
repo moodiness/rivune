@@ -19,7 +19,6 @@
 
 - Download `rivune-android-1.8.0.apk` and complete Android's package-installation prompt. Android 8.0 or newer is required, and the public application ID remains `io.rivune.app`.
 - The APK keeps the established Rivune release-signing identity so existing installations accept the update. Rivune verifies package identity, version, size, SHA-256, and signing certificate before Android shows its own confirmation.
-- The matching `rivune-android-1.8.0-corresponding-source.tar.gz` contains the exact Rivune revision, rebuild instructions, complete libmpv/native sources, and authenticated source/build metadata for packaged JVM dependencies.
 - The APK bundles the GPL-enabled libmpv/FFmpeg stack and is conveyed as a GPLv3 combined Android work. Its license and third-party notices are packaged in the APK; other Rivune components retain their separate repository licenses.
 
 ## Upgrade notes

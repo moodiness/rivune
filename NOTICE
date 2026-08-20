@@ -8,8 +8,8 @@ server, web, Apple, Windows, API, documentation, and other separately
 distributed Apache-licensed components. A Rivune Android application binary
 that includes dev.jdtech.mpv:libmpv:1.0.0 is a combined distribution conveyed
 under GNU GPL version 3 because the bundled FFmpeg 8.1 build enables GPL and
-version-3 code. Android terms, exact license texts, Corresponding Source
-directions, and native-component attributions are in:
+version-3 code. Android terms, exact license texts, and native-component
+attributions are in:
   clients/android/app/src/main/assets/legal/LICENSE.txt
   clients/android/app/src/main/assets/legal/NOTICE
   clients/android/app/src/main/assets/legal/THIRD_PARTY_NOTICES.txt

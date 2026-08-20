@@ -24,29 +24,6 @@ under Apache-2.0 when used separately. Its distribution as part of this combined
 Android work is additionally subject to GPLv3. This Android-specific notice does
 not relicense separate server or other client distributions.
 
-Corresponding Source
---------------------
-Every Rivune Android binary offered for download at
-
-  https://github.com/moodiness/rivune/releases
-
-must have equivalent no-charge access, from that same release, to a complete
-machine-readable Corresponding Source archive for the exact binary. The archive
-is named rivune-android-<version>-corresponding-source.tar.gz and includes the
-exact Rivune revision, libmpv-android sources, dependency sources, patches, and
-build scripts/configuration. Directions to that archive must appear beside the
-Android binary download. Do not distribute an Android binary when its matching
-archive is unavailable.
-
-The upstream source and build recipe corresponding to the pinned AAR is the
-libmpv-android v1.0.0 tag (commit fcf6745703dc1265bca88f12fee8fc355ddf251e):
-
-  https://github.com/jarnedemeulemeester/libmpv-android/tree/v1.0.0
-
-A distributor of a Rivune Android binary must keep the complete corresponding
-source available in the manner and for the duration required by GPLv3 section 6.
-An upstream link alone is not a substitute if upstream content ceases to
-correspond to, or be available for, the distributed binary.
 
 Authoritative composition references
 ------------------------------------
@@ -85,8 +62,8 @@ mpv logo
 
 Bundled native components
 -------------------------
-The following versions come from the v1.0.0 build recipe. Full source-level
-copyright details remain in the Corresponding Source.
+The following versions come from the v1.0.0 build recipe. Upstream projects
+publish their source-level copyright details at the links below.
 
 libmpv-android 1.0.0
   Project: https://github.com/jarnedemeulemeester/libmpv-android/tree/v1.0.0

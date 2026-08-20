@@ -267,7 +267,6 @@ jobs:
       channel: ${{ steps.metadata.outputs.channel }}
       published_at: ${{ steps.metadata.outputs.published_at }}
       android_asset_name: ${{ steps.metadata.outputs.android_asset_name }}
-      source_asset_name: ${{ steps.metadata.outputs.source_asset_name }}
       windows_asset_name: ${{ steps.metadata.outputs.windows_asset_name }}
       windows_x64_asset_name: ${{ steps.metadata.outputs.windows_x64_asset_name }}
       windows_arm64_asset_name: ${{ steps.metadata.outputs.windows_arm64_asset_name }}
@@ -301,11 +300,10 @@ jobs:
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
-      - name: Build unsigned Android release and corresponding source
+      - name: Build unsigned Android release
         id: metadata
         env:
           GITHUB_RELEASE_RUN_NUMBER: ${{ github.run_number }}
-          RELEASE_SHA: ${{ needs.authorize.outputs.sha }}
           RELEASE_STABLE: ${{ needs.authorize.outputs.stable }}
           RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
           RELEASE_WORKFLOW_CREATED_AT: ${{ github.event.workflow_run.created_at }}
@@ -313,7 +311,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          trap 'rm -rf .release-private' EXIT
 
           version_name="${RELEASE_TAG#v}"
           # github.run_number increases between releases but remains unchanged for rerun attempts.
@@ -344,13 +341,12 @@ jobs:
             echo "The source workflow creation time is not canonical RFC3339 UTC: ${RELEASE_WORKFLOW_CREATED_AT}" >&2
             exit 1
           fi
-          asset_name="rivune-android-${version_name}.apk"
-          source_asset_name="rivune-android-${version_name}-corresponding-source.tar.gz"
+          android_asset_name="rivune-android-${version_name}.apk"
           windows_asset_name='Rivune.exe'
           windows_x64_asset_name='Rivune-x64.exe'
           windows_arm64_asset_name='Rivune-arm64.exe'
           release_url="https://github.com/${REPOSITORY}/releases/tag/${RELEASE_TAG}"
-          asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${asset_name}"
+          android_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${android_asset_name}"
           windows_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_asset_name}"
           windows_x64_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_x64_asset_name}"
           windows_arm64_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_arm64_asset_name}"
@@ -366,19 +362,18 @@ jobs:
             exit 1
           }
 
-          mkdir -p release-assets .release-private release-inputs unsigned-android-input
+          mkdir -p release-inputs unsigned-android-input
           {
             echo "version_name=${version_name}"
             echo "version_code=${version_code}"
             echo "channel=${channel}"
             echo "published_at=${published_at}"
-            echo "android_asset_name=${asset_name}"
-            echo "source_asset_name=${source_asset_name}"
+            echo "android_asset_name=${android_asset_name}"
             echo "windows_asset_name=${windows_asset_name}"
             echo "windows_x64_asset_name=${windows_x64_asset_name}"
             echo "windows_arm64_asset_name=${windows_arm64_asset_name}"
             echo "release_url=${release_url}"
-            echo "android_asset_url=${asset_url}"
+            echo "android_asset_url=${android_asset_url}"
             echo "windows_asset_url=${windows_asset_url}"
             echo "windows_x64_asset_url=${windows_x64_asset_url}"
             echo "windows_arm64_asset_url=${windows_arm64_asset_url}"
@@ -386,8 +381,8 @@ jobs:
 
           export RIVUNE_ANDROID_VERSION_NAME="${version_name}"
           export RIVUNE_ANDROID_VERSION_CODE="${version_code}"
-
           bash clients/android/gradlew -p clients/android --no-daemon :app:assembleRelease
+
           mapfile -t libmpv_aars < <(find "${GRADLE_USER_HOME:-${HOME}/.gradle}/caches/modules-2/files-2.1/dev.jdtech.mpv/libmpv/1.0.0" \
             -type f -name 'libmpv-1.0.0.aar' -print)
           if (( ${#libmpv_aars[@]} == 0 )); then
@@ -406,557 +401,9 @@ jobs:
             exit 1
           fi
           cp "${unsigned_apk}" unsigned-android-input/app-release-unsigned.apk
-
-          # Bundle the exact approved Rivune tree and the complete native source graph
-          # used by dev.jdtech.mpv:libmpv:1.0.0. Git object IDs authenticate each
-          # immutable upstream checkout; downloaded source archives use pinned SHA-256.
-          source_root=".release-private/corresponding-source"
-          third_party_root="${source_root}/third-party/libmpv-android-1.0.0"
-          mkdir -p "${source_root}/rivune" "${third_party_root}/buildscripts/deps"
-          if [[ "$(git rev-parse HEAD)" != "${RELEASE_SHA}" ]]; then
-            echo "The checked-out Rivune source does not match the approved release commit." >&2
-            exit 1
-          fi
-          git archive --format=tar "${RELEASE_SHA}" | tar -xf - -C "${source_root}/rivune"
-
-          runtime_inventory="${GITHUB_WORKSPACE}/.release-private/runtime-inventory.tsv"
-          runtime_components="${GITHUB_WORKSPACE}/.release-private/runtime-components.txt"
-          runtime_artifacts="${GITHUB_WORKSPACE}/.release-private/runtime-artifacts"
-          runtime_sources="${GITHUB_WORKSPACE}/.release-private/runtime-sources"
-          RIVUNE_RUNTIME_INVENTORY_PATH="${runtime_inventory}" \
-          RIVUNE_RUNTIME_ARTIFACTS_PATH="${runtime_artifacts}" \
-          RIVUNE_RUNTIME_COMPONENTS_PATH="${runtime_components}" \
-          RIVUNE_RUNTIME_SOURCES_PATH="${runtime_sources}" \
-            bash clients/android/gradlew -p clients/android --no-daemon :app:writeReleaseRuntimeInventory
-          local_libmpv_aar="${runtime_artifacts}/dev.jdtech.mpv/libmpv/1.0.0/libmpv-1.0.0.aar"
-          printf '%s  %s\n' \
-            df146592480fc8418415a06b1f1a1d6318b0088e21f52254b0e9a82b61ca8fa2 \
-            "${local_libmpv_aar}" | sha256sum --check --strict
-          RIVUNE_LIBMPV_AAR_PATH="${local_libmpv_aar}" \
-            bash clients/android/gradlew -p clients/android --no-daemon :app:verifyLocalLibmpvOverride
-
-          jvm_source_root="${source_root}/third-party/jvm-runtime-sources"
-          RIVUNE_RUNTIME_COMPONENTS_FILE="${runtime_components}" \
-            python3 - "${runtime_inventory}" "${runtime_artifacts}" "${runtime_sources}" "${jvm_source_root}" <<'PYTHON'
-          import hashlib
-          import os
-          import pathlib
-          import shutil
-          import sys
-          import urllib.error
-          import urllib.request
-          import zipfile
-
-          inventory_path, artifacts_path, sources_path, output_path = map(pathlib.Path, sys.argv[1:])
-          rows = []
-          for line_number, line in enumerate(inventory_path.read_text(encoding="utf-8").splitlines(), 1):
-              fields = line.split("\t")
-              if len(fields) != 3:
-                  raise SystemExit(f"invalid runtime inventory line {line_number}")
-              coordinate, filename, artifact_sha256 = fields
-              parts = coordinate.split(":")
-              if len(parts) != 3 or not all(parts) or len(artifact_sha256) != 64:
-                  raise SystemExit(f"invalid runtime inventory identity on line {line_number}")
-              rows.append((coordinate, *parts, filename, artifact_sha256))
-          if len(rows) != 90 or rows != sorted(rows, key=lambda row: (row[0], row[4], row[5])):
-              raise SystemExit("runtime inventory must contain the exact 90 deterministically sorted release artifacts")
-          if len({(row[0], row[4]) for row in rows}) != len(rows):
-              raise SystemExit("runtime inventory contains duplicate module artifacts")
-          opener = urllib.request.build_opener()
-          opener.addheaders = [("User-Agent", "rivune-release-source-bundler")]
-
-          def digest(path, algorithm="sha256"):
-              value = hashlib.new(algorithm)
-              with path.open("rb") as stream:
-                  for block in iter(lambda: stream.read(1024 * 1024), b""):
-                      value.update(block)
-              return value.hexdigest()
-
-          def fetch(url, destination, optional=False):
-              try:
-                  with opener.open(url, timeout=60) as response:
-                      content = response.read()
-              except urllib.error.HTTPError as error:
-                  if optional and error.code == 404:
-                      return False
-                  raise SystemExit(f"source material fetch failed ({error.code}): {url}") from error
-              destination.write_bytes(content)
-              return True
-
-          def verify_published_checksum(path, url, google):
-              algorithms = ("sha256", "sha1") if google else ("sha1",)
-              for algorithm in algorithms:
-                  checksum_path = path.with_name(path.name + f".{algorithm}")
-                  if not fetch(url + f".{algorithm}", checksum_path, optional=(google and algorithm == "sha256")):
-                      continue
-                  expected = checksum_path.read_text(encoding="ascii").strip().split()[0].lower()
-                  if len(expected) != hashlib.new(algorithm).digest_size * 2 or digest(path, algorithm) != expected:
-                      raise SystemExit(f"published checksum mismatch for {url}")
-                  return
-              raise SystemExit(f"no published checksum for {url}")
-
-          def safe_member(name):
-              normalized = pathlib.PurePosixPath(name)
-              return not normalized.is_absolute() and ".." not in normalized.parts and name not in ("", ".")
-
-          manifest = []
-          for coordinate, group, name, version, artifact_filename, artifact_sha256 in rows:
-              relative_module = pathlib.Path(group, name, version)
-              runtime_artifact = artifacts_path / relative_module / artifact_filename
-              if not runtime_artifact.is_file() or digest(runtime_artifact) != artifact_sha256:
-                  raise SystemExit(f"runtime artifact differs from Gradle inventory: {coordinate} {artifact_filename}")
-
-              google = group == "androidx" or group.startswith("androidx.")
-              repository = "https://dl.google.com/dl/android/maven2" if google else "https://repo1.maven.org/maven2"
-              repository_path = "/".join((*group.split("."), name, version))
-              base_url = f"{repository}/{repository_path}"
-              module_output = output_path / relative_module
-              module_output.mkdir(parents=True)
-
-              runtime_remote_name = f"{name}-{version}{runtime_artifact.suffix}"
-              runtime_url = f"{base_url}/{runtime_remote_name}"
-              verify_published_checksum(runtime_artifact, runtime_url, google)
-
-              source_directory = sources_path / relative_module
-              source_archives = sorted(source_directory.glob("*-sources.jar")) if source_directory.is_dir() else []
-              if len(source_archives) > 1:
-                  raise SystemExit(f"multiple source archives resolved for {coordinate}")
-              has_classes = False
-              with zipfile.ZipFile(runtime_artifact) as runtime_zip:
-                  runtime_names = runtime_zip.namelist()
-                  if runtime_artifact.suffix == ".aar" and "classes.jar" in runtime_names:
-                      with runtime_zip.open("classes.jar") as nested_stream:
-                          from io import BytesIO
-                          with zipfile.ZipFile(BytesIO(nested_stream.read())) as classes_zip:
-                              has_classes = any(item.endswith(".class") for item in classes_zip.namelist())
-                  elif runtime_artifact.suffix == ".jar":
-                      has_classes = any(item.endswith(".class") for item in runtime_names)
-                  has_native_or_dex = any(item.lower().endswith((".so", ".dll", ".dylib", ".dex")) for item in runtime_names)
-                  if has_native_or_dex and coordinate not in {
-                      "androidx.graphics:graphics-path:1.0.1", "dev.jdtech.mpv:libmpv:1.0.0",
-                  }:
-                      raise SystemExit(f"unaccounted native or dex binary in JVM dependency: {coordinate}")
-                  resources_output = module_output / "runtime-resources"
-                  selected_resources = []
-                  for item in runtime_zip.infolist():
-                      member = item.filename
-                      if item.is_dir() or not safe_member(member):
-                          continue
-                      if runtime_artifact.suffix == ".aar":
-                          selected = (member == "AndroidManifest.xml" or member in {
-                              "R.txt", "public.txt", "consumer-rules.pro", "proguard.txt",
-                          } or member.startswith(("res/", "assets/", "aidl/")) or
-                              (member.startswith("prefab/") and "/include/" in member))
-                      else:
-                          upper = member.upper()
-                          selected = (not member.endswith((".class", ".kotlin_module")) and
-                              not upper.endswith((".SF", ".RSA", ".DSA")) and
-                              upper != "META-INF/MANIFEST.MF")
-                      if selected:
-                          destination = resources_output / pathlib.PurePosixPath(member)
-                          destination.parent.mkdir(parents=True, exist_ok=True)
-                          with runtime_zip.open(item) as source, destination.open("wb") as target:
-                              shutil.copyfileobj(source, target)
-                          selected_resources.append(member)
-
-              source_description = "NO_CLASSES"
-              source_hash = "-"
-              if source_archives:
-                  source_archive = source_archives[0]
-                  with zipfile.ZipFile(source_archive) as source_zip:
-                      source_names = source_zip.namelist()
-                      if any(not safe_member(item) for item in source_names):
-                          raise SystemExit(f"unsafe path in sources archive for {coordinate}")
-                      has_source_code = any(item.endswith((".java", ".kt", ".kts")) for item in source_names)
-                  if has_classes and not has_source_code and coordinate != "dev.jdtech.mpv:libmpv:1.0.0":
-                      raise SystemExit(f"sources archive contains no source code for {coordinate}")
-                  source_destination = module_output / source_archive.name
-                  shutil.copyfile(source_archive, source_destination)
-                  source_url = f"{base_url}/{source_archive.name}"
-                  verify_published_checksum(source_destination, source_url, google)
-                  source_description = source_archive.name
-                  source_hash = digest(source_destination)
-              elif has_classes:
-                  raise SystemExit(f"missing source archive for code-bearing dependency {coordinate}")
-
-              metadata_hashes = []
-              for extension, optional in (("pom", False), ("module", True)):
-                  metadata_name = f"{name}-{version}.{extension}"
-                  metadata_path = module_output / metadata_name
-                  metadata_url = f"{base_url}/{metadata_name}"
-                  if fetch(metadata_url, metadata_path, optional=optional):
-                      verify_published_checksum(metadata_path, metadata_url, google)
-                      metadata_hashes.append(f"{metadata_name}:{digest(metadata_path)}")
-              if coordinate == "dev.jdtech.mpv:libmpv:1.0.0":
-                  source_description = f"FULL_SOURCE:../libmpv-android-1.0.0;MAVEN_SOURCE:{source_description}"
-                  source_hash = "0006e4243da3ebfb3d43cc4c87a07026384b47807337d9180e221cd8b9389589"
-              manifest.append((coordinate, artifact_filename, artifact_sha256,
-                  source_description, source_hash, *metadata_hashes))
-
-          if len(manifest) != len(rows) or [entry[0] for entry in manifest] != [row[0] for row in rows]:
-              raise SystemExit("JVM source manifest does not exactly cover the resolved runtime inventory")
-          manifest_path = output_path / "RUNTIME_MODULES.tsv"
-          manifest_path.write_text("\n".join("\t".join(entry) for entry in manifest) + "\n", encoding="utf-8")
-          components = pathlib.Path(os.environ["RIVUNE_RUNTIME_COMPONENTS_FILE"]).read_text(encoding="utf-8").splitlines()
-          if len(components) != 125 or components != sorted(set(components)):
-              raise SystemExit("resolved component inventory must contain the exact 125 unique sorted release components")
-          artifact_coordinates = [row[0] for row in rows]
-          for coordinate in sorted(set(components) - set(artifact_coordinates)):
-              group, name, version = coordinate.split(":")
-              google = group == "androidx" or group.startswith("androidx.")
-              repository = "https://dl.google.com/dl/android/maven2" if google else "https://repo1.maven.org/maven2"
-              repository_path = "/".join((*group.split("."), name, version))
-              base_url = f"{repository}/{repository_path}"
-              metadata_output = output_path / "component-metadata" / group / name / version
-              metadata_output.mkdir(parents=True)
-              for extension, optional in (("pom", False), ("module", True)):
-                  metadata_name = f"{name}-{version}.{extension}"
-                  metadata_path = metadata_output / metadata_name
-                  metadata_url = f"{base_url}/{metadata_name}"
-                  if fetch(metadata_url, metadata_path, optional=optional):
-                      verify_published_checksum(metadata_path, metadata_url, google)
-          if not set(artifact_coordinates).issubset(components):
-              raise SystemExit("runtime artifacts are not a subset of resolved components")
-          (output_path / "RESOLVED_COMPONENTS.txt").write_text("\n".join(components) + "\n", encoding="utf-8")
-          checksummed = sorted(path for path in output_path.rglob("*") if path.is_file())
-          (output_path / "SOURCE_SHA256SUMS").write_text("".join(
-              f"{digest(path)}  {path.relative_to(output_path).as_posix()}\n" for path in checksummed
-          ), encoding="utf-8")
-          PYTHON
-
-          fetch_git_source() {
-            local name="$1" repository="$2" commit="$3" destination="$4" submodule_status
-            git init -q "${destination}"
-            git -C "${destination}" remote add origin "${repository}"
-            git -C "${destination}" fetch -q --depth 1 origin "${commit}"
-            git -C "${destination}" checkout -q --detach FETCH_HEAD
-            if [[ "$(git -C "${destination}" rev-parse HEAD)" != "${commit}" ]]; then
-              echo "Source checkout for ${name} did not resolve to ${commit}." >&2
-              return 1
-            fi
-            git -C "${destination}" -c url.https://github.com/.insteadOf=git://github.com/ \
-              submodule update --init --recursive --depth 1
-            submodule_status="$(git -C "${destination}" submodule status --recursive)"
-            if grep -Eq '^[+-]' <<<"${submodule_status}" ||
-               [[ -n "$(git -C "${destination}" status --porcelain --untracked-files=no --ignore-submodules=none)" ]]; then
-              echo "Source checkout for ${name} is incomplete or differs from its authenticated commit." >&2
-              return 1
-            fi
-          }
-          fetch_source_tarball() {
-            local name="$1" url="$2" expected_sha256="$3" destination="$4" archive archive_entries
-            archive=".release-private/${name}.tar.gz"
-            curl --fail-with-body --location --proto '=https' --tlsv1.2 --silent --show-error \
-              "${url}" --output "${archive}"
-            printf '%s  %s\n' "${expected_sha256}" "${archive}" | sha256sum --check --strict
-            archive_entries="$(tar -tzf "${archive}")"
-            if grep -Eq '(^/|(^|/)\.\.(/|$))' <<<"${archive_entries}"; then
-              echo "Source archive for ${name} contains an unsafe path." >&2
-              return 1
-            fi
-            mkdir -p "${destination}"
-            tar -xzf "${archive}" --strip-components=1 --no-same-owner --no-same-permissions -C "${destination}"
-          }
-
-          fetch_source_tarball libmpv-android \
-            https://github.com/jarnedemeulemeester/libmpv-android/archive/fcf6745703dc1265bca88f12fee8fc355ddf251e.tar.gz \
-            0006e4243da3ebfb3d43cc4c87a07026384b47807337d9180e221cd8b9389589 "${third_party_root}"
-          deps_root="${third_party_root}/buildscripts/deps"
-          fetch_git_source mbedtls https://github.com/Mbed-TLS/mbedtls.git \
-            0bebf8b8c7f07abe3571ded48a11aa907a1ffb20 "${deps_root}/mbedtls"
-          fetch_git_source dav1d https://github.com/videolan/dav1d.git \
-            b546257f770768b2c88258c533da38b91a06f737 "${deps_root}/dav1d"
-          fetch_git_source ffmpeg https://github.com/FFmpeg/FFmpeg.git \
-            9047fa1b084f76b1b4d065af2d743df1b40dfb56 "${deps_root}/ffmpeg"
-          fetch_git_source freetype https://gitlab.freedesktop.org/freetype/freetype.git \
-            0a0221a1347e2f1e07c395263540026e9a0aa7c7 "${deps_root}/freetype"
-          fetch_git_source fribidi https://github.com/fribidi/fribidi.git \
-            68162babff4f39c4e2dc164a5e825af93bda9983 "${deps_root}/fribidi"
-          fetch_git_source harfbuzz https://github.com/harfbuzz/harfbuzz.git \
-            cfb70b0b91af933a08339c7c8eef459df1098d7b "${deps_root}/harfbuzz"
-          fetch_source_tarball libunibreak \
-            https://github.com/adah1972/libunibreak/releases/download/libunibreak_6_1/libunibreak-6.1.tar.gz \
-            cc4de0099cf7ff05005ceabff4afed4c582a736abc38033e70fdac86335ce93f "${deps_root}/libunibreak"
-          fetch_git_source libxml2 https://gitlab.gnome.org/GNOME/libxml2.git \
-            3d840e17858de03a09fba8b202e3a89267d5795a "${deps_root}/libxml2"
-          fetch_git_source fontconfig https://gitlab.freedesktop.org/fontconfig/fontconfig.git \
-            6d0a98982ec351c165c9224c8b7dbdfca3010e47 "${deps_root}/fontconfig"
-          fetch_git_source libass https://github.com/libass/libass.git \
-            bbb3c7f1570a4a021e52683f3fbdf74fe492ae84 "${deps_root}/libass"
-          fetch_source_tarball lua https://www.lua.org/ftp/lua-5.2.4.tar.gz \
-            b9e2e4aad6789b3b63a056d442f7b39f0ecfca3ae0f1fc0ae4e9614401b69f4b "${deps_root}/lua"
-          fetch_git_source libplacebo https://github.com/haasn/libplacebo.git \
-            cee9b076f2c63104ccfd497fa79c39a867293ec4 "${deps_root}/libplacebo"
-          fetch_git_source mpv https://github.com/mpv-player/mpv.git \
-            41f6a645068483470267271e1d09966ca3b9f413 "${deps_root}/mpv"
-
-          jvm_upstreams="${jvm_source_root}/full-upstreams"
-          mkdir -p "${jvm_upstreams}"
-          python3 .github/scripts/assemble-androidx-source.py \
-            "${runtime_inventory}" "${jvm_source_root}" "${jvm_upstreams}"
-          # Full immutable projects supplement Maven source classifiers with build logic,
-          # generators, and resources needed to modify and rebuild packaged JVM code.
-          fetch_git_source media3 https://github.com/androidx/media.git \
-            2bc207851df311340767e913931ca7b28cab1794 "${jvm_upstreams}/androidx-media3-1.11.0"
-          fetch_git_source coil https://github.com/coil-kt/coil.git \
-            ce14e14bc9a25c6952e26e248aad75fbd2e9f9d0 "${jvm_upstreams}/coil-2.7.0"
-          fetch_git_source accompanist https://github.com/google/accompanist.git \
-            6eb55b0d58d2b8b4d39d62c8b600115283a4cf36 "${jvm_upstreams}/accompanist-0.32.0"
-          fetch_git_source androidsvg https://github.com/BigBadaboom/androidsvg.git \
-            9490d751d91033051efc6a4a9835ceff6082e9ff "${jvm_upstreams}/androidsvg-1.4"
-          fetch_git_source okhttp https://github.com/square/okhttp.git \
-            4984568367caaf359b82c452bd28b5e192824d1c "${jvm_upstreams}/okhttp-4.12.0"
-          fetch_git_source okio https://github.com/square/okio.git \
-            d6c38c257c79974ac7e6d77b84ce2eeefc1b92b0 "${jvm_upstreams}/okio-3.9.0"
-          fetch_git_source coroutines https://github.com/Kotlin/kotlinx.coroutines.git \
-            5f8900478a8e20c073145b1608fbc71fe3d7378b "${jvm_upstreams}/kotlinx-coroutines-1.10.2"
-          fetch_git_source serialization https://github.com/Kotlin/kotlinx.serialization.git \
-            afd811f5221d803588ea4a2713ab6b0bd78d288a "${jvm_upstreams}/kotlinx-serialization-1.8.1"
-          fetch_git_source kotlin-2.2.10 https://github.com/JetBrains/kotlin.git \
-            c448af19ded1b1a4e96e9af6412cd9acb100ce1a "${jvm_upstreams}/kotlin-2.2.10"
-          fetch_git_source kotlin-1.9.0 https://github.com/JetBrains/kotlin.git \
-            bcf27812cd28041e0b9ffa3bfe52fc58c397d0eb "${jvm_upstreams}/kotlin-1.9.0"
-          fetch_git_source guava https://github.com/google/guava.git \
-            df9602b6f1dd36414464229e0a441469d06e4575 "${jvm_upstreams}/guava-33.3.1"
-          fetch_git_source annotations https://github.com/JetBrains/java-annotations.git \
-            5d06c0c48e0a4fe44b2bc0d5d3e8b113c7a57de2 "${jvm_upstreams}/jetbrains-annotations-23.0.0"
-          fetch_git_source jspecify https://github.com/jspecify/jspecify.git \
-            b2a10e14bb81c1b7cb6e488c112fe55cb2218d7d "${jvm_upstreams}/jspecify-1.0.0"
-          # AndroidX frameworks/support revisions are authenticated and deduplicated
-          # in full-upstreams/androidx-support-repository by assemble-androidx-source.py.
-          removal_checks=".release-private/removed-upstream-non-source.sha256"
-          cat > "${removal_checks}" <<'EOF'
-          dd18891d3e1361388390a7bb16153cc837efa3a0fad3e304fe9443cf2c930cb4  coil-2.7.0/.github/debug.keystore
-          c34df2b60d81ae1099dcd4caa6917adbb45a0a5593ac32a74152189f2990c080  kotlin-1.9.0/libraries/tools/kotlin-gradle-plugin-integration-tests/src/test/resources/common/debug.keystore
-          c34df2b60d81ae1099dcd4caa6917adbb45a0a5593ac32a74152189f2990c080  kotlin-2.2.10/libraries/tools/kotlin-gradle-plugin-integration-tests/src/test/resources/common/debug.keystore
-          EOF
-          (cd "${jvm_upstreams}" && sha256sum --check --strict "${GITHUB_WORKSPACE}/${removal_checks}")
-          while read -r _ removed_path; do
-            rm "${jvm_upstreams}/${removed_path}"
-          done < "${removal_checks}"
-          awk '{ print $2 "  sha256:" $1 "  authenticated binary fixture or public debug key omitted by no-binary/no-keystore source archive policy; not required to build packaged runtime libraries" }' \
-            "${removal_checks}" > "${jvm_source_root}/REMOVED_NON_SOURCE_FILES.txt"
-
-          # Exact AndroidX coordinates are generated from the resolved runtime
-          # inventory and must match it byte-for-byte; version changes fail closed.
-          full_upstream_manifest="${jvm_source_root}/FULL_UPSTREAMS.tsv"
-          cp "${jvm_source_root}/ANDROIDX_COORDINATES.tsv" "${full_upstream_manifest}"
-          cat >> "${full_upstream_manifest}" <<'EOF'
-          io.coil-kt:*	coil-2.7.0	ce14e14bc9a25c6952e26e248aad75fbd2e9f9d0	full tagged source/build tree except documented public debug key
-          com.google.accompanist:*	accompanist-0.32.0	6eb55b0d58d2b8b4d39d62c8b600115283a4cf36	full tagged source and build tree
-          com.caverock:*	androidsvg-1.4	9490d751d91033051efc6a4a9835ceff6082e9ff	full tagged source and build tree
-          com.squareup.okhttp3:*	okhttp-4.12.0	4984568367caaf359b82c452bd28b5e192824d1c	full tagged source and build tree
-          com.squareup.okio:*	okio-3.9.0	d6c38c257c79974ac7e6d77b84ce2eeefc1b92b0	full tagged source and build tree
-          org.jetbrains.kotlinx:kotlinx-coroutines-*	kotlinx-coroutines-1.10.2	5f8900478a8e20c073145b1608fbc71fe3d7378b	full tagged source and build tree
-          org.jetbrains.kotlinx:kotlinx-serialization-*	kotlinx-serialization-1.8.1	afd811f5221d803588ea4a2713ab6b0bd78d288a	full tagged source and build tree
-          org.jetbrains.kotlin:kotlin-stdlib:2.2.10	kotlin-2.2.10	c448af19ded1b1a4e96e9af6412cd9acb100ce1a	full tagged source and build tree
-          org.jetbrains.kotlin:kotlin-stdlib-jdk*:1.9.0	kotlin-1.9.0	bcf27812cd28041e0b9ffa3bfe52fc58c397d0eb	full tagged source and build tree
-          com.google.guava:*	guava-33.3.1	df9602b6f1dd36414464229e0a441469d06e4575	full tagged source and build tree
-          org.jetbrains:annotations:*	jetbrains-annotations-23.0.0	5d06c0c48e0a4fe44b2bc0d5d3e8b113c7a57de2	full tagged source and build tree
-          org.jspecify:*	jspecify-1.0.0	b2a10e14bb81c1b7cb6e488c112fe55cb2218d7d	full tagged source and build tree
-          EOF
-
-          # Every code-bearing resolved module must match exactly one immutable
-          # full-source mapping. libmpv is covered by its native source tree.
-          python3 - "${runtime_inventory}" "${full_upstream_manifest}" <<'PYTHON'
-          import fnmatch
-          import pathlib
-          import sys
-          inventory = [line.split("\t", 1)[0] for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
-          patterns = [line.split("\t", 1)[0] for line in pathlib.Path(sys.argv[2]).read_text().splitlines()]
-          for coordinate in inventory:
-              if coordinate == "dev.jdtech.mpv:libmpv:1.0.0":
-                  continue
-              matches = [pattern for pattern in patterns if fnmatch.fnmatchcase(coordinate, pattern)]
-              if len(matches) != 1:
-                  raise SystemExit(f"resolved JVM module has {len(matches)} full-source mappings: {coordinate}")
-          PYTHON
-
-          cat > "${source_root}/REBUILDING.txt" <<'EOF'
-          Rebuilding Rivune Android from this Corresponding Source
-
-          Requirements: Linux, JDK 21 for libmpv, JDK 17 for Rivune, Android SDK
-          platform 36, Android build-tools 36.0.0 (Rivune) and 37.0.0 (libmpv),
-          NDK 29.0.14206865, CMake 4.1.2, and the standard native build tools
-          installed by libmpv-android's buildscripts.
-          1. cd third-party/libmpv-android-1.0.0/buildscripts
-          2. Symlink sdk/android-sdk-linux to your Android SDK or run ./download.sh.
-             All native dependency directories are already populated, so download.sh
-             will not replace them. Version 1.0.0 has no patches; run ./build.sh.
-          3. The resulting AAR is under ../libmpv/build/outputs/aar/.
-          4. Return to this archive root and run:
-               ./rebuild-android.sh /absolute/path/to/libmpv-release.aar
-
-          The script loads the original public version name/code from RELEASE_BUILD_ENV.
-          RIVUNE_LIBMPV_AAR_PATH is fail-closed: Gradle verifies that the local AAR is
-          selected and dev.jdtech.mpv:libmpv:1.0.0 is absent from the runtime graph.
-          RUNTIME_MODULES.tsv and SOURCE_SHA256SUMS under third-party/jvm-runtime-sources
-          bind every packaged external JVM artifact to its exact Maven source, resources,
-          build metadata, and full upstream build tree. ANDROIDX_COORDINATES.tsv maps
-          every packaged AndroidX coordinate to an exact immutable revision. Run
-          checkout-androidx-support.sh COORDINATE DESTINATION to materialize its full
-          frameworks/support source and build tree from the deduplicated Git repository.
-          EOF
-
-          printf '%s\n' \
-            "RIVUNE_ANDROID_VERSION_NAME=${version_name}" \
-            "RIVUNE_ANDROID_VERSION_CODE=${version_code}" \
-            > "${source_root}/RELEASE_BUILD_ENV"
-
-          cat > "${source_root}/rebuild-android.sh" <<'EOF'
-          #!/bin/sh
-          set -eu
-          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
-            echo "usage: $0 /absolute/path/to/rebuilt-libmpv-1.0.0.aar" >&2
-            exit 2
-          fi
-          root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-          aar=$(CDPATH= cd -- "$(dirname -- "$1")" && pwd)/$(basename -- "$1")
-          if [ ! -f "$root/RELEASE_BUILD_ENV" ]; then
-            echo "missing RELEASE_BUILD_ENV" >&2
-            exit 1
-          fi
-          set -a
-          . "$root/RELEASE_BUILD_ENV"
-          set +a
-          export RIVUNE_LIBMPV_AAR_PATH=$aar
-          exec "$root/rivune/clients/android/gradlew" -p "$root/rivune/clients/android" --no-daemon \
-            :app:verifyLocalLibmpvOverride :app:assembleRelease
-          EOF
-          chmod 0755 "${source_root}/rebuild-android.sh"
-
-          cat > "${source_root}/UPSTREAM_SOURCES.txt" <<EOF
-          libmpv-android 1.0.0 fcf6745703dc1265bca88f12fee8fc355ddf251e sha256:0006e4243da3ebfb3d43cc4c87a07026384b47807337d9180e221cd8b9389589
-          mbedtls 3.6.6 0bebf8b8c7f07abe3571ded48a11aa907a1ffb20
-          dav1d 1.5.3 b546257f770768b2c88258c533da38b91a06f737
-          ffmpeg 8.1 9047fa1b084f76b1b4d065af2d743df1b40dfb56
-          freetype 2.14.3 0a0221a1347e2f1e07c395263540026e9a0aa7c7
-          fribidi 1.0.16 68162babff4f39c4e2dc164a5e825af93bda9983
-          harfbuzz 14.1.0 cfb70b0b91af933a08339c7c8eef459df1098d7b
-          libunibreak 6.1 sha256:cc4de0099cf7ff05005ceabff4afed4c582a736abc38033e70fdac86335ce93f
-          libxml2 2.15.2 3d840e17858de03a09fba8b202e3a89267d5795a
-          fontconfig 2.17.1 6d0a98982ec351c165c9224c8b7dbdfca3010e47
-          libass 0.17.4 bbb3c7f1570a4a021e52683f3fbdf74fe492ae84
-          lua 5.2.4 sha256:b9e2e4aad6789b3b63a056d442f7b39f0ecfca3ae0f1fc0ae4e9614401b69f4b
-          libplacebo 7.360.1 cee9b076f2c63104ccfd497fa79c39a867293ec4
-          mpv 0.41.0 41f6a645068483470267271e1d09966ca3b9f413
-          EOF
-
-          printf '%s\n' \
-            "Rivune Android ${version_name} Corresponding Source" \
-            "Rivune commit: ${RELEASE_SHA}" \
-            "libmpv-android: 1.0.0 (fcf6745703dc1265bca88f12fee8fc355ddf251e)" \
-            'Native dependency versions and acquisition recipes are pinned in:' \
-            'third-party/libmpv-android-1.0.0/buildscripts/include/depinfo.sh' \
-            'third-party/libmpv-android-1.0.0/buildscripts/include/download-deps.sh' \
-            'All dependency sources named there are expanded under buildscripts/deps/.' \
-            > "${source_root}/CORRESPONDING_SOURCE.txt"
-
-          # Remove repository metadata after all authenticated checkouts, then reject
-          find "${source_root}" -name .git -exec rm -rf {} +
-          python3 - "${jvm_source_root}" <<'PYTHON'
-          import hashlib
-          import pathlib
-          import sys
-          root = pathlib.Path(sys.argv[1])
-          checksum_file = root / "SOURCE_SHA256SUMS"
-          files = sorted(path for path in root.rglob("*") if path.is_file() and path != checksum_file)
-          with checksum_file.open("w", encoding="utf-8", newline="\n") as output:
-              for path in files:
-                  digest = hashlib.sha256()
-                  with path.open("rb") as stream:
-                      for block in iter(lambda: stream.read(1024 * 1024), b""):
-                          digest.update(block)
-                  output.write(f"{digest.hexdigest()}  {path.relative_to(root).as_posix()}\n")
-          PYTHON
-          if find "${source_root}" \
-            \( -type d \( -name .release-private -o -name .gradle -o -name .cxx -o -name node_modules \) \
-            -o -type f \( -name .env -o -iname '*.apk' -o -iname '*.aar' -o -iname '*.jks' -o -iname '*.keystore' \) \) \
-            -print -quit | grep -q .; then
-            echo "Corresponding Source contains a forbidden private, cache, build, or binary path." >&2
-            exit 1
-          fi
-          if find "${source_root}" -path "${jvm_upstreams}" -prune -o \
-            -type f \( -iname '*.dex' -o -iname '*.class' -o -iname '*.o' -o -iname '*.so' \) \
-            -print -quit | grep -q .; then
-            echo "Corresponding Source contains a generated binary outside an authenticated upstream tree." >&2
-            exit 1
-          fi
-          canonical_source_root="$(realpath "${source_root}")"
-          while IFS= read -r -d '' link; do
-            resolved_link="$(realpath -m "${link}")"
-            if [[ "${resolved_link}" != "${canonical_source_root}"/* ]]; then
-              echo "Corresponding Source symlink escapes the archive root: ${link}" >&2
-              exit 1
-            fi
-          done < <(find "${source_root}" -type l -print0)
-
-          required_source_entries=(
-            UPSTREAM_SOURCES.txt
-            REBUILDING.txt
-            RELEASE_BUILD_ENV
-            rebuild-android.sh
-            third-party/jvm-runtime-sources/RESOLVED_COMPONENTS.txt
-            third-party/jvm-runtime-sources/RUNTIME_MODULES.tsv
-            third-party/jvm-runtime-sources/SOURCE_SHA256SUMS
-            third-party/jvm-runtime-sources/FULL_UPSTREAMS.tsv
-            third-party/jvm-runtime-sources/ANDROIDX_COORDINATES.tsv
-            third-party/jvm-runtime-sources/checkout-androidx-support.sh
-            third-party/jvm-runtime-sources/full-upstreams/androidx-support-repository
-            third-party/jvm-runtime-sources/REMOVED_NON_SOURCE_FILES.txt
-            rivune/clients/android/app/src/main/assets/legal/LICENSE.txt
-            rivune/clients/android/app/src/main/assets/legal/NOTICE
-            rivune/clients/android/app/src/main/assets/legal/THIRD_PARTY_NOTICES.txt
-            rivune/clients/android/app/src/main/assets/legal/licenses/GPL-3.0.txt
-            rivune/clients/android/app/src/main/assets/legal/licenses/AndroidX-Media-Apache-2.0.txt
-            rivune/clients/android/app/build.gradle.kts
-            rivune/clients/android/gradlew
-            rivune/clients/android/gradle/libs.versions.toml
-            third-party/libmpv-android-1.0.0/buildscripts/build.sh
-            third-party/libmpv-android-1.0.0/buildscripts/include/depinfo.sh
-            third-party/libmpv-android-1.0.0/buildscripts/include/download-deps.sh
-            third-party/libmpv-android-1.0.0/buildscripts/scripts/ffmpeg.sh
-          )
-          for dependency in mbedtls dav1d ffmpeg freetype fribidi harfbuzz libunibreak libxml2 fontconfig libass lua libplacebo mpv; do
-            required_source_entries+=("third-party/libmpv-android-1.0.0/buildscripts/deps/${dependency}")
-          done
-          for required_entry in "${required_source_entries[@]}"; do
-            if [[ ! -e "${source_root}/${required_entry}" ]]; then
-              echo "Corresponding Source is missing required entry: ${required_entry}" >&2
-              exit 1
-            fi
-          done
-
-          source_date_epoch="$(git show -s --format=%ct "${RELEASE_SHA}")"
-          LC_ALL=C tar --sort=name --format=posix --owner=0 --group=0 --numeric-owner \
-            --mtime="@${source_date_epoch}" \
-            --pax-option=delete=atime,delete=ctime \
-            -cf ".release-private/${source_asset_name%.gz}" -C "${source_root}" .
-          gzip -n -9 ".release-private/${source_asset_name%.gz}"
-          mv ".release-private/${source_asset_name}" "release-assets/${source_asset_name}"
-          source_archive_size="$(stat -c %s "release-assets/${source_asset_name}")"
-          if (( source_archive_size > 2040109465 )); then
-            echo "Corresponding Source archive exceeds the 1.9 GiB release-asset safety limit." >&2
-            exit 1
-          fi
-          archive_entries="$(tar -tzf "release-assets/${source_asset_name}")"
-          if grep -Eq '(^/|(^|/)\.\.(/|$)|(^|/)\.git(/|$)|(^|/)\.release-private(/|$))' <<<"${archive_entries}"; then
-            echo "Corresponding Source archive contains an unsafe or forbidden path." >&2
-            exit 1
-          fi
-          for required_entry in "${required_source_entries[@]}"; do
-            if ! grep -Fxq "./${required_entry}" <<<"${archive_entries}" &&
-               ! grep -Fxq "./${required_entry}/" <<<"${archive_entries}"; then
-              echo "Corresponding Source archive is missing required entry: ${required_entry}" >&2
-              exit 1
-            fi
-          done
-          mv "release-assets/${source_asset_name}" release-inputs/
           mv "release-assets/${windows_asset_name}" release-inputs/
           mv "release-assets/${windows_x64_asset_name}" release-inputs/
           mv "release-assets/${windows_arm64_asset_name}" release-inputs/
-          rm -rf .release-private
-          trap - EXIT
       - name: Upload immutable unsigned Android input
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -966,7 +413,7 @@ jobs:
           retention-days: 7
           compression-level: 0
           overwrite: false
-      - name: Upload immutable Windows and source inputs
+      - name: Upload immutable Windows inputs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-inputs-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1139,7 +586,7 @@ jobs:
         with:
           ref: ${{ needs.authorize.outputs.sha }}
           persist-credentials: false
-      - name: Download immutable Windows and source inputs
+      - name: Download immutable Windows inputs
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ needs.build-assets.outputs.release_inputs_artifact_name }}
@@ -1162,7 +609,6 @@ jobs:
           RIVUNE_RELEASE_CHANNEL: ${{ needs.build-assets.outputs.channel }}
           RIVUNE_RELEASE_PUBLISHED_AT: ${{ needs.build-assets.outputs.published_at }}
           RIVUNE_RELEASE_ANDROID_ASSET_NAME: ${{ needs.build-assets.outputs.android_asset_name }}
-          RIVUNE_RELEASE_SOURCE_ASSET_NAME: ${{ needs.build-assets.outputs.source_asset_name }}
           RIVUNE_RELEASE_WINDOWS_ASSET_NAME: ${{ needs.build-assets.outputs.windows_asset_name }}
           RIVUNE_RELEASE_WINDOWS_X64_ASSET_NAME: ${{ needs.build-assets.outputs.windows_x64_asset_name }}
           RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_NAME: ${{ needs.build-assets.outputs.windows_arm64_asset_name }}
@@ -1181,7 +627,6 @@ jobs:
             RIVUNE_RELEASE_CHANNEL \
             RIVUNE_RELEASE_PUBLISHED_AT \
             RIVUNE_RELEASE_ANDROID_ASSET_NAME \
-            RIVUNE_RELEASE_SOURCE_ASSET_NAME \
             RIVUNE_RELEASE_WINDOWS_ASSET_NAME \
             RIVUNE_RELEASE_WINDOWS_X64_ASSET_NAME \
             RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_NAME \
@@ -1351,11 +796,10 @@ jobs:
           set -euo pipefail
           version_name="${RELEASE_TAG#v}"
           asset_name="rivune-android-${version_name}.apk"
-          source_asset_name="rivune-android-${version_name}-corresponding-source.tar.gz"
           windows_asset_name='Rivune.exe'
           windows_x64_asset_name='Rivune-x64.exe'
           windows_arm64_asset_name='Rivune-arm64.exe'
-          expected_files="$(printf '%s\n' rivune-update.json rivune-android-update.json "${asset_name}" "${source_asset_name}" "${windows_asset_name}" "${windows_x64_asset_name}" "${windows_arm64_asset_name}" | sort)"
+          expected_files="$(printf '%s\n' rivune-update.json rivune-android-update.json "${asset_name}" "${windows_asset_name}" "${windows_x64_asset_name}" "${windows_arm64_asset_name}" | sort)"
           actual_files="$(find release-assets -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
           if [[ "${actual_files}" != "${expected_files}" ]]; then
             echo "Immutable artifact does not contain the exact release asset set." >&2
@@ -1372,48 +816,6 @@ jobs:
             echo 'Rivune.exe must be byte-identical to Rivune-x64.exe.' >&2
             exit 1
           }
-          if (( $(stat -c %s "release-assets/${source_asset_name}") > 2040109465 )); then
-            echo "Corresponding Source archive exceeds the 1.9 GiB release-asset safety limit." >&2
-            exit 1
-          fi
-          archive_entries="$(tar -tzf "release-assets/${source_asset_name}")"
-          if grep -Eq '(^/|(^|/)\.\.(/|$)|(^|/)\.git(/|$)|(^|/)\.release-private(/|$))' <<<"${archive_entries}"; then
-            echo "Corresponding Source archive contains an unsafe or forbidden path." >&2
-            exit 1
-          fi
-          required_archive_entries=(
-            ./UPSTREAM_SOURCES.txt
-            ./REBUILDING.txt
-            ./rebuild-android.sh
-            ./RELEASE_BUILD_ENV
-            ./third-party/jvm-runtime-sources/RUNTIME_MODULES.tsv
-            ./third-party/jvm-runtime-sources/SOURCE_SHA256SUMS
-            ./third-party/jvm-runtime-sources/FULL_UPSTREAMS.tsv
-            ./third-party/jvm-runtime-sources/ANDROIDX_COORDINATES.tsv
-            ./third-party/jvm-runtime-sources/checkout-androidx-support.sh
-            ./third-party/jvm-runtime-sources/full-upstreams/androidx-support-repository/
-            ./third-party/jvm-runtime-sources/REMOVED_NON_SOURCE_FILES.txt
-            ./rivune/clients/android/app/build.gradle.kts
-            ./rivune/clients/android/gradle/libs.versions.toml
-            ./rivune/clients/android/app/src/main/assets/legal/LICENSE.txt
-            ./rivune/clients/android/app/src/main/assets/legal/NOTICE
-            ./rivune/clients/android/app/src/main/assets/legal/THIRD_PARTY_NOTICES.txt
-            ./rivune/clients/android/app/src/main/assets/legal/licenses/GPL-3.0.txt
-            ./rivune/clients/android/app/src/main/assets/legal/licenses/AndroidX-Media-Apache-2.0.txt
-            ./third-party/libmpv-android-1.0.0/buildscripts/include/depinfo.sh
-            ./third-party/libmpv-android-1.0.0/buildscripts/include/download-deps.sh
-            ./third-party/libmpv-android-1.0.0/buildscripts/scripts/ffmpeg.sh
-            ./third-party/jvm-runtime-sources/RESOLVED_COMPONENTS.txt
-          )
-          for dependency in mbedtls dav1d ffmpeg freetype fribidi harfbuzz libunibreak libxml2 fontconfig libass lua libplacebo mpv; do
-            required_archive_entries+=("./third-party/libmpv-android-1.0.0/buildscripts/deps/${dependency}/")
-          done
-          for required_entry in "${required_archive_entries[@]}"; do
-            if ! grep -Fxq "${required_entry}" <<<"${archive_entries}"; then
-              echo "Corresponding Source archive is missing required entry: ${required_entry}" >&2
-              exit 1
-            fi
-          done
           if [[ "${RELEASE_STABLE}" == true ]]; then
             expected_channel=stable
           else
@@ -1637,7 +1039,6 @@ jobs:
             local candidate_release_id content_type expected_upload_url upload_url
             local version_name="${RELEASE_TAG#v}"
             local apk_name="rivune-android-${version_name}.apk"
-            local source_name="rivune-android-${version_name}-corresponding-source.tar.gz"
             local windows_name='Rivune.exe'
             local windows_x64_name='Rivune-x64.exe'
             local windows_arm64_name='Rivune-arm64.exe'
@@ -1645,7 +1046,6 @@ jobs:
               rivune-update.json
               rivune-android-update.json
               "${apk_name}"
-              "${source_name}"
               "${windows_name}"
               "${windows_x64_name}"
               "${windows_arm64_name}"
@@ -1669,7 +1069,7 @@ jobs:
                 return 1
               fi
               case "${release_asset_name}" in
-                rivune-update.json|rivune-android-update.json|"${apk_name}"|"${source_name}"|"${windows_name}"|"${windows_x64_name}"|"${windows_arm64_name}") ;;
+                rivune-update.json|rivune-android-update.json|"${apk_name}"|"${windows_name}"|"${windows_x64_name}"|"${windows_arm64_name}") ;;
                 *)
                   echo "The partial GitHub Release contains an unexpected asset: ${release_asset_name}" >&2
                   return 1
@@ -1727,7 +1127,6 @@ jobs:
               case "${release_asset_name}" in
                 rivune-update.json|rivune-android-update.json) content_type='application/json' ;;
                 "${apk_name}") content_type='application/vnd.android.package-archive' ;;
-                "${source_name}") content_type='application/gzip' ;;
                 "${windows_name}"|"${windows_x64_name}"|"${windows_arm64_name}") content_type='application/vnd.microsoft.portable-executable' ;;
               esac
               upload_release_asset "release-assets/${release_asset_name}" "${content_type}"
@@ -1771,12 +1170,11 @@ jobs:
             local release_json="$1" asset_id asset_name asset_digest trusted_asset_sha
             local version_name="${RELEASE_TAG#v}"
             local apk_name="rivune-android-${version_name}.apk"
-            local source_name="rivune-android-${version_name}-corresponding-source.tar.gz"
             local windows_name='Rivune.exe'
             local windows_x64_name='Rivune-x64.exe'
             local windows_arm64_name='Rivune-arm64.exe'
             local expected_assets actual_assets expected_channel expected_release_url expected_apk_url expected_windows_url expected_windows_x64_url expected_windows_arm64_url
-            expected_assets="$(printf '%s\n' rivune-update.json rivune-android-update.json "${apk_name}" "${source_name}" "${windows_name}" "${windows_x64_name}" "${windows_arm64_name}" | sort)"
+            expected_assets="$(printf '%s\n' rivune-update.json rivune-android-update.json "${apk_name}" "${windows_name}" "${windows_x64_name}" "${windows_arm64_name}" | sort)"
             actual_assets="$(jq -r '.assets[].name' <<<"${release_json}" | sort)"
             if [[ "${actual_assets}" != "${expected_assets}" ]]; then
               echo "The GitHub Release asset set is incomplete or contains unexpected files." >&2
@@ -1813,12 +1211,11 @@ jobs:
               return 1
             }
 
-            local trusted_asset adopted_asset_sha trusted_asset_sha archive_entries
+            local trusted_asset adopted_asset_sha trusted_asset_sha
             for trusted_asset in \
               rivune-update.json \
               rivune-android-update.json \
               "${apk_name}" \
-              "${source_name}" \
               "${windows_name}" \
               "${windows_x64_name}" \
               "${windows_arm64_name}"; do
@@ -1826,49 +1223,6 @@ jobs:
               trusted_asset_sha="$(sha256sum "release-assets/${trusted_asset}" | cut -d ' ' -f1)"
               if [[ "${adopted_asset_sha}" != "${trusted_asset_sha}" ]]; then
                 echo "The adopted ${trusted_asset} differs from the trusted release artifact." >&2
-                return 1
-              fi
-            done
-            if (( $(stat -c %s "adopted-release-assets/${source_name}") > 2040109465 )); then
-              echo "The adopted Corresponding Source exceeds the 1.9 GiB release-asset safety limit." >&2
-              return 1
-            fi
-            archive_entries="$(tar -tzf "adopted-release-assets/${source_name}")"
-            if grep -Eq '(^/|(^|/)\.\.(/|$)|(^|/)\.git(/|$)|(^|/)\.release-private(/|$))' <<<"${archive_entries}"; then
-              echo "The adopted Corresponding Source contains an unsafe or forbidden path." >&2
-              return 1
-            fi
-            for required_entry in \
-              ./UPSTREAM_SOURCES.txt \
-              ./REBUILDING.txt \
-              ./rebuild-android.sh \
-              ./RELEASE_BUILD_ENV \
-              ./third-party/jvm-runtime-sources/RESOLVED_COMPONENTS.txt \
-              ./third-party/jvm-runtime-sources/RUNTIME_MODULES.tsv \
-              ./third-party/jvm-runtime-sources/SOURCE_SHA256SUMS \
-              ./third-party/jvm-runtime-sources/FULL_UPSTREAMS.tsv \
-              ./third-party/jvm-runtime-sources/ANDROIDX_COORDINATES.tsv \
-              ./third-party/jvm-runtime-sources/checkout-androidx-support.sh \
-              ./third-party/jvm-runtime-sources/full-upstreams/androidx-support-repository/ \
-              ./third-party/jvm-runtime-sources/REMOVED_NON_SOURCE_FILES.txt \
-              ./rivune/clients/android/app/build.gradle.kts \
-              ./rivune/clients/android/gradle/libs.versions.toml \
-              ./rivune/clients/android/app/src/main/assets/legal/LICENSE.txt \
-              ./rivune/clients/android/app/src/main/assets/legal/NOTICE \
-              ./rivune/clients/android/app/src/main/assets/legal/THIRD_PARTY_NOTICES.txt \
-              ./rivune/clients/android/app/src/main/assets/legal/licenses/GPL-3.0.txt \
-              ./rivune/clients/android/app/src/main/assets/legal/licenses/AndroidX-Media-Apache-2.0.txt \
-              ./third-party/libmpv-android-1.0.0/buildscripts/include/depinfo.sh \
-              ./third-party/libmpv-android-1.0.0/buildscripts/include/download-deps.sh \
-              ./third-party/libmpv-android-1.0.0/buildscripts/scripts/ffmpeg.sh; do
-              if ! grep -Fxq "${required_entry}" <<<"${archive_entries}"; then
-                echo "The adopted Corresponding Source is missing required entry: ${required_entry}" >&2
-                return 1
-              fi
-            done
-            for dependency in mbedtls dav1d ffmpeg freetype fribidi harfbuzz libunibreak libxml2 fontconfig libass lua libplacebo mpv; do
-              if ! grep -Fxq "./third-party/libmpv-android-1.0.0/buildscripts/deps/${dependency}/" <<<"${archive_entries}"; then
-                echo "The adopted Corresponding Source is missing dependency source: ${dependency}" >&2
                 return 1
               fi
             done
@@ -2245,7 +1599,7 @@ jobs:
             echo "The prepared GitHub Release does not record the effective OCI image digest exactly once." >&2
             exit 1
           fi
-          expected_assets="$(printf '%s\n' rivune-update.json rivune-android-update.json "rivune-android-${RELEASE_TAG#v}.apk" "rivune-android-${RELEASE_TAG#v}-corresponding-source.tar.gz" Rivune.exe Rivune-x64.exe Rivune-arm64.exe | sort)"
+          expected_assets="$(printf '%s\n' rivune-update.json rivune-android-update.json "rivune-android-${RELEASE_TAG#v}.apk" Rivune.exe Rivune-x64.exe Rivune-arm64.exe | sort)"
           actual_assets="$(jq -r '.assets[].name' <<<"${release}" | sort)"
           if [[ "${actual_assets}" != "${expected_assets}" ]]; then
             echo "The prepared GitHub Release asset set is incomplete or contains unexpected files." >&2
@@ -2378,7 +1732,7 @@ jobs:
             echo "Final published release metadata does not match the authorized release." >&2
             exit 1
           fi
-          expected_assets="$(printf '%s\n' rivune-update.json rivune-android-update.json "rivune-android-${RELEASE_TAG#v}.apk" "rivune-android-${RELEASE_TAG#v}-corresponding-source.tar.gz" Rivune.exe Rivune-x64.exe Rivune-arm64.exe | sort)"
+          expected_assets="$(printf '%s\n' rivune-update.json rivune-android-update.json "rivune-android-${RELEASE_TAG#v}.apk" Rivune.exe Rivune-x64.exe Rivune-arm64.exe | sort)"
           actual_assets="$(jq -r '.assets[].name' <<<"${final_release}" | sort)"
           if [[ "${actual_assets}" != "${expected_assets}" ]]; then
             echo "Final published release asset set is incomplete or contains unexpected files." >&2

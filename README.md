@@ -66,7 +66,7 @@ The Windows executables are portable, but local state is not stored beside them.
 
 ### Android app
 
-Official Android releases provide a universal APK for phones, tablets, and Android TV. Download `rivune-android-<version>.apk` and its `rivune-android-<version>-corresponding-source.tar.gz` from the matching [GitHub Release](https://github.com/moodiness/rivune/releases), compare each SHA-256 with the digest GitHub publishes for that asset, and complete Android's normal package-installation prompt. The public application ID is `io.rivune.app` and Android 8.0 or newer is required.
+Official Android releases provide a universal APK for phones, tablets, and Android TV. Download `rivune-android-<version>.apk` from the matching [GitHub Release](https://github.com/moodiness/rivune/releases), compare its SHA-256 with the digest GitHub publishes for that asset, and complete Android's normal package-installation prompt. The public application ID is `io.rivune.app` and Android 8.0 or newer is required.
 
 The installed apps check the global `rivune-update.json` release asset at most once every 24 hours and also offer a manual check in Settings. The same schema-v2 document advertises the Android APK, canonical x64 Windows `Rivune-x64.exe`, ARM64 Windows `Rivune-arm64.exe`, and the legacy x64 `Rivune.exe` bridge; `rivune-android-update.json` remains a generated schema-v1 compatibility bridge for Android v1.7.2 installations. Neither client contains a GitHub token. An Android update is downloaded only after consent, then its size, SHA-256, package identity, version code, and signing certificate are verified before Android shows its own installation confirmation. Silent installation is not supported; if Android blocks installs from this source, grant that system permission and return to Rivune to continue.
 
@@ -91,4 +91,4 @@ The Android application binary includes a GPLv3 native playback stack and is
 distributed under different combined-work terms. See
 [`clients/android/app/src/main/assets/legal/LICENSE.txt`](clients/android/app/src/main/assets/legal/LICENSE.txt) and
 [`clients/android/app/src/main/assets/legal/THIRD_PARTY_NOTICES.txt`](clients/android/app/src/main/assets/legal/THIRD_PARTY_NOTICES.txt)
-for the exact terms, Corresponding Source directions, and attributions.
+for the exact terms and attributions.
