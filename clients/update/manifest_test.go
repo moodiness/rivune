@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -40,7 +39,6 @@ func fixture(t *testing.T) (generateOptions, map[string]any) {
 		windowsX64Executable:      x64Executable,
 		windowsArm64Executable:    arm64Executable,
 		output:                    filepath.Join(directory, "rivune-update.json"),
-		legacyAndroidOutput:       filepath.Join(directory, "rivune-android-update.json"),
 		channel:                   "stable",
 		tagName:                   "v1.2.3",
 		publishedAt:               "2026-08-14T12:34:56Z",
@@ -114,25 +112,6 @@ func TestGeneratesExactFourPackageContract(t *testing.T) {
 	}
 	if !reflect.DeepEqual(packages["windowsArm64"], windowsArm64Expected) {
 		t.Fatalf("Windows ARM64 package mismatch\ngot:  %#v\nwant: %#v", packages["windowsArm64"], windowsArm64Expected)
-	}
-}
-
-func TestLegacyManifestExactlyMirrorsGlobalAndroidEntry(t *testing.T) {
-	_, manifest := fixture(t)
-	legacy := buildLegacyAndroidManifest(manifest)
-	if err := validateLegacyAndroidManifest(legacy); err != nil {
-		t.Fatal(err)
-	}
-	if err := validateLegacyMatchesGlobal(legacy, manifest); err != nil {
-		t.Fatal(err)
-	}
-	packages := manifest["packages"].(map[string]any)
-	if !reflect.DeepEqual(legacy["package"], packages["android"]) {
-		t.Fatal("legacy package is not identical to the global Android entry")
-	}
-	legacy["package"].(map[string]any)["buildVersion"] = "124"
-	if err := validateLegacyMatchesGlobal(legacy, manifest); err == nil {
-		t.Fatal("mismatched legacy Android package was accepted")
 	}
 }
 
@@ -308,71 +287,6 @@ func TestPackageSizeBoundaries(t *testing.T) {
 	}
 }
 
-func TestOutputPathAliases(t *testing.T) {
-	directory := t.TempDir()
-	absolute := filepath.Join(directory, "manifest.json")
-	workingDirectory, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	relative, err := filepath.Rel(workingDirectory, absolute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	aliased, err := outputPathsAlias(relative, absolute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !aliased {
-		t.Fatal("relative and absolute paths to the same output were not detected")
-	}
-
-	if runtime.GOOS == "windows" {
-		aliased, err := outputPathsAlias(absolute, strings.ToUpper(absolute))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !aliased {
-			t.Fatal("case-insensitive Windows output alias was not detected")
-		}
-	}
-	t.Run("symlinked_parent", func(t *testing.T) {
-		realDirectory := t.TempDir()
-		linkDirectory := filepath.Join(t.TempDir(), "linked")
-		if err := os.Symlink(realDirectory, linkDirectory); err != nil {
-			t.Skipf("directory symlinks unavailable: %v", err)
-		}
-		aliased, err := outputPathsAlias(
-			filepath.Join(realDirectory, "manifest.json"),
-			filepath.Join(linkDirectory, "manifest.json"),
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !aliased {
-			t.Fatal("symlinked output parent was not resolved")
-		}
-	})
-
-	t.Run("existing_hard_link", func(t *testing.T) {
-		first := filepath.Join(t.TempDir(), "first.json")
-		second := filepath.Join(filepath.Dir(first), "second.json")
-		if err := os.WriteFile(first, []byte("manifest"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Link(first, second); err != nil {
-			t.Skipf("hard links unavailable: %v", err)
-		}
-		aliased, err := outputPathsAlias(first, second)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !aliased {
-			t.Fatal("hard-linked output files were not detected")
-		}
-	})
-}
-
 func TestRejectsUnsafeAndWrongTagAssetURLs(t *testing.T) {
 	_, manifest := fixture(t)
 	cases := []struct {
@@ -494,7 +408,7 @@ func TestRejectsMismatchedLocalAssetMetadataAndExpectedFields(t *testing.T) {
 	}
 }
 
-func TestGenerateAndValidateGlobalAndLegacyFilesTogether(t *testing.T) {
+func TestGenerateAndValidateGlobalManifest(t *testing.T) {
 	options, _ := fixture(t)
 	generateArguments := []string{
 		"--apk", options.apk,
@@ -502,7 +416,6 @@ func TestGenerateAndValidateGlobalAndLegacyFilesTogether(t *testing.T) {
 		"--windows-x64-executable", options.windowsX64Executable,
 		"--windows-arm64-executable", options.windowsArm64Executable,
 		"--output", options.output,
-		"--legacy-android-output", options.legacyAndroidOutput,
 		"--channel", options.channel,
 		"--tag-name", options.tagName,
 		"--published-at", options.publishedAt,
@@ -529,7 +442,6 @@ func TestGenerateAndValidateGlobalAndLegacyFilesTogether(t *testing.T) {
 		"--windows-executable", options.windowsExecutable,
 		"--windows-x64-executable", options.windowsX64Executable,
 		"--windows-arm64-executable", options.windowsArm64Executable,
-		"--legacy-android-manifest", options.legacyAndroidOutput,
 		"--channel", options.channel,
 		"--tag-name", options.tagName,
 		"--published-at", options.publishedAt,
