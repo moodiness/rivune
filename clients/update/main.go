@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 )
 
 var errUsage = errors.New("invalid command line")
@@ -63,7 +61,6 @@ func runGenerate(arguments []string) error {
 		{"windows-x64-executable", options.windowsX64Executable},
 		{"windows-arm64-executable", options.windowsArm64Executable},
 		{"output", options.output},
-		{"legacy-android-output", options.legacyAndroidOutput},
 		{"channel", options.channel},
 		{"tag-name", options.tagName},
 		{"published-at", options.publishedAt},
@@ -81,21 +78,11 @@ func runGenerate(arguments []string) error {
 			return fmt.Errorf("--%s is required", option.name)
 		}
 	}
-	aliased, err := outputPathsAlias(options.output, options.legacyAndroidOutput)
-	if err != nil {
-		return err
-	}
-	if aliased {
-		return fmt.Errorf("--output and --legacy-android-output must be different files")
-	}
 	manifest, err := buildManifest(options)
 	if err != nil {
 		return err
 	}
-	if err := writeManifest(options.output, manifest); err != nil {
-		return err
-	}
-	return writeManifest(options.legacyAndroidOutput, buildLegacyAndroidManifest(manifest))
+	return writeManifest(options.output, manifest)
 }
 
 func addGenerateFlags(flags *flag.FlagSet, options *generateOptions) {
@@ -104,7 +91,6 @@ func addGenerateFlags(flags *flag.FlagSet, options *generateOptions) {
 	flags.StringVar(&options.windowsX64Executable, "windows-x64-executable", "", "path to the canonical Windows x64 executable")
 	flags.StringVar(&options.windowsArm64Executable, "windows-arm64-executable", "", "path to the Windows ARM64 executable")
 	flags.StringVar(&options.output, "output", "", "path for the generated global manifest")
-	flags.StringVar(&options.legacyAndroidOutput, "legacy-android-output", "", "path for the generated legacy Android manifest")
 	flags.StringVar(&options.channel, "channel", "", "release channel: stable or prerelease")
 	flags.StringVar(&options.tagName, "tag-name", "", "release tag including the v prefix")
 	flags.StringVar(&options.publishedAt, "published-at", "", "RFC3339 release timestamp")
@@ -116,61 +102,6 @@ func addGenerateFlags(flags *flag.FlagSet, options *generateOptions) {
 	flags.StringVar(&options.windowsExecutableURL, "windows-executable-url", "", "exact HTTPS legacy-compatible Windows executable release asset URL")
 	flags.StringVar(&options.windowsX64ExecutableURL, "windows-x64-executable-url", "", "exact HTTPS canonical Windows x64 executable release asset URL")
 	flags.StringVar(&options.windowsArm64ExecutableURL, "windows-arm64-executable-url", "", "exact HTTPS Windows ARM64 executable release asset URL")
-}
-
-func outputPathsAlias(left, right string) (bool, error) {
-	leftPath, err := canonicalOutputPath(left)
-	if err != nil {
-		return false, err
-	}
-	rightPath, err := canonicalOutputPath(right)
-	if err != nil {
-		return false, err
-	}
-	if runtime.GOOS == "windows" {
-		if strings.EqualFold(leftPath, rightPath) {
-			return true, nil
-		}
-	} else if leftPath == rightPath {
-		return true, nil
-	}
-	leftInfo, leftErr := os.Stat(left)
-	rightInfo, rightErr := os.Stat(right)
-	if leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo) {
-		return true, nil
-	}
-	if leftErr != nil && !os.IsNotExist(leftErr) {
-		return false, leftErr
-	}
-	if rightErr != nil && !os.IsNotExist(rightErr) {
-		return false, rightErr
-	}
-	return false, nil
-}
-
-func canonicalOutputPath(value string) (string, error) {
-	absolute, err := filepath.Abs(value)
-	if err != nil {
-		return "", err
-	}
-	absolute = filepath.Clean(absolute)
-	if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
-		return filepath.Clean(resolved), nil
-	}
-	ancestor := filepath.Dir(absolute)
-	tail := []string{filepath.Base(absolute)}
-	for {
-		if resolved, err := filepath.EvalSymlinks(ancestor); err == nil {
-			parts := append([]string{resolved}, tail...)
-			return filepath.Clean(filepath.Join(parts...)), nil
-		}
-		parent := filepath.Dir(ancestor)
-		if parent == ancestor {
-			return absolute, nil
-		}
-		tail = append([]string{filepath.Base(ancestor)}, tail...)
-		ancestor = parent
-	}
 }
 
 func writeManifest(output string, manifest map[string]any) error {
@@ -226,9 +157,6 @@ func runValidate(arguments []string) error {
 	if options.windowsArm64ExecutableURL == "" {
 		return fmt.Errorf("--windows-arm64-executable-url is required")
 	}
-	if options.legacyAndroidManifest == "" {
-		return fmt.Errorf("--legacy-android-manifest is required")
-	}
 	return validateManifestFile(flags.Arg(0), options)
 }
 
@@ -237,7 +165,6 @@ func addValidateFlags(flags *flag.FlagSet, options *validateOptions) {
 	flags.StringVar(&options.windowsExecutable, "windows-executable", "", "Legacy-compatible Windows executable whose file name, size, and SHA-256 must match")
 	flags.StringVar(&options.windowsX64Executable, "windows-x64-executable", "", "Canonical Windows x64 executable whose file name, size, and SHA-256 must match")
 	flags.StringVar(&options.windowsArm64Executable, "windows-arm64-executable", "", "Windows ARM64 executable whose file name, size, and SHA-256 must match")
-	flags.StringVar(&options.legacyAndroidManifest, "legacy-android-manifest", "", "legacy Android manifest that must match the global Android package")
 	flags.StringVar(&options.channel, "channel", "", "expected release channel")
 	flags.StringVar(&options.tagName, "tag-name", "", "expected release tag")
 	flags.StringVar(&options.publishedAt, "published-at", "", "expected RFC3339 publication timestamp")
@@ -258,11 +185,11 @@ func printUsage(output *os.File) {
 }
 
 func printGenerateUsage(output anyWriter) {
-	fmt.Fprintln(output, "Usage: go run . generate --apk <path> --windows-executable <path> --windows-x64-executable <path> --windows-arm64-executable <path> --output <path> --legacy-android-output <path> --channel <channel> --tag-name <tag> --published-at <timestamp> --release-url <url> --apk-url <url> --application-id <id> --build-version <version> --signing-certificate-sha256 <digest> --windows-executable-url <url> --windows-x64-executable-url <url> --windows-arm64-executable-url <url>")
+	fmt.Fprintln(output, "Usage: go run . generate --apk <path> --windows-executable <path> --windows-x64-executable <path> --windows-arm64-executable <path> --output <path> --channel <channel> --tag-name <tag> --published-at <timestamp> --release-url <url> --apk-url <url> --application-id <id> --build-version <version> --signing-certificate-sha256 <digest> --windows-executable-url <url> --windows-x64-executable-url <url> --windows-arm64-executable-url <url>")
 }
 
 func printValidateUsage(output anyWriter) {
-	fmt.Fprintln(output, "Usage: go run . validate --apk <path> --windows-executable <path> --windows-x64-executable <path> --windows-arm64-executable <path> --windows-executable-url <url> --windows-x64-executable-url <url> --windows-arm64-executable-url <url> --legacy-android-manifest <path> [expected-value options] <global-manifest>")
+	fmt.Fprintln(output, "Usage: go run . validate --apk <path> --windows-executable <path> --windows-x64-executable <path> --windows-arm64-executable <path> --windows-executable-url <url> --windows-x64-executable-url <url> --windows-arm64-executable-url <url> [expected-value options] <global-manifest>")
 }
 
 type anyWriter interface {

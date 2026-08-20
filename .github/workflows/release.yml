@@ -601,7 +601,7 @@ jobs:
         with:
           go-version: "1.26.6"
           cache: false
-      - name: Generate and verify public release manifests
+      - name: Generate and verify public release manifest
         env:
           RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
           RIVUNE_RELEASE_VERSION_NAME: ${{ needs.build-assets.outputs.version_name }}
@@ -646,7 +646,6 @@ jobs:
             go run . generate \
               --apk "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_ANDROID_ASSET_NAME}" \
               --output "${GITHUB_WORKSPACE}/release-assets/rivune-update.json" \
-              --legacy-android-output "${GITHUB_WORKSPACE}/release-assets/rivune-android-update.json" \
               --channel "${RIVUNE_RELEASE_CHANNEL}" \
               --tag-name "${RELEASE_TAG}" \
               --published-at "${RIVUNE_RELEASE_PUBLISHED_AT}" \
@@ -676,7 +675,6 @@ jobs:
               --windows-x64-executable-url "${RIVUNE_RELEASE_WINDOWS_X64_ASSET_URL}" \
               --windows-arm64-executable "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_NAME}" \
               --windows-arm64-executable-url "${RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_URL}" \
-              --legacy-android-manifest "${GITHUB_WORKSPACE}/release-assets/rivune-android-update.json" \
               "${GITHUB_WORKSPACE}/release-assets/rivune-update.json"
           )
       - name: Set up QEMU
@@ -799,7 +797,7 @@ jobs:
           windows_asset_name='Rivune.exe'
           windows_x64_asset_name='Rivune-x64.exe'
           windows_arm64_asset_name='Rivune-arm64.exe'
-          expected_files="$(printf '%s\n' rivune-update.json rivune-android-update.json "${asset_name}" "${windows_asset_name}" "${windows_x64_asset_name}" "${windows_arm64_asset_name}" | sort)"
+          expected_files="$(printf '%s\n' rivune-update.json "${asset_name}" "${windows_asset_name}" "${windows_x64_asset_name}" "${windows_arm64_asset_name}" | sort)"
           actual_files="$(find release-assets -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
           if [[ "${actual_files}" != "${expected_files}" ]]; then
             echo "Immutable artifact does not contain the exact release asset set." >&2
@@ -843,7 +841,6 @@ jobs:
               --windows-x64-executable-url "${expected_windows_x64_asset_url}" \
               --windows-arm64-executable "${GITHUB_WORKSPACE}/release-assets/${windows_arm64_asset_name}" \
               --windows-arm64-executable-url "${expected_windows_arm64_asset_url}" \
-              --legacy-android-manifest "${GITHUB_WORKSPACE}/release-assets/rivune-android-update.json" \
               "${GITHUB_WORKSPACE}/release-assets/rivune-update.json"
           )
       - name: Validate curated release notes
@@ -1044,7 +1041,6 @@ jobs:
             local windows_arm64_name='Rivune-arm64.exe'
             local -a expected_names=(
               rivune-update.json
-              rivune-android-update.json
               "${apk_name}"
               "${windows_name}"
               "${windows_x64_name}"
@@ -1069,7 +1065,7 @@ jobs:
                 return 1
               fi
               case "${release_asset_name}" in
-                rivune-update.json|rivune-android-update.json|"${apk_name}"|"${windows_name}"|"${windows_x64_name}"|"${windows_arm64_name}") ;;
+                rivune-update.json|"${apk_name}"|"${windows_name}"|"${windows_x64_name}"|"${windows_arm64_name}") ;;
                 *)
                   echo "The partial GitHub Release contains an unexpected asset: ${release_asset_name}" >&2
                   return 1
@@ -1125,7 +1121,7 @@ jobs:
                 continue
               fi
               case "${release_asset_name}" in
-                rivune-update.json|rivune-android-update.json) content_type='application/json' ;;
+                rivune-update.json) content_type='application/json' ;;
                 "${apk_name}") content_type='application/vnd.android.package-archive' ;;
                 "${windows_name}"|"${windows_x64_name}"|"${windows_arm64_name}") content_type='application/vnd.microsoft.portable-executable' ;;
               esac
@@ -1174,7 +1170,7 @@ jobs:
             local windows_x64_name='Rivune-x64.exe'
             local windows_arm64_name='Rivune-arm64.exe'
             local expected_assets actual_assets expected_channel expected_release_url expected_apk_url expected_windows_url expected_windows_x64_url expected_windows_arm64_url
-            expected_assets="$(printf '%s\n' rivune-update.json rivune-android-update.json "${apk_name}" "${windows_name}" "${windows_x64_name}" "${windows_arm64_name}" | sort)"
+            expected_assets="$(printf '%s\n' rivune-update.json "${apk_name}" "${windows_name}" "${windows_x64_name}" "${windows_arm64_name}" | sort)"
             actual_assets="$(jq -r '.assets[].name' <<<"${release_json}" | sort)"
             if [[ "${actual_assets}" != "${expected_assets}" ]]; then
               echo "The GitHub Release asset set is incomplete or contains unexpected files." >&2
@@ -1214,7 +1210,6 @@ jobs:
             local trusted_asset adopted_asset_sha trusted_asset_sha
             for trusted_asset in \
               rivune-update.json \
-              rivune-android-update.json \
               "${apk_name}" \
               "${windows_name}" \
               "${windows_x64_name}" \
@@ -1254,14 +1249,13 @@ jobs:
                 --application-id io.rivune.app \
                 --build-version "$(jq -er '.packages.android.buildVersion' "${GITHUB_WORKSPACE}/adopted-release-assets/rivune-update.json")" \
                 --signing-certificate-sha256 "$(jq -er '.packages.android.signingCertificateSha256' "${GITHUB_WORKSPACE}/adopted-release-assets/rivune-update.json")" \
-                --legacy-android-manifest "${GITHUB_WORKSPACE}/adopted-release-assets/rivune-android-update.json" \
                 "${GITHUB_WORKSPACE}/adopted-release-assets/rivune-update.json"
             )
             local trusted_application_id trusted_build_version trusted_cert trusted_version_name
-            trusted_application_id="$(jq -er '.package.applicationId' release-assets/rivune-android-update.json)"
-            trusted_build_version="$(jq -er '.package.buildVersion' release-assets/rivune-android-update.json)"
-            trusted_cert="$(jq -er '.package.signingCertificateSha256' release-assets/rivune-android-update.json)"
-            trusted_version_name="$(jq -er '.version' release-assets/rivune-android-update.json)"
+            trusted_application_id="$(jq -er '.packages.android.applicationId' release-assets/rivune-update.json)"
+            trusted_build_version="$(jq -er '.packages.android.buildVersion' release-assets/rivune-update.json)"
+            trusted_cert="$(jq -er '.packages.android.signingCertificateSha256' release-assets/rivune-update.json)"
+            trusted_version_name="$(jq -er '.version' release-assets/rivune-update.json)"
             local apksigner="${ANDROID_HOME}/build-tools/36.0.0/apksigner"
             local aapt="${ANDROID_HOME}/build-tools/36.0.0/aapt"
             local actual_cert apksigner_output badging
@@ -1286,18 +1280,18 @@ jobs:
               echo "The adopted APK versionName differs from the trusted release artifact." >&2
               return 1
             }
-            if ! jq -e --slurpfile trusted release-assets/rivune-android-update.json '
+            if ! jq -e --slurpfile trusted release-assets/rivune-update.json '
               .version == $trusted[0].version and
               .channel == $trusted[0].channel and
               .tagName == $trusted[0].tagName and
-              .package.format == $trusted[0].package.format and
-              .package.architectures == $trusted[0].package.architectures and
-              .package.applicationId == $trusted[0].package.applicationId and
-              .package.buildVersion == $trusted[0].package.buildVersion and
-              .package.minimumOsVersion == $trusted[0].package.minimumOsVersion and
-              .package.fileName == $trusted[0].package.fileName and
-              .package.signingCertificateSha256 == $trusted[0].package.signingCertificateSha256
-            ' adopted-release-assets/rivune-android-update.json >/dev/null; then
+              .packages.android.format == $trusted[0].packages.android.format and
+              .packages.android.architectures == $trusted[0].packages.android.architectures and
+              .packages.android.applicationId == $trusted[0].packages.android.applicationId and
+              .packages.android.buildVersion == $trusted[0].packages.android.buildVersion and
+              .packages.android.minimumOsVersion == $trusted[0].packages.android.minimumOsVersion and
+              .packages.android.fileName == $trusted[0].packages.android.fileName and
+              .packages.android.signingCertificateSha256 == $trusted[0].packages.android.signingCertificateSha256
+            ' adopted-release-assets/rivune-update.json >/dev/null; then
               echo "The adopted manifest identity, signing, or version differs from the trusted release artifact." >&2
               return 1
             fi
@@ -1599,7 +1593,7 @@ jobs:
             echo "The prepared GitHub Release does not record the effective OCI image digest exactly once." >&2
             exit 1
           fi
-          expected_assets="$(printf '%s\n' rivune-update.json rivune-android-update.json "rivune-android-${RELEASE_TAG#v}.apk" Rivune.exe Rivune-x64.exe Rivune-arm64.exe | sort)"
+          expected_assets="$(printf '%s\n' rivune-update.json "rivune-android-${RELEASE_TAG#v}.apk" Rivune.exe Rivune-x64.exe Rivune-arm64.exe | sort)"
           actual_assets="$(jq -r '.assets[].name' <<<"${release}" | sort)"
           if [[ "${actual_assets}" != "${expected_assets}" ]]; then
             echo "The prepared GitHub Release asset set is incomplete or contains unexpected files." >&2
@@ -1732,7 +1726,7 @@ jobs:
             echo "Final published release metadata does not match the authorized release." >&2
             exit 1
           fi
-          expected_assets="$(printf '%s\n' rivune-update.json rivune-android-update.json "rivune-android-${RELEASE_TAG#v}.apk" Rivune.exe Rivune-x64.exe Rivune-arm64.exe | sort)"
+          expected_assets="$(printf '%s\n' rivune-update.json "rivune-android-${RELEASE_TAG#v}.apk" Rivune.exe Rivune-x64.exe Rivune-arm64.exe | sort)"
           actual_assets="$(jq -r '.assets[].name' <<<"${final_release}" | sort)"
           if [[ "${actual_assets}" != "${expected_assets}" ]]; then
             echo "Final published release asset set is incomplete or contains unexpected files." >&2

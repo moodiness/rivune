@@ -17,7 +17,6 @@ import (
 
 const (
 	schemaVersion          = 2
-	legacySchemaVersion    = 1
 	androidApplicationID   = "io.rivune.app"
 	githubReleaseURLPrefix = "https://github.com/moodiness/rivune/releases"
 	maxAndroidPackageSize  = int64(512 * 1024 * 1024)
@@ -38,7 +37,6 @@ type generateOptions struct {
 	windowsX64Executable      string
 	windowsArm64Executable    string
 	output                    string
-	legacyAndroidOutput       string
 	channel                   string
 	tagName                   string
 	publishedAt               string
@@ -57,7 +55,6 @@ type validateOptions struct {
 	windowsExecutable         string
 	windowsX64Executable      string
 	windowsArm64Executable    string
-	legacyAndroidManifest     string
 	channel                   string
 	tagName                   string
 	publishedAt               string
@@ -143,24 +140,6 @@ func buildManifest(options generateOptions) (map[string]any, error) {
 	return manifest, nil
 }
 
-func buildLegacyAndroidManifest(manifest map[string]any) map[string]any {
-	packages := manifest["packages"].(map[string]any)
-	androidPackage := packages["android"].(map[string]any)
-	legacyPackage := make(map[string]any, len(androidPackage))
-	for key, value := range androidPackage {
-		legacyPackage[key] = value
-	}
-	return map[string]any{
-		"schemaVersion": legacySchemaVersion,
-		"channel":       manifest["channel"],
-		"version":       manifest["version"],
-		"tagName":       manifest["tagName"],
-		"publishedAt":   manifest["publishedAt"],
-		"releaseUrl":    manifest["releaseUrl"],
-		"package":       legacyPackage,
-	}
-}
-
 func validateManifestFile(manifestPath string, options validateOptions) error {
 	manifest, err := readManifest(manifestPath)
 	if err != nil {
@@ -171,18 +150,6 @@ func validateManifestFile(manifestPath string, options validateOptions) error {
 	}
 	if err := validateExpectedValues(manifest, options); err != nil {
 		return err
-	}
-	if options.legacyAndroidManifest != "" {
-		legacyManifest, err := readManifest(options.legacyAndroidManifest)
-		if err != nil {
-			return err
-		}
-		if err := validateLegacyAndroidManifest(legacyManifest); err != nil {
-			return err
-		}
-		if err := validateLegacyMatchesGlobal(legacyManifest, manifest); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -331,32 +298,6 @@ func validateManifest(manifest any) error {
 	return validateWindowsPackage(windowsArm64Package, tagName, "manifest.packages.windowsArm64", "arm64", "Rivune-arm64.exe")
 }
 
-func validateLegacyAndroidManifest(manifest any) error {
-	root, err := object(manifest, "legacy manifest")
-	if err != nil {
-		return err
-	}
-	if err := requireSchema(root, legacySchemaVersion); err != nil {
-		return err
-	}
-	channel, version, tagName, err := validateCommonRoot(root)
-	if err != nil {
-		return err
-	}
-	if err := validateChannelVersion(channel, version); err != nil {
-		return err
-	}
-	packageValue, err := required(root, "package", "manifest")
-	if err != nil {
-		return err
-	}
-	packageObject, err := object(packageValue, "manifest.package")
-	if err != nil {
-		return err
-	}
-	return validateAndroidPackage(packageObject, tagName, version, "manifest.package")
-}
-
 func requireSchema(root map[string]any, expected int) error {
 	value, err := required(root, "schemaVersion", "manifest")
 	if err != nil {
@@ -490,21 +431,6 @@ func validateCommonPackageFields(packageObject map[string]any, context, tagName,
 	}
 	_, err = sha256Field(packageObject, "sha256", context)
 	return err
-}
-
-func validateLegacyMatchesGlobal(legacy, global any) error {
-	legacyRoot := legacy.(map[string]any)
-	globalRoot := global.(map[string]any)
-	for _, key := range []string{"channel", "version", "tagName", "publishedAt", "releaseUrl"} {
-		if !reflect.DeepEqual(legacyRoot[key], globalRoot[key]) {
-			return fmt.Errorf("legacy Android manifest %s does not match global manifest", key)
-		}
-	}
-	packages := globalRoot["packages"].(map[string]any)
-	if !reflect.DeepEqual(legacyRoot["package"], packages["android"]) {
-		return fmt.Errorf("legacy Android package does not exactly match global Android package")
-	}
-	return nil
 }
 
 func validateExpectedValues(manifest any, options validateOptions) error {
