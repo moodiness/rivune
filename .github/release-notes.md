@@ -2,17 +2,17 @@
 
 ## Highlights
 
-- Windows now ships native portable executables for both x64 and ARM64: `Rivune-x64.exe` and `Rivune-arm64.exe`.
-- The Windows updater selects the package matching the running process architecture. The byte-identical x64 `Rivune.exe` bridge remains available so v1.8.0 installations can update safely.
-- The single schema-v2 `rivune-update.json` feed now carries Android, Windows x64, and Windows ARM64 packages. The obsolete schema-v1 `rivune-android-update.json` release asset is no longer published.
-- Release publication now requires GitHub's SHA-256 metadata for every asset and validates the complete five-asset set before promotion.
+- Windows ships native portable executables for both x64 and ARM64: `Rivune-x64.exe` and `Rivune-arm64.exe`.
+- The Windows updater selects the package matching the running process architecture and preserves the executable's build-time filename.
+- The exact release set is `rivune-android-<version>.apk`, the sole schema-v2 `rivune-update.json` feed, x64 `Rivune-x64.exe`, and ARM64 `Rivune-arm64.exe`.
+- Release publication requires GitHub's SHA-256 metadata for every asset and validates that complete four-asset set before promotion.
 
 ## Windows installation
 
 - Download `Rivune-x64.exe` on x64 Windows or `Rivune-arm64.exe` on ARM64 Windows. Windows 10 build 19041 or newer is required.
 - Compare the executable's SHA-256 with the digest GitHub publishes for that asset, place it in a user-writable folder, and run it directly; no installer or administrator access is required.
 - The executables are intentionally unsigned so distribution remains free. Microsoft Defender SmartScreen may show an unknown-publisher warning; continue only for the exact file from this official release after its SHA-256 matches.
-- Existing v1.8.0 x64 installations can update through `Rivune.exe`. Later architecture-aware checks use the canonical x64 or ARM64 package automatically, at most once every 24 hours or manually from About.
+- Installations from v1.8.0 must download `Rivune-x64.exe` manually once because the former x64 asset is no longer published. Architecture-aware checks then select the x64 or ARM64 package automatically, at most once every 24 hours or manually from About.
 
 ## Android installation
 
