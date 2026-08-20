@@ -30,7 +30,7 @@ class AppUpdateTest {
         assertEquals("1.2.3", manifest.version)
         assertEquals(42L, manifest.androidPackage.buildVersion)
         assertEquals("io.rivune.app", manifest.androidPackage.applicationId)
-        assertEquals("rivune-android-1.2.3.apk", manifest.androidPackage.fileName)
+        assertEquals("Rivune-Android.apk", manifest.androidPackage.fileName)
     }
 
     @Test
@@ -38,9 +38,9 @@ class AppUpdateTest {
         assertFailsWith<InvalidUpdateManifest> { AppUpdateManifestParser.parse(validManifest().replace("\"schemaVersion\":2", "\"schemaVersion\":1")) }
         assertFailsWith<InvalidUpdateManifest> { AppUpdateManifestParser.parse(validManifest().replace("\"publishedAt\":\"2026-08-14T10:00:00Z\",", "")) }
         assertFailsWith<InvalidUpdateManifest> { AppUpdateManifestParser.parse(validManifest().replace("\"android\":{", "\"other\":{")) }
-        assertFailsWith<InvalidUpdateManifest> { AppUpdateManifestParser.parse(validManifest().replace("https://github.com/moodiness/rivune/releases/download/v1.2.3/rivune-android-1.2.3.apk", "https://evil.example/rivune-android-1.2.3.apk")) }
+        assertFailsWith<InvalidUpdateManifest> { AppUpdateManifestParser.parse(validManifest().replace("https://github.com/moodiness/rivune/releases/download/v1.2.3/Rivune-Android.apk", "https://evil.example/Rivune-Android.apk")) }
         assertFailsWith<InvalidUpdateManifest> { AppUpdateManifestParser.parse(validManifest().replace("https://github.com/moodiness/rivune/releases/tag/v1.2.3", "https://github.com/other/rivune/releases/tag/v1.2.3")) }
-        assertFailsWith<InvalidUpdateManifest> { AppUpdateManifestParser.parse(validManifest().replace("\"fileName\":\"rivune-android-1.2.3.apk\"", "\"fileName\":\"../rivune.apk\"")) }
+        assertFailsWith<InvalidUpdateManifest> { AppUpdateManifestParser.parse(validManifest().replace("\"fileName\":\"Rivune-Android.apk\"", "\"fileName\":\"../rivune.apk\"")) }
         assertFailsWith<InvalidUpdateManifest> { AppUpdateManifestParser.parse(validManifest().replace("\"version\":\"1.2.3\"", "\"version\":\"v1.2.3\"")) }
         assertFailsWith<InvalidUpdateManifest> { AppUpdateManifestParser.parse(validManifest().replace("\"tagName\":\"v1.2.3\"", "\"tagName\":\"v1.2.4\"")) }
         assertFailsWith<InvalidUpdateManifest> { AppUpdateManifestParser.parse(validManifest().replace("\"channel\":\"stable\"", "\"channel\":\"prerelease\"")) }
@@ -169,8 +169,8 @@ class AppUpdateTest {
               "applicationId":"io.rivune.app",
               "buildVersion":"42",
               "minimumOsVersion":"8.0",
-              "fileName":"rivune-android-1.2.3.apk",
-              "url":"https://github.com/moodiness/rivune/releases/download/v1.2.3/rivune-android-1.2.3.apk",
+              "fileName":"Rivune-Android.apk",
+              "url":"https://github.com/moodiness/rivune/releases/download/v1.2.3/Rivune-Android.apk",
               "size":18,
               "sha256":"${"a".repeat(64)}",
               "signingCertificateSha256":"${"b".repeat(64)}",

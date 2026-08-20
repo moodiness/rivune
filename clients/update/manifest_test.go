@@ -16,7 +16,7 @@ const x64FixtureContents = "Windows x64 executable fixture"
 func fixture(t *testing.T) (generateOptions, map[string]any) {
 	t.Helper()
 	directory := t.TempDir()
-	apk := filepath.Join(directory, "rivune-android-1.2.3.apk")
+	apk := filepath.Join(directory, "Rivune-Android.apk")
 	x64Executable := filepath.Join(directory, "Rivune-x64.exe")
 	arm64Executable := filepath.Join(directory, "Rivune-arm64.exe")
 	if err := os.WriteFile(apk, []byte("signed apk fixture"), 0o600); err != nil {
@@ -38,7 +38,7 @@ func fixture(t *testing.T) (generateOptions, map[string]any) {
 		tagName:                   "v1.2.3",
 		publishedAt:               "2026-08-14T12:34:56Z",
 		releaseURL:                "https://github.com/moodiness/rivune/releases/tag/v1.2.3",
-		apkURL:                    "https://github.com/moodiness/rivune/releases/download/v1.2.3/rivune-android-1.2.3.apk",
+		apkURL:                    "https://github.com/moodiness/rivune/releases/download/v1.2.3/Rivune-Android.apk",
 		applicationID:             androidApplicationID,
 		buildVersion:              "123",
 		signingCertificateSHA256:  repeatHex("ab", 32),
@@ -119,12 +119,7 @@ func TestPrereleaseChannelUsesSemverVersion(t *testing.T) {
 	options.tagName = "v2.0.0-rc.1"
 	options.channel = "prerelease"
 	options.releaseURL = "https://github.com/moodiness/rivune/releases/tag/v2.0.0-rc.1"
-	directory := filepath.Dir(options.apk)
-	options.apk = filepath.Join(directory, "rivune-android-2.0.0-rc.1.apk")
-	if err := os.WriteFile(options.apk, []byte("signed apk fixture"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	options.apkURL = "https://github.com/moodiness/rivune/releases/download/v2.0.0-rc.1/rivune-android-2.0.0-rc.1.apk"
+	options.apkURL = "https://github.com/moodiness/rivune/releases/download/v2.0.0-rc.1/Rivune-Android.apk"
 	options.windowsX64ExecutableURL = "https://github.com/moodiness/rivune/releases/download/v2.0.0-rc.1/Rivune-x64.exe"
 	options.windowsArm64ExecutableURL = "https://github.com/moodiness/rivune/releases/download/v2.0.0-rc.1/Rivune-arm64.exe"
 	manifest, err := buildManifest(options)
@@ -252,9 +247,10 @@ func TestRejectsUnsafeAndWrongTagAssetURLs(t *testing.T) {
 		field    string
 		value    string
 	}{
-		{"android", "url", "https://evil.example/rivune.apk"},
-		{"android", "url", "https://github.com/moodiness/rivune/releases/download/v1.2.4/rivune-android-1.2.3.apk"},
-		{"android", "fileName", "../rivune.apk"},
+		{"android", "url", "https://evil.example/Rivune-Android.apk"},
+		{"android", "url", "https://github.com/moodiness/rivune/releases/download/v1.2.4/Rivune-Android.apk"},
+		{"android", "fileName", "rivune-android-1.2.3.apk"},
+		{"android", "fileName", "../Rivune-Android.apk"},
 		{"windowsX64", "url", "https://github.com/moodiness/rivune/releases/download/v1.2.4/Rivune-x64.exe"},
 		{"windowsX64", "url", "https://evil.example/Rivune-x64.exe"},
 		{"windowsX64", "fileName", "other.exe"},
