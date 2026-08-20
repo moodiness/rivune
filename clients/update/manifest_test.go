@@ -17,16 +17,12 @@ func fixture(t *testing.T) (generateOptions, map[string]any) {
 	t.Helper()
 	directory := t.TempDir()
 	apk := filepath.Join(directory, "rivune-android-1.2.3.apk")
-	executable := filepath.Join(directory, "Rivune.exe")
 	x64Executable := filepath.Join(directory, "Rivune-x64.exe")
 	arm64Executable := filepath.Join(directory, "Rivune-arm64.exe")
 	if err := os.WriteFile(apk, []byte("signed apk fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	const x64Contents = x64FixtureContents
-	if err := os.WriteFile(executable, []byte(x64Contents), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.WriteFile(x64Executable, []byte(x64Contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +31,6 @@ func fixture(t *testing.T) (generateOptions, map[string]any) {
 	}
 	options := generateOptions{
 		apk:                       apk,
-		windowsExecutable:         executable,
 		windowsX64Executable:      x64Executable,
 		windowsArm64Executable:    arm64Executable,
 		output:                    filepath.Join(directory, "rivune-update.json"),
@@ -47,7 +42,6 @@ func fixture(t *testing.T) (generateOptions, map[string]any) {
 		applicationID:             androidApplicationID,
 		buildVersion:              "123",
 		signingCertificateSHA256:  repeatHex("ab", 32),
-		windowsExecutableURL:      "https://github.com/moodiness/rivune/releases/download/v1.2.3/Rivune.exe",
 		windowsX64ExecutableURL:   "https://github.com/moodiness/rivune/releases/download/v1.2.3/Rivune-x64.exe",
 		windowsArm64ExecutableURL: "https://github.com/moodiness/rivune/releases/download/v1.2.3/Rivune-arm64.exe",
 	}
@@ -58,7 +52,7 @@ func fixture(t *testing.T) (generateOptions, map[string]any) {
 	return options, manifest
 }
 
-func TestGeneratesExactFourPackageContract(t *testing.T) {
+func TestGeneratesExactThreePackageContract(t *testing.T) {
 	options, manifest := fixture(t)
 	expectedRootFields := []string{"schemaVersion", "channel", "version", "tagName", "publishedAt", "releaseUrl", "packages"}
 	for _, field := range expectedRootFields {
@@ -83,11 +77,6 @@ func TestGeneratesExactFourPackageContract(t *testing.T) {
 		"signingCertificateSha256": repeatHex("ab", 32), "fileName": filepath.Base(options.apk),
 		"url": options.apkURL, "size": int64(len("signed apk fixture")), "sha256": hex.EncodeToString(apkDigest[:]),
 	}
-	windowsExpected := map[string]any{
-		"format": "exe", "architectures": []string{"x64"}, "minimumOsVersion": "10.0.19041.0",
-		"fileName": "Rivune.exe", "url": options.windowsExecutableURL,
-		"size": int64(len(x64FixtureContents)), "sha256": hex.EncodeToString(x64ExecutableDigest[:]),
-	}
 	windowsX64Expected := map[string]any{
 		"format": "exe", "architectures": []string{"x64"}, "minimumOsVersion": "10.0.19041.0",
 		"fileName": "Rivune-x64.exe", "url": options.windowsX64ExecutableURL,
@@ -101,14 +90,11 @@ func TestGeneratesExactFourPackageContract(t *testing.T) {
 	if !reflect.DeepEqual(packages["android"], androidExpected) {
 		t.Fatalf("Android package mismatch\ngot:  %#v\nwant: %#v", packages["android"], androidExpected)
 	}
-	if !reflect.DeepEqual(packages["windows"], windowsExpected) {
-		t.Fatalf("Windows package mismatch\ngot:  %#v\nwant: %#v", packages["windows"], windowsExpected)
-	}
-	if len(packages) != 4 {
-		t.Fatalf("unexpected package contract: %#v", packages)
-	}
 	if !reflect.DeepEqual(packages["windowsX64"], windowsX64Expected) {
 		t.Fatalf("Windows x64 package mismatch\ngot:  %#v\nwant: %#v", packages["windowsX64"], windowsX64Expected)
+	}
+	if len(packages) != 3 {
+		t.Fatalf("unexpected package contract: %#v", packages)
 	}
 	if !reflect.DeepEqual(packages["windowsArm64"], windowsArm64Expected) {
 		t.Fatalf("Windows ARM64 package mismatch\ngot:  %#v\nwant: %#v", packages["windowsArm64"], windowsArm64Expected)
@@ -121,7 +107,6 @@ func TestAcceptsAdditionalRootPackageAndPlatformFields(t *testing.T) {
 	packages := manifest["packages"].(map[string]any)
 	packages["linux"] = map[string]any{"format": "future"}
 	packages["android"].(map[string]any)["futureAndroidField"] = map[string]any{"value": 1}
-	packages["windows"].(map[string]any)["futureWindowsField"] = true
 	packages["windowsX64"].(map[string]any)["futureWindowsX64Field"] = true
 	packages["windowsArm64"].(map[string]any)["futureWindowsArm64Field"] = true
 	if err := validateManifest(manifest); err != nil {
@@ -140,7 +125,6 @@ func TestPrereleaseChannelUsesSemverVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	options.apkURL = "https://github.com/moodiness/rivune/releases/download/v2.0.0-rc.1/rivune-android-2.0.0-rc.1.apk"
-	options.windowsExecutableURL = "https://github.com/moodiness/rivune/releases/download/v2.0.0-rc.1/Rivune.exe"
 	options.windowsX64ExecutableURL = "https://github.com/moodiness/rivune/releases/download/v2.0.0-rc.1/Rivune-x64.exe"
 	options.windowsArm64ExecutableURL = "https://github.com/moodiness/rivune/releases/download/v2.0.0-rc.1/Rivune-arm64.exe"
 	manifest, err := buildManifest(options)
@@ -161,7 +145,7 @@ func TestRejectsEachMissingRequiredRootAndPlatform(t *testing.T) {
 			assertInvalid(t, invalid)
 		})
 	}
-	for _, platform := range []string{"android", "windows", "windowsX64", "windowsArm64"} {
+	for _, platform := range []string{"android", "windowsX64", "windowsArm64"} {
 		t.Run("platform_"+platform, func(t *testing.T) {
 			invalid := cloneManifest(t, manifest)
 			delete(invalid["packages"].(map[string]any), platform)
@@ -173,7 +157,7 @@ func TestRejectsEachMissingRequiredRootAndPlatform(t *testing.T) {
 func TestRejectsEachMissingRequiredKnownPackageField(t *testing.T) {
 	_, manifest := fixture(t)
 	packages := manifest["packages"].(map[string]any)
-	for _, platform := range []string{"android", "windows", "windowsX64", "windowsArm64"} {
+	for _, platform := range []string{"android", "windowsX64", "windowsArm64"} {
 		for field := range packages[platform].(map[string]any) {
 			t.Run(platform+"_"+field, func(t *testing.T) {
 				invalid := cloneManifest(t, manifest)
@@ -186,7 +170,7 @@ func TestRejectsEachMissingRequiredKnownPackageField(t *testing.T) {
 
 func TestRejectsObsoleteWindowsPackageFields(t *testing.T) {
 	_, manifest := fixture(t)
-	for _, platform := range []string{"windows", "windowsX64", "windowsArm64"} {
+	for _, platform := range []string{"windowsX64", "windowsArm64"} {
 		for _, field := range []string{"identityName", "publisher", "packageVersion", "signingCertificateSha256"} {
 			t.Run(platform+"_"+field, func(t *testing.T) {
 				invalid := cloneManifest(t, manifest)
@@ -209,9 +193,6 @@ func TestRejectsWrongFixedPlatformContracts(t *testing.T) {
 
 		{"android", "minimumOsVersion", "7.0"},
 		{"android", "applicationId", "io.example.other"},
-		{"windows", "format", "zip"},
-		{"windows", "architectures", []string{"arm64"}},
-		{"windows", "minimumOsVersion", "10.0.17763.0"},
 		{"windowsX64", "format", "zip"},
 		{"windowsX64", "architectures", []string{"arm64"}},
 		{"windowsX64", "minimumOsVersion", "10.0.17763.0"},
@@ -228,23 +209,6 @@ func TestRejectsWrongFixedPlatformContracts(t *testing.T) {
 	}
 }
 
-func TestRejectsMismatchedLegacyAndCanonicalX64Bytes(t *testing.T) {
-	for _, testCase := range []struct {
-		name  string
-		field string
-		value any
-	}{
-		{"size", "size", int64(1)},
-		{"sha256", "sha256", repeatHex("ef", 32)},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			_, manifest := fixture(t)
-			manifest["packages"].(map[string]any)["windowsX64"].(map[string]any)[testCase.field] = testCase.value
-			assertInvalid(t, manifest)
-		})
-	}
-}
-
 func TestPackageSizeBoundaries(t *testing.T) {
 	_, manifest := fixture(t)
 	cases := []struct {
@@ -252,18 +216,12 @@ func TestPackageSizeBoundaries(t *testing.T) {
 		maximum  int64
 	}{
 		{"android", maxAndroidPackageSize},
-		{"windows", maxWindowsPackageSize},
 		{"windowsX64", maxWindowsPackageSize},
 		{"windowsArm64", maxWindowsPackageSize},
 	}
 	setPackageSize := func(root map[string]any, platform string, size int64) {
 		packages := root["packages"].(map[string]any)
 		packages[platform].(map[string]any)["size"] = size
-		if platform == "windows" {
-			packages["windowsX64"].(map[string]any)["size"] = size
-		} else if platform == "windowsX64" {
-			packages["windows"].(map[string]any)["size"] = size
-		}
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.platform+"_exact_limit", func(t *testing.T) {
@@ -297,15 +255,12 @@ func TestRejectsUnsafeAndWrongTagAssetURLs(t *testing.T) {
 		{"android", "url", "https://evil.example/rivune.apk"},
 		{"android", "url", "https://github.com/moodiness/rivune/releases/download/v1.2.4/rivune-android-1.2.3.apk"},
 		{"android", "fileName", "../rivune.apk"},
-		{"windows", "url", "http://github.com/moodiness/rivune/releases/download/v1.2.3/Rivune.exe"},
-		{"windows", "url", "https://github.com/other/rivune/releases/download/v1.2.3/Rivune.exe"},
-		{"windows", "fileName", "rivune.exe"},
 		{"windowsX64", "url", "https://github.com/moodiness/rivune/releases/download/v1.2.4/Rivune-x64.exe"},
 		{"windowsX64", "url", "https://evil.example/Rivune-x64.exe"},
-		{"windowsX64", "fileName", "Rivune.exe"},
+		{"windowsX64", "fileName", "other.exe"},
 		{"windowsArm64", "url", "https://github.com/moodiness/rivune/releases/download/v1.2.4/Rivune-arm64.exe"},
 		{"windowsArm64", "url", "https://evil.example/Rivune-arm64.exe"},
-		{"windowsArm64", "fileName", "Rivune.exe"},
+		{"windowsArm64", "fileName", "rivune-arm64.exe"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.platform+"_"+testCase.field, func(t *testing.T) {
@@ -333,9 +288,6 @@ func TestRejectsMalformedVersionBuildCertificateAndDigestFields(t *testing.T) {
 			root["packages"].(map[string]any)["android"].(map[string]any)["signingCertificateSha256"] = strings.Repeat("A", 64)
 		},
 		func(root map[string]any) {
-			root["packages"].(map[string]any)["windows"].(map[string]any)["sha256"] = strings.Repeat("F", 64)
-		},
-		func(root map[string]any) {
 			root["packages"].(map[string]any)["windowsX64"].(map[string]any)["sha256"] = strings.Repeat("F", 64)
 		},
 		func(root map[string]any) {
@@ -354,12 +306,12 @@ func TestRejectsMalformedVersionBuildCertificateAndDigestFields(t *testing.T) {
 func TestRejectsMismatchedLocalAssetMetadataAndExpectedFields(t *testing.T) {
 	options, manifest := fixture(t)
 	validate := validateOptions{
-		apk: options.apk, windowsExecutable: options.windowsExecutable, windowsX64Executable: options.windowsX64Executable,
+		apk: options.apk, windowsX64Executable: options.windowsX64Executable,
 		windowsArm64Executable: options.windowsArm64Executable, channel: options.channel, tagName: options.tagName,
 		publishedAt: options.publishedAt, releaseURL: options.releaseURL, apkURL: options.apkURL,
 		applicationID: options.applicationID, buildVersion: options.buildVersion,
-		signingCertificateSHA256: options.signingCertificateSHA256, windowsExecutableURL: options.windowsExecutableURL,
-		windowsX64ExecutableURL: options.windowsX64ExecutableURL, windowsArm64ExecutableURL: options.windowsArm64ExecutableURL,
+		signingCertificateSHA256: options.signingCertificateSHA256,
+		windowsX64ExecutableURL:  options.windowsX64ExecutableURL, windowsArm64ExecutableURL: options.windowsArm64ExecutableURL,
 	}
 	if err := validateExpectedValues(manifest, validate); err != nil {
 		t.Fatal(err)
@@ -371,18 +323,6 @@ func TestRejectsMismatchedLocalAssetMetadataAndExpectedFields(t *testing.T) {
 		t.Fatal("mismatched local APK was accepted")
 	}
 	validate.apk = ""
-	if err := os.WriteFile(options.windowsExecutable, []byte("different Windows executable"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := validateExpectedValues(manifest, validate); err == nil {
-		t.Fatal("mismatched local Windows executable was accepted")
-	}
-	validate.windowsExecutable = ""
-	validate.windowsExecutableURL = "https://github.com/moodiness/rivune/releases/download/v1.2.4/Rivune.exe"
-	if err := validateExpectedValues(manifest, validate); err == nil {
-		t.Fatal("mismatched expected Windows executable URL was accepted")
-	}
-	validate.windowsExecutableURL = ""
 	if err := os.WriteFile(options.windowsX64Executable, []byte("different Windows x64 executable"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +352,6 @@ func TestGenerateAndValidateGlobalManifest(t *testing.T) {
 	options, _ := fixture(t)
 	generateArguments := []string{
 		"--apk", options.apk,
-		"--windows-executable", options.windowsExecutable,
 		"--windows-x64-executable", options.windowsX64Executable,
 		"--windows-arm64-executable", options.windowsArm64Executable,
 		"--output", options.output,
@@ -424,7 +363,6 @@ func TestGenerateAndValidateGlobalManifest(t *testing.T) {
 		"--application-id", options.applicationID,
 		"--build-version", options.buildVersion,
 		"--signing-certificate-sha256", options.signingCertificateSHA256,
-		"--windows-executable-url", options.windowsExecutableURL,
 		"--windows-x64-executable-url", options.windowsX64ExecutableURL,
 		"--windows-arm64-executable-url", options.windowsArm64ExecutableURL,
 	}
@@ -439,7 +377,6 @@ func TestGenerateAndValidateGlobalManifest(t *testing.T) {
 	}
 	validateArguments := []string{
 		"--apk", options.apk,
-		"--windows-executable", options.windowsExecutable,
 		"--windows-x64-executable", options.windowsX64Executable,
 		"--windows-arm64-executable", options.windowsArm64Executable,
 		"--channel", options.channel,
@@ -450,7 +387,6 @@ func TestGenerateAndValidateGlobalManifest(t *testing.T) {
 		"--application-id", options.applicationID,
 		"--build-version", options.buildVersion,
 		"--signing-certificate-sha256", options.signingCertificateSHA256,
-		"--windows-executable-url", options.windowsExecutableURL,
 		"--windows-x64-executable-url", options.windowsX64ExecutableURL,
 		"--windows-arm64-executable-url", options.windowsArm64ExecutableURL,
 		options.output,

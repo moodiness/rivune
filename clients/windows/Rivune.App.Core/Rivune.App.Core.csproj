@@ -12,5 +12,7 @@
     <ProjectReference Include="../Rivune.Windows/Rivune.Windows.csproj" />
     <InternalsVisibleTo Include="Rivune.Windows.Tests" />
     <InternalsVisibleTo Include="Rivune" />
+    <InternalsVisibleTo Include="Rivune-x64" />
+    <InternalsVisibleTo Include="Rivune-arm64" />
   </ItemGroup>
 </Project>

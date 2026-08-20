@@ -108,8 +108,8 @@ public sealed class AppUpdateCheckerTests
 
     [Theory]
     [InlineData("\"architectures\":[\"arm64\"]", "\"architectures\":[\"x64\"]")]
-    [InlineData("\"fileName\":\"Rivune-arm64.exe\"", "\"fileName\":\"Rivune.exe\"")]
-    [InlineData("/Rivune-arm64.exe\"", "/Rivune.exe\"")]
+    [InlineData("\"fileName\":\"Rivune-arm64.exe\"", "\"fileName\":\"Rivune-x64.exe\"")]
+    [InlineData("/Rivune-arm64.exe\"", "/Rivune-x64.exe\"")]
     public async Task RejectsWrongArm64PackageMetadata(string expected, string replacement)
     {
         var armPackageStart = Manifest().IndexOf("\"windowsArm64\"", StringComparison.Ordinal);
@@ -277,7 +277,7 @@ public sealed class AppUpdateCheckerTests
     public async Task DownloadsPackageThroughTrustedRedirectAndVerifiesIt()
     {
         var contents = Encoding.UTF8.GetBytes("portable-exe-contents");
-        var assetUri = new Uri("https://release-assets.githubusercontent.com/github-production-release-asset/123/Rivune.exe?token=signed");
+        var assetUri = new Uri("https://release-assets.githubusercontent.com/github-production-release-asset/123/Rivune-x64.exe?token=signed");
         var handler = new SequenceHandler(
             Response(HttpStatusCode.Redirect, location: assetUri),
             Response(HttpStatusCode.OK, contents));
@@ -339,7 +339,7 @@ public sealed class AppUpdateCheckerTests
         var contents = Encoding.UTF8.GetBytes("portable-exe-contents");
         var handler = new SequenceHandler(Response(
             HttpStatusCode.Redirect,
-            location: new Uri("https://evil.example/Rivune.exe")));
+            location: new Uri("https://evil.example/Rivune-x64.exe")));
         using var client = new HttpClient(handler);
         await using var destination = new MemoryStream();
 
@@ -384,7 +384,6 @@ public sealed class AppUpdateCheckerTests
     }
 
     [Theory]
-    [InlineData("Rivune.exe")]
     [InlineData("Rivune-x64.exe")]
     [InlineData("Rivune-arm64.exe")]
     public void ParsesExactPortableApplyArguments(string fileName)
@@ -417,8 +416,8 @@ public sealed class AppUpdateCheckerTests
     [InlineData("--sha256", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")]
     public void RejectsInvalidPortableApplyArguments(string name, string value)
     {
-        var source = Path.Combine(Path.GetTempPath(), "Rivune", "updates", "test", "Rivune.exe");
-        var target = Path.Combine(Path.GetTempPath(), "Rivune-installed", "Rivune.exe");
+        var source = Path.Combine(Path.GetTempPath(), "Rivune", "updates", "test", "Rivune-x64.exe");
+        var target = Path.Combine(Path.GetTempPath(), "Rivune-installed", "Rivune-x64.exe");
         var arguments = new[]
         {
             PortableAppUpdate.ApplySwitch,
@@ -435,10 +434,10 @@ public sealed class AppUpdateCheckerTests
     }
 
     [Theory]
-    [InlineData("Rivune.exe", "Rivune-arm64.exe")]
-    [InlineData("Rivune.exe", "Rivune-x64.exe")]
     [InlineData("Rivune-x64.exe", "Rivune-arm64.exe")]
-    [InlineData("Rivune-arm64.exe", "Rivune.exe")]
+    [InlineData("Rivune-arm64.exe", "Rivune-x64.exe")]
+    [InlineData("Rivune-x64.exe", "other.exe")]
+    [InlineData("other.exe", "Rivune-x64.exe")]
     [InlineData("other.exe", "other.exe")]
     public void RejectsMismatchedOrUnsupportedPortableHandoffNames(string sourceName, string targetName)
     {
@@ -460,8 +459,8 @@ public sealed class AppUpdateCheckerTests
     [Fact]
     public void RejectsCleanupOutsideTemporaryDirectory()
     {
-        var current = Path.Combine(Path.GetTempPath(), "Rivune-installed", "Rivune.exe");
-        var untrusted = Path.Combine(Path.GetPathRoot(Path.GetTempPath())!, "Rivune.exe");
+        var current = Path.Combine(Path.GetTempPath(), "Rivune-installed", "Rivune-x64.exe");
+        var untrusted = Path.Combine(Path.GetPathRoot(Path.GetTempPath())!, "Rivune-x64.exe");
 
         Assert.Throws<InvalidOperationException>(() => PortableAppUpdate.ParseStartupCommand(
             [PortableAppUpdate.CleanupSwitch, untrusted],
@@ -469,7 +468,6 @@ public sealed class AppUpdateCheckerTests
     }
 
     [Theory]
-    [InlineData("Rivune.exe")]
     [InlineData("Rivune-x64.exe")]
     [InlineData("Rivune-arm64.exe")]
     public void PreparesQuotedHandoffWithoutChangingCurrentExecutable(string fileName)
@@ -509,8 +507,8 @@ public sealed class AppUpdateCheckerTests
         var targetDirectory = Path.Combine(Path.GetTempPath(), "Rivune-installed-tests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         Directory.CreateDirectory(targetDirectory);
-        var source = Path.Combine(root, "Rivune.exe");
-        var target = Path.Combine(targetDirectory, "Rivune.exe");
+        var source = Path.Combine(root, "Rivune-x64.exe");
+        var target = Path.Combine(targetDirectory, "Rivune-x64.exe");
         var currentContents = Encoding.UTF8.GetBytes("not a Windows executable: current");
         var updateContents = Encoding.UTF8.GetBytes("not a Windows executable: update");
         File.WriteAllBytes(source, updateContents);
@@ -564,15 +562,6 @@ public sealed class AppUpdateCheckerTests
               "size":654321,
               "sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
             },
-            "windows":{
-              "format":"exe",
-              "architectures":["x64"],
-              "minimumOsVersion":"10.0.19041.0",
-              "fileName":"Rivune.exe",
-              "url":"https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune.exe",
-              "size":123456,
-              "sha256":"{{PackageSha256}}"
-            },
             "windowsX64":{
               "format":"exe",
               "architectures":["x64"],
@@ -595,14 +584,14 @@ public sealed class AppUpdateCheckerTests
         }
         """;
 
-    private static readonly Uri PackageUri = new("https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune.exe");
+    private static readonly Uri PackageUri = new("https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-x64.exe");
 
     private static WindowsUpdatePackage Package(byte[] contents, long? size = null, string? sha256 = null) => new(
         PackageUri,
         "exe",
         ["x64"],
         "10.0.19041.0",
-        "Rivune.exe",
+        "Rivune-x64.exe",
         size ?? contents.LongLength,
         sha256 ?? Convert.ToHexStringLower(SHA256.HashData(contents)));
 

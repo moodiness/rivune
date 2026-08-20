@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -33,7 +32,6 @@ var (
 
 type generateOptions struct {
 	apk                       string
-	windowsExecutable         string
 	windowsX64Executable      string
 	windowsArm64Executable    string
 	output                    string
@@ -45,14 +43,12 @@ type generateOptions struct {
 	applicationID             string
 	buildVersion              string
 	signingCertificateSHA256  string
-	windowsExecutableURL      string
 	windowsX64ExecutableURL   string
 	windowsArm64ExecutableURL string
 }
 
 type validateOptions struct {
 	apk                       string
-	windowsExecutable         string
 	windowsX64Executable      string
 	windowsArm64Executable    string
 	channel                   string
@@ -63,17 +59,12 @@ type validateOptions struct {
 	applicationID             string
 	buildVersion              string
 	signingCertificateSHA256  string
-	windowsExecutableURL      string
 	windowsX64ExecutableURL   string
 	windowsArm64ExecutableURL string
 }
 
 func buildManifest(options generateOptions) (map[string]any, error) {
 	apkSize, apkDigest, err := assetMetadata(options.apk, "APK", maxAndroidPackageSize)
-	if err != nil {
-		return nil, err
-	}
-	windowsSize, windowsDigest, err := assetMetadata(options.windowsExecutable, "Legacy Windows executable", maxWindowsPackageSize)
 	if err != nil {
 		return nil, err
 	}
@@ -104,15 +95,6 @@ func buildManifest(options generateOptions) (map[string]any, error) {
 				"url":                      options.apkURL,
 				"size":                     apkSize,
 				"sha256":                   apkDigest,
-			},
-			"windows": map[string]any{
-				"format":           "exe",
-				"architectures":    []string{"x64"},
-				"minimumOsVersion": "10.0.19041.0",
-				"fileName":         filepath.Base(options.windowsExecutable),
-				"url":              options.windowsExecutableURL,
-				"size":             windowsSize,
-				"sha256":           windowsDigest,
 			},
 			"windowsX64": map[string]any{
 				"format":           "exe",
@@ -261,17 +243,6 @@ func validateManifest(manifest any) error {
 	if err := validateAndroidPackage(androidPackage, tagName, version, "manifest.packages.android"); err != nil {
 		return err
 	}
-	windowsValue, err := required(packages, "windows", "manifest.packages")
-	if err != nil {
-		return err
-	}
-	windowsPackage, err := object(windowsValue, "manifest.packages.windows")
-	if err != nil {
-		return err
-	}
-	if err := validateWindowsPackage(windowsPackage, tagName, "manifest.packages.windows", "x64", "Rivune.exe"); err != nil {
-		return err
-	}
 	windowsX64Value, err := required(packages, "windowsX64", "manifest.packages")
 	if err != nil {
 		return err
@@ -282,10 +253,6 @@ func validateManifest(manifest any) error {
 	}
 	if err := validateWindowsPackage(windowsX64Package, tagName, "manifest.packages.windowsX64", "x64", "Rivune-x64.exe"); err != nil {
 		return err
-	}
-	if !reflect.DeepEqual(windowsPackage["size"], windowsX64Package["size"]) ||
-		!reflect.DeepEqual(windowsPackage["sha256"], windowsX64Package["sha256"]) {
-		return fmt.Errorf("manifest.packages.windowsX64 must match legacy manifest.packages.windows bytes")
 	}
 	windowsArm64Value, err := required(packages, "windowsArm64", "manifest.packages")
 	if err != nil {
@@ -437,7 +404,6 @@ func validateExpectedValues(manifest any, options validateOptions) error {
 	root := manifest.(map[string]any)
 	packages := root["packages"].(map[string]any)
 	androidPackage := packages["android"].(map[string]any)
-	windowsPackage := packages["windows"].(map[string]any)
 	windowsX64Package := packages["windowsX64"].(map[string]any)
 	windowsArm64Package := packages["windowsArm64"].(map[string]any)
 	expected := []struct {
@@ -453,7 +419,6 @@ func validateExpectedValues(manifest any, options validateOptions) error {
 		{androidPackage["applicationId"], options.applicationID, "Android applicationId"},
 		{androidPackage["buildVersion"], options.buildVersion, "Android buildVersion"},
 		{androidPackage["signingCertificateSha256"], options.signingCertificateSHA256, "Android signing certificate"},
-		{windowsPackage["url"], options.windowsExecutableURL, "Legacy Windows executable URL"},
 		{windowsX64Package["url"], options.windowsX64ExecutableURL, "Windows x64 executable URL"},
 		{windowsArm64Package["url"], options.windowsArm64ExecutableURL, "Windows ARM64 executable URL"},
 	}
@@ -463,9 +428,6 @@ func validateExpectedValues(manifest any, options validateOptions) error {
 		}
 	}
 	if err := validateExpectedAsset(androidPackage, options.apk, "APK", maxAndroidPackageSize); err != nil {
-		return err
-	}
-	if err := validateExpectedAsset(windowsPackage, options.windowsExecutable, "Legacy Windows executable", maxWindowsPackageSize); err != nil {
 		return err
 	}
 	if err := validateExpectedAsset(windowsX64Package, options.windowsX64Executable, "Windows x64 executable", maxWindowsPackageSize); err != nil {

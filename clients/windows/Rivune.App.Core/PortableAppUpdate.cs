@@ -362,7 +362,6 @@ internal static partial class PortableAppUpdate
     }
 
     private static bool IsAllowedExecutableFileName(string fileName) =>
-        fileName.Equals("Rivune.exe", StringComparison.OrdinalIgnoreCase) ||
         fileName.Equals("Rivune-x64.exe", StringComparison.OrdinalIgnoreCase) ||
         fileName.Equals("Rivune-arm64.exe", StringComparison.OrdinalIgnoreCase);
 
