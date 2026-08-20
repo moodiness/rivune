@@ -34,6 +34,7 @@ project.lock.json
 publish/
 *.pubxml
 !Properties/PublishProfiles/win-arm64.pubxml
+!Properties/PublishProfiles/win-x64.pubxml
 PublishScripts/
 
 # Code analysis and tooling

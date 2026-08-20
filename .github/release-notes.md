@@ -1,4 +1,4 @@
-# Rivune v1.8.1
+# Rivune v1.8.2
 
 ## Highlights
 
@@ -16,9 +16,9 @@
 
 ## Android installation
 
-- Download `rivune-android-1.8.1.apk` and complete Android's package-installation prompt. Android 8.0 or newer is required, and the public application ID remains `io.rivune.app`.
+- Download `rivune-android-1.8.2.apk` and complete Android's package-installation prompt. Android 8.0 or newer is required, and the public application ID remains `io.rivune.app`.
 - The APK keeps the established Rivune release-signing identity so existing installations accept the update. Rivune verifies package identity, version, size, SHA-256, and signing certificate before Android shows its own confirmation.
-- Android v1.7.2 and earlier installations that still request `rivune-android-update.json` must install v1.8.1 manually once. Current installations use the global `rivune-update.json` feed.
+- Android v1.7.2 and earlier installations that still request `rivune-android-update.json` must install v1.8.2 manually once. Current installations use the global `rivune-update.json` feed.
 - The APK bundles the GPL-enabled libmpv/FFmpeg stack and is conveyed as a GPLv3 combined Android work. Its license and third-party notices are packaged in the APK; other Rivune components retain their separate repository licenses.
 
 ## Upgrade notes
@@ -28,10 +28,10 @@
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.8.1`
+- `ghcr.io/moodiness/rivune:1.8.2`
 - `ghcr.io/moodiness/rivune:1.8`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.8.0...v1.8.1
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.8.0...v1.8.2

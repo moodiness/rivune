@@ -46,8 +46,8 @@ Create and push one annotated tag:
 ```sh
 git switch main
 git pull --ff-only
-git tag -a v1.8.1 -m "Rivune v1.8.1"
-git push origin v1.8.1
+git tag -a v1.8.2 -m "Rivune v1.8.2"
+git push origin v1.8.2
 ```
 
 The tag push runs `Release candidate CI`. Its read-only `authorize` job resolves
@@ -93,7 +93,7 @@ docker compose -f compose.yaml -f compose.amd-intel.yaml config --format json | 
 If GitHub does not create the release-candidate run for an otherwise valid tag push, dispatch the same read-only gate without moving the tag:
 
 ```sh
-gh workflow run release-candidate.yml --ref main -f tag=v1.8.1
+gh workflow run release-candidate.yml --ref main -f tag=v1.8.2
 ```
 
 The manual path enforces the same SemVer, annotated-tag, current-`main`, and tag-target checks. Its successful `workflow_run` is eligible for the same external release-environment gate; it does not weaken artifact authorization or permit a stale or lightweight tag.
@@ -123,10 +123,10 @@ The environment response must show `moodiness` as required reviewer, `can_admins
 
 ## Published artifacts
 
-After all gates succeed, the workflow publishes one OCI manifest to `ghcr.io/moodiness/rivune` for exactly `linux/amd64` and `linux/arm64`, with provenance and an SBOM. A stable `v1.8.1` release receives:
+After all gates succeed, the workflow publishes one OCI manifest to `ghcr.io/moodiness/rivune` for exactly `linux/amd64` and `linux/arm64`, with provenance and an SBOM. A stable `v1.8.2` release receives:
 
 ```text
-1.8.1
+1.8.2
 1.8
 1
 latest
@@ -139,7 +139,7 @@ A prerelease such as `v2.0.0-rc.1` receives its full SemVer tag but does not mov
 Verify the release and its OCI attestations after the workflow completes:
 
 ```sh
-image=ghcr.io/moodiness/rivune:1.8.1
+image=ghcr.io/moodiness/rivune:1.8.2
 docker buildx imagetools inspect "${image}"
 docker buildx imagetools inspect "${image}" --raw > rivune-manifest.json
 jq -e '[.manifests[] | select((.annotations // {})["vnd.docker.reference.type"] != "attestation-manifest") | [.platform.os, .platform.architecture]] | sort == [["linux", "amd64"], ["linux", "arm64"]]' rivune-manifest.json
