@@ -557,8 +557,8 @@ public sealed class AppUpdateCheckerTests
               "applicationId":"io.rivune.app",
               "buildVersion":"10702",
               "signingCertificateSha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-              "fileName":"rivune-android-1.7.2.apk",
-              "url":"https://github.com/moodiness/rivune/releases/download/v1.7.2/rivune-android-1.7.2.apk",
+              "fileName":"Rivune-Android.apk",
+              "url":"https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-Android.apk",
               "size":654321,
               "sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
             },

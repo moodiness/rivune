@@ -18,6 +18,7 @@ const (
 	schemaVersion          = 2
 	androidApplicationID   = "io.rivune.app"
 	githubReleaseURLPrefix = "https://github.com/moodiness/rivune/releases"
+	androidAssetFileName   = "Rivune-Android.apk"
 	maxAndroidPackageSize  = int64(512 * 1024 * 1024)
 	maxWindowsPackageSize  = int64(2*1024*1024*1024 - 1)
 )
@@ -240,7 +241,7 @@ func validateManifest(manifest any) error {
 	if err != nil {
 		return err
 	}
-	if err := validateAndroidPackage(androidPackage, tagName, version, "manifest.packages.android"); err != nil {
+	if err := validateAndroidPackage(androidPackage, tagName, "manifest.packages.android"); err != nil {
 		return err
 	}
 	windowsX64Value, err := required(packages, "windowsX64", "manifest.packages")
@@ -329,7 +330,7 @@ func validateChannelVersion(channel, version string) error {
 	return nil
 }
 
-func validateAndroidPackage(packageObject map[string]any, tagName, version, context string) error {
+func validateAndroidPackage(packageObject map[string]any, tagName, context string) error {
 	if err := requireExactString(packageObject, "format", "apk", context); err != nil {
 		return err
 	}
@@ -352,7 +353,7 @@ func validateAndroidPackage(packageObject map[string]any, tagName, version, cont
 	if _, err := sha256Field(packageObject, "signingCertificateSha256", context); err != nil {
 		return err
 	}
-	return validateCommonPackageFields(packageObject, context, tagName, "rivune-android-"+version+".apk", maxAndroidPackageSize)
+	return validateCommonPackageFields(packageObject, context, tagName, androidAssetFileName, maxAndroidPackageSize)
 }
 
 func validateWindowsPackage(packageObject map[string]any, tagName, context, architecture, fileName string) error {

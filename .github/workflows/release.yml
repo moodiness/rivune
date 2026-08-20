@@ -329,7 +329,7 @@ jobs:
             echo "The source workflow creation time is not canonical RFC3339 UTC: ${RELEASE_WORKFLOW_CREATED_AT}" >&2
             exit 1
           fi
-          android_asset_name="rivune-android-${version_name}.apk"
+          android_asset_name='Rivune-Android.apk'
           windows_x64_asset_name='Rivune-x64.exe'
           windows_arm64_asset_name='Rivune-arm64.exe'
           release_url="https://github.com/${REPOSITORY}/releases/tag/${RELEASE_TAG}"
@@ -763,8 +763,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version_name="${RELEASE_TAG#v}"
-          asset_name="rivune-android-${version_name}.apk"
+          asset_name='Rivune-Android.apk'
           windows_x64_asset_name='Rivune-x64.exe'
           windows_arm64_asset_name='Rivune-arm64.exe'
           expected_files="$(printf '%s\n' rivune-update.json "${asset_name}" "${windows_x64_asset_name}" "${windows_arm64_asset_name}" | sort)"
@@ -997,8 +996,7 @@ jobs:
           complete_partial_release_assets() {
             local release_json="$1" release_asset_id release_asset_name release_asset_digest adopted_sha trusted_sha
             local candidate_release_id content_type expected_upload_url upload_url
-            local version_name="${RELEASE_TAG#v}"
-            local apk_name="rivune-android-${version_name}.apk"
+            local apk_name='Rivune-Android.apk'
             local windows_x64_name='Rivune-x64.exe'
             local windows_arm64_name='Rivune-arm64.exe'
             local -a expected_names=(
@@ -1125,8 +1123,7 @@ jobs:
           }
           validate_remote_assets() {
             local release_json="$1" asset_id asset_name asset_digest trusted_asset_sha
-            local version_name="${RELEASE_TAG#v}"
-            local apk_name="rivune-android-${version_name}.apk"
+            local apk_name='Rivune-Android.apk'
             local windows_x64_name='Rivune-x64.exe'
             local windows_arm64_name='Rivune-arm64.exe'
             local expected_assets actual_assets expected_channel expected_release_url expected_apk_url expected_windows_x64_url expected_windows_arm64_url
@@ -1539,7 +1536,7 @@ jobs:
             echo "The prepared GitHub Release does not record the effective OCI image digest exactly once." >&2
             exit 1
           fi
-          expected_assets="$(printf '%s\n' rivune-update.json "rivune-android-${RELEASE_TAG#v}.apk" Rivune-x64.exe Rivune-arm64.exe | sort)"
+          expected_assets="$(printf '%s\n' rivune-update.json Rivune-Android.apk Rivune-x64.exe Rivune-arm64.exe | sort)"
           actual_assets="$(jq -r '.assets[].name' <<<"${release}" | sort)"
           if [[ "${actual_assets}" != "${expected_assets}" ]]; then
             echo "The prepared GitHub Release asset set is incomplete or contains unexpected files." >&2
@@ -1672,7 +1669,7 @@ jobs:
             echo "Final published release metadata does not match the authorized release." >&2
             exit 1
           fi
-          expected_assets="$(printf '%s\n' rivune-update.json "rivune-android-${RELEASE_TAG#v}.apk" Rivune-x64.exe Rivune-arm64.exe | sort)"
+          expected_assets="$(printf '%s\n' rivune-update.json Rivune-Android.apk Rivune-x64.exe Rivune-arm64.exe | sort)"
           actual_assets="$(jq -r '.assets[].name' <<<"${final_release}" | sort)"
           if [[ "${actual_assets}" != "${expected_assets}" ]]; then
             echo "Final published release asset set is incomplete or contains unexpected files." >&2
