@@ -2042,6 +2042,7 @@ public sealed partial class MainPage : Page
             SubtitleModes = [PlaybackSubtitleDelivery.External, PlaybackSubtitleDelivery.Burn],
             MediaProfiles = profiles,
         };
+    }
 
     private static string FriendlyError(Exception exception) => exception switch
     {
