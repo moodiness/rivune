@@ -9,6 +9,13 @@ if [[ "${OSTYPE:-}" == darwin* ]]; then
       break
     fi
   done
+  if [[ "${coreutils_found}" == false ]] &&
+     stat -c '%a' -- "$0" >/dev/null 2>&1 &&
+     chmod --version >/dev/null 2>&1 &&
+     ln --version >/dev/null 2>&1 &&
+     mktemp --version >/dev/null 2>&1; then
+    coreutils_found=true
+  fi
   if [[ "${coreutils_found}" == false ]]; then
     printf 'Rivune requires GNU coreutils on macOS; install it with: brew install coreutils\n' >&2
     exit 1
