@@ -47,9 +47,6 @@
     <Content Include="Assets\Wide310x150Logo.scale-200.png" />
   </ItemGroup>
 
-  <ItemGroup>
-    <AssemblyMetadata Include="RivuneExpectedUpdateSignerSha256" Value="$(RivuneExpectedUpdateSignerSha256)" />
-  </ItemGroup>
 
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
