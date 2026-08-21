@@ -31,7 +31,7 @@ trap cleanup EXIT
 
 wait_for_postgres() {
   for _ in $(seq 1 60); do
-    if docker exec "${POSTGRES}" pg_isready -U rivune -d rivune >/dev/null 2>&1; then
+    if docker exec "${POSTGRES}" pg_isready -h 127.0.0.1 -U rivune -d rivune >/dev/null 2>&1; then
       return
     fi
     sleep 1
@@ -59,10 +59,6 @@ wait_for_rivune() {
 start_rivune() {
   local ssl_mode="$1"
   local root_certificate="$2"
-  local -a tls_mount=()
-  if [[ -n "${root_certificate}" ]]; then
-    tls_mount=(-v "${CA_VOLUME}:/run/rivune-postgres-tls:ro")
-  fi
   docker run -d --name "${RIVUNE}" --network "${DATABASE_NETWORK}" --init \
     --security-opt no-new-privileges:true --cap-drop ALL \
     --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add SETGID --cap-add SETUID \
@@ -82,7 +78,7 @@ start_rivune() {
     -e RIVUNE_MEDIA_TEMP_DIR=/transcode \
     -v "${ARTWORK_VOLUME}:/var/lib/rivune/artwork" \
     -v "${TRANSCODE_VOLUME}:/transcode" \
-    "${tls_mount[@]}" \
+    -v "${CA_VOLUME}:/run/rivune-postgres-tls:ro" \
     "${IMAGE}" >/dev/null
   docker network connect --alias rivune "${EDGE_NETWORK}" "${RIVUNE}"
   wait_for_rivune
