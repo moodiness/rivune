@@ -31,6 +31,10 @@
     </dict>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Rivune connects to the self-hosted server address you provide.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_rivune._tcp</string>
+    </array>
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>

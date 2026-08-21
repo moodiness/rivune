@@ -74,6 +74,57 @@ class OnboardingUiTest {
     }
 
     @Test
+    fun discoveredServerRequiresTransportConfirmationBeforeConnecting() {
+        var submitted: String? = null
+        val server = DiscoveredRivuneServer(
+            serviceName = "Living room",
+            name = "Living room",
+            address = "http://192.168.1.20:8080",
+            version = "1.10.0",
+        )
+        setRivuneContent {
+            ServerScreen(
+                serverInput = "",
+                isBusy = false,
+                failure = null,
+                isTv = false,
+                discoveredServers = listOf(server),
+                onConnect = { submitted = it },
+                onClearFailure = {},
+            )
+        }
+
+        composeRule.onNodeWithTag("${RivuneTestTags.DiscoveredServerPrefix}${server.address}")
+            .performClick()
+        composeRule.onNodeWithText(server.address).assertIsDisplayed()
+        composeRule.onNodeWithText(string(R.string.server_local_http_explanation)).assertIsDisplayed()
+        composeRule.runOnIdle { assertEquals(null, submitted) }
+        composeRule.onNodeWithText(string(R.string.server_confirm_connect)).performClick()
+
+        composeRule.runOnIdle { assertEquals(server.address, submitted) }
+    }
+
+    @Test
+    fun manualEntryAndDiscoveryActionsRemainAvailableTogether() {
+        var discoveryRequested = false
+        setRivuneContent {
+            ServerScreen(
+                serverInput = "media.example.com",
+                isBusy = false,
+                failure = null,
+                isTv = false,
+                onConnect = {},
+                onClearFailure = {},
+                onDiscover = { discoveryRequested = true },
+            )
+        }
+
+        composeRule.onNodeWithTag(RivuneTestTags.ServerInput).assertIsDisplayed()
+        composeRule.onNodeWithTag(RivuneTestTags.ServerDiscover).performClick()
+        composeRule.runOnIdle { assertTrue(discoveryRequested) }
+    }
+
+    @Test
     @OptIn(ExperimentalTestApi::class)
     fun tvServerAddressEntersEditingAfterRemoteConfirmation() {
         setRivuneContent {

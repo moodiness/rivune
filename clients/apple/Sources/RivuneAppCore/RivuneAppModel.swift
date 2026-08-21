@@ -388,6 +388,7 @@ public final class RivuneAppModel: ObservableObject {
         connect(to: serverAddress)
     }
 
+
     public func connect(to address: String) {
         beginOperation()
         let currentGeneration = generation

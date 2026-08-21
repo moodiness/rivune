@@ -15,6 +15,16 @@
     <string name="server_supporting">Localhost and private-network addresses use HTTP when no scheme is supplied. Use HTTP only on a trusted local network.</string>
     <string name="server_retry">Try again</string>
     <string name="server_loading_description">Connecting to the Rivune server</string>
+    <string name="server_discover">Find servers on this network</string>
+    <string name="server_refresh_discovery">Refresh nearby servers</string>
+    <string name="server_discovered">NEARBY RIVUNE SERVERS</string>
+    <string name="server_secure">Secure HTTPS</string>
+    <string name="server_local_http">Trusted-LAN HTTP</string>
+    <string name="server_confirm_title">Connect to %1$s?</string>
+    <string name="server_secure_explanation">This discovered server uses encrypted HTTPS. Confirm the address before continuing.</string>
+    <string name="server_local_http_explanation">This discovered server uses unencrypted HTTP. Continue only on a trusted private network.</string>
+    <string name="server_confirm_connect">Connect</string>
+    <string name="server_confirm_cancel">Cancel</string>
 
 
     <string name="pairing_eyebrow">DEVICE PAIRING</string>

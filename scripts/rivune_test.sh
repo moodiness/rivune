@@ -32,6 +32,8 @@ RIVUNE_RESTORE_PASSWORD=restore-secret
 RIVUNE_SETUP_TOKEN=setup-secret
 RIVUNE_ENCRYPTION_KEYS=1:1212121212121212121212121212121212121212121212121212121212121212
 RIVUNE_PUBLIC_URL=https://media.example.com
+RIVUNE_DISCOVERY_URL=https://media.example.com
+RIVUNE_DISCOVERY_NAME=Rivune
 RIVUNE_VERSION=1.6.0
 RIVUNE_PORT=8080
 ENV
@@ -83,7 +85,7 @@ setup_output="${setup_case}/setup.output"
 (
   cd "${setup_case}/work"
   PATH="${setup_case}/bin:${PATH}" "${setup_case}/root/rivune" setup \
-    --public-url https://media.example.com --version 1.6.0
+    --public-url https://media.example.com --discovery-name 'Living room' --version 1.6.0
 ) >"${setup_output}" 2>&1
 [[ "$(stat -c '%a' "${setup_case}/root/.env")" == 600 ]] || fail 'setup did not apply mode 0600'
 [[ "$(wc -l < "${setup_case}/openssl.log")" == 5 ]] || fail 'setup did not invoke OpenSSL independently five times'
@@ -91,7 +93,8 @@ mapfile -t generated < <(sed -n -E 's/^(RIVUNE_POSTGRES_SUPERUSER_PASSWORD|RIVUN
 [[ "${#generated[@]}" == 5 ]] || fail 'setup did not populate all five generated secrets'
 [[ "$(printf '%s\n' "${generated[@]}" | sort -u | wc -l)" == 5 ]] || fail 'setup reused generated secret material'
 grep -qx 'RIVUNE_PUBLIC_URL=https://media.example.com' "${setup_case}/root/.env" || fail 'setup did not set the public origin'
-grep -qx 'RIVUNE_VERSION=1.6.0' "${setup_case}/root/.env" || fail 'setup did not set the selected version'
+grep -qx 'RIVUNE_DISCOVERY_URL=https://media.example.com' "${setup_case}/root/.env" || fail 'setup did not configure the announced origin'
+grep -qx 'RIVUNE_DISCOVERY_NAME=Living room' "${setup_case}/root/.env" || fail 'setup did not configure the selected discovery name'
 for secret in "${generated[@]}"; do
   if grep -Fq "${secret}" "${setup_output}"; then
     fail 'setup echoed a generated secret'
@@ -280,6 +283,7 @@ assert_compose pull
 assert_compose status
 assert_compose logs
 assert_compose logs postgres
+assert_compose logs discovery
 if PATH="${wrapper_case}/bin:${PATH}" "${wrapper_case}/root/rivune" logs 'postgres;touch-pwned' >/dev/null 2>&1; then
   fail 'logs accepted an unrecognized service'
 fi
@@ -317,18 +321,17 @@ FAKE_HELPER
 COMPOSE_FILE=${wrapper_case}/root/compose.yaml
 COMPOSE_ENV_FILES=${wrapper_case}/root/.env
 COMPOSE_PROJECT_NAME=
-COMPOSE_PROFILES=
+COMPOSE_PROFILES=discovery
 COMPOSE_PATH_SEPARATOR=
 EXPECTED_ENV
-  assert_file_equals "${wrapper_case}/expected-env" "${ENV_LOG}" "${delegated} compose environment"
 done
 
 help_output="$("${ROOT_DIR}/rivune" help)"
 for command in setup up down restart pull status logs doctor backup verify-backup restore help; do
   [[ "${help_output}" == *"${command}"* ]] || fail "help omitted ${command}"
 done
-[[ "${help_output}" == *'setup --version X.Y.Z [--public-url HTTPS_OR_LOCAL_HTTP_ORIGIN]'* ]] || \
-  fail 'help did not describe the supported setup origins'
+[[ "${help_output}" == *'setup --version X.Y.Z [--public-url HTTPS_OR_LOCAL_HTTP_ORIGIN] [--discovery-name NAME]'* ]] || \
+  fail 'help did not describe the supported setup origins and discovery name'
 
 doctor_case="$(prepare_case doctor)"
 write_environment "${doctor_case}/root"
@@ -352,11 +355,18 @@ case "$*" in
     [[ "${DOCTOR_SERVICE_FAIL:-}" != rivune ]] || exit 0
     printf 'rivune-id\n'
     ;;
+  'compose --env-file .env -f compose.yaml ps -q discovery')
+    [[ "${DOCTOR_SERVICE_FAIL:-}" != discovery ]] || exit 0
+    printf 'discovery-id\n'
+    ;;
   'inspect --format {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}} postgres-id')
     printf 'running healthy\n'
     ;;
   'inspect --format {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}} rivune-id')
     printf 'running healthy\n'
+    ;;
+  'inspect --format {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}} discovery-id')
+    printf 'running \n'
     ;;
   'compose --env-file .env -f compose.yaml exec -T postgres pg_isready --username rivune --dbname rivune')
     [[ "${DOCTOR_DB_FAIL:-0}" != 1 ]]

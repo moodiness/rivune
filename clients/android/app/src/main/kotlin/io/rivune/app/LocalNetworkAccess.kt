@@ -9,13 +9,26 @@ internal const val ACCESS_LOCAL_NETWORK_PERMISSION = "android.permission.ACCESS_
 internal const val LOCAL_NETWORK_PERMISSION_API = 37
 
 internal fun requiresLocalNetworkPermission(
-    normalizedServerUrl: String,
     sdkInt: Int,
     targetSdk: Int,
     permissionGranted: Boolean,
 ): Boolean = sdkInt >= LOCAL_NETWORK_PERMISSION_API &&
     targetSdk >= LOCAL_NETWORK_PERMISSION_API &&
-    !permissionGranted &&
+    !permissionGranted
+
+internal fun requiresLocalNetworkPermission(context: Context): Boolean =
+    requiresLocalNetworkPermission(
+        permissionGranted = context.checkSelfPermission(ACCESS_LOCAL_NETWORK_PERMISSION) == PackageManager.PERMISSION_GRANTED,
+        sdkInt = Build.VERSION.SDK_INT,
+        targetSdk = context.applicationInfo.targetSdkVersion,
+    )
+
+internal fun requiresLocalNetworkPermission(
+    normalizedServerUrl: String,
+    sdkInt: Int,
+    targetSdk: Int,
+    permissionGranted: Boolean,
+): Boolean = requiresLocalNetworkPermission(sdkInt, targetSdk, permissionGranted) &&
     isKnownLocalNetworkServerUrl(normalizedServerUrl)
 
 internal fun requiresLocalNetworkPermission(context: Context, normalizedServerUrl: String): Boolean =

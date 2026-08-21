@@ -226,16 +226,53 @@ private struct PrimaryButton: View {
 
 private struct ServerView: View {
     @ObservedObject var model: RivuneAppModel
+    @StateObject private var browser = RivuneLANBrowser()
     @State private var address = ""
+    @State private var selectedServer: DiscoveredRivuneServer?
 
     var body: some View {
         AuthFrame {
             ScreenHeading(
                 eyebrow: "Your server",
                 title: "Connect to Rivune",
-                bodyText: "Enter the address of the Rivune server you or your administrator hosts. This app has no public catalog or hosted account."
+                bodyText: "Choose a Rivune server found on this network, or enter its address manually. This app has no public catalog or hosted account."
             )
             VStack(alignment: .leading, spacing: 14) {
+                if !browser.servers.isEmpty {
+                    Text("NEARBY RIVUNE SERVERS")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(RivunePalette.secondary)
+                    ForEach(browser.servers) { server in
+                        Button {
+                            selectedServer = server
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: "network")
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(server.name)
+                                        .font(.body.weight(.semibold))
+                                    Text(server.usesSecureTransport ? "Secure HTTPS" : "Trusted-LAN HTTP")
+                                        .font(.caption)
+                                        .foregroundStyle(RivunePalette.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .foregroundStyle(RivunePalette.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 16)
+                            .frame(minHeight: 58)
+                        }
+                        .rivuneGlassButton()
+                        .accessibilityIdentifier("discovered-server-\(server.id)")
+                    }
+                }
+                Button(browser.servers.isEmpty ? "Find servers on this network" : "Refresh nearby servers") {
+                    browser.start()
+                }
+                .rivuneGlassButton()
+                .accessibilityIdentifier("server-discover")
+
                 Text("SERVER ADDRESS")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(RivunePalette.secondary)
@@ -269,8 +306,29 @@ private struct ServerView: View {
                 .accessibilityIdentifier("server-connect")
             }
         }
-        .onAppear { address = model.serverAddress }
+        .onAppear {
+            address = model.serverAddress
+            browser.start()
+        }
+        .onDisappear { browser.stop() }
         .onChange(of: address) { _ in model.clearFailure() }
+        .confirmationDialog(
+            selectedServer.map { "Connect to \($0.name)?" } ?? "Connect to this server?",
+            isPresented: Binding(
+                get: { selectedServer != nil },
+                set: { if !$0 { selectedServer = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: selectedServer
+        ) { server in
+            Button("Connect") {
+                selectedServer = nil
+                model.connect(to: server.address.absoluteString)
+            }
+            Button("Cancel", role: .cancel) { selectedServer = nil }
+        } message: { server in
+            Text("\(server.address.absoluteString)\n\n\(server.usesSecureTransport ? "Encrypted HTTPS connection." : "Unencrypted HTTP. Continue only on a trusted private network.")")
+        }
     }
 
     private func submit() {

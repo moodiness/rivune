@@ -269,6 +269,26 @@
                                 <TextBlock Text="FIRST CONNECTION" Style="{StaticResource RivuneEyebrowStyle}" />
                                 <TextBlock Text="Where does your Rivune live?" Style="{StaticResource RivuneHeadlineMediumTextStyle}" AutomationProperties.HeadingLevel="Level1" />
                                 <TextBlock Text="Enter the address of your Rivune server. Your library stays on your server." Style="{StaticResource RivuneBodyMediumTextStyle}" Margin="0,0,0,4" />
+                                <StackPanel x:Name="DiscoveredServersPanel" Spacing="8" Visibility="Collapsed">
+                                    <TextBlock Text="NEARBY RIVUNE SERVERS" Style="{StaticResource RivuneEyebrowStyle}" />
+                                    <ListView x:Name="DiscoveredServersList" SelectionMode="Single" IsItemClickEnabled="True" ItemClick="DiscoveredServersList_ItemClick" AutomationProperties.Name="Nearby Rivune servers">
+                                        <ListView.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid MinHeight="56" Padding="8" ColumnSpacing="12">
+                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                                    <StackPanel Spacing="2">
+                                                        <TextBlock Text="{Binding Name}" Style="{StaticResource RivuneBodyMediumTextStyle}" />
+                                                        <TextBlock Text="{Binding Address}" Style="{StaticResource RivuneBodySmallTextStyle}" />
+                                                    </StackPanel>
+                                                    <TextBlock Grid.Column="1" Text="{Binding SecurityLabel}" Style="{StaticResource RivuneBodySmallTextStyle}" VerticalAlignment="Center" />
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ListView.ItemTemplate>
+                                    </ListView>
+                                </StackPanel>
+                                <Button x:Name="DiscoverServersButton" Click="DiscoverServers_Click" Style="{StaticResource RivuneZoomTextButton}" HorizontalAlignment="Stretch">
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8"><FontIcon Glyph="&#xE968;" FontSize="20" /><TextBlock x:Name="DiscoverServersButtonLabel" Text="Find servers on this network" VerticalAlignment="Center" /></StackPanel>
+                                </Button>
                                 <StackPanel Spacing="6">
                                     <TextBlock Text="Server address" Style="{StaticResource RivuneBodyMediumTextStyle}" Foreground="{ThemeResource RivunePrimaryTextBrush}" />
                                     <TextBox x:Name="ServerAddressBox" Height="52" PlaceholderText="https://rivune.example" InputScope="Url" Style="{StaticResource RivuneTextField}" VerticalContentAlignment="Center" Padding="12,14,12,6" AutomationProperties.Name="Server address" KeyDown="ServerAddressBox_KeyDown" TextChanged="ServerAddressBox_TextChanged" />

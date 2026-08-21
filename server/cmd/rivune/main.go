@@ -13,6 +13,7 @@ import (
 
 	"github.com/moodiness/rivune/server/internal/config"
 	"github.com/moodiness/rivune/server/internal/database"
+	"github.com/moodiness/rivune/server/internal/discovery"
 	"github.com/moodiness/rivune/server/internal/httpapi"
 	"github.com/moodiness/rivune/server/internal/netguard"
 )
@@ -34,10 +35,27 @@ func main() {
 		return
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if len(os.Args) == 2 && os.Args[1] == "mdns" {
+		if err := runDiscovery(logger); err != nil {
+			logger.Error("LAN discovery stopped", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(logger); err != nil {
 		logger.Error("server stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+func runDiscovery(logger *slog.Logger) error {
+	cfg, err := discovery.Load(os.LookupEnv)
+	if err != nil {
+		return err
+	}
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	return discovery.Run(ctx, logger, cfg, version)
 }
 
 func checkHealth(ctx context.Context, target string) error {
