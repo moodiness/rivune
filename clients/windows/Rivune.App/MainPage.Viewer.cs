@@ -209,7 +209,7 @@ public sealed partial class MainPage
             {
                 XamlRoot = XamlRoot,
                 Title = $"Rivune {result.LatestVersion} is available",
-                Content = $"You are using Rivune {result.CurrentVersion}. Download the signed portable {result.Package.FileName} from GitHub, verify its size, SHA-256, pinned Authenticode signer, revocation status, and ProductVersion, then close and restart Rivune to replace this executable?",
+                Content = $"You are using Rivune {result.CurrentVersion}. Download the unsigned portable {result.Package.FileName} from the exact GitHub Release, verify its size, SHA-256, and ProductVersion, then close and restart Rivune to replace this executable? This does not provide an Authenticode publisher guarantee.",
                 PrimaryButtonText = "Download update",
                 CloseButtonText = "Not now",
                 DefaultButton = ContentDialogButton.Primary,
@@ -222,7 +222,7 @@ public sealed partial class MainPage
             {
                 XamlRoot = XamlRoot,
                 Title = $"Downloading Rivune {result.LatestVersion}",
-                Content = $"Downloading {result.Package.FileName} over HTTPS and verifying its exact size, SHA-256, Authenticode signature, revocation status, pinned signer, and ProductVersion before any update is started.",
+                Content = $"Downloading {result.Package.FileName} over HTTPS and verifying its exact size, SHA-256, and ProductVersion before any update is started.",
             };
             var downloadingOpened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             downloading.Opened += (_, _) => downloadingOpened.TrySetResult();
@@ -257,7 +257,7 @@ public sealed partial class MainPage
                 {
                     await AppUpdateChecker.DownloadPackageAsync(result.Package, destination, cancellation.Token);
                 }
-                var signerSha256 = AppUpdateSignatureVerifier.Verify(updatePath, result.LatestVersion);
+                PortableAppUpdate.VerifyProductVersion(updatePath, result.LatestVersion);
 
                 HideDialog(downloading);
                 await downloadingOperation;
@@ -272,7 +272,6 @@ public sealed partial class MainPage
                     Environment.ProcessId,
                     result.Package.Size,
                     result.Package.Sha256,
-                    signerSha256,
                     result.LatestVersion);
                 App.MainWindow.Close();
                 return;

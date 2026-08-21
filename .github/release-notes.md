@@ -4,7 +4,7 @@
 
 - Rivune now includes native SwiftUI applications for iPhone, iPad, Apple TV, Apple Vision Pro, and macOS, alongside the existing Android and Windows clients.
 - The first direct Apple release publishes unsigned iOS, tvOS, and visionOS archives plus a universal unsigned macOS disk image. These artifacts contain no project signing identity or provisioning profile.
-- Official Windows x64 and ARM64 executables are now Authenticode-signed. Automatic replacement verifies online revocation status, the pinned publisher certificate, the exact manifest version, size, and SHA-256 before and after staging.
+- Windows x64 and ARM64 remain portable unsigned executables. Automatic replacement verifies the exact GitHub asset URL, manifest version, size, SHA-256, and `ProductVersion` before and after staging, but it cannot verify an Authenticode publisher identity.
 - Native clients now isolate credentials by server origin, reject unsafe credential transports, and bound API response sizes. Android and Windows retain the explicit trusted-LAN HTTP exception for loopback and private addresses.
 - Playback proxy admission, playlist processing, startup reads, and idle reads are bounded to prevent a slow or oversized upstream from exhausting the server.
 - The release pipeline now covers backend, browser E2E, OpenAPI, Android, Apple, Windows x64/ARM64, migrations, HTTPS proxy behavior, and native multi-architecture container builds before publication.
@@ -19,7 +19,7 @@
 
 - Download `Rivune-x64.exe` on x64 Windows or `Rivune-arm64.exe` on ARM64 Windows. Windows 10 build 19041 or newer is required.
 - Keep the executable in a user-writable local folder. Rivune is portable and has no installer, but local preferences and DPAPI-protected sessions remain under `%LOCALAPPDATA%\Rivune\`.
-- SmartScreen reputation is independent of a valid Authenticode signature and may still warn for a new signing certificate.
+- The Windows executables are not Authenticode-signed and may trigger SmartScreen. Verify that the download URL is the matching `moodiness/rivune` GitHub Release and compare the asset SHA-256 before running it.
 
 ## Android installation
 

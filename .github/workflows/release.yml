@@ -186,7 +186,7 @@ jobs:
           compression-level: 0
           overwrite: false
   windows-asset:
-    name: Build unsigned Windows signing inputs
+    name: Build unsigned Windows release assets
     if: needs.authorize.outputs.authorized == 'true'
     needs:
       - authorize
@@ -205,17 +205,12 @@ jobs:
         uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: 10.0.x
-      - name: Publish and inspect unsigned x64 and ARM64 signing inputs
+      - name: Publish and inspect unsigned x64 and ARM64 executables
         env:
           RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
-          WINDOWS_UPDATE_SIGNER_SHA256: ${{ vars.WINDOWS_UPDATE_SIGNER_SHA256 }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $expectedUpdateSigner = ($env:WINDOWS_UPDATE_SIGNER_SHA256 -replace '[:\s]', '').ToLowerInvariant()
-          if ($expectedUpdateSigner -cnotmatch '^[0-9a-f]{64}$') {
-            throw 'Official Windows release requires repository variable WINDOWS_UPDATE_SIGNER_SHA256.'
-          }
           if ($env:RELEASE_TAG -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
             throw "Release tag is not valid SemVer: $env:RELEASE_TAG"
           }
@@ -246,8 +241,7 @@ jobs:
               -p:AssemblyVersion=$fileVersion `
               -p:FileVersion=$fileVersion `
               -p:InformationalVersion=$versionName `
-              -p:IncludeSourceRevisionInInformationalVersion=false `
-              -p:RivuneExpectedUpdateSignerSha256=$expectedUpdateSigner
+              -p:IncludeSourceRevisionInInformationalVersion=false
             if ($LASTEXITCODE -ne 0) { throw "Windows $($target.Label) portable publish failed." }
 
             $distributable = @(Get-ChildItem -LiteralPath $publish -File -Recurse |
@@ -274,7 +268,7 @@ jobs:
               throw "$($target.FileName) version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
             }
             if ((Get-AuthenticodeSignature -FilePath $asset).Status -ne 'NotSigned') {
-              throw "$($target.FileName) signing input must be unsigned before the isolated signing job."
+              throw "$($target.FileName) release executable must remain unsigned."
             }
             $size = (Get-Item -LiteralPath $asset).Length
             if ($size -le 0 -or $size -gt 2147483647) { throw "$($target.FileName) size is invalid: $size bytes." }
@@ -285,7 +279,7 @@ jobs:
           if (Compare-Object -ReferenceObject $expectedFiles -DifferenceObject $files -CaseSensitive) {
             throw "Windows release artifact must contain exactly: $($expectedFiles -join ', ')."
           }
-      - name: Upload immutable unsigned Windows signing inputs
+      - name: Upload immutable unsigned Windows executables
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: unsigned-windows-${{ github.run_id }}-${{ github.run_attempt }}
@@ -295,150 +289,13 @@ jobs:
           compression-level: 0
           overwrite: false
 
-  sign-windows:
-    name: Sign Windows executables on an isolated runner
+
+  build-assets:
+    name: Build Android and collect unsigned Windows release inputs
     if: needs.authorize.outputs.authorized == 'true'
     needs:
       - authorize
       - windows-asset
-    runs-on: windows-latest
-    environment: release
-    outputs:
-      artifact_name: signed-windows-${{ github.run_id }}-${{ github.run_attempt }}
-    permissions:
-      contents: read
-    steps:
-      - name: Download immutable unsigned Windows signing inputs
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ needs.windows-asset.outputs.artifact_name }}
-          path: unsigned-windows-input
-      - name: Sign and verify Windows executables
-        env:
-          WINDOWS_SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
-          WINDOWS_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
-          WINDOWS_SIGNING_CERT_SHA256: ${{ vars.WINDOWS_SIGNING_CERT_SHA256 }}
-          WINDOWS_SIGNING_CERT_THUMBPRINT: ${{ vars.WINDOWS_SIGNING_CERT_THUMBPRINT }}
-          WINDOWS_SIGNING_CERT_SUBJECT: ${{ vars.WINDOWS_SIGNING_CERT_SUBJECT }}
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $signingRoot = Join-Path $env:RUNNER_TEMP "rivune-windows-signing-$([Guid]::NewGuid().ToString('N'))"
-          try {
-            foreach ($name in @(
-              'WINDOWS_SIGNING_PFX_BASE64',
-              'WINDOWS_SIGNING_PFX_PASSWORD',
-              'WINDOWS_SIGNING_CERT_SHA256',
-              'WINDOWS_SIGNING_CERT_THUMBPRINT',
-              'WINDOWS_SIGNING_CERT_SUBJECT'
-            )) {
-              if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
-                throw "Required Windows signing configuration is missing: $name"
-              }
-            }
-            $expectedCert = ($env:WINDOWS_SIGNING_CERT_SHA256 -replace '[:\s]', '').ToLowerInvariant()
-            $expectedThumbprint = ($env:WINDOWS_SIGNING_CERT_THUMBPRINT -replace '[:\s]', '').ToLowerInvariant()
-            $expectedSubject = $env:WINDOWS_SIGNING_CERT_SUBJECT
-            if ($expectedCert -cnotmatch '^[0-9a-f]{64}$') {
-              throw 'WINDOWS_SIGNING_CERT_SHA256 must be a SHA-256 certificate fingerprint.'
-            }
-            if ($expectedThumbprint -cnotmatch '^[0-9a-f]{40}$') {
-              throw 'WINDOWS_SIGNING_CERT_THUMBPRINT must be a SHA-1 Windows certificate thumbprint.'
-            }
-
-            New-Item -ItemType Directory -Path $signingRoot | Out-Null
-            $pfxPath = Join-Path $signingRoot 'rivune-authenticode.pfx'
-            try {
-              $pfxBytes = [Convert]::FromBase64String($env:WINDOWS_SIGNING_PFX_BASE64)
-            } catch {
-              throw 'WINDOWS_SIGNING_PFX_BASE64 is not valid base64.'
-            }
-            if ($pfxBytes.Length -le 0) { throw 'Decoded Windows signing PFX is empty.' }
-            [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
-            [Array]::Clear($pfxBytes, 0, $pfxBytes.Length)
-
-            $signtool = Get-ChildItem -LiteralPath "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
-              -Filter signtool.exe -File -Recurse |
-              Where-Object { $_.Directory.Name -ceq 'x64' } |
-              Sort-Object FullName -Descending |
-              Select-Object -First 1 -ExpandProperty FullName
-            if ([string]::IsNullOrWhiteSpace($signtool)) { throw 'Windows SDK signtool.exe was not found.' }
-
-            $signedDirectory = Join-Path $env:GITHUB_WORKSPACE 'signed-windows'
-            New-Item -ItemType Directory -Path $signedDirectory | Out-Null
-            $targets = @(
-              @{ FileName = 'Rivune-x64.exe'; Machine = [uint16]0x8664 },
-              @{ FileName = 'Rivune-arm64.exe'; Machine = [uint16]0xAA64 }
-            )
-            foreach ($target in $targets) {
-              $source = Join-Path $env:GITHUB_WORKSPACE "unsigned-windows-input/$($target.FileName)"
-              $asset = Join-Path $signedDirectory $target.FileName
-              if (-not (Test-Path -LiteralPath $source -PathType Leaf) -or (Get-Item -LiteralPath $source).Length -le 0) {
-                throw "Unsigned Windows signing input is absent or empty: $($target.FileName)"
-              }
-              Copy-Item -LiteralPath $source -Destination $asset
-              & $signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
-                /f $pfxPath /p $env:WINDOWS_SIGNING_PFX_PASSWORD $asset
-              if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed for $($target.FileName)." }
-              & $signtool verify /pa /all /v $asset
-              if ($LASTEXITCODE -ne 0) { throw "Authenticode verification failed for $($target.FileName)." }
-
-              $signature = Get-AuthenticodeSignature -FilePath $asset
-              if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) {
-                throw "$($target.FileName) does not have a valid Authenticode signature: $($signature.Status)."
-              }
-              $actualCert = [Convert]::ToHexString(
-                [Security.Cryptography.SHA256]::HashData($signature.SignerCertificate.RawData)
-              ).ToLowerInvariant()
-              $actualThumbprint = ($signature.SignerCertificate.Thumbprint -replace '[:\s]', '').ToLowerInvariant()
-              if ($actualCert -cne $expectedCert -or
-                  $actualThumbprint -cne $expectedThumbprint -or
-                  $signature.SignerCertificate.Subject -cne $expectedSubject) {
-                throw "$($target.FileName) Authenticode signer does not match the pinned certificate fingerprint, thumbprint, and subject."
-              }
-
-              $stream = [IO.File]::OpenRead($asset)
-              try {
-                $reader = [IO.BinaryReader]::new($stream)
-                if ($reader.ReadUInt16() -ne 0x5a4d) { throw "$($target.FileName) has no DOS PE header." }
-                $stream.Position = 0x3c
-                $peOffset = $reader.ReadUInt32()
-                $stream.Position = $peOffset
-                if ($reader.ReadUInt32() -ne 0x00004550) { throw "$($target.FileName) has no PE signature." }
-                if ($reader.ReadUInt16() -ne $target.Machine) { throw "$($target.FileName) has the wrong PE machine." }
-              } finally {
-                if ($null -ne $reader) { $reader.Dispose() } else { $stream.Dispose() }
-              }
-            }
-            $files = @((Get-ChildItem -LiteralPath $signedDirectory -File).Name | Sort-Object)
-            if (Compare-Object -ReferenceObject @('Rivune-arm64.exe', 'Rivune-x64.exe') -DifferenceObject $files -CaseSensitive) {
-              throw 'Signed Windows artifact must contain exactly Rivune-x64.exe and Rivune-arm64.exe.'
-            }
-          } finally {
-            Remove-Item -LiteralPath $signingRoot -Recurse -Force -ErrorAction SilentlyContinue
-            $env:WINDOWS_SIGNING_PFX_BASE64 = $null
-            $env:WINDOWS_SIGNING_PFX_PASSWORD = $null
-          }
-      - name: Remove Windows signing material
-        if: ${{ always() }}
-        shell: pwsh
-        run: Get-ChildItem -LiteralPath $env:RUNNER_TEMP -Directory -Filter 'rivune-windows-signing-*' -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
-      - name: Upload immutable signed Windows executables
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: signed-windows-${{ github.run_id }}-${{ github.run_attempt }}
-          path: signed-windows/
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-          overwrite: false
-
-  build-assets:
-    name: Build Android and collect signed Windows release inputs
-    if: needs.authorize.outputs.authorized == 'true'
-    needs:
-      - authorize
-      - sign-windows
     runs-on: ubuntu-latest
     outputs:
       release_inputs_artifact_name: release-inputs-${{ github.run_id }}-${{ github.run_attempt }}
@@ -463,10 +320,10 @@ jobs:
           ref: ${{ needs.authorize.outputs.sha }}
           persist-credentials: false
           fetch-depth: 0
-      - name: Download immutable signed Windows release executables
+      - name: Download immutable unsigned Windows release executables
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ${{ needs.sign-windows.outputs.artifact_name }}
+          name: ${{ needs.windows-asset.outputs.artifact_name }}
           path: release-assets
       - name: Set up Java
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
@@ -1593,7 +1450,7 @@ jobs:
           trap - EXIT
 
   verify-windows-release:
-    name: Verify adopted Windows executables
+    name: Verify adopted unsigned Windows executables
     if: needs.authorize.outputs.authorized == 'true'
     needs:
       - authorize
@@ -1603,33 +1460,18 @@ jobs:
       # GitHub exposes draft release assets only to tokens with contents: write.
       contents: write
     steps:
-      - name: Verify remote executable architectures, versions, hashes, and Authenticode signers
+      - name: Verify remote executable architectures, versions, hashes, and unsigned status
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ needs.release.outputs.release_id }}
           RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
-          WINDOWS_SIGNING_CERT_SHA256: ${{ vars.WINDOWS_SIGNING_CERT_SHA256 }}
-          WINDOWS_SIGNING_CERT_THUMBPRINT: ${{ vars.WINDOWS_SIGNING_CERT_THUMBPRINT }}
-          WINDOWS_SIGNING_CERT_SUBJECT: ${{ vars.WINDOWS_SIGNING_CERT_SUBJECT }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($name in @(
-            'GH_TOKEN',
-            'RELEASE_ID',
-            'RELEASE_TAG',
-            'WINDOWS_SIGNING_CERT_SHA256',
-            'WINDOWS_SIGNING_CERT_THUMBPRINT',
-            'WINDOWS_SIGNING_CERT_SUBJECT'
-          )) {
+          foreach ($name in @('GH_TOKEN', 'RELEASE_ID', 'RELEASE_TAG')) {
             if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
               throw "Required Windows release verification value is missing: $name"
             }
-          }
-          $expectedCert = ($env:WINDOWS_SIGNING_CERT_SHA256 -replace '[:\s]', '').ToLowerInvariant()
-          $expectedThumbprint = ($env:WINDOWS_SIGNING_CERT_THUMBPRINT -replace '[:\s]', '').ToLowerInvariant()
-          if ($expectedCert -cnotmatch '^[0-9a-f]{64}$' -or $expectedThumbprint -cnotmatch '^[0-9a-f]{40}$') {
-            throw 'Pinned Windows certificate fingerprint or thumbprint is invalid.'
           }
           if ($env:RELEASE_ID -notmatch '^[1-9][0-9]*$') { throw 'Validated GitHub Release ID is invalid.' }
           if ($env:RELEASE_TAG -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
@@ -1712,18 +1554,8 @@ jobs:
             if ($version.FileVersion -ne $fileVersion -or $version.ProductVersion -ne $versionName) {
               throw "$($target.AssetName) version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
             }
-            $signature = Get-AuthenticodeSignature -FilePath $executable
-            if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) {
-              throw "Adopted $($target.AssetName) does not have a valid Authenticode signature."
-            }
-            $actualCert = [Convert]::ToHexString(
-              [Security.Cryptography.SHA256]::HashData($signature.SignerCertificate.RawData)
-            ).ToLowerInvariant()
-            $actualThumbprint = ($signature.SignerCertificate.Thumbprint -replace '[:\s]', '').ToLowerInvariant()
-            if ($actualCert -cne $expectedCert -or
-                $actualThumbprint -cne $expectedThumbprint -or
-                $signature.SignerCertificate.Subject -cne $env:WINDOWS_SIGNING_CERT_SUBJECT) {
-              throw "Adopted $($target.AssetName) signer does not match the pinned release certificate."
+            if ((Get-AuthenticodeSignature -FilePath $executable).Status -ne 'NotSigned') {
+              throw "Adopted $($target.AssetName) must remain unsigned."
             }
           }
 
