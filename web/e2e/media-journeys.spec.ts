@@ -1358,11 +1358,11 @@ test("season selector supports horizontal mouse dragging without changing the ac
   await page.mouse.move(dragStartX, bounds.y + bounds.height / 2);
   await page.mouse.down();
   await page.mouse.move(dragStartX - dragDistance, bounds.y + bounds.height / 2, { steps: 4 });
+  await expect.poll(() => seasons.evaluate((element) => element.scrollLeft)).toBeGreaterThan(dragDistance - 10);
+  const draggedScrollLeft = await seasons.evaluate((element) => element.scrollLeft);
   await page.mouse.up();
 
-  const releasedScrollLeft = await seasons.evaluate((element) => element.scrollLeft);
-  expect(releasedScrollLeft).toBeGreaterThan(dragDistance - 10);
-  const momentumTarget = Math.min(maxScrollLeft - 1, releasedScrollLeft + 4);
+  const momentumTarget = Math.min(maxScrollLeft - 1, draggedScrollLeft + 4);
   await expect.poll(() => seasons.evaluate((element) => element.scrollLeft)).toBeGreaterThan(momentumTarget);
   await expect(activeSeason).toHaveAttribute("aria-selected", "true");
   await page.getByRole("tab", { name: /^Season 2\b/ }).click();
