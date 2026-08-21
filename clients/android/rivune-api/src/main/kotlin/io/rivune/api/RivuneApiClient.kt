@@ -1010,7 +1010,7 @@ class RivuneApiClient(
                     requireServerDestination(response.request.url)
                     if (response.code in 300..399) throw decodeServerError(response.code, "")
                     val body = response.body
-                    if (body != null && body.contentLength() > MAX_PROFILE_AVATAR_BYTES) {
+                    if (body.contentLength() > MAX_PROFILE_AVATAR_BYTES) {
                         throw RivuneApiException.ResponseTooLarge("2 MiB")
                     }
                     val bytes = readBoundedBytes(body, MAX_PROFILE_AVATAR_BYTES)
@@ -1038,8 +1038,7 @@ class RivuneApiClient(
         return responseData.second
     }
 
-    private fun readBoundedBytes(body: ResponseBody?, maximumBytes: Long): ByteArray {
-        if (body == null) return ByteArray(0)
+    private fun readBoundedBytes(body: ResponseBody, maximumBytes: Long): ByteArray {
         val source = body.source()
         val bufferedBody = Buffer()
         var remaining = maximumBytes
@@ -1054,8 +1053,7 @@ class RivuneApiClient(
 
     private data class ResponseData(val status: Int, val body: String)
 
-    private fun readResponseBody(body: ResponseBody?): String {
-        if (body == null) return ""
+    private fun readResponseBody(body: ResponseBody): String {
         if (body.contentLength() > MAX_RESPONSE_BODY_BYTES) {
             throw RivuneApiException.ResponseTooLarge()
         }

@@ -354,7 +354,7 @@ internal class AppUpdateCoordinator(
         downloadHttpClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw InvalidUpdateManifest("Update download returned HTTP ${response.code}")
             requireAllowedFinalDownloadUrl(response.request.url)
-            val body = response.body ?: throw InvalidUpdateManifest("The update download is empty")
+            val body = response.body
             if (body.contentLength() > MAX_UPDATE_APK_BYTES ||
                 (body.contentLength() >= 0L && body.contentLength() != expected.size)
             ) throw InvalidUpdateManifest("The update download size does not match")
