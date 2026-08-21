@@ -35,7 +35,7 @@ public sealed class WindowsDevicePreferencesTests : IDisposable
             AutomaticallyShowSources = true,
             VideoAspectIndex = 2,
             Motion = DeviceMotionPreference.Reduced,
-            AccentColor = WindowsDevicePreferences.CoralAccentColor,
+            AccentColor = WindowsDevicePreferences.RoseAccentColor,
             AutoSkipIntro = true,
             AutoSkipRecap = true,
             AutoSkipOutro = true,

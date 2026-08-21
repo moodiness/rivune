@@ -145,6 +145,15 @@ class AppUpdateTest {
         assertEquals(-1, compareSemanticVersions("1.2.0-rc.1", "1.2.0"))
     }
 
+    @Test
+    fun installerConfirmationRequiresMatchingRecordedLiveSessionAndIntent() {
+        assertEquals(true, canLaunchInstallationConfirmation(42, 42, sessionExists = true, confirmationPresent = true))
+        assertEquals(false, canLaunchInstallationConfirmation(42, 41, sessionExists = true, confirmationPresent = true))
+        assertEquals(false, canLaunchInstallationConfirmation(42, 42, sessionExists = false, confirmationPresent = true))
+        assertEquals(false, canLaunchInstallationConfirmation(42, 42, sessionExists = true, confirmationPresent = false))
+        assertEquals(false, canLaunchInstallationConfirmation(-1, -1, sessionExists = true, confirmationPresent = true))
+    }
+
     private fun responseClient(response: (okhttp3.Request) -> Response): OkHttpClient =
         OkHttpClient.Builder().addInterceptor { response(it.request()) }.build()
 

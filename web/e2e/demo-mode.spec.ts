@@ -69,6 +69,58 @@ test("real setup keeps its setup token confined to the setup request", async ({ 
   expect(rivune.matching("/api/v1/demo/sessions", "POST")).toHaveLength(0);
 });
 
+test("setup and authentication remain usable when browser storage is blocked", async ({ page, rivune }) => {
+  await rivune.configurePreSetup(page);
+  await page.addInitScript(() => {
+    for (const method of ["getItem", "setItem", "removeItem"] as const) {
+      Object.defineProperty(Storage.prototype, method, {
+        configurable: true,
+        value() { throw new DOMException("Browser storage is blocked", "SecurityError"); },
+      });
+    }
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Set up server", exact: true }).click();
+  await page.getByLabel("Space name").fill("Storage-free server");
+  await page.getByLabel("Administrator account").fill("owner");
+  await page.getByLabel("First profile").fill("Alex");
+  await page.getByLabel("Administrator password").fill("correct-horse-battery-staple");
+  await page.getByLabel("Setup token").fill("fixture-setup-token");
+  await page.getByRole("button", { name: /Create my space/ }).click();
+
+  const account = await rivune.waitForRequest("/api/v1/auth/me", "GET");
+  expect(account.authorization).toBe("Bearer fixture-access");
+  await expect(page.getByRole("heading", { name: "Who's watching?" })).toBeVisible();
+});
+
+test("failed browser storage writes cannot resurrect stale credentials", async ({ page, rivune }) => {
+  await rivune.configurePreSetup(page);
+  await page.evaluate(() => {
+    localStorage.setItem("rivune.access", "stale-access");
+    localStorage.setItem("rivune.refresh", "stale-refresh");
+    localStorage.setItem("rivune.session", "stale-session");
+  });
+  await page.addInitScript(() => {
+    for (const method of ["setItem", "removeItem"] as const) {
+      Object.defineProperty(Storage.prototype, method, {
+        configurable: true,
+        value() { throw new DOMException("Browser storage is read-only", "QuotaExceededError"); },
+      });
+    }
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Set up server", exact: true }).click();
+  await page.getByLabel("Space name").fill("Read-only storage server");
+  await page.getByLabel("Administrator account").fill("owner");
+  await page.getByLabel("First profile").fill("Alex");
+  await page.getByLabel("Administrator password").fill("correct-horse-battery-staple");
+  await page.getByLabel("Setup token").fill("fixture-setup-token");
+  await page.getByRole("button", { name: /Create my space/ }).click();
+
+  const account = await rivune.waitForRequest("/api/v1/auth/me", "GET");
+  expect(account.authorization).toBe("Bearer fixture-access");
+});
+
 test("intentional demo admission is bearer-free and preserves real credentials until success", async ({ page, rivune }) => {
   await rivune.configurePreSetup(page);
   await page.evaluate(() => {

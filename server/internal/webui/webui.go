@@ -57,6 +57,7 @@ func serveFile(w http.ResponseWriter, name string, content []byte) {
 	if name == "index.html" {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
+		w.Header().Set("Referrer-Policy", "no-referrer")
 	} else if strings.HasPrefix(name, "assets/") {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	}

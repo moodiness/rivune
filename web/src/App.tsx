@@ -2,6 +2,7 @@ import { LoaderCircle, RefreshCw, ServerOff } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { principalIdentity, useAuth } from "./auth";
 import { api, APIError, clearMaintenanceMode, MAINTENANCE_MODE_EVENT, maintenanceModeMessage } from "./api";
+import { safeLocalStorage } from "./browserStorage";
 import { Button, RivuneMark } from "./components";
 import { clearMediaCaches } from "./homeCache";
 import { setLocale, translate as t } from "./i18n";
@@ -40,20 +41,12 @@ const principalStorageKey = "rivune.principal.v1";
 
 
 function rememberedPrincipal(): string | null {
-  try {
-    return localStorage.getItem(principalStorageKey);
-  } catch {
-    return null;
-  }
+  return safeLocalStorage.getItem(principalStorageKey);
 }
 
 function rememberPrincipal(principal: string | null): void {
-  try {
-    if (principal === null) localStorage.removeItem(principalStorageKey);
-    else localStorage.setItem(principalStorageKey, principal);
-  } catch {
-    // In-memory isolation still applies when persistent storage is unavailable.
-  }
+  if (principal === null) safeLocalStorage.removeItem(principalStorageKey);
+  else safeLocalStorage.setItem(principalStorageKey, principal);
 }
 
 function decodeRouteSegment(value: string): string {
@@ -385,7 +378,7 @@ function useSessionNotifications(sessionID: string | undefined, refreshAccount: 
     let active = true;
     let polling = false;
     const cursorKey = `rivune.notifications.${sessionID}`;
-    const storedCursor = localStorage.getItem(cursorKey);
+    const storedCursor = safeLocalStorage.getItem(cursorKey);
     let cursor = storedCursor !== null && nonNegativeDecimal.test(storedCursor) ? storedCursor : "0";
     const poll = async () => {
       if (polling) return;
@@ -397,7 +390,7 @@ function useSessionNotifications(sessionID: string | undefined, refreshAccount: 
           await notifyInfo(notification.message, t("notifications.from", { sender: notification.senderUsername }));
           if (!active) return;
           cursor = notification.id;
-          localStorage.setItem(cursorKey, cursor);
+          safeLocalStorage.setItem(cursorKey, cursor);
           void api.acknowledgeSessionNotification(notification.id).catch(() => undefined);
         }
       } catch (cause) {

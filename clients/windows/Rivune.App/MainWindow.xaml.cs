@@ -27,10 +27,10 @@ public sealed partial class MainWindow : Window
     private void ConfigureTitleBar()
     {
         var titleBar = AppWindow.TitleBar;
-        titleBar.BackgroundColor = ColorHelper.FromArgb(255, 5, 5, 5);
-        titleBar.InactiveBackgroundColor = ColorHelper.FromArgb(255, 5, 5, 5);
-        titleBar.ButtonBackgroundColor = ColorHelper.FromArgb(255, 5, 5, 5);
-        titleBar.ButtonInactiveBackgroundColor = ColorHelper.FromArgb(255, 5, 5, 5);
+        titleBar.BackgroundColor = Colors.Black;
+        titleBar.InactiveBackgroundColor = Colors.Black;
+        titleBar.ButtonBackgroundColor = Colors.Black;
+        titleBar.ButtonInactiveBackgroundColor = Colors.Black;
         titleBar.ButtonHoverBackgroundColor = ColorHelper.FromArgb(255, 27, 27, 27);
         titleBar.ButtonPressedBackgroundColor = ColorHelper.FromArgb(255, 57, 57, 57);
         titleBar.ButtonForegroundColor = Colors.White;

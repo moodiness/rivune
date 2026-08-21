@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices.WindowsRuntime;
+using System.Security.Cryptography;
 using System.Globalization;
 using System.Threading;
 using MicrosoftDispatcherQueue = Microsoft.UI.Dispatching.DispatcherQueue;
@@ -26,6 +28,7 @@ namespace Rivune.App;
 public sealed partial class MainPage : Page
 {
     private static readonly TimeSpan RestoreTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(3);
     private readonly MainPageViewModel _state = new();
     private readonly ServerAddressStore _serverAddressStore = new();
     private WindowsDevicePreferencesStore? _devicePreferencesStore;
@@ -47,6 +50,7 @@ public sealed partial class MainPage : Page
     private MediaSource? _mediaSource;
     private global::Windows.Web.Http.HttpClient? _mediaHttpClient;
     private LoopbackMediaProxy? _directMediaProxy;
+    private InMemoryRandomAccessStream? _subtitleStream;
     private readonly object _progressSync = new();
     private readonly object _endingSync = new();
     private readonly object _stopSync = new();
@@ -367,9 +371,9 @@ public sealed partial class MainPage : Page
         ServerAddressBox.Text = value;
         if (!Uri.TryCreate(value, UriKind.Absolute, out var server) ||
             !string.IsNullOrEmpty(server.UserInfo) ||
-            (server.Scheme != Uri.UriSchemeHttps && !(server.Scheme == Uri.UriSchemeHttp && server.IsLoopback)))
+            !TrustedLocalTransport.IsAllowedServerUri(server))
         {
-            ShowServer("Use an HTTPS address, or HTTP only for a loopback server.");
+            ShowServer("Use HTTPS, or HTTP only with localhost or a literal trusted-private address.");
             ServerAddressBox.Focus(FocusState.Programmatic);
             return;
         }
@@ -1161,7 +1165,7 @@ public sealed partial class MainPage : Page
                 _mediaSource = MediaSource.CreateFromUri(_directMediaProxy.PlaybackUri);
             }
             cancellationToken.ThrowIfCancellationRequested();
-            AttachSelectedSubtitle(_mediaSource, client);
+            await AttachSelectedSubtitleAsync(_mediaSource, client, cancellationToken);
             _mediaPlayer.Source = _mediaSource;
             cancellationToken.ThrowIfCancellationRequested();
             _mediaPlayer.PlaybackSession.PlaybackRate = PlaybackRates[_playbackRateIndex];
@@ -1230,6 +1234,8 @@ public sealed partial class MainPage : Page
         _mediaPlayer.Source = null;
         _mediaSource?.Dispose();
         _mediaSource = null;
+        _subtitleStream?.Dispose();
+        _subtitleStream = null;
         _adaptiveMediaSource = null;
         _mediaHttpClient?.Dispose();
         _mediaHttpClient = null;
@@ -1244,14 +1250,31 @@ public sealed partial class MainPage : Page
         ReleaseMediaPlayer(previous);
     }
 
-    private void AttachSelectedSubtitle(MediaSource mediaSource, RivuneApiClient client)
+    private async Task AttachSelectedSubtitleAsync(
+        MediaSource mediaSource,
+        RivuneApiClient client,
+        CancellationToken cancellationToken)
     {
         var session = _state.PlaybackSession;
         if (session?.SelectedSubtitleId is not { Length: > 0 } selectedId) return;
         var subtitle = session.Subtitles.FirstOrDefault(value => value.Id == selectedId);
         if (subtitle is not { Delivery: PlaybackSubtitleDelivery.External, Url: { Length: > 0 } url }) return;
-        var subtitleUri = client.ResolveResponseResourceUrl(url);
-        mediaSource.ExternalTimedTextSources.Add(TimedTextSource.CreateFromUri(subtitleUri));
+
+        var contents = await client.DownloadSameOriginSubtitleAsync(url, cancellationToken);
+        InMemoryRandomAccessStream? stream = new();
+        try
+        {
+            await stream.WriteAsync(contents.AsBuffer()).AsTask(cancellationToken);
+            stream.Seek(0);
+            mediaSource.ExternalTimedTextSources.Add(TimedTextSource.CreateFromStream(stream));
+            _subtitleStream = stream;
+            stream = null;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(contents);
+            stream?.Dispose();
+        }
     }
 
     private async void CloseSources_Click(object sender, RoutedEventArgs e)
@@ -1900,34 +1923,36 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private async Task ShutdownAsync()
-    {
-        if (_restoreTask is not null) await _restoreTask;
-        if (_updateOperationTask is { } updateOperation)
+    private Task ShutdownAsync() => ShutdownDeadline.RunAsync(
+        async cancellationToken =>
         {
-            try { await updateOperation; }
-            catch (Exception) { }
-        }
-        if (_devicePreferencesStore is { } devicePreferencesStore)
-            await devicePreferencesStore.DisposeAsync();
-        try { await _serverAddressOperation; }
-        catch (Exception) { }
-        Task? ending;
-        lock (_endingSync) ending = _endingTask;
-        if (ending is not null)
+            if (_restoreTask is not null) await _restoreTask.WaitAsync(cancellationToken);
+            if (_updateOperationTask is { } updateOperation)
+                await updateOperation.WaitAsync(cancellationToken);
+            if (_devicePreferencesStore is { } devicePreferencesStore)
+                await devicePreferencesStore.DisposeAsync().AsTask().WaitAsync(cancellationToken);
+            await _serverAddressOperation.WaitAsync(cancellationToken);
+
+            Task? ending;
+            lock (_endingSync) ending = _endingTask;
+            if (ending is not null)
+            {
+                await ending.WaitAsync(cancellationToken);
+            }
+            else if (_state.PlaybackSession is not null)
+            {
+                await FlushProgressAsync(false, cancellationToken);
+                await StopSessionOnceAsync().WaitAsync(cancellationToken);
+            }
+        },
+        ShutdownTimeout,
+        () =>
         {
-            await ending;
-        }
-        else if (_state.PlaybackSession is not null)
-        {
-            await FlushProgressAsync(false, CancellationToken.None);
-            await StopSessionOnceAsync();
-        }
-        ClearMediaSource();
-        ReleaseMediaPlayer(_mediaPlayer);
-        _state.Dispose();
-        _serverAddressStore.Dispose();
-    }
+            ClearMediaSource();
+            ReleaseMediaPlayer(_mediaPlayer);
+            _state.Dispose();
+            _serverAddressStore.Dispose();
+        });
 
     private void ShowOnly(UIElement view)
     {
@@ -2017,11 +2042,10 @@ public sealed partial class MainPage : Page
             SubtitleModes = [PlaybackSubtitleDelivery.External, PlaybackSubtitleDelivery.Burn],
             MediaProfiles = profiles,
         };
-    }
 
     private static string FriendlyError(Exception exception) => exception switch
     {
-        InvalidServerUrlException => "That server address is not allowed. Use HTTPS or loopback HTTP.",
+        InvalidServerUrlException => "That server address is not allowed. Use HTTPS or trusted-local HTTP with localhost or a literal private address.",
         IncompatibleProtocolException => "This server uses an incompatible Rivune protocol version.",
         NotAuthenticatedException => "Your session is no longer valid. Authorize this device again.",
         RivuneServerException server => server.Message,

@@ -176,9 +176,12 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   expect(sourceRequest.body.capabilities).not.toHaveProperty("maximumVideoBitrateKbps");
   const mediaProfiles = sourceRequest.body.capabilities.mediaProfiles as Array<{ videoCodec: string; audioCodec?: string; maximumVideoBitDepth?: number }>;
   expect(mediaProfiles.every((profile) => profile.maximumVideoBitDepth === 8 || profile.maximumVideoBitDepth === 10)).toBe(true);
-  const supportsHEVCMain10 = await page.evaluate(() => Boolean(document.createElement("video").canPlayType('video/mp4; codecs="hvc1.2.4.L153.B0"')));
-  expect(mediaProfiles.some((profile) => profile.videoCodec === "h265" && profile.maximumVideoBitDepth === 10)).toBe(supportsHEVCMain10);
-  expect(mediaProfiles.some((profile) => profile.videoCodec === "h265" && profile.audioCodec === "aac" && profile.maximumVideoBitDepth === 10)).toBe(true);
+  const browserMediaSupport = await page.evaluate(() => ({
+    hevcMain10: Boolean(document.createElement("video").canPlayType('video/mp4; codecs="hvc1.2.4.L153.B0"')),
+    aac: Boolean(document.createElement("audio").canPlayType('audio/mp4; codecs="mp4a.40.2"')),
+  }));
+  expect(mediaProfiles.some((profile) => profile.videoCodec === "h265" && profile.maximumVideoBitDepth === 10)).toBe(browserMediaSupport.hevcMain10);
+  expect(mediaProfiles.some((profile) => profile.videoCodec === "h265" && profile.audioCodec === "aac" && profile.maximumVideoBitDepth === 10)).toBe(browserMediaSupport.hevcMain10 && browserMediaSupport.aac);
   expect(await page.evaluate(() => window.matchMedia("(dynamic-range: high)").matches)).toBe(false);
   expect(sourceRequest.body.capabilities.hdrFormats).toEqual(["sdr"]);
   await expect(page.getByRole("button", { name: "Play episode" })).toBeEnabled();

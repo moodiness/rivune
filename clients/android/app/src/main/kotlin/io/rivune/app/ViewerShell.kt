@@ -5453,7 +5453,7 @@ private fun PlaybackTargetDialog(
         }
     }
 }
-private enum class EmbeddedPlaybackIcon(@DrawableRes val resourceId: Int) {
+private enum class EmbeddedPlaybackIcon(@field:DrawableRes val resourceId: Int) {
     RIVUNE(R.mipmap.ic_launcher),
     MEDIA3(R.drawable.media3_mark),
     MPV(R.drawable.mpv_mark),
@@ -6549,6 +6549,7 @@ private fun viewerFailureMessage(failure: UiFailure): String = stringResource(
     when (failure) {
         UiFailure.SERVER_INVALID -> R.string.error_invalid_server
         UiFailure.SERVER_UNREACHABLE -> R.string.error_network
+        UiFailure.LOCAL_NETWORK_PERMISSION -> R.string.error_local_network_permission
         UiFailure.PROTOCOL_INCOMPATIBLE -> R.string.error_incompatible_server
         UiFailure.SETUP_REQUIRED -> R.string.error_setup_required
         UiFailure.DEVICE_LIMIT -> R.string.error_device_limit

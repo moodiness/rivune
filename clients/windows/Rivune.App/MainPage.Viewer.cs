@@ -209,7 +209,7 @@ public sealed partial class MainPage
             {
                 XamlRoot = XamlRoot,
                 Title = $"Rivune {result.LatestVersion} is available",
-                Content = $"You are using Rivune {result.CurrentVersion}. Download the portable {result.Package.FileName} from GitHub, verify its published size and SHA-256, then close and restart Rivune to replace this executable?",
+                Content = $"You are using Rivune {result.CurrentVersion}. Download the signed portable {result.Package.FileName} from GitHub, verify its size, SHA-256, pinned Authenticode signer, revocation status, and ProductVersion, then close and restart Rivune to replace this executable?",
                 PrimaryButtonText = "Download update",
                 CloseButtonText = "Not now",
                 DefaultButton = ContentDialogButton.Primary,
@@ -222,7 +222,7 @@ public sealed partial class MainPage
             {
                 XamlRoot = XamlRoot,
                 Title = $"Downloading Rivune {result.LatestVersion}",
-                Content = $"Downloading {result.Package.FileName} over HTTPS and verifying its exact size and SHA-256 before any update is started.",
+                Content = $"Downloading {result.Package.FileName} over HTTPS and verifying its exact size, SHA-256, Authenticode signature, revocation status, pinned signer, and ProductVersion before any update is started.",
             };
             var downloadingOpened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             downloading.Opened += (_, _) => downloadingOpened.TrySetResult();
@@ -257,6 +257,7 @@ public sealed partial class MainPage
                 {
                     await AppUpdateChecker.DownloadPackageAsync(result.Package, destination, cancellation.Token);
                 }
+                var signerSha256 = AppUpdateSignatureVerifier.Verify(updatePath, result.LatestVersion);
 
                 HideDialog(downloading);
                 await downloadingOperation;
@@ -265,13 +266,14 @@ public sealed partial class MainPage
                     await DeleteTemporaryUpdateAsync(updatePath);
                     return;
                 }
-
                 PortableAppUpdate.StartHandoff(
                     updatePath,
                     processPath,
                     Environment.ProcessId,
                     result.Package.Size,
-                    result.Package.Sha256);
+                    result.Package.Sha256,
+                    signerSha256,
+                    result.LatestVersion);
                 App.MainWindow.Close();
                 return;
             }

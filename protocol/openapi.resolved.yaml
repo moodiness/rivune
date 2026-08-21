@@ -5057,8 +5057,12 @@ components:
             anyOf:
               - required:
                   - profileIds
+                properties:
+                  profileIds: {}
               - required:
                   - categoryIds
+                properties:
+                  categoryIds: {}
         - required:
             - profileIds
           properties:
@@ -9036,8 +9040,12 @@ components:
                 anyOf:
                   - required:
                       - profileIds
+                    properties:
+                      profileIds: {}
                   - required:
                       - categoryIds
+                    properties:
+                      categoryIds: {}
             - required:
                 - profileIds
               properties:
@@ -9843,11 +9851,14 @@ components:
             required:
               - sourceAddonId
             properties:
+              sourceAddonId: {}
               provider:
                 const: addon
           else:
             required:
               - externalId
+            properties:
+              externalId: {}
       properties:
         mediaType:
           type: string

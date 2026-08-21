@@ -17,6 +17,7 @@ public sealed class RivuneApiClient : IDisposable
     };
 
     private const int MaximumResponseBodyBytes = 16 * 1024 * 1024;
+    private const int MaximumSubtitleBodyBytes = 2 * 1024 * 1024;
 
     private sealed record DiscoveryEnvelope
     {
@@ -345,14 +346,26 @@ public sealed class RivuneApiClient : IDisposable
         }
     }
 
-    public async Task<byte[]> DownloadSameOriginResourceAsync(
+    public Task<byte[]> DownloadSameOriginResourceAsync(
         string value,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        DownloadSameOriginResourceAsync(value, "image/*", MaximumResponseBodyBytes, cancellationToken);
+
+    public Task<byte[]> DownloadSameOriginSubtitleAsync(
+        string value,
+        CancellationToken cancellationToken = default) =>
+        DownloadSameOriginResourceAsync(value, "text/vtt, application/x-subrip, text/plain", MaximumSubtitleBodyBytes, cancellationToken);
+
+    private async Task<byte[]> DownloadSameOriginResourceAsync(
+        string value,
+        string accept,
+        int maximumBytes,
+        CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
         var uri = ResolveResponseResourceUrl(value);
         using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("image/*"));
+        request.Headers.Accept.ParseAdd(accept);
         using var response = await _httpClient.SendAsync(
             request,
             HttpCompletionOption.ResponseHeadersRead,
@@ -369,11 +382,8 @@ public sealed class RivuneApiClient : IDisposable
                 retryAfter);
         }
 
-        var body = await ReadResponseBodyAsync(response.Content, cancellationToken).ConfigureAwait(false);
-        if (response.IsSuccessStatusCode)
-        {
-            return body;
-        }
+        var body = await ReadResponseBodyAsync(response.Content, maximumBytes, cancellationToken).ConfigureAwait(false);
+        if (response.IsSuccessStatusCode) return body;
 
         var exception = DecodeServerError(statusCode, body, retryAfter);
         CryptographicOperations.ZeroMemory(body);
@@ -1647,14 +1657,20 @@ public sealed class RivuneApiClient : IDisposable
         return new HttpResponsePayload(response.StatusCode, responseBody);
     }
 
+    private static Task<byte[]> ReadResponseBodyAsync(
+        HttpContent content,
+        CancellationToken cancellationToken) =>
+        ReadResponseBodyAsync(content, MaximumResponseBodyBytes, cancellationToken);
+
     private static async Task<byte[]> ReadResponseBodyAsync(
         HttpContent content,
+        int maximumBytes,
         CancellationToken cancellationToken)
     {
         var declaredLength = content.Headers.ContentLength;
-        if (declaredLength > MaximumResponseBodyBytes)
+        if (declaredLength > maximumBytes)
         {
-            throw new ResponseTooLargeException(MaximumResponseBodyBytes);
+            throw new ResponseTooLargeException(maximumBytes);
         }
 
         await using var stream = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
@@ -1667,7 +1683,7 @@ public sealed class RivuneApiClient : IDisposable
             var totalBytes = 0;
             while (true)
             {
-                var remainingWithSentinel = MaximumResponseBodyBytes + 1 - totalBytes;
+                var remainingWithSentinel = maximumBytes + 1 - totalBytes;
                 var bytesRead = await stream.ReadAsync(
                     readBuffer.AsMemory(0, Math.Min(readBuffer.Length, remainingWithSentinel)),
                     cancellationToken).ConfigureAwait(false);
@@ -1677,9 +1693,9 @@ public sealed class RivuneApiClient : IDisposable
                 }
 
                 totalBytes += bytesRead;
-                if (totalBytes > MaximumResponseBodyBytes)
+                if (totalBytes > maximumBytes)
                 {
-                    throw new ResponseTooLargeException(MaximumResponseBodyBytes);
+                    throw new ResponseTooLargeException(maximumBytes);
                 }
 
                 buffer.Write(readBuffer, 0, bytesRead);
@@ -2211,9 +2227,7 @@ public sealed class RivuneApiClient : IDisposable
         return new Uri(CredentialIssuer.Canonicalize(value), UriKind.Absolute);
     }
 
-    private static bool IsAllowedServerUrl(Uri value) =>
-        value.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
-        (value.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) && value.IsLoopback);
+    private static bool IsAllowedServerUrl(Uri value) => TrustedLocalTransport.IsAllowedServerUri(value);
     private static bool UsesProfileContext(Uri uri, HttpMethod method)
     {
         var path = uri.AbsolutePath;

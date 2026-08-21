@@ -394,7 +394,7 @@ func writeDirectProxyAssetWithStartupTimeout(w http.ResponseWriter, r *http.Requ
 	}
 
 	copyAssetHeaders(w.Header(), response.Header, true)
-	if contentType := replacementContentType(response.Header.Get("Content-Type"), upstreamURL); contentType != "" {
+	if contentType := replacementContentType(response.Header.Get("Content-Type"), upstreamURL, asset.Container, prefix); contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
 	w.WriteHeader(response.StatusCode)
@@ -461,8 +461,8 @@ func readPlaybackStartupByte(ctx context.Context, method string, response *http.
 	}
 	result := make(chan startupReadResult, 1)
 	go func() {
-		var first [1]byte
-		read, err := io.ReadFull(response.Body, first[:])
+		var first [512]byte
+		read, err := response.Body.Read(first[:])
 		result <- startupReadResult{prefix: first[:read], err: err}
 	}()
 	timer := time.NewTimer(timeout)
@@ -470,7 +470,7 @@ func readPlaybackStartupByte(ctx context.Context, method string, response *http.
 	select {
 	case completed := <-result:
 		if errors.Is(completed.err, io.EOF) {
-			if playbackResponseDeclaresContent(response) {
+			if declared, ok := playbackResponseDeclaredContentLength(response); ok && int64(len(completed.prefix)) < declared {
 				return completed.prefix, io.ErrUnexpectedEOF
 			}
 			return completed.prefix, nil
@@ -489,13 +489,13 @@ func readPlaybackStartupByte(ctx context.Context, method string, response *http.
 	}
 }
 
-func playbackResponseDeclaresContent(response *http.Response) bool {
-	if response.ContentLength > 0 {
-		return true
+func playbackResponseDeclaredContentLength(response *http.Response) (int64, bool) {
+	if response.ContentLength >= 0 {
+		return response.ContentLength, true
 	}
 	raw := strings.TrimSpace(response.Header.Get("Content-Length"))
 	length, err := strconv.ParseInt(raw, 10, 64)
-	return err == nil && length > 0
+	return length, err == nil && length >= 0
 }
 
 func playbackResponseHasBody(method string, response *http.Response) bool {
@@ -727,16 +727,68 @@ func copyAssetHeaders(destination, source http.Header, includeLength bool) {
 	}
 }
 
-func replacementContentType(current, rawURL string) string {
+func replacementContentType(current, rawURL, container string, prefix []byte) string {
 	mediaType, _, err := mime.ParseMediaType(current)
 	if err == nil && mediaType != "" && !strings.EqualFold(mediaType, "application/octet-stream") {
 		return ""
 	}
 	parsed, err := url.Parse(rawURL)
-	if err != nil {
+	if err == nil {
+		if contentType := mime.TypeByExtension(pathExtension(parsed.Path)); contentType != "" {
+			return contentType
+		}
+	}
+	if contentType := containerContentType(container); contentType != "" {
+		return contentType
+	}
+	return detectedMediaContentType(prefix)
+}
+
+func containerContentType(container string) string {
+	switch strings.ToLower(strings.TrimSpace(container)) {
+	case "mp4", "m4v", "mov":
+		return "video/mp4"
+	case "mkv", "matroska":
+		return "video/x-matroska"
+	case "webm":
+		return "video/webm"
+	case "avi":
+		return "video/x-msvideo"
+	case "mpeg", "mpg":
+		return "video/mpeg"
+	case "ts", "mpegts":
+		return "video/mp2t"
+	case "ogg", "ogv":
+		return "application/ogg"
+	case "flv":
+		return "video/x-flv"
+	default:
 		return ""
 	}
-	return mime.TypeByExtension(pathExtension(parsed.Path))
+}
+
+func detectedMediaContentType(prefix []byte) string {
+	switch {
+	case len(prefix) >= 12 && string(prefix[4:8]) == "ftyp":
+		return "video/mp4"
+	case len(prefix) >= 4 && bytes.Equal(prefix[:4], []byte{0x1a, 0x45, 0xdf, 0xa3}):
+		if bytes.Contains(bytes.ToLower(prefix), []byte("webm")) {
+			return "video/webm"
+		}
+		return "video/x-matroska"
+	case len(prefix) >= 12 && string(prefix[:4]) == "RIFF" && string(prefix[8:12]) == "AVI ":
+		return "video/x-msvideo"
+	case len(prefix) >= 4 && string(prefix[:4]) == "OggS":
+		return "application/ogg"
+	case len(prefix) >= 3 && string(prefix[:3]) == "FLV":
+		return "video/x-flv"
+	case len(prefix) >= 4 && bytes.Equal(prefix[:4], []byte{0x00, 0x00, 0x01, 0xba}):
+		return "video/mpeg"
+	case len(prefix) >= 1 && prefix[0] == 0x47:
+		return "video/mp2t"
+	default:
+		return ""
+	}
 }
 
 func isHLSPlaylist(response *http.Response, upstreamURL string) bool {

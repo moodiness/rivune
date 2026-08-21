@@ -1,0 +1,974 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0176153387E96953E951EA71 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DE8B8805F70E366672AB4820 /* Assets.xcassets */; };
+		05A5B52684AE9C1C64FB114F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 58E8B521BA1A6800B23643C5 /* Assets.xcassets */; };
+		138A52D4C225DE12985BE926 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 13170BA7E17A80904C9D3E7D /* PrivacyInfo.xcprivacy */; };
+		22AA14B8F81C2CC6C0749C69 /* RivuneAppCore in Frameworks */ = {isa = PBXBuildFile; productRef = 55E135FE6F82E33CC7B7B7B2 /* RivuneAppCore */; };
+		240C4E5332E899433D3EBA6F /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 15B4B9A0C250BB447E6444CE /* LaunchScreen.storyboard */; };
+		332DF2FF551756354CA052C2 /* RivuneAppCore in Frameworks */ = {isa = PBXBuildFile; productRef = FFD187498FD788E90C2A5D6E /* RivuneAppCore */; };
+		34C2311A9EAD3110E5C20672 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 5681213C05B72E9CAA9CCAF4 /* PrivacyInfo.xcprivacy */; };
+		6D437D60A6A3CFD01B06DCB3 /* RivuneMacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F34D5FD80D3F158DB38EDB0 /* RivuneMacApp.swift */; };
+		8428C4F065450E6ACBEBFB4A /* RivuneAppCore in Frameworks */ = {isa = PBXBuildFile; productRef = B17D0F3BB364E0D4351739A1 /* RivuneAppCore */; };
+		8AFCAB02E8D0F05CE8BBEDC3 /* RivuneTVApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FBF43D273AD736106CD4E4D /* RivuneTVApp.swift */; };
+		90C42D50B90C86ADDCD6800C /* RivuneAppCore in Frameworks */ = {isa = PBXBuildFile; productRef = 825DCD7008014753667D2801 /* RivuneAppCore */; };
+		9AA6DA3F3FF1617049FD9854 /* RivuneVisionApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35F19D0E82239B43D94E5AAE /* RivuneVisionApp.swift */; };
+		9EC2B718E2C8B24E8453ABD0 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9C8B64FAE1A118902A310803 /* Assets.xcassets */; };
+		A4570C9FB7D37CE503DF29D9 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 9C8DE299630BF35EC0BDED3B /* LaunchScreen.storyboard */; };
+		A5FB31984B56437E5EBE3494 /* RivuneIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED5017C977DBDC80461A561B /* RivuneIOSApp.swift */; };
+		A7B914BBAA4ED9017683430E /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F3E2797BB5AEC6FECE50726A /* PrivacyInfo.xcprivacy */; };
+		EA93F06DA5C09CEDA16893FD /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = FB11EF5A2EB93E2E1DAEB0E4 /* PrivacyInfo.xcprivacy */; };
+		ED6941E9E6BD29BDA41F4424 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 946A2E016CD76F0988530E12 /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		01A287E299F7B28ADB80E923 /* apple */ = {isa = PBXFileReference; lastKnownFileType = folder; name = apple; path = .; sourceTree = SOURCE_ROOT; };
+		0D5A2525A6753B218C87D44F /* Rivune-iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "Rivune-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		0F34D5FD80D3F158DB38EDB0 /* RivuneMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RivuneMacApp.swift; sourceTree = "<group>"; };
+		13170BA7E17A80904C9D3E7D /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		14F71C04EC261955A5E0C6F5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		15B4B9A0C250BB447E6444CE /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
+		1AA1F7B1466003C7ECF2263D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		2F9BEBD671D8A28BF3C2A27C /* Rivune-visionOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "Rivune-visionOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		311B900F91B00CA126B077AF /* Rivune.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Rivune.entitlements; sourceTree = "<group>"; };
+		35F19D0E82239B43D94E5AAE /* RivuneVisionApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RivuneVisionApp.swift; sourceTree = "<group>"; };
+		403C1A40762E50668A420969 /* Rivune-macOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Rivune-macOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		4FBF43D273AD736106CD4E4D /* RivuneTVApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RivuneTVApp.swift; sourceTree = "<group>"; };
+		5681213C05B72E9CAA9CCAF4 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		58E8B521BA1A6800B23643C5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		82A189138BD45ECFABB2B0B6 /* Rivune-tvOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "Rivune-tvOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		946A2E016CD76F0988530E12 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		98E2D3C8F8DD3514397B6CE5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		9C8B64FAE1A118902A310803 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		9C8DE299630BF35EC0BDED3B /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
+		C822D42FDDBFF51A2C9B05B8 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		DE8B8805F70E366672AB4820 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		ED5017C977DBDC80461A561B /* RivuneIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RivuneIOSApp.swift; sourceTree = "<group>"; };
+		F3E2797BB5AEC6FECE50726A /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		FB11EF5A2EB93E2E1DAEB0E4 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		0E601B3A2F257EF22880C663 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				332DF2FF551756354CA052C2 /* RivuneAppCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BC42BB2C1D43E137F2937FF9 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				90C42D50B90C86ADDCD6800C /* RivuneAppCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC9230250E9ABB6FB2DAEEB2 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				22AA14B8F81C2CC6C0749C69 /* RivuneAppCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F8F8139F06B23BE720BC83F4 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8428C4F065450E6ACBEBFB4A /* RivuneAppCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		387BCF2CD5765DACE36EA5F6 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				01A287E299F7B28ADB80E923 /* apple */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+		3FBC693027CF69CDD818FD99 /* macOS */ = {
+			isa = PBXGroup;
+			children = (
+				DE8B8805F70E366672AB4820 /* Assets.xcassets */,
+				98E2D3C8F8DD3514397B6CE5 /* Info.plist */,
+				5681213C05B72E9CAA9CCAF4 /* PrivacyInfo.xcprivacy */,
+				311B900F91B00CA126B077AF /* Rivune.entitlements */,
+				0F34D5FD80D3F158DB38EDB0 /* RivuneMacApp.swift */,
+			);
+			path = macOS;
+			sourceTree = "<group>";
+		};
+		6661DCC655EAA42F94183878 = {
+			isa = PBXGroup;
+			children = (
+				8BA7287E1740B5FE52C4B078 /* Apps */,
+				387BCF2CD5765DACE36EA5F6 /* Packages */,
+				E3F23A6EC658CB05AEF6C3B1 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		8BA7287E1740B5FE52C4B078 /* Apps */ = {
+			isa = PBXGroup;
+			children = (
+				AFA280D81539AF7E0E3D67F6 /* iOS */,
+				3FBC693027CF69CDD818FD99 /* macOS */,
+				F993B9D2324B6128F1826894 /* tvOS */,
+				AF3504BD5BA05E6B46665846 /* visionOS */,
+			);
+			path = Apps;
+			sourceTree = "<group>";
+		};
+		AF3504BD5BA05E6B46665846 /* visionOS */ = {
+			isa = PBXGroup;
+			children = (
+				946A2E016CD76F0988530E12 /* Assets.xcassets */,
+				C822D42FDDBFF51A2C9B05B8 /* Info.plist */,
+				13170BA7E17A80904C9D3E7D /* PrivacyInfo.xcprivacy */,
+				35F19D0E82239B43D94E5AAE /* RivuneVisionApp.swift */,
+			);
+			path = visionOS;
+			sourceTree = "<group>";
+		};
+		AFA280D81539AF7E0E3D67F6 /* iOS */ = {
+			isa = PBXGroup;
+			children = (
+				58E8B521BA1A6800B23643C5 /* Assets.xcassets */,
+				14F71C04EC261955A5E0C6F5 /* Info.plist */,
+				9C8DE299630BF35EC0BDED3B /* LaunchScreen.storyboard */,
+				F3E2797BB5AEC6FECE50726A /* PrivacyInfo.xcprivacy */,
+				ED5017C977DBDC80461A561B /* RivuneIOSApp.swift */,
+			);
+			path = iOS;
+			sourceTree = "<group>";
+		};
+		E3F23A6EC658CB05AEF6C3B1 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				0D5A2525A6753B218C87D44F /* Rivune-iOS.app */,
+				403C1A40762E50668A420969 /* Rivune-macOS.app */,
+				82A189138BD45ECFABB2B0B6 /* Rivune-tvOS.app */,
+				2F9BEBD671D8A28BF3C2A27C /* Rivune-visionOS.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		F993B9D2324B6128F1826894 /* tvOS */ = {
+			isa = PBXGroup;
+			children = (
+				9C8B64FAE1A118902A310803 /* Assets.xcassets */,
+				1AA1F7B1466003C7ECF2263D /* Info.plist */,
+				15B4B9A0C250BB447E6444CE /* LaunchScreen.storyboard */,
+				FB11EF5A2EB93E2E1DAEB0E4 /* PrivacyInfo.xcprivacy */,
+				4FBF43D273AD736106CD4E4D /* RivuneTVApp.swift */,
+			);
+			path = tvOS;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		291D9B74EABF1C98C4B1C87B /* Rivune-iOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F446E298C4DB66ADD73B6A72 /* Build configuration list for PBXNativeTarget "Rivune-iOS" */;
+			buildPhases = (
+				E32DCBD81724BCAAD467F721 /* Sources */,
+				F0CA27C876BF3FD263D947BA /* Resources */,
+				F8F8139F06B23BE720BC83F4 /* Frameworks */,
+				F3B4B3733845905C6058F163 /* Prune unused package frameworks */,
+				0E9CF1E6FA09C3A6FE3F37D3 /* Embed legal notices */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Rivune-iOS";
+			packageProductDependencies = (
+				B17D0F3BB364E0D4351739A1 /* RivuneAppCore */,
+			);
+			productName = "Rivune-iOS";
+			productReference = 0D5A2525A6753B218C87D44F /* Rivune-iOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+		2E65A982DCE3F874D1AD5A24 /* Rivune-macOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9799CEEA55D1AF1465F97E51 /* Build configuration list for PBXNativeTarget "Rivune-macOS" */;
+			buildPhases = (
+				AA846EA3357F0D63154F6EEA /* Sources */,
+				D7B78665E2F44C436D6E23CE /* Resources */,
+				0E601B3A2F257EF22880C663 /* Frameworks */,
+				D4FC5C9D125225FC4705815A /* Prune unused package frameworks */,
+				5B21E0E307321A81E5A4BC53 /* Embed legal notices */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Rivune-macOS";
+			packageProductDependencies = (
+				FFD187498FD788E90C2A5D6E /* RivuneAppCore */,
+			);
+			productName = "Rivune-macOS";
+			productReference = 403C1A40762E50668A420969 /* Rivune-macOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+		59E649B4A074F2E58D290166 /* Rivune-tvOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1B6EEA2365053ACE3BB63CC4 /* Build configuration list for PBXNativeTarget "Rivune-tvOS" */;
+			buildPhases = (
+				C68397F9AA429CA7B2B98953 /* Sources */,
+				C53DF537CBB72C5F8B5C5ED7 /* Resources */,
+				BC42BB2C1D43E137F2937FF9 /* Frameworks */,
+				FB6C5E241B5F5887264E7003 /* Prune unused package frameworks */,
+				76CDD7F50F594F8A7B8CD8DE /* Embed legal notices */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Rivune-tvOS";
+			packageProductDependencies = (
+				825DCD7008014753667D2801 /* RivuneAppCore */,
+			);
+			productName = "Rivune-tvOS";
+			productReference = 82A189138BD45ECFABB2B0B6 /* Rivune-tvOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+		E36B5664826925FEBD8F349D /* Rivune-visionOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5C946D51004196E7EDCB7789 /* Build configuration list for PBXNativeTarget "Rivune-visionOS" */;
+			buildPhases = (
+				A394EC04A5635D998686D3B8 /* Sources */,
+				6CDE4D845FCFA9D6A3A15579 /* Resources */,
+				CC9230250E9ABB6FB2DAEEB2 /* Frameworks */,
+				66431E83B91FDF161340DD67 /* Prune unused package frameworks */,
+				29C9327A6994AD63A2322533 /* Embed legal notices */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Rivune-visionOS";
+			packageProductDependencies = (
+				55E135FE6F82E33CC7B7B7B2 /* RivuneAppCore */,
+			);
+			productName = "Rivune-visionOS";
+			productReference = 2F9BEBD671D8A28BF3C2A27C /* Rivune-visionOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		C0DEEE3451137B6BED946869 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					291D9B74EABF1C98C4B1C87B = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+					2E65A982DCE3F874D1AD5A24 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+					59E649B4A074F2E58D290166 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+					E36B5664826925FEBD8F349D = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 9B83755C6054F42E8B16FA3A /* Build configuration list for PBXProject "Rivune" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 6661DCC655EAA42F94183878;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				33964E582707B760E9FCCDE8 /* XCLocalSwiftPackageReference "." */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = E3F23A6EC658CB05AEF6C3B1 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				291D9B74EABF1C98C4B1C87B /* Rivune-iOS */,
+				59E649B4A074F2E58D290166 /* Rivune-tvOS */,
+				E36B5664826925FEBD8F349D /* Rivune-visionOS */,
+				2E65A982DCE3F874D1AD5A24 /* Rivune-macOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		6CDE4D845FCFA9D6A3A15579 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				ED6941E9E6BD29BDA41F4424 /* Assets.xcassets in Resources */,
+				138A52D4C225DE12985BE926 /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C53DF537CBB72C5F8B5C5ED7 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9EC2B718E2C8B24E8453ABD0 /* Assets.xcassets in Resources */,
+				240C4E5332E899433D3EBA6F /* LaunchScreen.storyboard in Resources */,
+				EA93F06DA5C09CEDA16893FD /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D7B78665E2F44C436D6E23CE /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0176153387E96953E951EA71 /* Assets.xcassets in Resources */,
+				34C2311A9EAD3110E5C20672 /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F0CA27C876BF3FD263D947BA /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				05A5B52684AE9C1C64FB114F /* Assets.xcassets in Resources */,
+				A4570C9FB7D37CE503DF29D9 /* LaunchScreen.storyboard in Resources */,
+				A7B914BBAA4ED9017683430E /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		0E9CF1E6FA09C3A6FE3F37D3 /* Embed legal notices */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Scripts/embed-legal-notices.sh",
+				"$(SRCROOT)/../../LICENSE",
+				"$(SRCROOT)/../../NOTICE",
+				"$(SRCROOT)/Legal/LGPL-3.0.txt",
+				"$(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/LGPL-2.1.txt",
+				"$(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/GPL-3.0.txt",
+				"$(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/FFmpeg-LICENSE.txt",
+				"$(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/mpv-Copyright.txt",
+			);
+			name = "Embed legal notices";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/Rivune-Apache-2.0.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/NOTICE.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/LGPL-3.0.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/LGPL-2.1.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/GPL-3.0.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/FFmpeg-LICENSE.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/mpv-Copyright.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "Scripts/embed-legal-notices.sh";
+		};
+		29C9327A6994AD63A2322533 /* Embed legal notices */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Scripts/embed-legal-notices.sh",
+				"$(SRCROOT)/../../LICENSE",
+				"$(SRCROOT)/../../NOTICE",
+				"$(SRCROOT)/Legal/LGPL-3.0.txt",
+				"$(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/LGPL-2.1.txt",
+				"$(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/GPL-3.0.txt",
+				"$(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/FFmpeg-LICENSE.txt",
+				"$(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/mpv-Copyright.txt",
+			);
+			name = "Embed legal notices";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/Rivune-Apache-2.0.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/NOTICE.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/LGPL-3.0.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/LGPL-2.1.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/GPL-3.0.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/FFmpeg-LICENSE.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/mpv-Copyright.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "Scripts/embed-legal-notices.sh";
+		};
+		5B21E0E307321A81E5A4BC53 /* Embed legal notices */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Scripts/embed-legal-notices.sh",
+				"$(SRCROOT)/../../LICENSE",
+				"$(SRCROOT)/../../NOTICE",
+				"$(SRCROOT)/Legal/LGPL-3.0.txt",
+				"$(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/LGPL-2.1.txt",
+				"$(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/GPL-3.0.txt",
+				"$(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/FFmpeg-LICENSE.txt",
+				"$(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/mpv-Copyright.txt",
+			);
+			name = "Embed legal notices";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/Rivune-Apache-2.0.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/NOTICE.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/LGPL-3.0.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/LGPL-2.1.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/GPL-3.0.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/FFmpeg-LICENSE.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/mpv-Copyright.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "Scripts/embed-legal-notices.sh";
+		};
+		66431E83B91FDF161340DD67 /* Prune unused package frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Scripts/prune-unused-package-frameworks.sh",
+			);
+			name = "Prune unused package frameworks";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "Scripts/prune-unused-package-frameworks.sh";
+		};
+		76CDD7F50F594F8A7B8CD8DE /* Embed legal notices */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Scripts/embed-legal-notices.sh",
+				"$(SRCROOT)/../../LICENSE",
+				"$(SRCROOT)/../../NOTICE",
+				"$(SRCROOT)/Legal/LGPL-3.0.txt",
+				"$(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/LGPL-2.1.txt",
+				"$(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/GPL-3.0.txt",
+				"$(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/FFmpeg-LICENSE.txt",
+				"$(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/mpv-Copyright.txt",
+			);
+			name = "Embed legal notices";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/Rivune-Apache-2.0.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/NOTICE.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/LGPL-3.0.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/LGPL-2.1.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/GPL-3.0.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/FFmpeg-LICENSE.txt",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/mpv-Copyright.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "Scripts/embed-legal-notices.sh";
+		};
+		D4FC5C9D125225FC4705815A /* Prune unused package frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Scripts/prune-unused-package-frameworks.sh",
+			);
+			name = "Prune unused package frameworks";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "Scripts/prune-unused-package-frameworks.sh";
+		};
+		F3B4B3733845905C6058F163 /* Prune unused package frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Scripts/prune-unused-package-frameworks.sh",
+			);
+			name = "Prune unused package frameworks";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "Scripts/prune-unused-package-frameworks.sh";
+		};
+		FB6C5E241B5F5887264E7003 /* Prune unused package frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Scripts/prune-unused-package-frameworks.sh",
+			);
+			name = "Prune unused package frameworks";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "Scripts/prune-unused-package-frameworks.sh";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A394EC04A5635D998686D3B8 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9AA6DA3F3FF1617049FD9854 /* RivuneVisionApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AA846EA3357F0D63154F6EEA /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6D437D60A6A3CFD01B06DCB3 /* RivuneMacApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C68397F9AA429CA7B2B98953 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8AFCAB02E8D0F05CE8BBEDC3 /* RivuneTVApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E32DCBD81724BCAAD467F721 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A5FB31984B56437E5EBE3494 /* RivuneIOSApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		045D2DC9C488BA10ADBEC5B4 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Apps/visionOS/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.rivune.app.vision;
+				PRODUCT_NAME = Rivune;
+				SDKROOT = xros;
+				TARGETED_DEVICE_FAMILY = 7;
+			};
+			name = Debug;
+		};
+		4701EFD6238B0949793AC550 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Apps/iOS/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.rivune.app;
+				PRODUCT_NAME = Rivune;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		4FA7E88F4E05D5A8A83F6D31 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Apps/visionOS/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.rivune.app.vision;
+				PRODUCT_NAME = Rivune;
+				SDKROOT = xros;
+				TARGETED_DEVICE_FAMILY = 7;
+			};
+			name = Release;
+		};
+		64472D45A298E06436DA7AC4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_LOCALIZABILITY_NONLOCALIZED = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MARKETING_VERSION = 1.9.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 5.9;
+				TVOS_DEPLOYMENT_TARGET = 15.0;
+				XROS_DEPLOYMENT_TARGET = 1.0;
+			};
+			name = Release;
+		};
+		77949879FF5C6E56E5E7B900 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_LOCALIZABILITY_NONLOCALIZED = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MARKETING_VERSION = 1.9.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 5.9;
+				TVOS_DEPLOYMENT_TARGET = 15.0;
+				XROS_DEPLOYMENT_TARGET = 1.0;
+			};
+			name = Debug;
+		};
+		91F5750B77E3797CCA1B3080 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
+				ASSETCATALOG_COMPILER_LAUNCHIMAGE_NAME = LaunchImage;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Apps/tvOS/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.rivune.app.tv;
+				PRODUCT_NAME = Rivune;
+				SDKROOT = appletvos;
+				TARGETED_DEVICE_FAMILY = 3;
+			};
+			name = Debug;
+		};
+		962901B5FCF8704127602049 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
+				ASSETCATALOG_COMPILER_LAUNCHIMAGE_NAME = LaunchImage;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Apps/tvOS/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.rivune.app.tv;
+				PRODUCT_NAME = Rivune;
+				SDKROOT = appletvos;
+				TARGETED_DEVICE_FAMILY = 3;
+			};
+			name = Release;
+		};
+		D832F942233BB1EACDDA00F4 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Apps/macOS/Rivune.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Apps/macOS/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.rivune.app.mac;
+				PRODUCT_NAME = Rivune;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		EDF97BE6195D2E7D9BC1CA9B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Apps/macOS/Rivune.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Apps/macOS/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.rivune.app.mac;
+				PRODUCT_NAME = Rivune;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		F7C70AC731E60DA8E0FC4E6A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Apps/iOS/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.rivune.app;
+				PRODUCT_NAME = Rivune;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		1B6EEA2365053ACE3BB63CC4 /* Build configuration list for PBXNativeTarget "Rivune-tvOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				91F5750B77E3797CCA1B3080 /* Debug */,
+				962901B5FCF8704127602049 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		5C946D51004196E7EDCB7789 /* Build configuration list for PBXNativeTarget "Rivune-visionOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				045D2DC9C488BA10ADBEC5B4 /* Debug */,
+				4FA7E88F4E05D5A8A83F6D31 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		9799CEEA55D1AF1465F97E51 /* Build configuration list for PBXNativeTarget "Rivune-macOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D832F942233BB1EACDDA00F4 /* Debug */,
+				EDF97BE6195D2E7D9BC1CA9B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		9B83755C6054F42E8B16FA3A /* Build configuration list for PBXProject "Rivune" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				77949879FF5C6E56E5E7B900 /* Debug */,
+				64472D45A298E06436DA7AC4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		F446E298C4DB66ADD73B6A72 /* Build configuration list for PBXNativeTarget "Rivune-iOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4701EFD6238B0949793AC550 /* Debug */,
+				F7C70AC731E60DA8E0FC4E6A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		33964E582707B760E9FCCDE8 /* XCLocalSwiftPackageReference "." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = .;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		55E135FE6F82E33CC7B7B7B2 /* RivuneAppCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = RivuneAppCore;
+		};
+		825DCD7008014753667D2801 /* RivuneAppCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = RivuneAppCore;
+		};
+		B17D0F3BB364E0D4351739A1 /* RivuneAppCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = RivuneAppCore;
+		};
+		FFD187498FD788E90C2A5D6E /* RivuneAppCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = RivuneAppCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = C0DEEE3451137B6BED946869 /* Project object */;
+}

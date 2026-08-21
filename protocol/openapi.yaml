@@ -5122,7 +5122,11 @@ components:
         - not:
             anyOf:
               - required: [profileIds]
+                properties:
+                  profileIds: {}
               - required: [categoryIds]
+                properties:
+                  categoryIds: {}
         - required: [profileIds]
           properties:
             profileIds:
@@ -8258,7 +8262,11 @@ components:
             - not:
                 anyOf:
                   - required: [profileIds]
+                    properties:
+                      profileIds: {}
                   - required: [categoryIds]
+                    properties:
+                      categoryIds: {}
             - required: [profileIds]
               properties:
                 profileIds:
@@ -8885,10 +8893,13 @@ components:
           then:
             required: [sourceAddonId]
             properties:
+              sourceAddonId: {}
               provider:
                 const: addon
           else:
             required: [externalId]
+            properties:
+              externalId: {}
       properties:
         mediaType:
           type: string

@@ -331,13 +331,17 @@ func TestLoadLegacyEnvironmentCapturesInvalidTimezone(t *testing.T) {
 	}
 }
 
-func TestLoadAcceptsHTTPSAndLoopbackHTTPPublicURLs(t *testing.T) {
+func TestLoadAcceptsHTTPSAndLocalHTTPPublicURLs(t *testing.T) {
 	tests := []string{
 		"https://rivune.example.com/",
 		"http://localhost:8080",
 		"http://127.0.0.1:8080",
 		"http://[::1]:8080",
 		"http://[::ffff:127.0.0.1]:8080",
+		"http://192.168.1.10:8080",
+		"http://10.0.0.10:8080",
+		"http://172.16.0.10:8080",
+		"http://[fd00::10]:8080",
 	}
 
 	for _, publicURL := range tests {
@@ -379,20 +383,22 @@ func TestLoadRejectsPublicURLsThatAreNotOrigins(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsNonLoopbackHTTPPublicURLs(t *testing.T) {
+func TestLoadRejectsNonLocalHTTPPublicURLs(t *testing.T) {
 	for _, publicURL := range []string{
 		"http://rivune.example.com",
-		"http://192.168.1.10:8080",
 		"http://0.0.0.0:8080",
 		"http://host.docker.internal:8080",
+		"http://198.51.100.10:8080",
+		"http://169.254.1.10:8080",
+		"http://100.100.100.100:8080",
 	} {
 		t.Run(publicURL, func(t *testing.T) {
 			setRequiredEnvironment(t)
 			t.Setenv("RIVUNE_PUBLIC_URL", publicURL)
 
 			_, err := Load()
-			if err == nil || err.Error() != "RIVUNE_PUBLIC_URL must use https unless its host is loopback" {
-				t.Fatalf("non-loopback HTTP public URL error = %v", err)
+			if err == nil || err.Error() != "RIVUNE_PUBLIC_URL must use https unless its host is loopback or a private-network IP address" {
+				t.Fatalf("non-local HTTP public URL error = %v", err)
 			}
 		})
 	}

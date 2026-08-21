@@ -2,6 +2,7 @@ import { Bookmark, CalendarDays, Home, LogOut, PanelLeftClose, PanelLeftOpen, Ro
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { useAuth } from "./auth";
 import { APIError } from "./api";
+import { safeLocalStorage } from "./browserStorage";
 import { allowsMotion, focusFirstElement, handleDirectionalFocus, RivuneMark } from "./components";
 import { translate as t } from "./i18n";
 import { notifyError } from "./notifications";
@@ -24,7 +25,7 @@ function formatServerVersion(version: string | null): string | null {
 
 export function Shell({ view, onView, children }: { view: View; onView: (view: View) => void; children: ReactNode }) {
   const { activeProfile, leaveProfile, logout, discovery, exitDemo, mode, resetDemo } = useAuth();
-  const [sidebarCompact, setSidebarCompact] = useState(() => localStorage.getItem("rivune.sidebar.compact") === "true");
+  const [sidebarCompact, setSidebarCompact] = useState(() => safeLocalStorage.getItem("rivune.sidebar.compact") === "true");
   const [demoAction, setDemoAction] = useState<"reset" | "exit" | null>(null);
   const [mobileAccountOpen, setMobileAccountOpen] = useState(false);
   const sidebarRef = useRef<HTMLElement>(null);
@@ -86,7 +87,7 @@ export function Shell({ view, onView, children }: { view: View; onView: (view: V
   function toggleSidebar() {
     setSidebarCompact((current) => {
       const next = !current;
-      localStorage.setItem("rivune.sidebar.compact", String(next));
+      safeLocalStorage.setItem("rivune.sidebar.compact", String(next));
       return next;
     });
   }

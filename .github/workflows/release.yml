@@ -138,14 +138,61 @@ jobs:
             echo "tag=${RELEASE_TAG}"
           } >> "${GITHUB_OUTPUT}"
 
+  apple-assets:
+    name: Validate unsigned Apple direct-release assets
+    if: needs.authorize.outputs.authorized == 'true'
+    needs:
+      - authorize
+    runs-on: macos-latest
+    outputs:
+      artifact_name: apple-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out the approved main commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          persist-credentials: false
+      - name: Download candidate Apple release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: apple-release-assets-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: apple-release-assets
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+      - name: Verify unsigned Apple direct-release assets
+        env:
+          RELEASE_BUILD_NUMBER: ${{ github.event.workflow_run.run_number }}
+          RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_version="${RELEASE_TAG#v}"
+          release_version="${release_version%%+*}"
+          release_version="${release_version%%-*}"
+          bash clients/apple/Scripts/verify-direct-release-assets.sh \
+            apple-release-assets \
+            "${release_version}" \
+            "${RELEASE_BUILD_NUMBER}"
+      - name: Upload validated immutable Apple release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: apple-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: apple-release-assets/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
   windows-asset:
-    name: Build and verify Windows portable executables
+    name: Build unsigned Windows signing inputs
     if: needs.authorize.outputs.authorized == 'true'
     needs:
       - authorize
     runs-on: windows-latest
     outputs:
-      artifact_name: windows-release-asset-${{ github.run_id }}-${{ github.run_attempt }}
+      artifact_name: unsigned-windows-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       contents: read
     steps:
@@ -158,12 +205,17 @@ jobs:
         uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: 10.0.x
-      - name: Publish and inspect unsigned x64 and ARM64 executables
+      - name: Publish and inspect unsigned x64 and ARM64 signing inputs
         env:
           RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+          WINDOWS_UPDATE_SIGNER_SHA256: ${{ vars.WINDOWS_UPDATE_SIGNER_SHA256 }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $expectedUpdateSigner = ($env:WINDOWS_UPDATE_SIGNER_SHA256 -replace '[:\s]', '').ToLowerInvariant()
+          if ($expectedUpdateSigner -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Official Windows release requires repository variable WINDOWS_UPDATE_SIGNER_SHA256.'
+          }
           if ($env:RELEASE_TAG -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
             throw "Release tag is not valid SemVer: $env:RELEASE_TAG"
           }
@@ -194,7 +246,8 @@ jobs:
               -p:AssemblyVersion=$fileVersion `
               -p:FileVersion=$fileVersion `
               -p:InformationalVersion=$versionName `
-              -p:IncludeSourceRevisionInInformationalVersion=false
+              -p:IncludeSourceRevisionInInformationalVersion=false `
+              -p:RivuneExpectedUpdateSignerSha256=$expectedUpdateSigner
             if ($LASTEXITCODE -ne 0) { throw "Windows $($target.Label) portable publish failed." }
 
             $distributable = @(Get-ChildItem -LiteralPath $publish -File -Recurse |
@@ -221,7 +274,7 @@ jobs:
               throw "$($target.FileName) version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
             }
             if ((Get-AuthenticodeSignature -FilePath $asset).Status -ne 'NotSigned') {
-              throw "$($target.FileName) must be unsigned."
+              throw "$($target.FileName) signing input must be unsigned before the isolated signing job."
             }
             $size = (Get-Item -LiteralPath $asset).Length
             if ($size -le 0 -or $size -gt 2147483647) { throw "$($target.FileName) size is invalid: $size bytes." }
@@ -232,22 +285,160 @@ jobs:
           if (Compare-Object -ReferenceObject $expectedFiles -DifferenceObject $files -CaseSensitive) {
             throw "Windows release artifact must contain exactly: $($expectedFiles -join ', ')."
           }
-      - name: Upload immutable Windows release executables
+      - name: Upload immutable unsigned Windows signing inputs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: windows-release-asset-${{ github.run_id }}-${{ github.run_attempt }}
+          name: unsigned-windows-${{ github.run_id }}-${{ github.run_attempt }}
           path: windows-release-asset/
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
           overwrite: false
 
-  build-assets:
-    name: Build unsigned Android and Windows release inputs
+  sign-windows:
+    name: Sign Windows executables on an isolated runner
     if: needs.authorize.outputs.authorized == 'true'
     needs:
       - authorize
       - windows-asset
+    runs-on: windows-latest
+    environment: release
+    outputs:
+      artifact_name: signed-windows-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+    steps:
+      - name: Download immutable unsigned Windows signing inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.windows-asset.outputs.artifact_name }}
+          path: unsigned-windows-input
+      - name: Sign and verify Windows executables
+        env:
+          WINDOWS_SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          WINDOWS_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+          WINDOWS_SIGNING_CERT_SHA256: ${{ vars.WINDOWS_SIGNING_CERT_SHA256 }}
+          WINDOWS_SIGNING_CERT_THUMBPRINT: ${{ vars.WINDOWS_SIGNING_CERT_THUMBPRINT }}
+          WINDOWS_SIGNING_CERT_SUBJECT: ${{ vars.WINDOWS_SIGNING_CERT_SUBJECT }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $signingRoot = Join-Path $env:RUNNER_TEMP "rivune-windows-signing-$([Guid]::NewGuid().ToString('N'))"
+          try {
+            foreach ($name in @(
+              'WINDOWS_SIGNING_PFX_BASE64',
+              'WINDOWS_SIGNING_PFX_PASSWORD',
+              'WINDOWS_SIGNING_CERT_SHA256',
+              'WINDOWS_SIGNING_CERT_THUMBPRINT',
+              'WINDOWS_SIGNING_CERT_SUBJECT'
+            )) {
+              if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+                throw "Required Windows signing configuration is missing: $name"
+              }
+            }
+            $expectedCert = ($env:WINDOWS_SIGNING_CERT_SHA256 -replace '[:\s]', '').ToLowerInvariant()
+            $expectedThumbprint = ($env:WINDOWS_SIGNING_CERT_THUMBPRINT -replace '[:\s]', '').ToLowerInvariant()
+            $expectedSubject = $env:WINDOWS_SIGNING_CERT_SUBJECT
+            if ($expectedCert -cnotmatch '^[0-9a-f]{64}$') {
+              throw 'WINDOWS_SIGNING_CERT_SHA256 must be a SHA-256 certificate fingerprint.'
+            }
+            if ($expectedThumbprint -cnotmatch '^[0-9a-f]{40}$') {
+              throw 'WINDOWS_SIGNING_CERT_THUMBPRINT must be a SHA-1 Windows certificate thumbprint.'
+            }
+
+            New-Item -ItemType Directory -Path $signingRoot | Out-Null
+            $pfxPath = Join-Path $signingRoot 'rivune-authenticode.pfx'
+            try {
+              $pfxBytes = [Convert]::FromBase64String($env:WINDOWS_SIGNING_PFX_BASE64)
+            } catch {
+              throw 'WINDOWS_SIGNING_PFX_BASE64 is not valid base64.'
+            }
+            if ($pfxBytes.Length -le 0) { throw 'Decoded Windows signing PFX is empty.' }
+            [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
+            [Array]::Clear($pfxBytes, 0, $pfxBytes.Length)
+
+            $signtool = Get-ChildItem -LiteralPath "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+              -Filter signtool.exe -File -Recurse |
+              Where-Object { $_.Directory.Name -ceq 'x64' } |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1 -ExpandProperty FullName
+            if ([string]::IsNullOrWhiteSpace($signtool)) { throw 'Windows SDK signtool.exe was not found.' }
+
+            $signedDirectory = Join-Path $env:GITHUB_WORKSPACE 'signed-windows'
+            New-Item -ItemType Directory -Path $signedDirectory | Out-Null
+            $targets = @(
+              @{ FileName = 'Rivune-x64.exe'; Machine = [uint16]0x8664 },
+              @{ FileName = 'Rivune-arm64.exe'; Machine = [uint16]0xAA64 }
+            )
+            foreach ($target in $targets) {
+              $source = Join-Path $env:GITHUB_WORKSPACE "unsigned-windows-input/$($target.FileName)"
+              $asset = Join-Path $signedDirectory $target.FileName
+              if (-not (Test-Path -LiteralPath $source -PathType Leaf) -or (Get-Item -LiteralPath $source).Length -le 0) {
+                throw "Unsigned Windows signing input is absent or empty: $($target.FileName)"
+              }
+              Copy-Item -LiteralPath $source -Destination $asset
+              & $signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
+                /f $pfxPath /p $env:WINDOWS_SIGNING_PFX_PASSWORD $asset
+              if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed for $($target.FileName)." }
+              & $signtool verify /pa /all /v $asset
+              if ($LASTEXITCODE -ne 0) { throw "Authenticode verification failed for $($target.FileName)." }
+
+              $signature = Get-AuthenticodeSignature -FilePath $asset
+              if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) {
+                throw "$($target.FileName) does not have a valid Authenticode signature: $($signature.Status)."
+              }
+              $actualCert = [Convert]::ToHexString(
+                [Security.Cryptography.SHA256]::HashData($signature.SignerCertificate.RawData)
+              ).ToLowerInvariant()
+              $actualThumbprint = ($signature.SignerCertificate.Thumbprint -replace '[:\s]', '').ToLowerInvariant()
+              if ($actualCert -cne $expectedCert -or
+                  $actualThumbprint -cne $expectedThumbprint -or
+                  $signature.SignerCertificate.Subject -cne $expectedSubject) {
+                throw "$($target.FileName) Authenticode signer does not match the pinned certificate fingerprint, thumbprint, and subject."
+              }
+
+              $stream = [IO.File]::OpenRead($asset)
+              try {
+                $reader = [IO.BinaryReader]::new($stream)
+                if ($reader.ReadUInt16() -ne 0x5a4d) { throw "$($target.FileName) has no DOS PE header." }
+                $stream.Position = 0x3c
+                $peOffset = $reader.ReadUInt32()
+                $stream.Position = $peOffset
+                if ($reader.ReadUInt32() -ne 0x00004550) { throw "$($target.FileName) has no PE signature." }
+                if ($reader.ReadUInt16() -ne $target.Machine) { throw "$($target.FileName) has the wrong PE machine." }
+              } finally {
+                if ($null -ne $reader) { $reader.Dispose() } else { $stream.Dispose() }
+              }
+            }
+            $files = @((Get-ChildItem -LiteralPath $signedDirectory -File).Name | Sort-Object)
+            if (Compare-Object -ReferenceObject @('Rivune-arm64.exe', 'Rivune-x64.exe') -DifferenceObject $files -CaseSensitive) {
+              throw 'Signed Windows artifact must contain exactly Rivune-x64.exe and Rivune-arm64.exe.'
+            }
+          } finally {
+            Remove-Item -LiteralPath $signingRoot -Recurse -Force -ErrorAction SilentlyContinue
+            $env:WINDOWS_SIGNING_PFX_BASE64 = $null
+            $env:WINDOWS_SIGNING_PFX_PASSWORD = $null
+          }
+      - name: Remove Windows signing material
+        if: ${{ always() }}
+        shell: pwsh
+        run: Get-ChildItem -LiteralPath $env:RUNNER_TEMP -Directory -Filter 'rivune-windows-signing-*' -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+      - name: Upload immutable signed Windows executables
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: signed-windows/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+
+  build-assets:
+    name: Build Android and collect signed Windows release inputs
+    if: needs.authorize.outputs.authorized == 'true'
+    needs:
+      - authorize
+      - sign-windows
     runs-on: ubuntu-latest
     outputs:
       release_inputs_artifact_name: release-inputs-${{ github.run_id }}-${{ github.run_attempt }}
@@ -272,10 +463,10 @@ jobs:
           ref: ${{ needs.authorize.outputs.sha }}
           persist-credentials: false
           fetch-depth: 0
-      - name: Download immutable Windows release executables
+      - name: Download immutable signed Windows release executables
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ${{ needs.windows-asset.outputs.artifact_name }}
+          name: ${{ needs.sign-windows.outputs.artifact_name }}
           path: release-assets
       - name: Set up Java
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
@@ -285,7 +476,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4
       - name: Install Android build tools
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+        run: sdkmanager "platforms;android-37.0" "build-tools;36.0.0"
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
       - name: Build unsigned Android release
@@ -530,6 +721,26 @@ jobs:
           [[ "${badging}" == *"package: name='io.rivune.app'"* ]] || { echo "Unexpected APK applicationId." >&2; exit 1; }
           [[ "${badging}" == *" versionCode='${RIVUNE_RELEASE_VERSION_CODE}'"* ]] || { echo "Unexpected APK versionCode." >&2; exit 1; }
           [[ "${badging}" == *" versionName='${RIVUNE_RELEASE_VERSION_NAME}'"* ]] || { echo "Unexpected APK versionName." >&2; exit 1; }
+          apk_size="$(stat -c %s "${asset_path}")"
+          apk_size_ceiling=268435456
+          if (( apk_size <= 0 || apk_size > apk_size_ceiling )); then
+            echo "Signed APK size must be between 1 and ${apk_size_ceiling} bytes; found ${apk_size}." >&2
+            exit 1
+          fi
+          expected_abis="$(printf '%s\n' arm64-v8a armeabi-v7a x86 x86_64 | sort)"
+          apk_entries="$(unzip -Z1 "${asset_path}")"
+          actual_abis="$(sed -nE 's#^lib/([^/]+)/.*#\1#p' <<<"${apk_entries}" | sort -u)"
+          if [[ "${actual_abis}" != "${expected_abis}" ]]; then
+            echo 'Signed APK must contain exactly arm64-v8a, armeabi-v7a, x86, and x86_64 native libraries.' >&2
+            printf 'Found ABI directories:\n%s\n' "${actual_abis:-<none>}" >&2
+            exit 1
+          fi
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            if ! grep -Eq "^lib/${abi}/[^/]+\\.so$" <<<"${apk_entries}"; then
+              echo "Signed APK contains no native shared library for ${abi}." >&2
+              exit 1
+            fi
+          done
           echo "signing_certificate_sha256=${expected_cert}" >> "${GITHUB_OUTPUT}"
       - name: Remove Android signing material
         if: ${{ always() }}
@@ -551,6 +762,7 @@ jobs:
     needs:
       - authorize
       - build-assets
+      - apple-assets
       - sign-android
     runs-on: ubuntu-latest
     outputs:
@@ -574,6 +786,11 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ needs.sign-android.outputs.artifact_name }}
+          path: release-assets
+      - name: Download immutable unsigned Apple release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.apple-assets.outputs.artifact_name }}
           path: release-assets
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -728,6 +945,7 @@ jobs:
     outputs:
       release_id: ${{ steps.draft.outputs.release_id }}
       image_digest: ${{ steps.draft.outputs.image_digest }}
+      asset_fingerprint: ${{ steps.draft.outputs.asset_fingerprint }}
     permissions:
       contents: write
     steps:
@@ -749,7 +967,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4
       - name: Install Android verification tools
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+        run: sdkmanager "platforms;android-37.0" "build-tools;36.0.0"
       - name: Download immutable release assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -764,9 +982,13 @@ jobs:
         run: |
           set -euo pipefail
           asset_name='Rivune-Android.apk'
+          ios_asset_name='Rivune-iOS-unsigned.ipa'
+          tvos_asset_name='Rivune-tvOS-unsigned.ipa'
+          visionos_asset_name='Rivune-visionOS-unsigned.ipa'
+          macos_asset_name='Rivune-macOS.dmg'
           windows_x64_asset_name='Rivune-x64.exe'
           windows_arm64_asset_name='Rivune-arm64.exe'
-          expected_files="$(printf '%s\n' rivune-update.json "${asset_name}" "${windows_x64_asset_name}" "${windows_arm64_asset_name}" | sort)"
+          expected_files="$(printf '%s\n' rivune-update.json "${asset_name}" "${ios_asset_name}" "${tvos_asset_name}" "${visionos_asset_name}" "${macos_asset_name}" "${windows_x64_asset_name}" "${windows_arm64_asset_name}" | sort)"
           actual_files="$(find release-assets -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
           if [[ "${actual_files}" != "${expected_files}" ]]; then
             echo "Immutable artifact does not contain the exact release asset set." >&2
@@ -776,6 +998,13 @@ jobs:
             windows_size="$(stat -c %s "release-assets/${windows_asset}")"
             if (( windows_size <= 0 || windows_size > 2147483647 )); then
               echo "${windows_asset} size is invalid: ${windows_size} bytes." >&2
+              exit 1
+            fi
+          done
+          for apple_asset in "${ios_asset_name}" "${tvos_asset_name}" "${visionos_asset_name}" "${macos_asset_name}"; do
+            apple_size="$(stat -c %s "release-assets/${apple_asset}")"
+            if (( apple_size <= 0 || apple_size > 536870912 )); then
+              echo "${apple_asset} size is invalid: ${apple_size} bytes." >&2
               exit 1
             fi
           done
@@ -997,11 +1226,19 @@ jobs:
             local release_json="$1" release_asset_id release_asset_name release_asset_digest adopted_sha trusted_sha
             local candidate_release_id content_type expected_upload_url upload_url
             local apk_name='Rivune-Android.apk'
+            local ios_name='Rivune-iOS-unsigned.ipa'
+            local tvos_name='Rivune-tvOS-unsigned.ipa'
+            local visionos_name='Rivune-visionOS-unsigned.ipa'
+            local macos_name='Rivune-macOS.dmg'
             local windows_x64_name='Rivune-x64.exe'
             local windows_arm64_name='Rivune-arm64.exe'
             local -a expected_names=(
               rivune-update.json
               "${apk_name}"
+              "${ios_name}"
+              "${tvos_name}"
+              "${visionos_name}"
+              "${macos_name}"
               "${windows_x64_name}"
               "${windows_arm64_name}"
             )
@@ -1024,7 +1261,7 @@ jobs:
                 return 1
               fi
               case "${release_asset_name}" in
-                rivune-update.json|"${apk_name}"|"${windows_x64_name}"|"${windows_arm64_name}") ;;
+                rivune-update.json|"${apk_name}"|"${ios_name}"|"${tvos_name}"|"${visionos_name}"|"${macos_name}"|"${windows_x64_name}"|"${windows_arm64_name}") ;;
                 *)
                   echo "The partial GitHub Release contains an unexpected asset: ${release_asset_name}" >&2
                   return 1
@@ -1082,6 +1319,8 @@ jobs:
               case "${release_asset_name}" in
                 rivune-update.json) content_type='application/json' ;;
                 "${apk_name}") content_type='application/vnd.android.package-archive' ;;
+                "${ios_name}"|"${tvos_name}"|"${visionos_name}") content_type='application/octet-stream' ;;
+                "${macos_name}") content_type='application/x-apple-diskimage' ;;
                 "${windows_x64_name}"|"${windows_arm64_name}") content_type='application/vnd.microsoft.portable-executable' ;;
               esac
               upload_release_asset "release-assets/${release_asset_name}" "${content_type}"
@@ -1122,12 +1361,16 @@ jobs:
               ' <<<"${release_json}" >/dev/null
           }
           validate_remote_assets() {
-            local release_json="$1" asset_id asset_name asset_digest trusted_asset_sha
+            local release_json="$1" asset_id asset_name asset_size asset_digest adopted_asset_size trusted_asset_sha
             local apk_name='Rivune-Android.apk'
+            local ios_name='Rivune-iOS-unsigned.ipa'
+            local tvos_name='Rivune-tvOS-unsigned.ipa'
+            local visionos_name='Rivune-visionOS-unsigned.ipa'
+            local macos_name='Rivune-macOS.dmg'
             local windows_x64_name='Rivune-x64.exe'
             local windows_arm64_name='Rivune-arm64.exe'
             local expected_assets actual_assets expected_channel expected_release_url expected_apk_url expected_windows_x64_url expected_windows_arm64_url
-            expected_assets="$(printf '%s\n' rivune-update.json "${apk_name}" "${windows_x64_name}" "${windows_arm64_name}" | sort)"
+            expected_assets="$(printf '%s\n' rivune-update.json "${apk_name}" "${ios_name}" "${tvos_name}" "${visionos_name}" "${macos_name}" "${windows_x64_name}" "${windows_arm64_name}" | sort)"
             actual_assets="$(jq -r '.assets[].name' <<<"${release_json}" | sort)"
             if [[ "${actual_assets}" != "${expected_assets}" ]]; then
               echo "The GitHub Release asset set is incomplete or contains unexpected files." >&2
@@ -1136,20 +1379,29 @@ jobs:
 
             rm -rf adopted-release-assets
             mkdir adopted-release-assets
-            while IFS=$'\t' read -r asset_id asset_name asset_digest; do
+            while IFS=$'\t' read -r asset_id asset_name asset_size asset_digest; do
               if [[ ! "${asset_id}" =~ ^[1-9][0-9]*$ ]]; then
                 echo "The GitHub Release contains an invalid asset ID." >&2
+                return 1
+              fi
+              if [[ ! "${asset_size}" =~ ^[1-9][0-9]*$ ]]; then
+                echo "The GitHub Release contains an invalid asset size for ${asset_name}." >&2
                 return 1
               fi
               gh api \
                 --header 'Accept: application/octet-stream' \
                 "repos/${REPOSITORY}/releases/assets/${asset_id}" > "adopted-release-assets/${asset_name}"
+              adopted_asset_size="$(stat -c %s "adopted-release-assets/${asset_name}")"
+              if [[ "${asset_size}" != "${adopted_asset_size}" ]]; then
+                echo "The GitHub asset metadata size differs from downloaded bytes for ${asset_name}." >&2
+                return 1
+              fi
               trusted_asset_sha="$(sha256sum "release-assets/${asset_name}" | cut -d ' ' -f1)"
               if [[ "${asset_digest}" != "sha256:${trusted_asset_sha}" ]]; then
                 echo "The GitHub asset metadata digest differs from trusted bytes for ${asset_name}." >&2
                 return 1
               fi
-            done < <(jq -r '.assets[] | [.id, .name, (.digest // "")] | @tsv' <<<"${release_json}")
+            done < <(jq -r '.assets[] | [.id, .name, .size, (.digest // "")] | @tsv' <<<"${release_json}")
 
             local adopted_windows_size
             for windows_asset in "${windows_x64_name}" "${windows_arm64_name}"; do
@@ -1164,6 +1416,10 @@ jobs:
             for trusted_asset in \
               rivune-update.json \
               "${apk_name}" \
+              "${ios_name}" \
+              "${tvos_name}" \
+              "${visionos_name}" \
+              "${macos_name}" \
               "${windows_x64_name}" \
               "${windows_arm64_name}"; do
               adopted_asset_sha="$(sha256sum "adopted-release-assets/${trusted_asset}" | cut -d ' ' -f1)"
@@ -1306,6 +1562,24 @@ jobs:
           fi
           effective_image_digest="$(validate_body_and_digest "${release}")"
           validate_remote_assets "${release}"
+          if ! asset_fingerprint="$(jq -ce '
+            .assets as $assets |
+            if (($assets | type) == "array" and
+                ($assets | length) == 8 and
+                ([$assets[].name] | sort) == ["Rivune-Android.apk", "Rivune-arm64.exe", "Rivune-iOS-unsigned.ipa", "Rivune-macOS.dmg", "Rivune-tvOS-unsigned.ipa", "Rivune-visionOS-unsigned.ipa", "Rivune-x64.exe", "rivune-update.json"] and
+                ([ $assets[].id ] | unique | length) == 8 and
+                all($assets[];
+                  (.id | type) == "number" and .id > 0 and .id == (.id | floor) and
+                  (.name | type) == "string" and
+                  (.size | type) == "number" and .size > 0 and .size == (.size | floor) and
+                  (.digest | type) == "string" and (.digest | test("^sha256:[0-9a-f]{64}$"))))
+            then [$assets[] | {id, name, size, digest}] | sort_by(.name)
+            else error("invalid release asset fingerprint metadata")
+            end
+          ' <<<"${release}")"; then
+            echo "The validated GitHub Release assets cannot produce an exact fingerprint." >&2
+            exit 1
+          fi
           if [[ "${created_release}" == true ]] && [[ "${effective_image_digest}" != "${CURRENT_IMAGE_DIGEST}" ]]; then
             echo "The newly created release did not record the published OCI image digest." >&2
             exit 1
@@ -1314,6 +1588,7 @@ jobs:
           {
             echo "release_id=${release_id}"
             echo "image_digest=${effective_image_digest}"
+            echo "asset_fingerprint=${asset_fingerprint}"
           } >> "${GITHUB_OUTPUT}"
           trap - EXIT
 
@@ -1328,18 +1603,33 @@ jobs:
       # GitHub exposes draft release assets only to tokens with contents: write.
       contents: write
     steps:
-      - name: Verify remote executable architectures, versions, hashes, and unsigned state
+      - name: Verify remote executable architectures, versions, hashes, and Authenticode signers
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ needs.release.outputs.release_id }}
           RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+          WINDOWS_SIGNING_CERT_SHA256: ${{ vars.WINDOWS_SIGNING_CERT_SHA256 }}
+          WINDOWS_SIGNING_CERT_THUMBPRINT: ${{ vars.WINDOWS_SIGNING_CERT_THUMBPRINT }}
+          WINDOWS_SIGNING_CERT_SUBJECT: ${{ vars.WINDOWS_SIGNING_CERT_SUBJECT }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($name in @('GH_TOKEN', 'RELEASE_ID', 'RELEASE_TAG')) {
+          foreach ($name in @(
+            'GH_TOKEN',
+            'RELEASE_ID',
+            'RELEASE_TAG',
+            'WINDOWS_SIGNING_CERT_SHA256',
+            'WINDOWS_SIGNING_CERT_THUMBPRINT',
+            'WINDOWS_SIGNING_CERT_SUBJECT'
+          )) {
             if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
               throw "Required Windows release verification value is missing: $name"
             }
+          }
+          $expectedCert = ($env:WINDOWS_SIGNING_CERT_SHA256 -replace '[:\s]', '').ToLowerInvariant()
+          $expectedThumbprint = ($env:WINDOWS_SIGNING_CERT_THUMBPRINT -replace '[:\s]', '').ToLowerInvariant()
+          if ($expectedCert -cnotmatch '^[0-9a-f]{64}$' -or $expectedThumbprint -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'Pinned Windows certificate fingerprint or thumbprint is invalid.'
           }
           if ($env:RELEASE_ID -notmatch '^[1-9][0-9]*$') { throw 'Validated GitHub Release ID is invalid.' }
           if ($env:RELEASE_TAG -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
@@ -1422,8 +1712,18 @@ jobs:
             if ($version.FileVersion -ne $fileVersion -or $version.ProductVersion -ne $versionName) {
               throw "$($target.AssetName) version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
             }
-            if ((Get-AuthenticodeSignature -FilePath $executable).Status -ne 'NotSigned') {
-              throw "Adopted $($target.AssetName) must be unsigned."
+            $signature = Get-AuthenticodeSignature -FilePath $executable
+            if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) {
+              throw "Adopted $($target.AssetName) does not have a valid Authenticode signature."
+            }
+            $actualCert = [Convert]::ToHexString(
+              [Security.Cryptography.SHA256]::HashData($signature.SignerCertificate.RawData)
+            ).ToLowerInvariant()
+            $actualThumbprint = ($signature.SignerCertificate.Thumbprint -replace '[:\s]', '').ToLowerInvariant()
+            if ($actualCert -cne $expectedCert -or
+                $actualThumbprint -cne $expectedThumbprint -or
+                $signature.SignerCertificate.Subject -cne $env:WINDOWS_SIGNING_CERT_SUBJECT) {
+              throw "Adopted $($target.AssetName) signer does not match the pinned release certificate."
             }
           }
 
@@ -1471,6 +1771,7 @@ jobs:
             type=raw,value=latest
       - name: Verify the prepared release before image promotion
         env:
+          ASSET_FINGERPRINT: ${{ needs.release.outputs.asset_fingerprint }}
           APPROVED_SHA: ${{ needs.authorize.outputs.sha }}
           IMAGE_DIGEST: ${{ needs.release.outputs.image_digest }}
           GH_TOKEN: ${{ github.token }}
@@ -1480,6 +1781,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if ! expected_asset_fingerprint="$(jq -ce '
+            if (type == "array" and
+                length == 8 and
+                (map(.name) | sort) == ["Rivune-Android.apk", "Rivune-arm64.exe", "Rivune-iOS-unsigned.ipa", "Rivune-macOS.dmg", "Rivune-tvOS-unsigned.ipa", "Rivune-visionOS-unsigned.ipa", "Rivune-x64.exe", "rivune-update.json"] and
+                (map(.id) | unique | length) == 8 and
+                all(.[];
+                  type == "object" and
+                  keys == ["digest", "id", "name", "size"] and
+                  (.id | type) == "number" and .id > 0 and .id == (.id | floor) and
+                  (.name | type) == "string" and
+                  (.size | type) == "number" and .size > 0 and .size == (.size | floor) and
+                  (.digest | type) == "string" and (.digest | test("^sha256:[0-9a-f]{64}$"))) and
+                . == sort_by(.name))
+            then . else error("invalid release asset fingerprint") end
+          ' <<<"${ASSET_FINGERPRINT}")" || [[ "${expected_asset_fingerprint}" != "${ASSET_FINGERPRINT}" ]]; then
+            echo "The validated release asset fingerprint output is malformed." >&2
+            exit 1
+          fi
           api() {
             curl --fail-with-body --silent --show-error \
               --header "Accept: application/vnd.github+json" \
@@ -1536,14 +1855,20 @@ jobs:
             echo "The prepared GitHub Release does not record the effective OCI image digest exactly once." >&2
             exit 1
           fi
-          expected_assets="$(printf '%s\n' rivune-update.json Rivune-Android.apk Rivune-x64.exe Rivune-arm64.exe | sort)"
+          expected_assets="$(printf '%s\n' rivune-update.json Rivune-Android.apk Rivune-iOS-unsigned.ipa Rivune-tvOS-unsigned.ipa Rivune-visionOS-unsigned.ipa Rivune-macOS.dmg Rivune-x64.exe Rivune-arm64.exe | sort)"
           actual_assets="$(jq -r '.assets[].name' <<<"${release}" | sort)"
           if [[ "${actual_assets}" != "${expected_assets}" ]]; then
             echo "The prepared GitHub Release asset set is incomplete or contains unexpected files." >&2
             exit 1
           fi
+          actual_asset_fingerprint="$(jq -ce '[.assets[] | {id, name, size, digest}] | sort_by(.name)' <<<"${release}")"
+          if [[ "${actual_asset_fingerprint}" != "${expected_asset_fingerprint}" ]]; then
+            echo "The prepared GitHub Release assets no longer match the validated fingerprint." >&2
+            exit 1
+          fi
       - name: Promote exact image, publish release, and promote mutable aliases
         env:
+          ASSET_FINGERPRINT: ${{ needs.release.outputs.asset_fingerprint }}
           PUBLISHED_EXACT_IMAGE_TAGS: ${{ steps.version.outputs.tags }}
           GH_TOKEN: ${{ github.token }}
           IMAGE: ghcr.io/${{ github.repository }}
@@ -1557,6 +1882,35 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if ! expected_asset_fingerprint="$(jq -ce '
+            if (type == "array" and
+                length == 8 and
+                (map(.name) | sort) == ["Rivune-Android.apk", "Rivune-arm64.exe", "Rivune-iOS-unsigned.ipa", "Rivune-macOS.dmg", "Rivune-tvOS-unsigned.ipa", "Rivune-visionOS-unsigned.ipa", "Rivune-x64.exe", "rivune-update.json"] and
+                (map(.id) | unique | length) == 8 and
+                all(.[];
+                  type == "object" and
+                  keys == ["digest", "id", "name", "size"] and
+                  (.id | type) == "number" and .id > 0 and .id == (.id | floor) and
+                  (.name | type) == "string" and
+                  (.size | type) == "number" and .size > 0 and .size == (.size | floor) and
+                  (.digest | type) == "string" and (.digest | test("^sha256:[0-9a-f]{64}$"))) and
+                . == sort_by(.name))
+            then . else error("invalid release asset fingerprint") end
+          ' <<<"${ASSET_FINGERPRINT}")" || [[ "${expected_asset_fingerprint}" != "${ASSET_FINGERPRINT}" ]]; then
+            echo "The validated release asset fingerprint output is malformed." >&2
+            exit 1
+          fi
+          release_asset_fingerprint() {
+            jq -ce '[.assets[] | {id, name, size, digest}] | sort_by(.name)' <<<"$1"
+          }
+          require_asset_fingerprint() {
+            local release_json="$1" context="$2" actual_asset_fingerprint
+            if ! actual_asset_fingerprint="$(release_asset_fingerprint "${release_json}")" ||
+               [[ "${actual_asset_fingerprint}" != "${expected_asset_fingerprint}" ]]; then
+              echo "${context} GitHub Release assets do not match the validated fingerprint." >&2
+              return 1
+            fi
+          }
           if [[ ! "${RELEASE_ID}" =~ ^[1-9][0-9]*$ ]]; then
             echo "The validated release ID is invalid: ${RELEASE_ID}" >&2
             exit 1
@@ -1566,6 +1920,7 @@ jobs:
             exit 1
           fi
           prepared_release="$(gh api "repos/${REPOSITORY}/releases/${RELEASE_ID}")"
+          require_asset_fingerprint "${prepared_release}" "The freshly fetched prepared"
           prepared_body="$(jq -er '.body | strings' <<<"${prepared_release}")"
           mapfile -t prepared_digests < <(sed -nE 's/^<!-- rivune-oci-image-digest: (sha256:[0-9a-f]{64}) -->$/\1/p' <<<"${prepared_body}")
           marker_mentions="$( (grep -oF '<!-- rivune-oci-image-digest:' <<<"${prepared_body}" || true) | wc -l)"
@@ -1611,6 +1966,8 @@ jobs:
           fi
 
 
+          prepared_release="$(gh api "repos/${REPOSITORY}/releases/${RELEASE_ID}")"
+          require_asset_fingerprint "${prepared_release}" "The immediately pre-publication"
           if jq -e '.draft == true' <<<"${prepared_release}" >/dev/null; then
             published_release="$(gh api --method PATCH "repos/${REPOSITORY}/releases/${RELEASE_ID}" \
               -F draft=false \
@@ -1619,6 +1976,7 @@ jobs:
           else
             published_release="${prepared_release}"
           fi
+          require_asset_fingerprint "${published_release}" "The publication response"
           if ! jq -e \
             --arg tag "${RELEASE_TAG}" \
             --arg sha "${RELEASE_SHA}" \
@@ -1653,8 +2011,8 @@ jobs:
               echo "Skipping mutable aliases because ${RELEASE_TAG} is no longer the latest stable release."
             fi
           fi
-
           final_release="$(gh api "repos/${REPOSITORY}/releases/${RELEASE_ID}")"
+          require_asset_fingerprint "${final_release}" "The final refetched"
           if ! jq -e \
             --arg tag "${RELEASE_TAG}" \
             --arg sha "${RELEASE_SHA}" \
@@ -1669,7 +2027,7 @@ jobs:
             echo "Final published release metadata does not match the authorized release." >&2
             exit 1
           fi
-          expected_assets="$(printf '%s\n' rivune-update.json Rivune-Android.apk Rivune-x64.exe Rivune-arm64.exe | sort)"
+          expected_assets="$(printf '%s\n' rivune-update.json Rivune-Android.apk Rivune-iOS-unsigned.ipa Rivune-tvOS-unsigned.ipa Rivune-visionOS-unsigned.ipa Rivune-macOS.dmg Rivune-x64.exe Rivune-arm64.exe | sort)"
           actual_assets="$(jq -r '.assets[].name' <<<"${final_release}" | sort)"
           if [[ "${actual_assets}" != "${expected_assets}" ]]; then
             echo "Final published release asset set is incomplete or contains unexpected files." >&2

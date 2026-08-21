@@ -67,7 +67,20 @@ public sealed class CredentialIsolationTests
     [Theory]
     [InlineData("http://rivune.test")]
     [InlineData("http://192.0.2.10:8080")]
-    public void RemoteHttpServerIsRejected(string serverUrl)
+    [InlineData("http://172.15.255.255")]
+    [InlineData("http://172.32.0.0")]
+    [InlineData("http://192.169.0.1")]
+    [InlineData("http://100.64.0.1")]
+    [InlineData("http://169.254.1.1")]
+    [InlineData("http://0.0.0.0")]
+    [InlineData("http://224.0.0.1")]
+    [InlineData("http://[::]")]
+    [InlineData("http://[fe80::1]")]
+    [InlineData("http://[ff02::1]")]
+    [InlineData("http://[::ffff:127.0.0.1]")]
+    [InlineData("http://[fbff::1]")]
+    [InlineData("http://[fe00::1]")]
+    public void UnsafeHttpServerIsRejected(string serverUrl)
     {
         Assert.Throws<InvalidServerUrlException>(() =>
         {
@@ -96,8 +109,14 @@ public sealed class CredentialIsolationTests
     [InlineData("http://localhost:8080")]
     [InlineData("http://127.0.0.1:8080")]
     [InlineData("http://127.42.7.9:8080")]
+    [InlineData("http://10.255.255.254:8080")]
+    [InlineData("http://172.16.0.1:8080")]
+    [InlineData("http://172.31.255.254:8080")]
+    [InlineData("http://192.168.255.254:8080")]
     [InlineData("http://[::1]:8080")]
-    public async Task LoopbackHttpServerIsAccepted(string serverUrl)
+    [InlineData("http://[fc00::1]:8080")]
+    [InlineData("http://[fdff:ffff::1]:8080")]
+    public async Task TrustedLocalHttpServerIsAccepted(string serverUrl)
     {
         var handler = new RecordingHandler();
         using var client = new RivuneApiClient(serverUrl, handler, new MemoryCredentialStore(null));

@@ -759,11 +759,18 @@ func TestSourcesWithoutAddonKeepsFanout(t *testing.T) {
 	}
 }
 
-func TestReplacementContentTypeUsesMediaExtensionForOctetStream(t *testing.T) {
-	if contentType := replacementContentType("application/octet-stream", "https://media.example/movie.mp4"); contentType != "video/mp4" {
-		t.Fatalf("expected video/mp4 replacement, got %q", contentType)
+func TestReplacementContentTypeUsesMediaExtensionContainerOrSignatureForOctetStream(t *testing.T) {
+	if contentType := replacementContentType("application/octet-stream", "https://media.example/movie.mp4", "", nil); contentType != "video/mp4" {
+		t.Fatalf("expected video/mp4 extension replacement, got %q", contentType)
 	}
-	if contentType := replacementContentType("video/custom", "https://media.example/movie.mp4"); contentType != "" {
+	if contentType := replacementContentType("application/octet-stream", "https://media.example/stream", "mkv", nil); contentType != "video/x-matroska" {
+		t.Fatalf("expected Matroska container replacement, got %q", contentType)
+	}
+	mp4Prefix := []byte{0, 0, 0, 24, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm'}
+	if contentType := replacementContentType("application/octet-stream", "https://media.example/stream", "", mp4Prefix); contentType != "video/mp4" {
+		t.Fatalf("expected video/mp4 signature replacement, got %q", contentType)
+	}
+	if contentType := replacementContentType("video/custom", "https://media.example/movie.mp4", "mkv", mp4Prefix); contentType != "" {
 		t.Fatalf("expected explicit upstream content type to remain unchanged, got %q", contentType)
 	}
 }
@@ -1949,10 +1956,10 @@ func TestPlaybackCapabilitiesOnlyApplySoftwareToneMapLimit(t *testing.T) {
 	}
 }
 
-func TestApplyPlaybackDecisionPersistsPrivateVideoBitDepth(t *testing.T) {
+func TestApplyPlaybackDecisionPersistsPrivateInspectionMetadata(t *testing.T) {
 	sources := []Source{{ID: "source"}}
-	assets := []storedAsset{{ID: "source"}}
-	inspection := MediaInspection{VideoTracks: []MediaTrack{{Codec: "h265", Height: 2160, BitDepth: 10}}}
+	assets := []storedAsset{{ID: "source", Container: "mkv"}}
+	inspection := MediaInspection{Container: "mp4", VideoTracks: []MediaTrack{{Codec: "h265", Height: 2160, BitDepth: 10}}}
 	decision := processingDecision(decisionVideoTranscodeRequired, "transcode", "transcode", inspection, Capabilities{}, true)
 	applyPlaybackDecision(sources, assets, sourceCandidate{}, inspection, processingTranscode, decision, Capabilities{})
 	encoded, err := json.Marshal(assets[0])
@@ -1963,8 +1970,8 @@ func TestApplyPlaybackDecisionPersistsPrivateVideoBitDepth(t *testing.T) {
 	if err := json.Unmarshal(encoded, &restored); err != nil {
 		t.Fatal(err)
 	}
-	if restored.VideoBitDepth != 10 {
-		t.Fatalf("restored private video bit depth = %d", restored.VideoBitDepth)
+	if restored.VideoBitDepth != 10 || restored.Container != "mp4" {
+		t.Fatalf("restored private inspection metadata = %+v, want 10-bit MP4", restored)
 	}
 }
 

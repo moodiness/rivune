@@ -1,3 +1,5 @@
+using Rivune.Windows;
+
 namespace Rivune.App;
 
 internal static class ServerAddressNormalizer
@@ -7,7 +9,8 @@ internal static class ServerAddressNormalizer
         ArgumentNullException.ThrowIfNull(value);
         var trimmed = value.Trim();
         if (trimmed.Length == 0 || trimmed.Contains("://", StringComparison.Ordinal)) return trimmed;
-        var loopback = Uri.TryCreate($"http://{trimmed}", UriKind.Absolute, out var probe) && probe.IsLoopback;
-        return $"{(loopback ? Uri.UriSchemeHttp : Uri.UriSchemeHttps)}://{trimmed}";
+        var trustedLocal = Uri.TryCreate($"http://{trimmed}", UriKind.Absolute, out var probe) &&
+            TrustedLocalTransport.IsAllowedServerUri(probe);
+        return $"{(trustedLocal ? Uri.UriSchemeHttp : Uri.UriSchemeHttps)}://{trimmed}";
     }
 }

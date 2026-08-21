@@ -124,3 +124,42 @@ jobs:
     needs:
       - authorize
     uses: ./.github/workflows/release-gate.yml
+
+  apple-assets:
+    name: Build unsigned Apple direct-release assets
+    if: needs.authorize.outputs.authorized == 'true'
+    needs:
+      - authorize
+    runs-on: macos-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the approved release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Build and inspect unsigned Apple direct-release assets
+        env:
+          RELEASE_BUILD_NUMBER: ${{ github.run_number }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_version="${RELEASE_TAG#v}"
+          release_version="${release_version%%+*}"
+          release_version="${release_version%%-*}"
+          bash clients/apple/Scripts/package-direct-release.sh \
+            apple-release-assets \
+            "${release_version}" \
+            "${RELEASE_BUILD_NUMBER}"
+      - name: Upload immutable unsigned Apple release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: apple-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: apple-release-assets/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false

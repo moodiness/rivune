@@ -14,7 +14,7 @@ usage() {
 Usage: ./rivune COMMAND [ARGUMENTS]
 
 Commands:
-  setup --version X.Y.Z [--public-url HTTPS_ORIGIN]
+  setup --version X.Y.Z [--public-url HTTPS_OR_LOCAL_HTTP_ORIGIN]
   up
   down
   restart
@@ -60,30 +60,51 @@ pin_compose_environment() {
 
 validate_public_url() {
   local value="$1"
-  local authority port=""
-  [[ -n "${value}" && "${value}" == https://* ]] || return 1
+  local scheme authority port="" host=""
+  case "${value}" in
+    https://*) scheme=https; authority="${value#https://}" ;;
+    http://*) scheme=http; authority="${value#http://}" ;;
+    *) return 1 ;;
+  esac
   [[ "${value}" != *$'\n'* && "${value}" != *$'\r'* && "${value}" != *[[:space:]]* ]] || return 1
-  authority="${value#https://}"
   [[ -n "${authority}" && "${authority}" != *"/"* && "${authority}" != *"@"* &&
      "${authority}" != *"?"* && "${authority}" != *"#"* && "${authority}" != *"\\"* ]] || return 1
 
   if [[ "${authority}" == \[* ]]; then
-    if [[ ! "${authority}" =~ ^\[[0-9A-Fa-f:]+\](:([0-9]+))?$ ]]; then
+    if [[ ! "${authority}" =~ ^\[([0-9A-Fa-f:]+)\](:([0-9]+))?$ ]]; then
       return 1
     fi
-    [[ "${authority}" == *:* ]] || return 1
-    port="${BASH_REMATCH[2]:-}"
+    host="${BASH_REMATCH[1]}"
+    [[ "${host}" == *:* ]] || return 1
+    port="${BASH_REMATCH[3]:-}"
   else
     if [[ ! "${authority}" =~ ^([A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?)(:([0-9]+))?$ ]]; then
       return 1
     fi
-    [[ "${BASH_REMATCH[1]}" != *..* ]] || return 1
+    host="${BASH_REMATCH[1]}"
+    [[ "${host}" != *..* ]] || return 1
     port="${BASH_REMATCH[4]:-}"
   fi
 
   if [[ -n "${port}" ]] && (( 10#${port} < 1 || 10#${port} > 65535 )); then
     return 1
   fi
+  [[ "${scheme}" == https ]] || validate_local_http_host "${host}"
+}
+
+validate_local_http_host() {
+  local host="$1" first second third fourth
+  if [[ "${host}" =~ ^[Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]$ || "${host}" == ::1 ||
+        "${host}" =~ ^[fF][cCdD][0-9A-Fa-f]{2}: ]]; then
+    return 0
+  fi
+  [[ "${host}" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+  first="${BASH_REMATCH[1]}" second="${BASH_REMATCH[2]}"
+  third="${BASH_REMATCH[3]}" fourth="${BASH_REMATCH[4]}"
+  (( 10#${first} <= 255 && 10#${second} <= 255 && 10#${third} <= 255 && 10#${fourth} <= 255 )) || return 1
+  (( 10#${first} == 10 || 10#${first} == 127 ||
+     (10#${first} == 172 && 10#${second} >= 16 && 10#${second} <= 31) ||
+     (10#${first} == 192 && 10#${second} == 168) ))
 }
 
 validate_version() {
@@ -134,7 +155,7 @@ setup_environment() {
   [[ "${version_set}" == true ]] || fail_usage '--version is required and must be a stable numeric version such as 1.6.0'
 
   if [[ "${public_url_set}" == true ]] && ! validate_public_url "${public_url}"; then
-    fail_usage '--public-url must be a complete HTTPS origin without credentials, path, query, or fragment'
+    fail_usage '--public-url must be HTTPS or loopback/private-IP HTTP without credentials, path, query, or fragment'
   fi
   validate_version "${version}" || fail_usage '--version must be a stable numeric version such as 1.6.0; mutable tags such as latest are not supported'
 
@@ -250,7 +271,7 @@ doctor_fail() {
 
 run_doctor() {
   local tool mode owner line key raw_value value
-  local service container_id state port public_url
+  local service container_id state bind_address port public_url
   local -A environment=()
   local -a required_variables=(
     RIVUNE_POSTGRES_SUPERUSER_PASSWORD
@@ -314,6 +335,11 @@ run_doctor() {
     pg_isready --username rivune --dbname rivune >/dev/null 2>&1 || doctor_fail 'PostgreSQL is not ready'
   doctor_ok 'PostgreSQL accepts connections'
 
+  bind_address="${environment[RIVUNE_BIND_ADDRESS]:-127.0.0.1}"
+  [[ "${bind_address}" == 127.0.0.1 || "${bind_address}" == 0.0.0.0 ]] ||
+    doctor_fail 'RIVUNE_BIND_ADDRESS must be 127.0.0.1 or the explicit trusted-LAN value 0.0.0.0'
+  doctor_ok 'Direct host binding is explicit and valid'
+
   port="${environment[RIVUNE_PORT]:-8080}"
   if [[ ! "${port}" =~ ^[0-9]+$ ]] || (( 10#${port} < 1 || 10#${port} > 65535 )); then
     doctor_fail 'RIVUNE_PORT is invalid'
@@ -324,7 +350,7 @@ run_doctor() {
 
   public_url="${environment[RIVUNE_PUBLIC_URL]:-}"
   if [[ -n "${public_url}" ]]; then
-    validate_public_url "${public_url}" || doctor_fail 'RIVUNE_PUBLIC_URL is not a safe HTTPS origin'
+    validate_public_url "${public_url}" || doctor_fail 'RIVUNE_PUBLIC_URL is not a safe HTTPS or local HTTP origin'
     curl --fail --silent --show-error --max-time 10 --output /dev/null -- \
       "${public_url}/ready" 2>/dev/null || doctor_fail 'Public readiness endpoint failed'
     doctor_ok 'Public readiness endpoint is healthy'

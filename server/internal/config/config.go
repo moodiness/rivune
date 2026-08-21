@@ -145,8 +145,8 @@ func Load() (Config, error) {
 		if parsed.Scheme != "http" && parsed.Scheme != "https" {
 			return Config{}, errors.New("RIVUNE_PUBLIC_URL must use http or https")
 		}
-		if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
-			return Config{}, errors.New("RIVUNE_PUBLIC_URL must use https unless its host is loopback")
+		if parsed.Scheme == "http" && !isLocalHTTPHost(parsed.Hostname()) {
+			return Config{}, errors.New("RIVUNE_PUBLIC_URL must use https unless its host is loopback or a private-network IP address")
 		}
 		parsed.Path = ""
 		cfg.PublicURL = parsed.String()
@@ -225,12 +225,16 @@ func LoadLegacyEnvironment() (LegacyEnvironment, error) {
 	return legacy, nil
 }
 
-func isLoopbackHost(host string) bool {
+func isLocalHTTPHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
 	address, err := netip.ParseAddr(host)
-	return err == nil && address.Unmap().IsLoopback()
+	if err != nil {
+		return false
+	}
+	address = address.Unmap()
+	return address.IsLoopback() || (address.IsPrivate() && netguard.IsAllowedAddress(address))
 }
 
 func loadDatabaseURL() (string, error) {

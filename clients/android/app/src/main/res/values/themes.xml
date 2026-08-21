@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="rivune_background">#07080B</color>
+    <color name="rivune_background">#000000</color>
     <color name="rivune_accent">#77A7FF</color>
     <color name="rivune_icon_background">#000000</color>
 

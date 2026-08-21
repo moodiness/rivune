@@ -49,16 +49,25 @@ final class CredentialSecurityTests: XCTestCase {
         XCTAssertFalse(requests.contains { $0.url?.path.hasSuffix("/auth/refresh") == true })
     }
 
-    func testRemoteHTTPConfiguredAndDiscoveredBasesAreRejectedButLoopbackHTTPIsAccepted() async throws {
-        XCTAssertThrowsError(
-            try RivuneAPIClient(
-                serverURL: URL(string: "http://rivune.example")!,
-                transport: CredentialSecurityTransport(),
-                credentialStore: IssuerScopedCredentialStore()
-            )
-        ) { error in
-            guard case RivuneAPIError.invalidServerURL = error else {
-                return XCTFail("Expected invalidServerURL, got \(error)")
+    func testRemoteHTTPIsRejectedWhileLocalHTTPIsAccepted() async throws {
+        let rejectedAddresses = [
+            "http://rivune.example",
+            "http://rivune.local",
+            "http://169.254.10.20",
+            "http://[2001:db8::20]",
+            "http://[fe80::20]"
+        ]
+        for address in rejectedAddresses {
+            XCTAssertThrowsError(
+                try RivuneAPIClient(
+                    serverURL: URL(string: address)!,
+                    transport: CredentialSecurityTransport(),
+                    credentialStore: IssuerScopedCredentialStore()
+                )
+            ) { error in
+                guard case RivuneAPIError.invalidServerURL = error else {
+                    return XCTFail("Expected invalidServerURL, got \(error)")
+                }
             }
         }
 
@@ -83,6 +92,15 @@ final class CredentialSecurityTests: XCTestCase {
         )
         _ = try await loopbackClient.discover()
         XCTAssertEqual(loopbackTransport.recordedRequests().first?.url?.absoluteString, "http://127.0.0.1:8080/.well-known/rivune")
+
+        let privateTransport = CredentialSecurityTransport()
+        let privateClient = try RivuneAPIClient(
+            serverURL: URL(string: "http://192.168.1.20:8080")!,
+            transport: privateTransport,
+            credentialStore: IssuerScopedCredentialStore()
+        )
+        _ = try await privateClient.discover()
+        XCTAssertEqual(privateTransport.recordedRequests().first?.url?.absoluteString, "http://192.168.1.20:8080/.well-known/rivune")
     }
 
     func testDelayedLoginCannotRepersistAfterLogoutReturns() async throws {
@@ -192,7 +210,7 @@ final class CredentialSecurityTests: XCTestCase {
         })
     }
 
-    func testLoopbackHTTPRejectsCredentialBearingRequestsBeforeTransport() async throws {
+    func testLocalHTTPCarriesAuthenticationOnlyToTheConfiguredOrigin() async throws {
         let server = URL(string: "http://127.0.0.1:8080")!
 
         let loginTransport = CredentialSecurityTransport()
@@ -207,14 +225,15 @@ final class CredentialSecurityTests: XCTestCase {
                 password: "password",
                 device: LoginDevice(name: "iPhone", platform: "iOS")
             )
-            XCTFail("Password login over loopback HTTP must be rejected")
-        } catch RivuneAPIError.invalidServerURL {
-            // Expected.
+            XCTFail("The fixture should reject the login after receiving it")
+        } catch RivuneAPIError.server(let status, _, _) {
+            XCTAssertEqual(status, 401)
         }
-        XCTAssertEqual(loginTransport.recordedRequests().map(\.url?.path), ["/.well-known/rivune"])
+        XCTAssertEqual(loginTransport.recordedRequests().map(\.url?.path), ["/.well-known/rivune", "/api/v1/auth/login"])
 
         let authenticatedStore = IssuerScopedCredentialStore()
-        try await authenticatedStore.save(StoredCredentials(tokens: fixtureToken(), profileContext: nil), for: server)
+        let token = fixtureToken()
+        try await authenticatedStore.save(StoredCredentials(tokens: token, profileContext: nil), for: server)
         let authenticatedTransport = CredentialSecurityTransport()
         let authenticatedClient = try RivuneAPIClient(
             serverURL: server,
@@ -226,32 +245,29 @@ final class CredentialSecurityTests: XCTestCase {
         XCTAssertTrue(restored)
         do {
             _ = try await authenticatedClient.currentAccount()
-            XCTFail("Bearer credentials over loopback HTTP must be rejected")
-        } catch RivuneAPIError.invalidServerURL {
-            // Expected.
+            XCTFail("The fixture should reject the authenticated request after receiving it")
+        } catch RivuneAPIError.server(let status, _, _) {
+            XCTAssertEqual(status, 401)
+        } catch RivuneAPIError.notAuthenticated {
+            // The automatic refresh was also rejected after both HTTP requests reached the transport.
         }
-        XCTAssertEqual(authenticatedTransport.recordedRequests().map(\.url?.path), ["/.well-known/rivune"])
-        do {
-            _ = try await authenticatedClient.refreshSession()
-            XCTFail("Refresh credentials over loopback HTTP must be rejected")
-        } catch RivuneAPIError.invalidServerURL {
-            // Expected.
-        }
-        XCTAssertEqual(authenticatedTransport.recordedRequests().map(\.url?.path), ["/.well-known/rivune"])
+        let authenticatedRequest = try XCTUnwrap(authenticatedTransport.recordedRequests().first {
+            $0.url?.path == "/api/v1/auth/me"
+        })
+        XCTAssertEqual(authenticatedRequest.url?.absoluteString, "http://127.0.0.1:8080/api/v1/auth/me")
+        XCTAssertEqual(authenticatedRequest.value(forHTTPHeaderField: "Authorization"), "Bearer \(token.accessToken)")
 
-        let exchangeTransport = CredentialSecurityTransport()
-        let exchangeClient = try RivuneAPIClient(
-            serverURL: server,
-            transport: exchangeTransport,
-            credentialStore: IssuerScopedCredentialStore()
-        )
-        do {
-            _ = try await exchangeClient.exchangeDeviceAuthorization(deviceCode: "reusable-device-code")
-            XCTFail("Device authorization exchange over loopback HTTP must be rejected")
-        } catch RivuneAPIError.invalidServerURL {
-            // Expected.
+        XCTAssertThrowsError(
+            try RivuneAPIClient(
+                serverURL: URL(string: "http://198.51.100.1:8080")!,
+                transport: CredentialSecurityTransport(),
+                credentialStore: IssuerScopedCredentialStore()
+            )
+        ) { error in
+            guard case RivuneAPIError.invalidServerURL = error else {
+                return XCTFail("Expected invalidServerURL, got \(error)")
+            }
         }
-        XCTAssertEqual(exchangeTransport.recordedRequests().map(\.url?.path), ["/.well-known/rivune"])
     }
 
     func testRemoteLogoutFailureDoesNotVetoLocalCredentialDeletion() async throws {

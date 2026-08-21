@@ -77,7 +77,7 @@ private class UpdateInstallState(context: Context) {
     }
 
     fun confirmationStarted(sessionId: Int) {
-        if (activeSessionId == sessionId) preferences.edit().putBoolean("awaiting_confirmation", false).apply()
+        if (activeSessionId == sessionId) preferences.edit().putBoolean("awaiting_confirmation", false).commit()
     }
 
     fun clear(sessionId: Int): Boolean {
@@ -156,7 +156,6 @@ internal class AppUpdateCoordinator(
         .build()
     private val installState = UpdateInstallState(context)
     private var resumedActivity = WeakReference<Activity>(null)
-    private var pendingConfirmation: Pair<Int, Intent>? = null
     private val operation = Mutex()
     private val _state = MutableStateFlow<AppUpdateState>(restingUpdateState(enabled))
     val state: StateFlow<AppUpdateState> = _state.asStateFlow()
@@ -178,13 +177,12 @@ internal class AppUpdateCoordinator(
     fun activityResumed(activity: Activity) {
         resumedActivity = WeakReference(activity)
         val sessionId = installState.activeSessionId
-        if (sessionId != NO_INSTALL_SESSION && pendingConfirmation == null &&
+        if (sessionId != NO_INSTALL_SESSION &&
             context.packageManager.packageInstaller.getSessionInfo(sessionId) == null
         ) {
             installState.clear(sessionId)
             _state.value = restingUpdateState(enabled)
         }
-        launchPendingConfirmation()
     }
 
     fun activityPaused(activity: Activity) {
@@ -319,31 +317,34 @@ internal class AppUpdateCoordinator(
 
     internal fun installationResult(sessionId: Int, status: Int, message: String?) {
         if (!installState.clear(sessionId)) return
-        pendingConfirmation = null
         _state.value = when (status) {
             PackageInstaller.STATUS_SUCCESS -> restingUpdateState(enabled)
             else -> AppUpdateState.Error(message?.takeIf { it.isNotBlank() } ?: "Android could not install the update")
         }
     }
 
-    internal fun requestInstallationConfirmation(sessionId: Int, confirmation: Intent?) {
-        if (confirmation == null || !installState.markAwaitingConfirmation(sessionId)) {
+    internal fun requestInstallationConfirmation(sessionId: Int, confirmation: Intent?, launchContext: Context = context) {
+        val sessionExists = runCatching {
+            context.packageManager.packageInstaller.getSessionInfo(sessionId)
+        }.getOrNull() != null
+        if (!canLaunchInstallationConfirmation(
+                activeSessionId = installState.activeSessionId,
+                callbackSessionId = sessionId,
+                sessionExists = sessionExists,
+                confirmationPresent = confirmation != null,
+            ) || !installState.markAwaitingConfirmation(sessionId)
+        ) {
             installationResult(sessionId, PackageInstaller.STATUS_FAILURE, "Android did not provide a valid installation confirmation")
             return
         }
-        pendingConfirmation = sessionId to confirmation
-        launchPendingConfirmation()
-    }
-
-    private fun launchPendingConfirmation() {
-        val activity = resumedActivity.get() ?: return
-        val pending = pendingConfirmation ?: return
+        val resumed = resumedActivity.get()
+        val targetContext = resumed ?: launchContext
+        if (resumed == null) confirmation!!.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         try {
-            activity.startActivity(pending.second)
-            installState.confirmationStarted(pending.first)
-            pendingConfirmation = null
+            targetContext.startActivity(confirmation!!)
+            installState.confirmationStarted(sessionId)
         } catch (error: Exception) {
-            installationResult(pending.first, PackageInstaller.STATUS_FAILURE, error.message)
+            installationResult(sessionId, PackageInstaller.STATUS_FAILURE, error.message)
         }
     }
 
@@ -417,6 +418,16 @@ internal class AppUpdateCoordinator(
 internal fun restingUpdateState(enabled: Boolean): AppUpdateState =
     if (enabled) AppUpdateState.Idle else AppUpdateState.Unavailable
 
+internal fun canLaunchInstallationConfirmation(
+    activeSessionId: Int,
+    callbackSessionId: Int,
+    sessionExists: Boolean,
+    confirmationPresent: Boolean,
+): Boolean = activeSessionId != NO_INSTALL_SESSION &&
+    callbackSessionId == activeSessionId &&
+    sessionExists &&
+    confirmationPresent
+
 internal fun resolveUpdateManifest(
     manifest: AppUpdateManifest,
     applicationId: String,
@@ -441,7 +452,7 @@ class AppUpdateInstallReceiver : BroadcastReceiver() {
         if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
             @Suppress("DEPRECATION")
             val confirmation = intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
-            updates.requestInstallationConfirmation(sessionId, confirmation)
+            updates.requestInstallationConfirmation(sessionId, confirmation, context)
             return
         }
         updates.installationResult(

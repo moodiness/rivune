@@ -1,3 +1,4 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.gradle.api.GradleException
 import org.gradle.api.artifacts.component.ComponentIdentifier
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
@@ -14,7 +15,6 @@ import java.util.zip.ZipInputStream
 
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
@@ -103,13 +103,13 @@ fun optionalBooleanEnvironment(name: String, default: Boolean): Boolean =
 
 android {
     namespace = "io.rivune.app"
-    compileSdk = 36
+    compileSdk = 37
     buildToolsVersion = "36.0.0"
 
     defaultConfig {
         applicationId = "io.rivune.app"
         minSdk = 26
-        targetSdk = 36
+        targetSdk = 37
         versionCode = releaseVersionCode
         versionName = releaseVersionName
         buildConfigField("Boolean", "APP_UPDATES_ENABLED", "true")
@@ -130,6 +130,11 @@ android {
                 optionalBooleanEnvironment("RIVUNE_ANDROID_UPDATES_ENABLED", false).toString(),
             )
         }
+        create("playRelease") {
+            initWith(getByName("release"))
+            matchingFallbacks += listOf("release")
+            buildConfigField("Boolean", "APP_UPDATES_ENABLED", "false")
+        }
     }
 
     compileOptions {
@@ -137,9 +142,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
+
 
     buildFeatures {
         compose = true
@@ -148,6 +151,12 @@ android {
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget = JvmTarget.JVM_17
     }
 }
 
@@ -181,7 +190,7 @@ dependencies {
         implementation(files(localLibmpvAarFile))
     }
 
-    testImplementation(kotlin("test"))
+    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.3.10")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")

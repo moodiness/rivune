@@ -48,6 +48,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <AssemblyMetadata Include="RivuneExpectedUpdateSignerSha256" Value="$(RivuneExpectedUpdateSignerSha256)" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
   </ItemGroup>
 

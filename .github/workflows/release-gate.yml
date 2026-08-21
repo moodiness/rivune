@@ -37,6 +37,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
@@ -67,6 +69,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
@@ -94,6 +98,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Set up Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -122,18 +128,20 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Set up Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 22
       - name: Lint OpenAPI contract with pinned Redocly
-        run: npx --yes @redocly/cli@1.34.5 lint protocol/openapi.yaml --format=github-actions
+        run: npx --yes @redocly/cli@2.47.0 lint protocol/openapi.yaml --format=github-actions
       - name: Lint Jellyfin compatibility contract with pinned Redocly
-        run: npx --yes @redocly/cli@1.34.5 lint protocol/jellyfin-compat-openapi.yaml --format=github-actions
+        run: npx --yes @redocly/cli@2.47.0 lint protocol/jellyfin-compat-openapi.yaml --format=github-actions
       - name: Resolve the complete OpenAPI contract
-        run: npx --yes @redocly/cli@1.34.5 bundle protocol/openapi.yaml --output /tmp/rivune-openapi.yaml
+        run: npx --yes @redocly/cli@2.47.0 bundle protocol/openapi.yaml --output /tmp/rivune-openapi.yaml
       - name: Verify committed resolved contract is current
-        run: diff --unified protocol/openapi.resolved.yaml /tmp/rivune-openapi.yaml
+        run: diff -u protocol/openapi.resolved.yaml /tmp/rivune-openapi.yaml
 
   swift-client:
     name: Swift API client
@@ -141,6 +149,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Test Swift package
         timeout-minutes: 10
         run: swift test --disable-swift-testing --package-path clients/apple
@@ -151,6 +161,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
@@ -167,11 +179,51 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4
       - name: Install Android platform
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+        run: sdkmanager "platforms;android-37.0" "build-tools;36.0.0"
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
-      - name: Test and build Android client
-        run: bash clients/android/gradlew -p clients/android --no-daemon :rivune-api:testDebugUnitTest :rivune-api:assembleRelease :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
+      - name: Test and build Android clients
+        run: |
+          set -euo pipefail
+          bash clients/android/gradlew -p clients/android --no-daemon \
+            :rivune-api:testDebugUnitTest \
+            :rivune-api:assembleRelease \
+            :app:testDebugUnitTest \
+            :app:assembleDebug \
+            :app:assembleRelease \
+            :app:bundlePlayRelease
+
+          github_apk='clients/android/app/build/outputs/apk/release/app-release-unsigned.apk'
+          shopt -s nullglob
+          play_bundles=(clients/android/app/build/outputs/bundle/playRelease/*.aab)
+          if [[ ! -s "${github_apk}" ]] || (( ${#play_bundles[@]} != 1 )) || [[ ! -s "${play_bundles[0]}" ]]; then
+            echo 'Stable GitHub APK or the single Play release bundle is absent or empty.' >&2
+            exit 1
+          fi
+
+          play_manifest_found=false
+          while IFS= read -r play_manifest; do
+            if ! grep -Fq '<manifest' "${play_manifest}"; then
+              continue
+            fi
+            play_manifest_found=true
+            if grep -Eq 'android.permission.REQUEST_INSTALL_PACKAGES|AppUpdateInstallReceiver' "${play_manifest}"; then
+              echo "Play merged manifest contains sideload updater capability: ${play_manifest}" >&2
+              exit 1
+            fi
+          done < <(find clients/android/app/build/intermediates -type f -path '*/playRelease/*' -name AndroidManifest.xml -print)
+          if [[ "${play_manifest_found}" != true ]]; then
+            echo 'No textual Play merged manifest was produced.' >&2
+            exit 1
+          fi
+
+          mapfile -t play_build_configs < <(find clients/android/app/build/generated \
+            -type f -path '*/playRelease/*' -name BuildConfig.java -print)
+          if (( ${#play_build_configs[@]} != 1 )) ||
+             ! grep -Eq 'APP_UPDATES_ENABLED[[:space:]]*=[[:space:]]*false' "${play_build_configs[0]}"; then
+            echo 'Play build must compile out the GitHub self-updater.' >&2
+            exit 1
+          fi
 
   windows-client:
     name: Windows ${{ matrix.label }} portable client
@@ -195,6 +247,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Set up .NET
         uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
@@ -205,7 +259,7 @@ jobs:
       - name: Test Windows library
         if: matrix.label == 'x64'
         run: dotnet test clients/windows/Rivune.Windows.slnx --configuration Release --nologo
-      - name: Publish, inspect, and smoke the unsigned executable
+      - name: Publish, inspect, and smoke the unsigned developer executable
         env:
           ASSET_FILE_NAME: ${{ matrix.file_name }}
           EXPECTED_MACHINE: ${{ matrix.machine }}
@@ -262,7 +316,7 @@ jobs:
             throw "Portable executable version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
           }
           if ((Get-AuthenticodeSignature -FilePath $executable).Status -ne 'NotSigned') {
-            throw 'Portable executable must be unsigned.'
+            throw 'Developer smoke executable must remain unsigned.'
           }
           $process = Start-Process -FilePath $executable -PassThru
           try {
@@ -278,6 +332,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Test private POSIX environment-file creation
         run: bash scripts/create-env_test.sh
       - name: Validate CPU-only and optional AMD/Intel Compose modes
@@ -364,6 +420,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
       - name: Build native linux/arm64 image

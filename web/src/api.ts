@@ -1,6 +1,7 @@
 import { translate as t } from "./i18n";
 import { clearMediaCaches } from "./homeCache";
 import { clearMetadataCache } from "./metadataCache";
+import { safeLocalStorage, safeSessionStorage } from "./browserStorage";
 import type {
   Account,
   AddonCatalogDescriptor,
@@ -102,11 +103,7 @@ export function clearMaintenanceMode(): void {
 }
 
 export function hasDemoHint(): boolean {
-  try {
-    return localStorage.getItem(DEMO_HINT_KEY) === "1";
-  } catch {
-    return false;
-  }
+  return safeLocalStorage.getItem(DEMO_HINT_KEY) === "1";
 }
 
 export function clearDemoClientState(): void {
@@ -114,11 +111,7 @@ export function clearDemoClientState(): void {
   clearMediaCaches();
   clearMetadataCache();
   currentMaintenanceMessage = null;
-  try {
-    localStorage.removeItem(DEMO_HINT_KEY);
-  } catch {
-    // The backend cookie remains the only authority when storage is unavailable.
-  }
+  safeLocalStorage.removeItem(DEMO_HINT_KEY);
 }
 
 export function prepareDemoAttempt(): void {
@@ -128,11 +121,7 @@ export function prepareDemoAttempt(): void {
 
 export function rememberDemoSession(): void {
   demoUnavailableDispatched = false;
-  try {
-    localStorage.setItem(DEMO_HINT_KEY, "1");
-  } catch {
-    // The non-secret hint is optional; the cookie remains authoritative.
-  }
+  safeLocalStorage.setItem(DEMO_HINT_KEY, "1");
 }
 
 export class APIError extends Error {
@@ -149,9 +138,9 @@ type SharedProfileContext = {
 
 function readSharedProfileContext(): SharedProfileContext | null {
   try {
-    const parsed = JSON.parse(localStorage.getItem(SHARED_PROFILE_CONTEXT_KEY) ?? "null") as Partial<SharedProfileContext> | null;
+    const parsed = JSON.parse(safeLocalStorage.getItem(SHARED_PROFILE_CONTEXT_KEY) ?? "null") as Partial<SharedProfileContext> | null;
     if (!parsed || typeof parsed.sessionId !== "string" || typeof parsed.profileId !== "string" || typeof parsed.profileContext !== "string") return null;
-    if (!parsed.sessionId || parsed.sessionId !== localStorage.getItem(SESSION_KEY) || !parsed.profileId || !parsed.profileContext) return null;
+    if (!parsed.sessionId || parsed.sessionId !== safeLocalStorage.getItem(SESSION_KEY) || !parsed.profileId || !parsed.profileContext) return null;
     return parsed as SharedProfileContext;
   } catch {
     return null;
@@ -159,27 +148,19 @@ function readSharedProfileContext(): SharedProfileContext | null {
 }
 
 function rememberSharedProfileContext(profileID: string, profileContext: string): void {
-  const sessionId = localStorage.getItem(SESSION_KEY);
+  const sessionId = safeLocalStorage.getItem(SESSION_KEY);
   if (!sessionId) return;
-  try {
-    localStorage.setItem(SHARED_PROFILE_CONTEXT_KEY, JSON.stringify({ sessionId, profileId: profileID, profileContext } satisfies SharedProfileContext));
-  } catch {
-    // The active tab remains authorized through its tab-local capability.
-  }
+  safeLocalStorage.setItem(SHARED_PROFILE_CONTEXT_KEY, JSON.stringify({ sessionId, profileId: profileID, profileContext } satisfies SharedProfileContext));
 }
 
 function clearSharedProfileContext(expectedContext?: string): void {
-  try {
-    if (expectedContext && readSharedProfileContext()?.profileContext !== expectedContext) return;
-    localStorage.removeItem(SHARED_PROFILE_CONTEXT_KEY);
-  } catch {
-    // The server remains authoritative when browser storage is unavailable.
-  }
+  if (expectedContext && readSharedProfileContext()?.profileContext !== expectedContext) return;
+  safeLocalStorage.removeItem(SHARED_PROFILE_CONTEXT_KEY);
 }
 
 export function profileRequestContext(profileID: string): string | null {
-  const tabContext = sessionStorage.getItem(PROFILE_KEY) === profileID
-    ? sessionStorage.getItem(PROFILE_CONTEXT_KEY)
+  const tabContext = safeSessionStorage.getItem(PROFILE_KEY) === profileID
+    ? safeSessionStorage.getItem(PROFILE_CONTEXT_KEY)
     : null;
   if (tabContext) {
     rememberSharedProfileContext(profileID, tabContext);
@@ -187,74 +168,70 @@ export function profileRequestContext(profileID: string): string | null {
   }
   const shared = readSharedProfileContext();
   if (!shared || shared.profileId !== profileID) return null;
-  sessionStorage.setItem(PROFILE_KEY, profileID);
-  sessionStorage.setItem(PROFILE_CONTEXT_KEY, shared.profileContext);
+  safeSessionStorage.setItem(PROFILE_KEY, profileID);
+  safeSessionStorage.setItem(PROFILE_CONTEXT_KEY, shared.profileContext);
   return shared.profileContext;
 }
 
 export function setProfileRequestContext(profileID: string | null, profileContext: string | null): void {
   if (profileID && profileContext) {
-    sessionStorage.setItem(PROFILE_KEY, profileID);
-    sessionStorage.setItem(PROFILE_CONTEXT_KEY, profileContext);
+    safeSessionStorage.setItem(PROFILE_KEY, profileID);
+    safeSessionStorage.setItem(PROFILE_CONTEXT_KEY, profileContext);
     rememberSharedProfileContext(profileID, profileContext);
     return;
   }
-  sessionStorage.removeItem(PROFILE_KEY);
-  sessionStorage.removeItem(PROFILE_CONTEXT_KEY);
+  safeSessionStorage.removeItem(PROFILE_KEY);
+  safeSessionStorage.removeItem(PROFILE_CONTEXT_KEY);
 }
 
 export function rejectProfileRequestContext(): void {
-  const rejectedContext = sessionStorage.getItem(PROFILE_CONTEXT_KEY);
+  const rejectedContext = safeSessionStorage.getItem(PROFILE_CONTEXT_KEY);
   if (rejectedContext) clearSharedProfileContext(rejectedContext);
 }
 
 export function broadcastProfileSelectionChange(): void {
-  try {
-    localStorage.setItem(PROFILE_SELECTION_BROADCAST_KEY, JSON.stringify({
-      sessionId: localStorage.getItem(SESSION_KEY),
-      nonce: `${Date.now()}-${Math.random()}`,
-    }));
-  } catch {
-    // The per-tab opaque profile capability remains the server-side boundary.
-  }
+  safeLocalStorage.setItem(PROFILE_SELECTION_BROADCAST_KEY, JSON.stringify({
+    sessionId: safeLocalStorage.getItem(SESSION_KEY),
+    nonce: `${Date.now()}-${Math.random()}`,
+  }));
 }
 
 
 
 function saveTokens(tokens: TokenPair) {
-  sessionStorage.setItem(ACCESS_KEY, tokens.accessToken);
-  localStorage.setItem(ACCESS_KEY, tokens.accessToken);
-  localStorage.setItem(SESSION_KEY, tokens.sessionId);
-  localStorage.setItem(DEVICE_KEY, tokens.deviceId);
-  localStorage.setItem(REFRESH_KEY, tokens.refreshToken);
+  safeSessionStorage.setItem(ACCESS_KEY, tokens.accessToken);
+  safeLocalStorage.setItem(ACCESS_KEY, tokens.accessToken);
+  safeLocalStorage.setItem(SESSION_KEY, tokens.sessionId);
+  safeLocalStorage.setItem(DEVICE_KEY, tokens.deviceId);
+  safeLocalStorage.setItem(REFRESH_KEY, tokens.refreshToken);
 }
 
 export function clearSession() {
-  sessionStorage.removeItem(ACCESS_KEY);
-  sessionStorage.removeItem(PROFILE_KEY);
-  sessionStorage.removeItem(PROFILE_CONTEXT_KEY);
-  localStorage.removeItem(ACCESS_KEY);
-  localStorage.removeItem(REFRESH_KEY);
-  localStorage.removeItem(SESSION_KEY);
+  safeSessionStorage.removeItem(ACCESS_KEY);
+  safeSessionStorage.removeItem(PROFILE_KEY);
+  safeSessionStorage.removeItem(PROFILE_CONTEXT_KEY);
+  safeLocalStorage.removeItem(ACCESS_KEY);
+  safeLocalStorage.removeItem(REFRESH_KEY);
+  safeLocalStorage.removeItem(SESSION_KEY);
   clearSharedProfileContext();
 }
 
 function adoptNewerSharedSession(refreshToken: string, sessionId: string | null): boolean {
-  const sharedRefreshToken = localStorage.getItem(REFRESH_KEY);
-  const sharedAccessToken = localStorage.getItem(ACCESS_KEY);
-  const sharedSessionId = localStorage.getItem(SESSION_KEY);
+  const sharedRefreshToken = safeLocalStorage.getItem(REFRESH_KEY);
+  const sharedAccessToken = safeLocalStorage.getItem(ACCESS_KEY);
+  const sharedSessionId = safeLocalStorage.getItem(SESSION_KEY);
   if (!sessionId || sharedSessionId !== sessionId || !sharedRefreshToken || sharedRefreshToken === refreshToken || !sharedAccessToken) return false;
-  sessionStorage.setItem(ACCESS_KEY, sharedAccessToken);
+  safeSessionStorage.setItem(ACCESS_KEY, sharedAccessToken);
   return true;
 }
 
 async function refreshSession(): Promise<boolean> {
-  const refreshToken = localStorage.getItem(REFRESH_KEY);
+  const refreshToken = safeLocalStorage.getItem(REFRESH_KEY);
   if (!refreshToken) return false;
-  const sessionId = localStorage.getItem(SESSION_KEY);
+  const sessionId = safeLocalStorage.getItem(SESSION_KEY);
 
   const refresh = async () => {
-    if (localStorage.getItem(REFRESH_KEY) !== refreshToken) {
+    if (safeLocalStorage.getItem(REFRESH_KEY) !== refreshToken) {
       return adoptNewerSharedSession(refreshToken, sessionId);
     }
     const response = await fetch(`${API_BASE}/auth/refresh`, {
@@ -264,11 +241,11 @@ async function refreshSession(): Promise<boolean> {
     });
     if (!response.ok) {
       if (adoptNewerSharedSession(refreshToken, sessionId)) return true;
-      if (localStorage.getItem(REFRESH_KEY) === refreshToken) clearSession();
+      if (safeLocalStorage.getItem(REFRESH_KEY) === refreshToken) clearSession();
       return false;
     }
     const tokens = (await response.json()) as TokenPair;
-    if (localStorage.getItem(REFRESH_KEY) !== refreshToken) {
+    if (safeLocalStorage.getItem(REFRESH_KEY) !== refreshToken) {
       return adoptNewerSharedSession(refreshToken, sessionId);
     }
     saveTokens(tokens);
@@ -282,22 +259,22 @@ async function refreshSession(): Promise<boolean> {
 }
 
 async function request<T>(path: string, init: RequestInit = {}, retry = true, attachSession = true, handleDemoUnavailable = true): Promise<T> {
-  const requestSessionId = localStorage.getItem(SESSION_KEY);
+  const requestSessionId = safeLocalStorage.getItem(SESSION_KEY);
   const headers = new Headers(init.headers);
   if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const token = attachSession ? sessionStorage.getItem(ACCESS_KEY) ?? localStorage.getItem(ACCESS_KEY) : null;
+  const token = attachSession ? safeSessionStorage.getItem(ACCESS_KEY) ?? safeLocalStorage.getItem(ACCESS_KEY) : null;
   if (token && !headers.has("Authorization")) headers.set("Authorization", `Bearer ${token}`);
-  const profileContext = token ? sessionStorage.getItem(PROFILE_CONTEXT_KEY) : null;
+  const profileContext = token ? safeSessionStorage.getItem(PROFILE_CONTEXT_KEY) : null;
   if (profileContext && !headers.has("X-Rivune-Profile-Context")) {
     headers.set("X-Rivune-Profile-Context", profileContext);
   }
   const requestURL = path.startsWith("/.well-known") || path === "/health" ? path : `${API_BASE}${path}`;
   const response = await fetch(requestURL, { ...init, headers, credentials: "same-origin" });
-  if (response.status === 401 && retry && localStorage.getItem(REFRESH_KEY)) {
+  if (response.status === 401 && retry && safeLocalStorage.getItem(REFRESH_KEY)) {
     refreshPromise ??= refreshSession().finally(() => { refreshPromise = null; });
-    if (await refreshPromise && requestSessionId !== null && localStorage.getItem(SESSION_KEY) === requestSessionId) {
+    if (await refreshPromise && requestSessionId !== null && safeLocalStorage.getItem(SESSION_KEY) === requestSessionId) {
       return request<T>(path, init, false, attachSession, handleDemoUnavailable);
     }
   }
@@ -364,7 +341,7 @@ export const api = {
   login: async (username: string, password: string) => {
     const tokens = await request<TokenPair>("/auth/login", {
       method: "POST",
-      body: JSON.stringify({ username, password, device: { id: localStorage.getItem(DEVICE_KEY) || undefined, name: browserName(), platform: "web" } }),
+      body: JSON.stringify({ username, password, device: { id: safeLocalStorage.getItem(DEVICE_KEY) || undefined, name: browserName(), platform: "web" } }),
     }, false, false);
     saveTokens(tokens);
     return tokens;

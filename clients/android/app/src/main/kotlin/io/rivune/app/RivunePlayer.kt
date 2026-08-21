@@ -773,6 +773,7 @@ private fun Media3PlayerScreen(
 
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
+                activePlayerView?.let { updateMedia3KeepScreenOn(it, playing) }
             }
 
             override fun onTracksChanged(tracks: Tracks) {
@@ -806,6 +807,7 @@ private fun Media3PlayerScreen(
             if (finished) return
             finished = true
             reportingJob?.cancel()
+            activePlayerView?.let { updateMedia3KeepScreenOn(it, isPlaying = false) }
             try {
                 reportProgress()
             } finally {
@@ -1028,18 +1030,20 @@ private fun Media3PlayerScreen(
                     this.player = player
                     forcedFrameRateController?.attach(videoSurfaceView)
                     activePlayerView = this
+                    updateMedia3KeepScreenOn(this, player.isPlaying)
                 }
             },
             update = { playerView ->
                 activePlayerView = playerView
                 playerView.player = player
+                updateMedia3KeepScreenOn(playerView, isPlaying)
                 playerView.resizeMode = sessionAspect.resizeMode()
                 playerView.useController = false
                 forcedFrameRateController?.attach(playerView.videoSurfaceView)
             },
             onRelease = { playerView ->
                 forcedFrameRateController?.attach(null)
-                playerView.player = null
+                releaseMedia3PlayerView(playerView)
                 if (activePlayerView === playerView) activePlayerView = null
             },
             modifier = Modifier.fillMaxSize(),
@@ -1226,6 +1230,15 @@ private fun Media3PlayerScreen(
     }
 }
 
+internal fun updateMedia3KeepScreenOn(playerView: PlayerView, isPlaying: Boolean) {
+    playerView.keepScreenOn = isPlaying
+}
+
+internal fun releaseMedia3PlayerView(playerView: PlayerView) {
+    playerView.keepScreenOn = false
+    playerView.player = null
+}
+
 @Composable
 private fun MpvPlayerScreen(
     presentation: PlayerPresentation,
@@ -1269,9 +1282,9 @@ private fun MpvPlayerScreen(
     var unlockVisible by remember(presentation.key) { mutableStateOf(false) }
     var playbackEnded by remember(presentation.key) { mutableStateOf(false) }
     var playbackRequested by remember(presentation.key) { mutableStateOf(true) }
-    var isPlaying by remember(presentation.key) { mutableStateOf(false) }
-    var positionMs by remember(presentation.key) { mutableLongStateOf(presentation.startPositionMs.coerceAtLeast(0L)) }
-    var durationMs by remember(presentation.key) { mutableLongStateOf(presentation.durationSeconds.coerceAtLeast(0).toLong() * 1_000L) }
+    var playbackIsPlaying by remember(presentation.key) { mutableStateOf(false) }
+    var playbackPositionMs by remember(presentation.key) { mutableLongStateOf(presentation.startPositionMs.coerceAtLeast(0L)) }
+    var playbackDurationMs by remember(presentation.key) { mutableLongStateOf(presentation.durationSeconds.coerceAtLeast(0).toLong() * 1_000L) }
     var interactionGeneration by remember(presentation.key) { mutableLongStateOf(0L) }
     var requestTransportFocusWhenVisible by remember(presentation.key) { mutableStateOf(false) }
     var markerWasVisible by remember(presentation.key) { mutableStateOf(false) }
@@ -1315,8 +1328,11 @@ private fun MpvPlayerScreen(
                     MpvPlaybackState.READY -> PlayerVisualState.Ready
                 }
             }
-            override fun onPlayingChanged(updated: Boolean) { isPlaying = updated }
-            override fun onPositionChanged(position: Long, duration: Long) { positionMs = position; durationMs = duration }
+            override fun onPlayingChanged(isPlaying: Boolean) { playbackIsPlaying = isPlaying }
+            override fun onPositionChanged(positionMs: Long, durationMs: Long) {
+                playbackPositionMs = positionMs
+                playbackDurationMs = durationMs
+            }
             override fun onTracksChanged(audio: List<MpvTrack>, subtitles: List<MpvTrack>) {
                 audioTracks = trackOptions(audio, audioFallback)
                 subtitleTracks = trackOptions(subtitles, subtitleFallback)
@@ -1326,17 +1342,17 @@ private fun MpvPlayerScreen(
                 terminalDelivered = true; playbackEnded = true; controlsVisible = true; optionsMenu = null
                 finalProgressReporter?.invoke(); currentOnPlaybackEnded()
             }
-            override fun onPlaybackFailed(failurePositionMs: Long, reason: PlayerEngineFailureReason) {
+            override fun onPlaybackFailed(positionMs: Long, reason: PlayerEngineFailureReason) {
                 if (terminalDelivered || closeRequested) return
                 terminalDelivered = true; visualState = PlayerVisualState.Ready; finalProgressReporter?.invoke()
-                currentOnPlaybackError(PlayerEngineFailure(failurePositionMs, fallbackEligible = false, reason = reason))
+                currentOnPlaybackError(PlayerEngineFailure(positionMs, fallbackEligible = false, reason = reason))
             }
         })
     }
 
     fun reportProgress(naturalEnd: Boolean = false) {
-        val safeDuration = durationMs.coerceAtLeast(0L)
-        val safePosition = positionMs.coerceAtLeast(0L).let { if (safeDuration > 0L) it.coerceAtMost(safeDuration) else it }
+        val safeDuration = playbackDurationMs.coerceAtLeast(0L)
+        val safePosition = playbackPositionMs.coerceAtLeast(0L).let { if (safeDuration > 0L) it.coerceAtMost(safeDuration) else it }
         currentOnProgress(
             (safePosition / 1_000L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
             if (safeDuration > 0L) ((safeDuration + 999L) / 1_000L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt() else 0,
@@ -1350,9 +1366,9 @@ private fun MpvPlayerScreen(
         if (requestFocus && isTv) requestTransportFocusWhenVisible = true
     }
     fun seekTo(targetMs: Long) {
-        val bounded = targetMs.coerceIn(0L, durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE)
+        val bounded = targetMs.coerceIn(0L, playbackDurationMs.takeIf { it > 0L } ?: Long.MAX_VALUE)
         autoSkippedMarkerEntries = autoSkipConsumedAfterUserSeek(presentation.markers, autoSkippedMarkerEntries, bounded)
-        controller.seekTo(bounded); positionMs = bounded
+        controller.seekTo(bounded); playbackPositionMs = bounded
     }
     fun replayFromStart() {
         if (!controller.replayFromStart()) return
@@ -1369,9 +1385,9 @@ private fun MpvPlayerScreen(
         terminalDelivered = false
         playbackEnded = false
         playbackRequested = true
-        positionMs = replayPositionMs
+        playbackPositionMs = replayPositionMs
     }
-    fun seekBy(deltaMs: Long) { if (!controlsLocked) { seekTo(positionMs + deltaMs); noteInteraction() } }
+    fun seekBy(deltaMs: Long) { if (!controlsLocked) { seekTo(playbackPositionMs + deltaMs); noteInteraction() } }
     fun togglePlayback() {
         if (controlsLocked) return
         if (playbackEnded) {
@@ -1418,8 +1434,8 @@ private fun MpvPlayerScreen(
         }
     }
     LaunchedEffect(controller, sessionAspect) { controller.setAspect(sessionAspect) }
-    LaunchedEffect(controlsVisible, isPlaying, interactionGeneration, playbackEnded, optionsMenu, controlsLocked) {
-        if (controlsVisible && isPlaying && !playbackEnded && optionsMenu == null && !controlsLocked) {
+    LaunchedEffect(controlsVisible, playbackIsPlaying, interactionGeneration, playbackEnded, optionsMenu, controlsLocked) {
+        if (controlsVisible && playbackIsPlaying && !playbackEnded && optionsMenu == null && !controlsLocked) {
             delay(if (isTv) CONTROLS_HIDE_TV_MS else CONTROLS_HIDE_PHONE_MS); controlsVisible = false
             if (isTv) playerRootFocus.requestFocus()
         }
@@ -1435,7 +1451,7 @@ private fun MpvPlayerScreen(
         if (controlsLocked && unlockVisible && isTv) { withFrameNanos { }; unlockFocus.requestFocus() }
     }
 
-    val activeMarkerEntry = activePlaybackMarkerEntry(presentation.markers, positionMs)
+    val activeMarkerEntry = activePlaybackMarkerEntry(presentation.markers, playbackPositionMs)
     val activeMarker = activeMarkerEntry?.marker
     val autoSkipEnabled = activeMarker?.let { shouldAutoSkipPlaybackMarker(it.type, autoSkipIntro, autoSkipRecap, autoSkipOutro) } == true
     val manualActiveMarker = activeMarker.takeUnless { autoSkipEnabled }
@@ -1446,7 +1462,7 @@ private fun MpvPlayerScreen(
     LaunchedEffect(activeMarkerEntry, autoSkipEnabled, autoSkippedMarkerEntries) {
         val entry = activeMarkerEntry ?: return@LaunchedEffect
         if (!autoSkipEnabled || entry.index in autoSkippedMarkerEntries) return@LaunchedEffect
-        autoSkippedMarkerEntries = autoSkippedMarkerEntries + entry.index; controller.seekTo(entry.endMs); positionMs = entry.endMs
+        autoSkippedMarkerEntries = autoSkippedMarkerEntries + entry.index; controller.seekTo(entry.endMs); playbackPositionMs = entry.endMs
     }
     val motionPolicy = LocalRivuneMotionPolicy.current
     val markerBottomPadding = if (controlsVisible) {
@@ -1508,7 +1524,7 @@ private fun MpvPlayerScreen(
         ) {
             PlayerChrome(
                 title = presentation.title, isTv = isTv, isWide = isWide, enabled = !closeRequested,
-                isPlaying = isPlaying, playbackEnded = playbackEnded, durationMs = durationMs, positionMs = positionMs,
+                isPlaying = playbackIsPlaying, playbackEnded = playbackEnded, durationMs = playbackDurationMs, positionMs = playbackPositionMs,
                 audioTracks = audioTracks, subtitleTracks = subtitleTracks, sessionAspect = sessionAspect,
                 playbackSpeed = playbackSpeed, optionsMenu = optionsMenu, hasNext = presentation.nextEpisode != null,
                 activeMarker = manualActiveMarker, closeFocus = closeFocus, rewindFocus = rewindFocus,

@@ -6,14 +6,14 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.lerp
 
 private const val MINIMUM_ACCENT_TEXT_CONTRAST = 4.5f
-internal val RivuneBackground = Color(0xFF050505)
-internal val RivuneBackgroundSoft = Color(0xFF080808)
+internal val RivuneBackground = Color.Black
+internal val RivuneBackgroundSoft = Color.Black
 internal val RivuneSurface = Color(0xFF0D0D0D)
 internal val RivuneSurfaceRaised = Color(0xFF141414)
 internal val RivuneSurfaceInteractive = Color(0xFF1B1B1B)
 internal val RivuneFunctionalLayer = Color(0xF20C0C0C)
 internal val RivuneArtworkPlaceholder = Color(0xFF151515)
-internal val RivuneCinematicTop = Color(0xFF050505)
+internal val RivuneCinematicTop = Color.Black
 internal val RivuneSurfaceSelected = Color(0xFF202020)
 internal val RivuneText = Color(0xFFF5F3EF)
 internal val RivuneTextSoft = Color(0xFFC9C6C1)

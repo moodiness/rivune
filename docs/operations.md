@@ -7,16 +7,16 @@ The supported container deployment is the root [`compose.yaml`](../compose.yaml)
 For the standard Linux Compose deployment, use the repository-root command instead of reconstructing Docker arguments:
 
 ```sh
-./rivune setup --public-url https://media.example.com --version 1.6.2
+./rivune setup --public-url https://media.example.com --version 1.9.0
 ./rivune up
 ./rivune status
 ./rivune logs rivune
 ./rivune doctor
 ```
 
-`setup` requires OpenSSL, validates a complete HTTPS origin and stable numeric image version, generates the three database passwords, setup token, and encryption key independently, and atomically creates a mode-0600 `.env`. It refuses every existing file or symlink. Lifecycle commands explicitly select `.env` and `compose.yaml`; backup, verification, and restore preserve their existing positional and trust arguments. Run `./rivune help` for the complete command surface.
+`setup` requires OpenSSL, validates a complete HTTPS or loopback/private-IP HTTP origin and stable numeric image version, generates the three database passwords, setup token, and encryption key independently, and atomically creates a mode-0600 `.env`. It refuses every existing file or symlink. Lifecycle commands explicitly select `.env` and `compose.yaml`; backup, verification, and restore preserve their existing positional and trust arguments. Run `./rivune help` for the complete command surface.
 
-`doctor` fails on the first broken invariant: required tools and Compose plugin, private `.env` ownership/mode, required and distinct database secrets, Compose rendering, both healthy containers, PostgreSQL readiness, loopback `/ready`, then the configured public HTTPS `/ready`. It never prints secret values.
+`doctor` fails on the first broken invariant: required tools and Compose plugin, private `.env` ownership/mode, required and distinct database secrets, explicit host binding, Compose rendering, both healthy containers, PostgreSQL readiness, loopback `/ready`, then the configured external HTTPS or local HTTP `/ready`. It never prints secret values.
 
 ## Request correlation and bounded diagnostics
 
@@ -43,14 +43,16 @@ Create the private `.env` file before entering any secrets:
 The helper refuses to overwrite an existing file or link and creates `.env`
 with mode `0600`. For an existing deployment, run `chmod 600 .env` and stop if
 it fails before continuing. Set three independent database secrets, a separate
-setup token, a versioned encryption key, the public HTTPS origin, and a pinned
-Rivune version. `postgres` is bootstrap-only, `rivune` is the application login,
+setup token, a versioned encryption key, the external origin (normally public
+HTTPS; optionally a literal private-IP HTTP origin for trusted-LAN-only use),
+and a pinned Rivune version. `postgres` is bootstrap-only, `rivune` is the
+application login,
 `rivune_owner` is a non-login owner, and `rivune_restore` is a non-superuser
 login used only by the restore scripts.
 
 ```dotenv
 RIVUNE_PUBLIC_URL=https://media.example.com
-RIVUNE_VERSION=1.6.2
+RIVUNE_VERSION=1.9.0
 RIVUNE_POSTGRES_SUPERUSER_PASSWORD=<output of: openssl rand -hex 32>
 RIVUNE_DATABASE_PASSWORD=<different output of: openssl rand -hex 32>
 RIVUNE_RESTORE_PASSWORD=<different output of: openssl rand -hex 32>
@@ -149,6 +151,14 @@ to the database network. The base stack trusts forwarded network headers only
 from its fixed `172.31.0.0/24` edge CIDR. A private topology override must set
 `RIVUNE_TRUSTED_PROXIES` to Newt's exact IP or its dedicated edge CIDR, never
 the LAN, database network, all private ranges, or `0.0.0.0/0`.
+
+For a device-only trusted-LAN deployment without a reverse proxy, set
+`RIVUNE_BIND_ADDRESS=0.0.0.0` and set `RIVUNE_PUBLIC_URL` to the host's literal
+private address, for example `http://192.168.1.20:8080`. Use that same URL on
+the phone or TV; `localhost` there refers to the device itself. This is an
+explicit cleartext exception: keep the host firewall limited to the trusted
+LAN and never forward the port from the router. Public and DNS-named HTTP
+origins remain rejected.
 
 The Unraid XML template targets the same topology but expects an existing
 PostgreSQL 18 container. Standard PostgreSQL on a database-only custom network
@@ -343,9 +353,9 @@ The subshell and its `EXIT` trap discard the exported secrets even when migratio
 After exporting the signing and verification key paths, lineage, and trusted state path described below, update to a stable release by changing `RIVUNE_VERSION` to an exact released version, backing up first, recording the printed backup ID outside the repository, and recreating only the application:
 
 ```sh
-COMPOSE_FILE=compose.yaml ./scripts/postgres-backup.sh backups/rivune-before-1.6.2.dump
-./scripts/postgres-verify-backup.sh --expect-backup-id '<recorded ID>' backups/rivune-before-1.6.2.dump
-# edit RIVUNE_VERSION=1.6.2 in .env
+COMPOSE_FILE=compose.yaml ./scripts/postgres-backup.sh backups/rivune-before-1.9.0.dump
+./scripts/postgres-verify-backup.sh --expect-backup-id '<recorded ID>' backups/rivune-before-1.9.0.dump
+# edit RIVUNE_VERSION=1.9.0 in .env
 docker compose --env-file .env -f compose.yaml pull rivune
 docker compose --env-file .env -f compose.yaml up -d rivune
 curl --fail --show-error https://media.example.com/ready

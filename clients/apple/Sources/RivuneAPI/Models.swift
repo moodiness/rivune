@@ -800,24 +800,87 @@ public struct InstanceTranscodingPatch: Encodable, Sendable, Equatable {
     }
 }
 
-public struct ProfileTranscodingPatch: Encodable, Sendable, Equatable {
-    public let transcoding: String?
+public enum SettingsPatchField<Value: Encodable & Sendable & Equatable>: Encodable, Sendable, Equatable {
+    case omitted
+    case null
+    case value(Value)
 
-    public init(transcoding: String?) {
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .omitted, .null: try container.encodeNil()
+        case .value(let value): try container.encode(value)
+        }
+    }
+}
+
+public struct ProfileSettingsPatch: Encodable, Sendable, Equatable {
+    public var maximumResolution: SettingsPatchField<String>
+    public var preferDirectPlay: SettingsPatchField<Bool>
+    public var audioLanguage: SettingsPatchField<String>
+    public var metadataLanguage: SettingsPatchField<String>
+    public var subtitleLanguage: SettingsPatchField<String>
+    public var forcedSubtitleLanguage: SettingsPatchField<String>
+    public var autoplayNextEpisode: SettingsPatchField<Bool>
+    public var skipIntroEnabled: SettingsPatchField<Bool>
+    public var skipRecapEnabled: SettingsPatchField<Bool>
+    public var skipOutroEnabled: SettingsPatchField<Bool>
+    public var transcoding: SettingsPatchField<String>
+
+    public init(
+        maximumResolution: SettingsPatchField<String> = .omitted,
+        preferDirectPlay: SettingsPatchField<Bool> = .omitted,
+        audioLanguage: SettingsPatchField<String> = .omitted,
+        metadataLanguage: SettingsPatchField<String> = .omitted,
+        subtitleLanguage: SettingsPatchField<String> = .omitted,
+        forcedSubtitleLanguage: SettingsPatchField<String> = .omitted,
+        autoplayNextEpisode: SettingsPatchField<Bool> = .omitted,
+        skipIntroEnabled: SettingsPatchField<Bool> = .omitted,
+        skipRecapEnabled: SettingsPatchField<Bool> = .omitted,
+        skipOutroEnabled: SettingsPatchField<Bool> = .omitted,
+        transcoding: SettingsPatchField<String> = .omitted
+    ) {
+        self.maximumResolution = maximumResolution
+        self.preferDirectPlay = preferDirectPlay
+        self.audioLanguage = audioLanguage
+        self.metadataLanguage = metadataLanguage
+        self.subtitleLanguage = subtitleLanguage
+        self.forcedSubtitleLanguage = forcedSubtitleLanguage
+        self.autoplayNextEpisode = autoplayNextEpisode
+        self.skipIntroEnabled = skipIntroEnabled
+        self.skipRecapEnabled = skipRecapEnabled
+        self.skipOutroEnabled = skipOutroEnabled
         self.transcoding = transcoding
     }
 
     public func encode(to encoder: Encoder) throws {
-        var values = encoder.container(keyedBy: CodingKeys.self)
-        if let transcoding {
-            try values.encode(transcoding, forKey: .transcoding)
-        } else {
-            try values.encodeNil(forKey: .transcoding)
-        }
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodePatch(maximumResolution, forKey: .maximumResolution)
+        try container.encodePatch(preferDirectPlay, forKey: .preferDirectPlay)
+        try container.encodePatch(audioLanguage, forKey: .audioLanguage)
+        try container.encodePatch(metadataLanguage, forKey: .metadataLanguage)
+        try container.encodePatch(subtitleLanguage, forKey: .subtitleLanguage)
+        try container.encodePatch(forcedSubtitleLanguage, forKey: .forcedSubtitleLanguage)
+        try container.encodePatch(autoplayNextEpisode, forKey: .autoplayNextEpisode)
+        try container.encodePatch(skipIntroEnabled, forKey: .skipIntroEnabled)
+        try container.encodePatch(skipRecapEnabled, forKey: .skipRecapEnabled)
+        try container.encodePatch(skipOutroEnabled, forKey: .skipOutroEnabled)
+        try container.encodePatch(transcoding, forKey: .transcoding)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case transcoding
+        case maximumResolution, preferDirectPlay, audioLanguage, metadataLanguage, subtitleLanguage
+        case forcedSubtitleLanguage, autoplayNextEpisode, skipIntroEnabled, skipRecapEnabled, skipOutroEnabled, transcoding
+    }
+}
+
+private extension KeyedEncodingContainer {
+    mutating func encodePatch<Value: Encodable & Sendable & Equatable>(_ field: SettingsPatchField<Value>, forKey key: Key) throws {
+        switch field {
+        case .omitted: break
+        case .null: try encodeNil(forKey: key)
+        case .value(let value): try encode(value, forKey: key)
+        }
     }
 }
 
@@ -825,6 +888,16 @@ public struct SettingsValues: Codable, Sendable, Equatable {
     public let allowTranscoding: Bool?
     public let transcoding: String?
     public let maximumCastMembers: Int?
+    public let maximumResolution: String?
+    public let preferDirectPlay: Bool?
+    public let audioLanguage: String?
+    public let subtitleLanguage: String?
+    public let forcedSubtitleLanguage: String?
+    public let autoplayNextEpisode: Bool?
+    public let skipIntroEnabled: Bool?
+    public let skipRecapEnabled: Bool?
+    public let skipOutroEnabled: Bool?
+    public let metadataLanguage: String?
 }
 
 public struct SettingsLayer: Codable, Sendable, Equatable {
@@ -837,6 +910,16 @@ public struct EffectiveSettingsSources: Codable, Sendable, Equatable {
     public let allowTranscoding: String?
     public let transcoding: String?
     public let maximumCastMembers: String?
+    public let maximumResolution: String?
+    public let preferDirectPlay: String?
+    public let audioLanguage: String?
+    public let subtitleLanguage: String?
+    public let forcedSubtitleLanguage: String?
+    public let autoplayNextEpisode: String?
+    public let skipIntroEnabled: String?
+    public let skipRecapEnabled: String?
+    public let skipOutroEnabled: String?
+    public let metadataLanguage: String?
 }
 
 public struct EffectiveSettings: Codable, Sendable, Equatable {
@@ -1720,7 +1803,47 @@ public struct AddonResourceResult: Codable, Sendable, Equatable { public let add
 public struct AddonResourceFailure: Codable, Sendable, Equatable { public let addonId: UUID; public let manifestId: String; public let code: String; public let message: String }
 public struct AddonResourceBatch: Codable, Sendable, Equatable { public let results: [AddonResourceResult]; public let errors: [AddonResourceFailure] }
 
+public struct CalendarEventList: Codable, Sendable, Equatable {
+    public let events: [CalendarEvent]
+}
+
+public struct CalendarEvent: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let titleId: UUID
+    public let mediaType: String
+    public let title: String
+    public let releaseDate: String
+    public let posterUrl: String?
+    public let resourceId: String?
+    public let resourceProvider: String?
+    public let seriesTitle: String?
+    public let seriesId: UUID?
+    public let seasonId: UUID?
+    public let seasonNumber: Int?
+    public let episodeNumber: Int?
+}
+
 public enum TitleMediaType: String, Codable, Sendable, Equatable { case movie, series, tv }
+private func normalizedTitleReleaseDate(_ value: String?) -> String? {
+    guard let normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines), normalized.count >= 10 else { return nil }
+    let dateOnly = String(normalized.prefix(10))
+    let dateFormatter = DateFormatter()
+    dateFormatter.calendar = Calendar(identifier: .gregorian)
+    dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+    dateFormatter.timeZone = TimeZone(secondsFromGMT: 0)
+    dateFormatter.dateFormat = "yyyy-MM-dd"
+    dateFormatter.isLenient = false
+    guard let date = dateFormatter.date(from: dateOnly), dateFormatter.string(from: date) == dateOnly else { return nil }
+    guard normalized.count > 10 else { return dateOnly }
+    guard normalized[normalized.index(normalized.startIndex, offsetBy: 10)] == "T" else { return nil }
+    let isoFormatter = ISO8601DateFormatter()
+    isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if isoFormatter.date(from: normalized) == nil {
+        isoFormatter.formatOptions = [.withInternetDateTime]
+        guard isoFormatter.date(from: normalized) != nil else { return nil }
+    }
+    return dateOnly
+}
 public struct TitleResolveInput: Codable, Sendable, Equatable {
     public let mediaType: TitleMediaType
     public let provider: String
@@ -1738,7 +1861,7 @@ public struct TitleResolveInput: Codable, Sendable, Equatable {
     public let language: String?
     public let category: String?
     public init(mediaType: TitleMediaType, provider: String, externalId: String? = nil, resourceId: String, title: String, posterUrl: String? = nil, backgroundUrl: String? = nil, releaseInfo: String? = nil, released: String? = nil, sourceAddonId: UUID? = nil, sourceCatalogId: String? = nil, sourceName: String? = nil, country: String? = nil, language: String? = nil, category: String? = nil) {
-        self.mediaType = mediaType; self.provider = provider; self.externalId = externalId; self.resourceId = resourceId; self.title = title; self.posterUrl = posterUrl; self.backgroundUrl = backgroundUrl; self.releaseInfo = releaseInfo; self.released = released; self.sourceAddonId = sourceAddonId; self.sourceCatalogId = sourceCatalogId; self.sourceName = sourceName; self.country = country; self.language = language; self.category = category
+        self.mediaType = mediaType; self.provider = provider; self.externalId = externalId; self.resourceId = resourceId; self.title = title; self.posterUrl = posterUrl; self.backgroundUrl = backgroundUrl; self.releaseInfo = releaseInfo; self.released = normalizedTitleReleaseDate(released); self.sourceAddonId = sourceAddonId; self.sourceCatalogId = sourceCatalogId; self.sourceName = sourceName; self.country = country; self.language = language; self.category = category
     }
 }
 public struct TitleReference: Codable, Sendable, Equatable, Identifiable {
