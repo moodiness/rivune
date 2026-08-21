@@ -12,7 +12,7 @@
     <string name="server_placeholder">https://rivune.example</string>
     <string name="server_connect">Continue</string>
     <string name="server_connecting">Connecting…</string>
-    <string name="server_supporting">Example: https://media.example.com. HTTPS is required except for localhost.</string>
+    <string name="server_supporting">Localhost and private-network addresses use HTTP when no scheme is supplied. Use HTTP only on a trusted local network.</string>
     <string name="server_retry">Try again</string>
     <string name="server_loading_description">Connecting to the Rivune server</string>
 
@@ -377,6 +377,7 @@
     <string name="error_invalid_server">This server address is not valid. Check it and try again.</string>
     <string name="error_incompatible_server">This server uses an incompatible Rivune protocol.</string>
     <string name="error_network">The server could not be reached. Check your connection and try again.</string>
+    <string name="error_local_network_permission">Allow local network access to connect to this trusted HTTP server, then try again.</string>
     <string name="error_pin">That PIN was not accepted.</string>
     <string name="error_profile">This profile cannot be opened right now.</string>
     <string name="error_generic">Rivune could not complete the request. Please try again.</string>

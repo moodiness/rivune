@@ -253,6 +253,9 @@ func applyPlaybackDecision(sources []Source, assets []storedAsset, candidate sou
 	source.Compatible = true
 	source.Decision = clonePlaybackDecision(decision)
 	asset := &assets[candidate.assetIndex]
+	if inspection.Container != "" {
+		asset.Container = inspection.Container
+	}
 	asset.Decision = clonePlaybackDecision(decision)
 	if mode == "direct" {
 		return

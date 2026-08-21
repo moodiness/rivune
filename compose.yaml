@@ -1,6 +1,6 @@
 services:
   rivune:
-    image: ghcr.io/moodiness/rivune:${RIVUNE_VERSION:-1.8.3}
+    image: ghcr.io/moodiness/rivune:${RIVUNE_VERSION:-1.9.0}
     restart: unless-stopped
     init: true
     security_opt:
@@ -67,7 +67,7 @@ services:
       - edge
       - database
     ports:
-      - "127.0.0.1:${RIVUNE_PORT:-8080}:8080"
+      - "${RIVUNE_BIND_ADDRESS:-127.0.0.1}:${RIVUNE_PORT:-8080}:8080"
     volumes:
       - artwork_cache:/var/lib/rivune/artwork
       - media_workspace:/var/lib/rivune/media

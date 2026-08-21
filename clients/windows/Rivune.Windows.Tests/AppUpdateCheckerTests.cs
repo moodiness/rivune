@@ -372,6 +372,76 @@ public sealed class AppUpdateCheckerTests
         Assert.Equal(0, destination.Length);
     }
 
+    [Fact]
+    public void UpdateSignerPinIsRequiredBeforeAuthenticodeValidation()
+    {
+        var verifierCalled = false;
+
+        var exception = Assert.Throws<InvalidOperationException>(() => AppUpdateSignatureVerifier.Verify(
+            "Rivune-x64.exe",
+            null,
+            "1.7.2",
+            _ => { verifierCalled = true; return true; },
+            _ => new string('a', 64),
+            _ => "1.7.2"));
+
+        Assert.Contains("signer pin", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(verifierCalled);
+    }
+
+    [Fact]
+    public void ExpectedUpdateVersionMustBeExactSemanticVersionBeforeTrustValidation()
+    {
+        var trustCalled = false;
+
+        Assert.Throws<InvalidOperationException>(() => AppUpdateSignatureVerifier.Verify(
+            "Rivune-x64.exe",
+            new string('a', 64),
+            "v1.7.2",
+            _ => { trustCalled = true; return true; },
+            _ => new string('a', 64),
+            _ => "1.7.2"));
+
+        Assert.False(trustCalled);
+    }
+
+    [Fact]
+    public void UpdateMustBeTrustedAndMatchSignerAndProductVersion()
+    {
+        var fingerprint = string.Join(':', Enumerable.Repeat("ab", 32));
+        AppUpdateSignatureVerifier.Verify(
+            "Rivune-x64.exe",
+            fingerprint,
+            "1.7.2-rc.1+release",
+            _ => true,
+            _ => string.Concat(Enumerable.Repeat("AB", 32)),
+            _ => "1.7.2-rc.1+release");
+
+        Assert.Throws<InvalidOperationException>(() => AppUpdateSignatureVerifier.Verify(
+            "Rivune-x64.exe", new string('a', 64), "1.7.2", _ => false,
+            _ => new string('a', 64), _ => "1.7.2"));
+        Assert.Throws<InvalidOperationException>(() => AppUpdateSignatureVerifier.Verify(
+            "Rivune-x64.exe", new string('a', 64), "1.7.2", _ => true,
+            _ => new string('b', 64), _ => "1.7.2"));
+        Assert.Throws<InvalidOperationException>(() => AppUpdateSignatureVerifier.Verify(
+            "Rivune-x64.exe", new string('a', 64), "1.7.2", _ => true,
+            _ => new string('a', 64), _ => null));
+        var mismatch = Assert.Throws<InvalidOperationException>(() => AppUpdateSignatureVerifier.Verify(
+            "Rivune-x64.exe", new string('a', 64), "1.7.2", _ => true,
+            _ => new string('a', 64), _ => "1.7.3"));
+        Assert.Contains("ProductVersion", mismatch.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AuthenticodeTrustRequiresOnlineRevocationForSignerChainExceptRoot()
+    {
+        Assert.Equal(AppUpdateSignatureVerifier.RevocationCheckWholeChain, AppUpdateSignatureVerifier.AuthenticodeRevocationChecks);
+        Assert.Equal(AppUpdateSignatureVerifier.RevocationCheckChainExcludeRoot, AppUpdateSignatureVerifier.AuthenticodeProviderFlags);
+        Assert.Equal(
+            0u,
+            AppUpdateSignatureVerifier.AuthenticodeProviderFlags & AppUpdateSignatureVerifier.CacheOnlyUrlRetrieval);
+    }
+
     [Theory]
     [InlineData("1.07.2")]
     [InlineData("v1.7.2")]
@@ -399,6 +469,8 @@ public sealed class AppUpdateCheckerTests
                 "--wait-pid", "12345",
                 "--size", "42",
                 "--sha256", PackageSha256,
+                "--signer-sha256", PackageSha256,
+                "--expected-version", "1.7.2-rc.1+release",
             ],
             source);
 
@@ -408,12 +480,16 @@ public sealed class AppUpdateCheckerTests
         Assert.Equal(12345, apply.Request.ParentProcessId);
         Assert.Equal(42, apply.Request.Size);
         Assert.Equal(PackageSha256, apply.Request.Sha256);
+        Assert.Equal(PackageSha256, apply.Request.SignerSha256);
+        Assert.Equal("1.7.2-rc.1+release", apply.Request.ExpectedVersion);
     }
 
     [Theory]
     [InlineData("--wait-pid", "0")]
     [InlineData("--size", "0")]
     [InlineData("--sha256", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")]
+    [InlineData("--signer-sha256", "short")]
+    [InlineData("--expected-version", "v1.7.2")]
     public void RejectsInvalidPortableApplyArguments(string name, string value)
     {
         var source = Path.Combine(Path.GetTempPath(), "Rivune", "updates", "test", "Rivune-x64.exe");
@@ -426,6 +502,8 @@ public sealed class AppUpdateCheckerTests
             "--wait-pid", "12345",
             "--size", "42",
             "--sha256", PackageSha256,
+            "--signer-sha256", PackageSha256,
+            "--expected-version", "1.7.2",
         };
         arguments[Array.IndexOf(arguments, name) + 1] = value;
 
@@ -452,6 +530,8 @@ public sealed class AppUpdateCheckerTests
                 "--wait-pid", "12345",
                 "--size", "42",
                 "--sha256", PackageSha256,
+                "--signer-sha256", PackageSha256,
+                "--expected-version", "1.7.2",
             ],
             source));
     }
@@ -486,12 +566,29 @@ public sealed class AppUpdateCheckerTests
         try
         {
             var digest = Convert.ToHexStringLower(SHA256.HashData(updateContents));
-            var startInfo = PortableAppUpdate.PrepareHandoff(source, target, 12345, updateContents.Length, digest);
+            var startInfo = PortableAppUpdate.PrepareHandoff(
+                source,
+                target,
+                12345,
+                updateContents.Length,
+                digest,
+                PackageSha256,
+                "1.7.2-rc.1+release");
 
             Assert.Equal(source, startInfo.FileName);
             Assert.False(startInfo.UseShellExecute);
-            Assert.Contains(source, startInfo.ArgumentList);
-            Assert.Contains(target, startInfo.ArgumentList);
+            Assert.Equal(
+                [
+                    PortableAppUpdate.ApplySwitch,
+                    "--source", source,
+                    "--target", target,
+                    "--wait-pid", "12345",
+                    "--size", updateContents.Length.ToString(),
+                    "--sha256", digest,
+                    "--signer-sha256", PackageSha256,
+                    "--expected-version", "1.7.2-rc.1+release",
+                ],
+                startInfo.ArgumentList);
             Assert.Equal(currentContents, File.ReadAllBytes(target));
         }
         finally
@@ -520,12 +617,59 @@ public sealed class AppUpdateCheckerTests
                 target,
                 int.MaxValue,
                 updateContents.Length,
-                Convert.ToHexStringLower(SHA256.HashData(updateContents)));
+                Convert.ToHexStringLower(SHA256.HashData(updateContents)),
+                PackageSha256,
+                "1.7.2");
 
             await Assert.ThrowsAnyAsync<Exception>(() =>
-                PortableAppUpdate.ApplyAsync(request, TestContext.Current.CancellationToken));
+                PortableAppUpdate.ApplyAsync(request, TestContext.Current.CancellationToken, (_, _, _) => { }));
 
             Assert.Equal(currentContents, File.ReadAllBytes(target));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+            Directory.Delete(targetDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ApplyVerifiesDownloadedAndStagedAuthenticodeBeforeReplacement()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "Rivune", "updates", Guid.NewGuid().ToString("N"));
+        var targetDirectory = Path.Combine(Path.GetTempPath(), "Rivune-installed-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        Directory.CreateDirectory(targetDirectory);
+        var source = Path.Combine(root, "Rivune-x64.exe");
+        var target = Path.Combine(targetDirectory, "Rivune-x64.exe");
+        var updateContents = Encoding.UTF8.GetBytes("signed update fixture");
+        File.WriteAllBytes(source, updateContents);
+        File.WriteAllBytes(target, "current"u8.ToArray());
+        var verifiedPaths = new List<string>();
+        try
+        {
+            var request = new PortableUpdateApplyRequest(
+                source,
+                target,
+                int.MaxValue,
+                updateContents.Length,
+                Convert.ToHexStringLower(SHA256.HashData(updateContents)),
+                PackageSha256,
+                "1.7.2-rc.1+release");
+
+            await Assert.ThrowsAnyAsync<Exception>(() => PortableAppUpdate.ApplyAsync(
+                request,
+                TestContext.Current.CancellationToken,
+                (path, signer, expectedVersion) =>
+                {
+                    Assert.Equal(PackageSha256, signer);
+                    Assert.Equal("1.7.2-rc.1+release", expectedVersion);
+                    verifiedPaths.Add(path);
+                }));
+
+            Assert.Equal(2, verifiedPaths.Count);
+            Assert.Equal(source, verifiedPaths[0]);
+            Assert.StartsWith(targetDirectory, verifiedPaths[1], StringComparison.OrdinalIgnoreCase);
         }
         finally
         {

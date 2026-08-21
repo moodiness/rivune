@@ -21,6 +21,7 @@ import io.rivune.api.Profile
 import io.rivune.api.ProfileAvatar
 import io.rivune.api.ProfileSelection
 import io.rivune.api.RivuneApiException
+import io.rivune.api.normalizeServerUrl
 import java.time.Instant
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
@@ -64,26 +65,83 @@ class RivuneViewModelTest {
     }
 
     @Test
-    fun normalizesRemoteAndLoopbackServerAddresses() {
+    fun normalizesRemoteAndLocalNetworkServerAddresses() {
         assertEquals("https://media.example.com", normalizeServerUrl("media.example.com/"))
         assertEquals("http://localhost:8080", normalizeServerUrl("localhost:8080"))
         assertEquals("http://127.0.0.1:8080", normalizeServerUrl("127.0.0.1:8080/"))
+        assertEquals("http://192.168.1.20:8080", normalizeServerUrl("192.168.1.20:8080"))
+        assertEquals("http://10.0.0.20:8080", normalizeServerUrl("10.0.0.20:8080"))
+        assertEquals("http://172.16.0.20:8080", normalizeServerUrl("172.16.0.20:8080"))
+        assertEquals("http://[fd00::20]:8080", normalizeServerUrl("[fd00::20]:8080"))
+        assertEquals("https://rivune.local:8080", normalizeServerUrl("rivune.local:8080"))
         assertNull(normalizeServerUrl("https://media example.com"))
         assertNull(normalizeServerUrl("  "))
     }
 
     @Test
-    fun normalizesTitleReleaseDatesForWatchState() {
-        assertEquals("2026-08-12", titleReleaseDate("2026-08-12"))
-        assertEquals("2026-08-12", titleReleaseDate("2026-08-12T15:30:45.123+02:00"))
-        assertNull(titleReleaseDate("2026"))
-        assertNull(titleReleaseDate("2026-02-30T15:30:00Z"))
+    fun defaultsPublicAddressesToHttps() {
+        assertEquals("https://192.0.2.10:8080", normalizeServerUrl("192.0.2.10:8080"))
+        assertEquals("https://[2001:db8::20]:8080", normalizeServerUrl("[2001:db8::20]:8080"))
     }
 
     @Test
-    fun rejectsUnsupportedCleartextLoopbackAliases() {
-        assertEquals("https://127.0.0.2:8080", normalizeServerUrl("127.0.0.2:8080"))
-        assertEquals("https://[::1]:8080", normalizeServerUrl("[::1]:8080"))
+    fun localNetworkPermissionTargetsOnlyApi37SupportedKnownLanDestinations() {
+        val knownLan = listOf(
+            "http://10.0.2.2:8080",
+            "http://172.31.255.254:8080",
+            "http://192.168.1.20:8080",
+            "http://[fd00::20]:8080",
+            "https://10.0.2.2:8080",
+            "https://172.31.255.254:8080",
+            "https://192.168.1.20:8080",
+            "https://[fd00::20]:8080",
+            "https://rivune.local:8080",
+            "https://RIVUNE.LOCAL:8080",
+            "https://rivune.local.:8080",
+        )
+        knownLan.forEach { url ->
+            assertTrue(requiresLocalNetworkPermission(url, sdkInt = 37, targetSdk = 37, permissionGranted = false))
+            assertFalse(requiresLocalNetworkPermission(url, sdkInt = 36, targetSdk = 37, permissionGranted = false))
+            assertFalse(requiresLocalNetworkPermission(url, sdkInt = 37, targetSdk = 36, permissionGranted = false))
+            assertFalse(requiresLocalNetworkPermission(url, sdkInt = 37, targetSdk = 37, permissionGranted = true))
+        }
+
+        listOf(
+            "http://localhost:8080",
+            "https://localhost:8080",
+            "http://rivune.local:8080",
+            "http://rivune.local.:8080",
+            "https://local:8080",
+            "https://rivune.example:8080",
+            "http://169.254.1.1:8080",
+            "https://100.64.1.1:8080",
+            "http://127.0.0.1:8080",
+            "https://127.0.0.1:8080",
+            "http://[::1]:8080",
+            "https://[::1]:8080",
+            "https://192.0.2.10:8080",
+            "https://[fe80::1]:8080",
+            "https://user@10.0.2.2:8080",
+            "https://@10.0.2.2:8080",
+            "https://:@rivune.local:8080",
+            "not a URL",
+        ).forEach { url ->
+            assertFalse(requiresLocalNetworkPermission(url, sdkInt = 37, targetSdk = 37, permissionGranted = false))
+        }
+    }
+
+    @Test
+    fun deniedLocalNetworkPermissionKeepsConnectionRetryableWithoutCreatingGateway() {
+        val store = FakeServerStore()
+        val gateway = FakeGateway()
+        val viewModel = viewModel(store, gateway, serverConnectionAllowed = { false })
+
+        viewModel.connect("10.0.2.2:8080")
+
+        assertEquals(UiFailure.LOCAL_NETWORK_PERMISSION, viewModel.state.value.failure)
+        assertEquals("http://10.0.2.2:8080", viewModel.state.value.serverInput)
+        assertFalse(viewModel.state.value.isBusy)
+        assertNull(store.value)
     }
 
     @Test
@@ -3094,6 +3152,7 @@ class RivuneViewModelTest {
         appPreferences: AppPreferencesReader = AppPreferencesReader { AppPreferencesState() },
         locale: java.util.Locale = java.util.Locale.ENGLISH,
         playbackNetwork: PlaybackNetwork = PlaybackNetwork.WIFI_OR_ETHERNET,
+        serverConnectionAllowed: (String) -> Boolean = { true },
         instantNow: () -> Instant = Instant::now,
     ) = RivuneViewModel(
         store,
@@ -3105,6 +3164,7 @@ class RivuneViewModelTest {
         appPreferences = appPreferences,
         localeProvider = { locale },
         playbackNetworkProvider = { playbackNetwork },
+        serverConnectionAllowed = serverConnectionAllowed,
         instantNow = instantNow,
     ).also(viewModels::add)
 }

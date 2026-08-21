@@ -390,6 +390,16 @@ func (body *trackedProxyBody) Close() error {
 	return nil
 }
 
+type dataAndEOFReader struct {
+	data []byte
+}
+
+func (reader *dataAndEOFReader) Read(destination []byte) (int, error) {
+	read := copy(destination, reader.data)
+	reader.data = reader.data[read:]
+	return read, io.EOF
+}
+
 type countingProxyResponseWriter struct {
 	header      http.Header
 	status      int
@@ -470,6 +480,31 @@ func TestDirectStartupPreflightSkipsBodylessResponsesAndAcceptsCleanEOF(t *testi
 		})
 	}
 }
+
+func TestDirectStartupAcceptsShortDeclaredBodyReturnedWithEOF(t *testing.T) {
+	body := &trackedProxyBody{reader: &dataAndEOFReader{data: []byte("short")}}
+	response := directProxyResponse(body)
+	response.ContentLength = 5
+	response.Header.Set("Content-Length", "5")
+	writer := &countingProxyResponseWriter{}
+	err := writeDirectProxyAssetWithStartupTimeout(writer, httptest.NewRequest(http.MethodGet, "/movie.mp4", nil), storedAsset{Kind: "stream"}, response, "https://provider.example/movie.mp4", time.Second)
+	if err != nil || writer.status != http.StatusOK || writer.written != 5 || !body.closed.Load() {
+		t.Fatalf("short declared body error=%v status=%d bytes=%d closed=%t", err, writer.status, writer.written, body.closed.Load())
+	}
+}
+
+func TestDirectStartupRejectsEOFBeforeDeclaredLength(t *testing.T) {
+	body := &trackedProxyBody{reader: &dataAndEOFReader{data: []byte("cut")}}
+	response := directProxyResponse(body)
+	response.ContentLength = 5
+	response.Header.Set("Content-Length", "5")
+	writer := &countingProxyResponseWriter{}
+	err := writeDirectProxyAssetWithStartupTimeout(writer, httptest.NewRequest(http.MethodGet, "/movie.mp4", nil), storedAsset{Kind: "stream"}, response, "https://provider.example/movie.mp4", time.Second)
+	if !errors.Is(err, ErrMediaSourceFailed) || writer.status != 0 || len(writer.Header()) != 0 || !body.closed.Load() {
+		t.Fatalf("truncated declared body error=%v status=%d headers=%v closed=%t", err, writer.status, writer.Header(), body.closed.Load())
+	}
+}
+
 func TestDirectStartupEOFWithDeclaredContentFailsBeforeCommit(t *testing.T) {
 	for _, test := range []struct {
 		name   string

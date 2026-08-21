@@ -2,6 +2,7 @@ import { ArrowLeft, ArrowRight, Bookmark, Check, Clapperboard, Compass, Film, In
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { principalIdentity, useAuth } from "../auth";
+import { safeSessionStorage } from "../browserStorage";
 import { ActionMenu, Button, EmptyState, HorizontalDragRow, MediaCard, Notice, SectionHeading, Select, Skeleton, handleDirectionalFocus } from "../components";
 import { translate as t } from "../i18n";
 import { mediaFromLibraryItem, mediaIdentity, resolveMediaTitle } from "../mediaIdentity";
@@ -1321,7 +1322,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     sourcePaginationControllersRef.current.clear();
     visibleIdentityRef.current.clear();
     loadedProfileRef.current = mediaPreferences.profileID;
-    setQuery(sessionStorage.getItem(`rivune.search.${mediaPreferences.profileID}`) ?? "");
+    setQuery(safeSessionStorage.getItem(`rivune.search.${mediaPreferences.profileID}`) ?? "");
     setFilter("all");
     setItems([]);
     setSourceSections([]);
@@ -1662,7 +1663,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     setHasMore(false);
     setLoading(value.trim().length >= 2);
     setLoadingMore(false);
-    if (mediaPreferences.profileID) sessionStorage.setItem(`rivune.search.${mediaPreferences.profileID}`, value);
+    if (mediaPreferences.profileID) safeSessionStorage.setItem(`rivune.search.${mediaPreferences.profileID}`, value);
   }
 
   function selectSearchFilter(value: typeof filter) {

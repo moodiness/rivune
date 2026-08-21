@@ -98,6 +98,19 @@ for secret in "${generated[@]}"; do
   fi
 done
 
+lan_setup_case="$(prepare_case setup-lan-http)"
+make_fake_openssl "${lan_setup_case}"
+export OPENSSL_LOG="${lan_setup_case}/openssl.log" OPENSSL_COUNT="${lan_setup_case}/openssl.count"
+(
+  cd "${lan_setup_case}/work"
+  PATH="${lan_setup_case}/bin:${PATH}" "${lan_setup_case}/root/rivune" setup \
+    --public-url http://192.168.1.20:8080 --version 1.9.0
+) >/dev/null 2>&1
+grep -qx 'RIVUNE_PUBLIC_URL=http://192.168.1.20:8080' "${lan_setup_case}/root/.env" ||
+  fail 'setup did not accept the private-LAN HTTP origin'
+grep -qx 'RIVUNE_BIND_ADDRESS=127.0.0.1' "${lan_setup_case}/root/.env" ||
+  fail 'setup exposed the LAN port without the separate binding opt-in'
+
 failed_generation_case="$(prepare_case failed-generation)"
 make_fake_openssl "${failed_generation_case}"
 export OPENSSL_LOG="${failed_generation_case}/openssl.log" OPENSSL_COUNT="${failed_generation_case}/openssl.count"
@@ -197,6 +210,8 @@ for hostile in \
   'https://media.example.com/path' \
   'https://media.example.com?query' \
   'http://media.example.com' \
+  'http://198.51.100.20:8080' \
+  'http://169.254.1.20:8080' \
   'https://media.example.com:70000'; do
   validation_case="$(prepare_case "validation-${validation_index}")"
   make_fake_openssl "${validation_case}"
@@ -312,8 +327,8 @@ help_output="$("${ROOT_DIR}/rivune" help)"
 for command in setup up down restart pull status logs doctor backup verify-backup restore help; do
   [[ "${help_output}" == *"${command}"* ]] || fail "help omitted ${command}"
 done
-[[ "${help_output}" == *'setup --version X.Y.Z [--public-url HTTPS_ORIGIN]'* ]] || \
-  fail 'help did not require an explicit stable setup version'
+[[ "${help_output}" == *'setup --version X.Y.Z [--public-url HTTPS_OR_LOCAL_HTTP_ORIGIN]'* ]] || \
+  fail 'help did not describe the supported setup origins'
 
 doctor_case="$(prepare_case doctor)"
 write_environment "${doctor_case}/root"

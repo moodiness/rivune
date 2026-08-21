@@ -9,7 +9,9 @@ internal sealed record PortableUpdateApplyRequest(
     string TargetPath,
     int ParentProcessId,
     long Size,
-    string Sha256);
+    string Sha256,
+    string SignerSha256,
+    string ExpectedVersion);
 
 internal abstract record PortableUpdateStartupCommand
 {
@@ -52,9 +54,11 @@ internal static partial class PortableAppUpdate
         }
 
         if (!arguments[0].Equals(ApplySwitch, StringComparison.Ordinal)) return null;
-        if (arguments.Count != 11 ||
+        if (arguments.Count != 15 ||
             arguments[1] != "--source" || arguments[3] != "--target" ||
-            arguments[5] != "--wait-pid" || arguments[7] != "--size" || arguments[9] != "--sha256")
+            arguments[5] != "--wait-pid" || arguments[7] != "--size" ||
+            arguments[9] != "--sha256" || arguments[11] != "--signer-sha256" ||
+            arguments[13] != "--expected-version")
         {
             throw new InvalidOperationException("The portable update arguments are invalid.");
         }
@@ -70,15 +74,18 @@ internal static partial class PortableAppUpdate
             throw new InvalidOperationException("The portable update process identifier is invalid.");
         if (!long.TryParse(arguments[8], out var size) || size is <= 0 or > int.MaxValue)
             throw new InvalidOperationException("The portable update size is invalid.");
-        if (!Sha256Pattern().IsMatch(arguments[10]))
-            throw new InvalidOperationException("The portable update SHA-256 is invalid.");
+        if (!Sha256Pattern().IsMatch(arguments[10]) || AppUpdateSignatureVerifier.NormalizeSha256(arguments[12]) is not { } signerSha256)
+            throw new InvalidOperationException("The portable update verification metadata is invalid.");
+        var expectedVersion = ValidateExpectedVersion(arguments[14]);
 
         return new PortableUpdateStartupCommand.Apply(new(
             sourcePath,
             targetPath,
             parentProcessId,
             size,
-            arguments[10]));
+            arguments[10],
+            signerSha256,
+            expectedVersion));
     }
 
     internal static ProcessStartInfo PrepareHandoff(
@@ -86,7 +93,9 @@ internal static partial class PortableAppUpdate
         string currentExecutable,
         int currentProcessId,
         long size,
-        string sha256)
+        string sha256,
+        string signerSha256,
+        string expectedVersion)
     {
         var sourcePath = NormalizeAbsolutePath(downloadedExecutable, "The downloaded update path is invalid.");
         var targetPath = NormalizeAbsolutePath(currentExecutable, "The running Rivune executable path is invalid.");
@@ -105,8 +114,10 @@ internal static partial class PortableAppUpdate
             throw new InvalidOperationException("The verified update file is not in the trusted temporary directory.");
         if (currentProcessId <= 0)
             throw new InvalidOperationException("The running Rivune process identifier is invalid.");
-        if (size is <= 0 or > int.MaxValue || !Sha256Pattern().IsMatch(sha256))
+        if (size is <= 0 or > int.MaxValue || !Sha256Pattern().IsMatch(sha256) ||
+            AppUpdateSignatureVerifier.NormalizeSha256(signerSha256) is not { } normalizedSignerSha256)
             throw new InvalidOperationException("The verified update metadata is invalid.");
+        var validatedExpectedVersion = ValidateExpectedVersion(expectedVersion);
 
         EnsureTargetDirectoryIsWritable(targetPath);
 
@@ -119,6 +130,8 @@ internal static partial class PortableAppUpdate
                      "--wait-pid", currentProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture),
                      "--size", size.ToString(System.Globalization.CultureInfo.InvariantCulture),
                      "--sha256", sha256,
+                     "--signer-sha256", normalizedSignerSha256,
+                     "--expected-version", validatedExpectedVersion,
                  })
         {
             startInfo.ArgumentList.Add(argument);
@@ -131,31 +144,44 @@ internal static partial class PortableAppUpdate
         string currentExecutable,
         int currentProcessId,
         long size,
-        string sha256)
+        string sha256,
+        string signerSha256,
+        string expectedVersion)
     {
-        var startInfo = PrepareHandoff(downloadedExecutable, currentExecutable, currentProcessId, size, sha256);
+        var startInfo = PrepareHandoff(
+            downloadedExecutable,
+            currentExecutable,
+            currentProcessId,
+            size,
+            sha256,
+            signerSha256,
+            expectedVersion);
         if (Process.Start(startInfo) is null)
             throw new InvalidOperationException("Windows could not start the verified update. Rivune is still unchanged; try again.");
     }
 
     internal static async Task ApplyAsync(
         PortableUpdateApplyRequest request,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Action<string, string, string>? signatureVerifier = null)
     {
         ArgumentNullException.ThrowIfNull(request);
+        signatureVerifier ??= AppUpdateSignatureVerifier.Verify;
         ValidateApplyRequest(request);
         await VerifyFileAsync(request.SourcePath, request.Size, request.Sha256, cancellationToken).ConfigureAwait(false);
+        signatureVerifier(request.SourcePath, request.SignerSha256, request.ExpectedVersion);
         await WaitForParentExitAsync(request, cancellationToken).ConfigureAwait(false);
 
         var directory = Path.GetDirectoryName(request.TargetPath)!;
         var nonce = Guid.NewGuid().ToString("N");
-        var stagedPath = Path.Combine(directory, $".rivune-update-{nonce}.tmp");
+        var stagedPath = Path.Combine(directory, $".rivune-update-{nonce}.exe");
         var backupPath = Path.Combine(directory, $".rivune-backup-{nonce}.tmp");
         var replaced = false;
         try
         {
             File.Copy(request.SourcePath, stagedPath, overwrite: false);
             await VerifyFileAsync(stagedPath, request.Size, request.Sha256, cancellationToken).ConfigureAwait(false);
+            signatureVerifier(stagedPath, request.SignerSha256, request.ExpectedVersion);
             File.Replace(stagedPath, request.TargetPath, backupPath, ignoreMetadataErrors: true);
             replaced = true;
 
@@ -225,6 +251,8 @@ internal static partial class PortableAppUpdate
                 "--wait-pid", request.ParentProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 "--size", request.Size.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 "--sha256", request.Sha256,
+                "--signer-sha256", request.SignerSha256,
+                "--expected-version", request.ExpectedVersion,
             ],
             request.SourcePath);
         if (command is not PortableUpdateStartupCommand.Apply)
@@ -302,6 +330,21 @@ internal static partial class PortableAppUpdate
         var digest = Convert.ToHexStringLower(await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false));
         if (!digest.Equals(expectedSha256, StringComparison.Ordinal))
             throw new InvalidOperationException("The portable update SHA-256 changed before it could be applied.");
+    }
+
+    private static string ValidateExpectedVersion(string? version)
+    {
+        if (string.IsNullOrEmpty(version))
+            throw new InvalidOperationException("The expected portable update version is invalid.");
+        try
+        {
+            _ = AppUpdateChecker.CompareSemanticVersions(version, version);
+            return version;
+        }
+        catch (InvalidOperationException exception)
+        {
+            throw new InvalidOperationException("The expected portable update version is invalid.", exception);
+        }
     }
 
     private static void EnsureTargetDirectoryIsWritable(string targetPath)

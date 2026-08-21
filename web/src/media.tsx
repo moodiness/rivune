@@ -2263,6 +2263,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   const playbackDurationRef = useRef(0);
   const streamProtocolRef = useRef("");
   const playbackOffsetRef = useRef(0);
+  const seekTransportRef = useRef<((position: number) => void) | undefined>(undefined);
   const pausedAtRef = useRef(0);
   const subtitlePreferenceRef = useRef<string | undefined>(undefined);
   const subtitleHandoffRef = useRef(false);
@@ -2480,6 +2481,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     const sourceURL = processed ? `${playbackURL.pathname}${playbackURL.search}` : stream.url;
     let disposed = false;
     let destroyHLS = () => {};
+    let seekTransport: ((position: number) => void) | undefined;
     const isHLS = stream.protocol === "hls";
     const startPlayback = () => {
       void video.play().catch((cause: unknown) => {
@@ -2538,6 +2540,14 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         destroyHLS = () => hls.destroy();
         let mediaRecoveries = 0;
         let networkRecoveries = 0;
+        seekTransport = (position: number) => {
+          hls.stopLoad();
+          mediaRecoveries = 0;
+          networkRecoveries = 0;
+          video.currentTime = position;
+          hls.startLoad(position);
+        };
+        seekTransportRef.current = seekTransport;
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           setPhase("ready");
           hls.startLoad(mediaPosition);
@@ -2581,6 +2591,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       disposed = true;
       video.removeEventListener("error", handleMediaError);
       destroyHLS();
+      if (seekTransportRef.current === seekTransport) seekTransportRef.current = undefined;
       video.removeAttribute("src");
       video.load();
     };
@@ -2946,7 +2957,8 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     setCurrentTime(target);
     if (video && (stream?.mode === "direct" || stream?.mediaTimeline === "absolute")) {
       playbackOffsetRef.current = 0;
-      video.currentTime = target;
+      if (stream?.mediaTimeline === "absolute" && seekTransportRef.current) seekTransportRef.current(target);
+      else video.currentTime = target;
     } else {
       playbackOffsetRef.current = target;
       setPlaybackStart(target);

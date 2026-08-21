@@ -164,6 +164,27 @@ class OnboardingUiTest {
     }
 
     @Test
+    fun localNetworkDenialExplainsPermissionAndKeepsRetryActionable() {
+        var retried = false
+        setRivuneContent {
+            ServerScreen(
+                serverInput = "http://10.0.2.2:8080",
+                isBusy = false,
+                failure = UiFailure.LOCAL_NETWORK_PERMISSION,
+                isTv = true,
+                onConnect = { retried = true },
+                onClearFailure = {},
+            )
+        }
+
+        composeRule.onNodeWithText(string(R.string.error_local_network_permission)).assertIsDisplayed()
+        composeRule.onNodeWithText(string(R.string.server_retry)).assertIsDisplayed()
+        composeRule.onNodeWithTag(RivuneTestTags.ServerSubmit).performClick()
+
+        composeRule.runOnIdle { assertTrue(retried) }
+    }
+
+    @Test
     fun connectionLoadingKeepsAddressVisibleAndReportsProgress() {
         setRivuneContent {
             ServerScreen(

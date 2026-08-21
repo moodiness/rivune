@@ -1902,7 +1902,7 @@
   .details-page--immersive .details-title-links { margin-bottom: 14px; }
   .details-page--immersive .details-description { width: 100%; max-width: 740px; display: -webkit-box; margin-bottom: 20px; overflow: hidden; font-size: clamp(12px, 1vw, 15px); line-height: 1.6; -webkit-box-orient: vertical; -webkit-line-clamp: 5; }
   .details-page--immersive .details-actions { gap: 8px; }
-  .details-page--immersive .details-actions .button { min-height: 44px; padding-inline: 15px; font-size: 11px; }
+  .details-page--immersive .details-actions .button { min-height: 44px; padding-inline: 13px; font-size: 11px; }
   .details-page--immersive .details-context-actions { margin-top: 5px; }
   .details-page--immersive .notice { max-width: 620px; }
 

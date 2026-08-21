@@ -273,7 +273,7 @@
                                     <TextBlock Text="Server address" Style="{StaticResource RivuneBodyMediumTextStyle}" Foreground="{ThemeResource RivunePrimaryTextBrush}" />
                                     <TextBox x:Name="ServerAddressBox" Height="52" PlaceholderText="https://rivune.example" InputScope="Url" Style="{StaticResource RivuneTextField}" VerticalContentAlignment="Center" Padding="12,14,12,6" AutomationProperties.Name="Server address" KeyDown="ServerAddressBox_KeyDown" TextChanged="ServerAddressBox_TextChanged" />
                                 </StackPanel>
-                                <TextBlock x:Name="ServerSupportText" Text="Example: https://media.example.com. HTTPS is required except for localhost." Style="{StaticResource RivuneBodySmallTextStyle}" />
+                                <TextBlock x:Name="ServerSupportText" Text="Example: https://media.example.com. HTTP is allowed only for localhost or a literal trusted-private address." Style="{StaticResource RivuneBodySmallTextStyle}" />
                                 <InfoBar x:Name="ServerError" IsOpen="False" Severity="Error" IsClosable="False" />
                                 <Grid HorizontalAlignment="Center" ColumnSpacing="24">
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>

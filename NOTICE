@@ -17,6 +17,26 @@ attributions are in:
 This Android-specific distribution condition does not relicense separate
 Rivune server or other client distributions.
 
+Apple MPV playback distribution
+--------------------------------
+The Rivune Apple application links the LGPL product from MPVKit 1.0.0, which
+contains mpv 0.41.0 and FFmpeg 8.1.2 built without the optional GPL variant.
+The MPVKit package and prebuilt library sources are available at:
+  https://github.com/mpvkit/MPVKit/tree/1.0.0
+  https://github.com/mpv-player/mpv/tree/v0.41.0
+  https://github.com/FFmpeg/FFmpeg/tree/n8.1.2
+MPVKit is distributed under GNU LGPL version 3. mpv and FFmpeg components in
+this non-GPL build are distributed under GNU LGPL version 2.1 or later, with
+additional permissively licensed components documented by those projects.
+Distributed Rivune Apple applications include this notice and the exact Apache,
+GPL, LGPL, mpv, and FFmpeg licensing files under their bundled `Legal`
+directory. Rivune's Apple integration source, including its libmpv calls and
+release packaging scripts, remains available in this repository so recipients
+can rebuild and relink the combined work. Redistributors must preserve those
+files and satisfy the applicable LGPL relinking or shared-library requirements.
+This notice does not relicense Rivune's separately distributed Apache-2.0
+components.
+
 This product uses the TMDB API but is not endorsed or certified by TMDB.
 
 This product uses the TVDB API but is not endorsed or certified by TVDB.

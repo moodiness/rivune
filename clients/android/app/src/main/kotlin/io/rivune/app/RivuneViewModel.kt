@@ -36,6 +36,7 @@ import io.rivune.api.ProfileSelection
 import io.rivune.api.ResolvedCollectionFolder
 import io.rivune.api.RivuneApiClient
 import io.rivune.api.RivuneApiException
+import io.rivune.api.normalizeServerUrl
 import io.rivune.api.Season
 import io.rivune.api.Series
 import io.rivune.api.SeriesMappingProvider
@@ -105,6 +106,7 @@ data class PairingInfo(
 enum class UiFailure {
     SERVER_INVALID,
     SERVER_UNREACHABLE,
+    LOCAL_NETWORK_PERMISSION,
     PROTOCOL_INCOMPATIBLE,
     SETUP_REQUIRED,
     DEVICE_LIMIT,
@@ -302,6 +304,7 @@ class RivuneViewModel internal constructor(
     private val externalPlaybackSupportProvider: () -> ExternalPlaybackSupport = { ExternalPlaybackSupport() },
     private val appPreferences: AppPreferencesReader = AppPreferencesReader { AppPreferencesState() },
     private val playbackNetworkProvider: () -> PlaybackNetwork = { PlaybackNetwork.WIFI_OR_ETHERNET },
+    private val serverConnectionAllowed: (String) -> Boolean = { true },
     private val localeProvider: () -> Locale = Locale::getDefault,
     private val diagnostics: DiagnosticsBuffer = DiagnosticsBuffer(),
     private val instantNow: () -> Instant = Instant::now,
@@ -355,6 +358,15 @@ class RivuneViewModel internal constructor(
                 failure = UiFailure.SERVER_INVALID,
             )
             diagnostics.record(DiagnosticEventCode.SERVER_CONNECTION_FAILED)
+            return
+        }
+        if (!serverConnectionAllowed(normalized)) {
+            mutableState.value = mutableState.value.copy(
+                destination = AppDestination.Server,
+                serverInput = normalized,
+                isBusy = false,
+                failure = UiFailure.LOCAL_NETWORK_PERMISSION,
+            )
             return
         }
         diagnostics.record(DiagnosticEventCode.SERVER_CONNECTION_STARTED)
@@ -3071,24 +3083,15 @@ class RivuneViewModel internal constructor(
                         externalPlaybackSupportProvider = { detectExternalPlaybackSupport(applicationContext) },
                         appPreferences = application?.appPreferences ?: AppPreferencesStore(applicationContext),
                         playbackNetworkProvider = { detectPlaybackNetwork(applicationContext) },
+                        serverConnectionAllowed = { serverUrl ->
+                            !requiresLocalNetworkPermission(applicationContext, serverUrl)
+                        },
                         diagnostics = application?.diagnostics ?: DiagnosticsBuffer(),
                     ) as T
                 }
             }
         }
     }
-}
-internal fun normalizeServerUrl(value: String): String? {
-    val trimmed = value.trim()
-    if (trimmed.isEmpty() || trimmed.any(Char::isWhitespace)) return null
-    val withScheme = if ("://" in trimmed) {
-        trimmed
-    } else {
-        val host = trimmed.substringBefore('/').substringBefore(':').lowercase()
-        val scheme = if (host == "localhost" || host == "127.0.0.1") "http" else "https"
-        "$scheme://$trimmed"
-    }
-    return withScheme.trimEnd('/').takeIf(String::isNotBlank)
 }
 
 private fun CollectionItem.identity(): String = "$mediaType\u0000$id"

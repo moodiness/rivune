@@ -31,6 +31,9 @@ func TestHandlerServesEntryPointAndBrowserRoutes(t *testing.T) {
 			if policy := response.Header().Get("Content-Security-Policy"); !strings.Contains(policy, "script-src 'self'") {
 				t.Fatalf("entry point did not allow its bundled scripts: %q", policy)
 			}
+			if policy := response.Header().Get("Referrer-Policy"); policy != "no-referrer" {
+				t.Fatalf("expected no-referrer entry point policy, got %q", policy)
+			}
 		})
 	}
 }

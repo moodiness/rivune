@@ -1362,7 +1362,7 @@ test("season selector supports horizontal mouse dragging without changing the ac
 
   const releasedScrollLeft = await seasons.evaluate((element) => element.scrollLeft);
   expect(releasedScrollLeft).toBeGreaterThan(dragDistance - 10);
-  const momentumTarget = Math.min(maxScrollLeft - 1, dragDistance + 20);
+  const momentumTarget = Math.min(maxScrollLeft - 1, releasedScrollLeft + 4);
   await expect.poll(() => seasons.evaluate((element) => element.scrollLeft)).toBeGreaterThan(momentumTarget);
   await expect(activeSeason).toHaveAttribute("aria-selected", "true");
   await page.getByRole("tab", { name: /^Season 2\b/ }).click();

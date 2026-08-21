@@ -363,7 +363,7 @@ public sealed partial class MainPage
                 AddChoice("Theme", "Appearance inherited by compatible clients.", settings.Theme, ["system", "dark", "light"], sources.Theme, value => SaveSettingsAsync(new SettingsPatch { Theme = StringPatch(value) }));
                 AddChoice("Card density", "Controls how much artwork appears on each row.", settings.CardDensity, ["comfortable", "compact"], sources.CardDensity, value => SaveSettingsAsync(new SettingsPatch { CardDensity = StringPatch(value) }));
                 AddBooleanPreference("Animations", "Animate navigation and artwork where supported.", settings.AnimationsEnabled, sources.AnimationsEnabled, value => SaveSettingsAsync(new SettingsPatch { AnimationsEnabled = BooleanPatch(value) }));
-                AddDeviceChoice("Accent color", "Color used for highlighted controls on this device.", AccentName(_devicePreferences.AccentColor), ["Blue", "Coral", "Green", "Violet"], (preferences, value) => preferences with { AccentColor = AccentColorFromName(value) });
+                AddDeviceChoice("Accent color", "Color used for highlighted controls on this device.", AccentName(_devicePreferences.AccentColor), ["Blue", "Coral", "Green", "Violet", "Rose"], (preferences, value) => preferences with { AccentColor = AccentColorFromName(value) });
                 AddDeviceChoice("Startup page", "Page opened after profile selection on this device.", _devicePreferences.StartupTab.ToString(), ["Home", "Search", "Library", "Calendar"], (preferences, value) => preferences with { StartupTab = Enum.Parse<ViewerTab>(value) });
                 AddDeviceChoice("Motion", "Animation policy used by this device.", _devicePreferences.Motion.ToString(), ["System", "Full", "Reduced"], (preferences, value) => preferences with { Motion = Enum.Parse<DeviceMotionPreference>(value) });
                 AddDeviceBoolean("Automatically show sources", "Open the source picker after selecting a playable title on this device.", _devicePreferences.AutomaticallyShowSources, (preferences, value) => preferences with { AutomaticallyShowSources = value });
@@ -668,6 +668,7 @@ public sealed partial class MainPage
         WindowsDevicePreferences.CoralAccentColor => "Coral",
         WindowsDevicePreferences.GreenAccentColor => "Green",
         WindowsDevicePreferences.VioletAccentColor => "Violet",
+        WindowsDevicePreferences.RoseAccentColor => "Rose",
         _ => "Blue",
     };
 
@@ -676,9 +677,9 @@ public sealed partial class MainPage
         "Coral" => WindowsDevicePreferences.CoralAccentColor,
         "Green" => WindowsDevicePreferences.GreenAccentColor,
         "Violet" => WindowsDevicePreferences.VioletAccentColor,
+        "Rose" => WindowsDevicePreferences.RoseAccentColor,
         _ => WindowsDevicePreferences.DefaultAccentColor,
     };
-
     private async Task SaveDevicePreferencesAsync(Func<WindowsDevicePreferences, WindowsDevicePreferences> update)
     {
         var store = _devicePreferencesStore ?? throw new InvalidOperationException("Device preferences are unavailable.");

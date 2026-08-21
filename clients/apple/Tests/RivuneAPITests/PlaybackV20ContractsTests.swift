@@ -57,6 +57,26 @@ final class PlaybackV20ContractsTests: XCTestCase {
         """.utf8)))
     }
 
+    func testTitleResolveInputNormalizesReleaseDates() {
+        let timestamp = TitleResolveInput(
+            mediaType: .movie,
+            provider: "addon",
+            resourceId: "movie-1",
+            title: "Film",
+            released: "2026-08-12T15:30:45.123+02:00"
+        )
+        XCTAssertEqual(timestamp.released, "2026-08-12")
+
+        let dateOnly = TitleResolveInput(mediaType: .movie, provider: "addon", resourceId: "movie-2", title: "Film", released: "2026-08-12")
+        XCTAssertEqual(dateOnly.released, "2026-08-12")
+
+        let yearOnly = TitleResolveInput(mediaType: .movie, provider: "addon", resourceId: "movie-3", title: "Film", released: "2026")
+        XCTAssertNil(yearOnly.released)
+
+        let impossibleDate = TitleResolveInput(mediaType: .movie, provider: "addon", resourceId: "movie-4", title: "Film", released: "2026-02-30T15:30:00Z")
+        XCTAssertNil(impossibleDate.released)
+    }
+
     func testMetadataMarkersAndSourcesRequestsUseV20QueryAndBody() async throws {
         let transport = V20RecordingTransport()
         let client = try makeClient(transport: transport)

@@ -144,8 +144,12 @@ final class TranscodingModelsTests: XCTestCase {
 
         let instance = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(InstanceTranscodingPatch(allowTranscoding: nil))) as? [String: Any])
         XCTAssertTrue(instance["allowTranscoding"] is NSNull)
-        let profile = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(ProfileTranscodingPatch(transcoding: nil))) as? [String: Any])
+        let profile = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(ProfileSettingsPatch(transcoding: .null))) as? [String: Any])
         XCTAssertTrue(profile["transcoding"] is NSNull)
+        let selective = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(ProfileSettingsPatch(maximumResolution: .value("1080p")))) as? [String: Any])
+        XCTAssertEqual(selective["maximumResolution"] as? String, "1080p")
+        XCTAssertNil(selective["transcoding"])
+        XCTAssertNil(selective["preferDirectPlay"])
 
         let error = try JSONDecoder().decode(ServerError.self, from: Data(#"{"code":"future_error_code","message":"future","futureField":true}"#.utf8))
         XCTAssertEqual(error.code, "future_error_code")

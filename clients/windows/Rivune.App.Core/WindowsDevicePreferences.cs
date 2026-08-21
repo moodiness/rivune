@@ -16,6 +16,7 @@ internal sealed record WindowsDevicePreferences
     public const string CoralAccentColor = "#FF8F70";
     public const string GreenAccentColor = "#71C99A";
     public const string VioletAccentColor = "#C29AFF";
+    public const string RoseAccentColor = "#FF7D8C";
 
     private ViewerTab _startupTab = ViewerTab.Home;
     private int _videoAspectIndex;
@@ -58,6 +59,7 @@ internal sealed record WindowsDevicePreferences
         if (string.Equals(value, CoralAccentColor, StringComparison.OrdinalIgnoreCase)) return CoralAccentColor;
         if (string.Equals(value, GreenAccentColor, StringComparison.OrdinalIgnoreCase)) return GreenAccentColor;
         if (string.Equals(value, VioletAccentColor, StringComparison.OrdinalIgnoreCase)) return VioletAccentColor;
+        if (string.Equals(value, RoseAccentColor, StringComparison.OrdinalIgnoreCase)) return RoseAccentColor;
         return DefaultAccentColor;
     }
 }

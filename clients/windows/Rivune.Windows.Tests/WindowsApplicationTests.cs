@@ -156,6 +156,27 @@ public sealed class WindowsApplicationTests
         Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
     }
 
+    [Fact]
+    public async Task ShutdownDeadlineCleansUpWhenNetworkingNeverCompletes()
+    {
+        var request = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cleanupCount = 0;
+        var cancellationObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        await ShutdownDeadline.RunAsync(
+            cancellationToken =>
+            {
+                cancellationToken.Register(() => cancellationObserved.TrySetResult());
+                return request.Task;
+            },
+            TimeSpan.FromMilliseconds(25),
+            () => cleanupCount++).WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, cleanupCount);
+        await cancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        Assert.False(request.Task.IsCompleted);
+    }
+
     private sealed class DelegateHandler(
         Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) : HttpMessageHandler
     {

@@ -1,6 +1,10 @@
 package password
 
-import "testing"
+import (
+	"errors"
+	"strings"
+	"testing"
+)
 
 func TestHashAndVerify(t *testing.T) {
 	hash, err := Hash("correct-horse-battery-staple")
@@ -43,7 +47,31 @@ func TestHashUsesUniqueSalt(t *testing.T) {
 }
 
 func TestVerifyRejectsMalformedHash(t *testing.T) {
-	if _, err := Verify("password", "not-a-password-hash"); err == nil {
-		t.Fatal("expected malformed hash to be rejected")
+	hash, err := Hash("password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutations := map[string]string{
+		"not PHC":               "not-a-password-hash",
+		"wrong version":         strings.Replace(hash, "$v=19$", "$v=18$", 1),
+		"excessive memory":      strings.Replace(hash, "$m=65536,t=3,p=2$", "$m=4294967295,t=3,p=2$", 1),
+		"excessive iterations":  strings.Replace(hash, "$m=65536,t=3,p=2$", "$m=65536,t=4294967295,p=2$", 1),
+		"excessive parallelism": strings.Replace(hash, "$m=65536,t=3,p=2$", "$m=65536,t=3,p=255$", 1),
+		"trailing parameters":   strings.Replace(hash, "$m=65536,t=3,p=2$", "$m=65536,t=3,p=2,extra=1$", 1),
+	}
+	parts := strings.Split(hash, "$")
+	shortSalt := append([]string(nil), parts...)
+	shortSalt[4] = "AA"
+	mutations["short salt"] = strings.Join(shortSalt, "$")
+	shortDigest := append([]string(nil), parts...)
+	shortDigest[5] = "AA"
+	mutations["short digest"] = strings.Join(shortDigest, "$")
+
+	for name, malformed := range mutations {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Verify("password", malformed); !errors.Is(err, ErrInvalidHash) {
+				t.Fatalf("Verify error = %v, want %v", err, ErrInvalidHash)
+			}
+		})
 	}
 }

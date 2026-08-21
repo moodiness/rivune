@@ -674,6 +674,15 @@ public actor RivuneAPIClient {
         return result.profiles
     }
 
+    public func profileAvatar(id: UUID) async throws -> Data {
+        try await requestData(
+            "profiles/\(id.uuidString.lowercased())/avatar",
+            method: "GET",
+            body: nil,
+            authenticated: true
+        )
+    }
+
     public func selectProfile(id: UUID, pin: String? = nil) async throws -> ProfileSelection {
         try Task.checkCancellation()
         guard !profileSelectionMutationInFlight else { throw CancellationError() }
@@ -770,7 +779,6 @@ public actor RivuneAPIClient {
             retryAfterRefresh: true,
             expectedAuthenticationGeneration: generation,
             expectedProfileSelectionGeneration: selectionGeneration,
-            credentialBearing: true,
             profileMutationCancellation: callerCancellation
         )
         let selection: ProfileSelection
@@ -802,7 +810,6 @@ public actor RivuneAPIClient {
             retryAfterRefresh: true,
             expectedAuthenticationGeneration: generation,
             expectedProfileSelectionGeneration: selectionGeneration,
-            credentialBearing: true,
             profileMutationCancellation: callerCancellation
         )
         try await persistProfileContext(
@@ -855,7 +862,7 @@ public actor RivuneAPIClient {
         try await request("profiles/\(id.uuidString.lowercased())/settings", authenticated: true)
     }
 
-    public func updateProfileSettings(id: UUID, patch: ProfileTranscodingPatch) async throws -> SettingsLayer {
+    public func updateProfileSettings(id: UUID, patch: ProfileSettingsPatch) async throws -> SettingsLayer {
         try await request("profiles/\(id.uuidString.lowercased())/settings", method: "PATCH", body: patch, authenticated: true)
     }
 
@@ -1125,6 +1132,15 @@ public actor RivuneAPIClient {
         )
     }
 
+    public func calendar(from: String, to: String, language: String? = nil) async throws -> [CalendarEvent] {
+        let result: CalendarEventList = try await request(
+            "calendar",
+            query: queryItems(("from", from), ("to", to), ("language", language)),
+            authenticated: true
+        )
+        return result.events
+    }
+
     public func tvLibraryMembership(_ identities: [TVLibraryIdentity]) async throws -> TVLibraryMembershipResult {
         try await request("library/membership", method: "POST", body: TVLibraryMembershipRequest(identities: identities), authenticated: true)
     }
@@ -1202,8 +1218,7 @@ public actor RivuneAPIClient {
             authorizationToken: authorizationToken,
             retryAfterRefresh: authenticated,
             expectedAuthenticationGeneration: requestGeneration,
-            expectedProfileSelectionGeneration: requestProfileGeneration,
-            credentialBearing: authenticated || Self.isCredentialBearingURL(url)
+            expectedProfileSelectionGeneration: requestProfileGeneration
         )
     }
 
@@ -1224,8 +1239,7 @@ public actor RivuneAPIClient {
             authorizationToken: authorizationToken,
             retryAfterRefresh: retryAfterRefresh,
             expectedAuthenticationGeneration: nil,
-            expectedProfileSelectionGeneration: nil,
-            credentialBearing: true
+            expectedProfileSelectionGeneration: nil
         ).data
     }
 
@@ -1261,8 +1275,7 @@ public actor RivuneAPIClient {
             authorizationToken: authorizationToken,
             retryAfterRefresh: retryAfterRefresh,
             expectedAuthenticationGeneration: requestGeneration,
-            expectedProfileSelectionGeneration: requestProfileGeneration,
-            credentialBearing: authenticated || Self.isCredentialBearingURL(url)
+            expectedProfileSelectionGeneration: requestProfileGeneration
         )
         do { return try decoder.decode(Response.self, from: result.data) }
         catch { throw RivuneAPIError.invalidResponse }
@@ -1276,7 +1289,6 @@ public actor RivuneAPIClient {
         retryAfterRefresh: Bool,
         expectedAuthenticationGeneration: UInt64?,
         expectedProfileSelectionGeneration: UInt64?,
-        credentialBearing: Bool,
         profileMutationCancellation: ProfileMutationCancellation? = nil
     ) async throws -> HTTPResult {
         guard try Self.canonicalServerOrigin(url) == serverURL else {
@@ -1284,9 +1296,6 @@ public actor RivuneAPIClient {
         }
         var request = URLRequest(url: url)
         request.httpMethod = method
-        if credentialBearing && url.scheme?.lowercased() != "https" {
-            throw RivuneAPIError.invalidServerURL(url.absoluteString)
-        }
         request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
@@ -1330,7 +1339,6 @@ public actor RivuneAPIClient {
                 retryAfterRefresh: false,
                 expectedAuthenticationGeneration: expectedAuthenticationGeneration,
                 expectedProfileSelectionGeneration: expectedProfileSelectionGeneration,
-                credentialBearing: true,
                 profileMutationCancellation: profileMutationCancellation
             )
         }
@@ -1345,12 +1353,6 @@ public actor RivuneAPIClient {
         if let profile, profile != profileSelectionGeneration { throw CancellationError() }
     }
 
-    private static func isCredentialBearingURL(_ url: URL) -> Bool {
-        let path = url.path
-        return path.hasSuffix("/auth/login") ||
-            path.hasSuffix("/auth/refresh") ||
-            path.hasSuffix("/auth/device-code/token")
-    }
     private static func usesProfileContext(_ url: URL, method: String) -> Bool {
         let path = url.path
         if path.hasSuffix("/auth/logout") || path.hasSuffix("/auth/me") { return false }
@@ -1511,7 +1513,7 @@ public actor RivuneAPIClient {
 
         let scheme = rawScheme.lowercased()
         let host = rawHost.lowercased()
-        guard scheme == "https" || (scheme == "http" && isLoopback(host)) else {
+        guard scheme == "https" || (scheme == "http" && isLocalNetworkHost(host)) else {
             throw RivuneAPIError.invalidServerURL(value.absoluteString)
         }
 
@@ -1528,23 +1530,23 @@ public actor RivuneAPIClient {
         return origin
     }
 
-    private static func isLoopback(_ rawHost: String) -> Bool {
+    private static func isLocalNetworkHost(_ rawHost: String) -> Bool {
         let host = rawHost
             .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
             .lowercased()
-        if host == "localhost" || host == "localhost." || host == "::1" {
-            return true
+        guard !host.isEmpty else { return false }
+        if host == "localhost" || host == "::1" { return true }
+        if host.contains(":") {
+            guard let firstGroup = host.split(separator: ":", omittingEmptySubsequences: true).first,
+                  let prefix = UInt16(firstGroup, radix: 16) else { return false }
+            return prefix & 0xfe00 == 0xfc00
         }
-        let octets = host.split(separator: ".", omittingEmptySubsequences: false)
-        guard octets.count == 4,
-              octets.first == "127",
-              octets.allSatisfy({ octet in
-                  guard let value = Int(octet) else { return false }
-                  return value >= 0 && value <= 255
-              }) else {
-            return false
-        }
-        return true
+        let octets = host.split(separator: ".", omittingEmptySubsequences: false).compactMap { Int($0) }
+        guard octets.count == 4, octets.allSatisfy({ 0...255 ~= $0 }) else { return false }
+        return octets[0] == 10 ||
+            octets[0] == 127 ||
+            (octets[0] == 172 && 16...31 ~= octets[1]) ||
+            (octets[0] == 192 && octets[1] == 168)
     }
 
     private func decodeServerError(status: Int, data: Data) -> RivuneAPIError {

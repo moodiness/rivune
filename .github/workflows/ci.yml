@@ -1,0 +1,16 @@
+name: Continuous integration
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Complete project gate
+    uses: ./.github/workflows/release-gate.yml

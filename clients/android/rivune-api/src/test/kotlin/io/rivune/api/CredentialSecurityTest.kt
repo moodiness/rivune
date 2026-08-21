@@ -5,8 +5,15 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 
@@ -57,12 +64,76 @@ class CredentialSecurityTest {
     }
 
     @Test
-    fun remoteAndUnsupportedLoopbackHttpServersAreRejected() {
-        listOf("http://192.0.2.10", "http://127.0.0.2", "http://[::1]").forEach { serverUrl ->
-            assertFailsWith<RivuneApiException.InvalidServerUrl> {
+    fun publicHttpServersAreRejected() {
+        listOf(
+            "http://rivune.example",
+            "http://192.0.2.10",
+            "http://169.254.10.20",
+            "http://203.0.113.20",
+            "http://rivune.local",
+            "http://RIVUNE.LOCAL",
+            "http://rivune.local.",
+            "http://[2001:db8::20]",
+            "http://[fe80::20]",
+        ).forEach { serverUrl ->
+            assertFailsWith<RivuneApiException.InvalidServerUrl>(serverUrl) {
                 RivuneApiClient(serverUrl, LeakyCredentialStore(null))
             }
         }
+    }
+
+    @Test
+    fun privateNetworkHttpServersAreAccepted() {
+        listOf(
+            "http://localhost:8080",
+            "http://127.42.7.9:8080",
+            "http://10.0.0.20:8080",
+            "http://172.31.255.254:8080",
+            "http://192.168.1.20:8080",
+            "http://[::1]:8080",
+            "http://[fd00::20]:8080",
+        ).forEach { serverUrl ->
+            RivuneApiClient(serverUrl, LeakyCredentialStore(null))
+        }
+    }
+
+    @Test
+    fun localNetworkPermissionClassifierIncludesSupportedKnownLanDestinations() {
+        listOf(
+            "http://10.0.0.20:8080",
+            "http://172.31.255.254:8080",
+            "http://192.168.1.20:8080",
+            "http://[fd00::20]:8080",
+            "https://10.0.0.20:8080",
+            "https://172.16.0.1:8080",
+            "https://192.168.1.20:8080",
+            "https://[fd00::20]:8080",
+            "https://rivune.local:8080",
+            "https://RIVUNE.LOCAL:8080",
+            "https://rivune.local.:8080",
+        ).forEach { assertTrue(isKnownLocalNetworkServerUrl(it), it) }
+
+        listOf(
+            "http://localhost:8080",
+            "https://localhost:8080",
+            "http://127.42.7.9:8080",
+            "https://127.42.7.9:8080",
+            "http://[::1]:8080",
+            "https://[::1]:8080",
+            "http://rivune.local:8080",
+            "http://rivune.local.:8080",
+            "https://local:8080",
+            "https://rivune.example:8080",
+            "https://169.254.10.20:8080",
+            "https://100.64.0.1:8080",
+            "https://192.0.2.10:8080",
+            "https://[fe80::20]:8080",
+            "https://user@10.0.0.20:8080",
+            "https://user:password@rivune.local:8080",
+            "https://@10.0.0.20:8080",
+            "https://:@rivune.local:8080",
+            "not a URL",
+        ).forEach { assertFalse(isKnownLocalNetworkServerUrl(it), it) }
     }
 
     @Test
@@ -89,6 +160,43 @@ class CredentialSecurityTest {
         } finally {
             server.shutdown()
         }
+    }
+
+    @Test
+    fun privateNetworkHttpCanCarryLoginCredentials() = runBlocking {
+        val requests = mutableListOf<Request>()
+        val client = RivuneApiClient(
+            "http://192.168.1.20:8080",
+            LeakyCredentialStore(null),
+            OkHttpClient.Builder()
+                .addInterceptor { chain ->
+                    val request = chain.request()
+                    requests += request
+                    val body = if (request.url.encodedPath == "/.well-known/rivune") {
+                        DISCOVERY_RESPONSE
+                    } else {
+                        LOGIN_RESPONSE
+                    }
+                    Response.Builder()
+                        .request(request)
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .header("Content-Type", "application/json")
+                        .body(body.toResponseBody(JSON_MEDIA_TYPE))
+                        .build()
+                }
+                .build(),
+        )
+
+        client.login("alice", "password", LoginDevice(name = "Test phone", platform = "android"))
+
+        assertEquals(
+            listOf("/.well-known/rivune", "/api/v1/auth/login"),
+            requests.map { it.url.encodedPath },
+        )
+        assertEquals(listOf("192.168.1.20", "192.168.1.20"), requests.map { it.url.host })
+        assertNull(requests.first().header("Authorization"))
     }
 
     @Test
@@ -210,6 +318,11 @@ class CredentialSecurityTest {
         )
 
     private companion object {
+        val JSON_MEDIA_TYPE = "application/json".toMediaType()
+        const val DISCOVERY_RESPONSE =
+            """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}"""
+        const val LOGIN_RESPONSE =
+            """{"tokenType":"Bearer","accessToken":"lan-access","accessTokenExpiresAt":"2026-08-04T12:15:00Z","refreshToken":"lan-refresh","refreshTokenExpiresAt":"2026-09-04T12:00:00Z","sessionId":"22222222-2222-4222-8222-222222222222","deviceId":"33333333-3333-4333-8333-333333333333","authorizationScope":"global_admin","category":null}"""
         val REDIRECT_STATUSES = listOf(302, 307, 308)
     }
 

@@ -46,8 +46,8 @@
         </ResourceDictionary>
     </ResourceDictionary.ThemeDictionaries>
 
-    <Color x:Key="RivuneCanvasColor">#050505</Color>
-    <Color x:Key="RivuneCanvasSoftColor">#080808</Color>
+    <Color x:Key="RivuneCanvasColor">#000000</Color>
+    <Color x:Key="RivuneCanvasSoftColor">#000000</Color>
     <Color x:Key="RivuneSurfaceColor">#0D0D0D</Color>
     <Color x:Key="RivuneRaisedSurfaceColor">#141414</Color>
     <Color x:Key="RivuneInteractiveSurfaceColor">#1B1B1B</Color>
@@ -73,7 +73,7 @@
     <Color x:Key="RivuneSuccessColor">#79D5AE</Color>
     <Color x:Key="RivuneWarningColor">#E8B870</Color>
     <Color x:Key="RivuneScrimColor">#CC000000</Color>
-    <Color x:Key="RivunePlayerCanvasColor">#050505</Color>
+    <Color x:Key="RivunePlayerCanvasColor">#000000</Color>
     <Color x:Key="RivunePlayerChromeColor">#61000000</Color>
     <Color x:Key="RivuneArtworkFallbackTopColor">#FF151515</Color>
     <Color x:Key="RivuneArtworkFallbackBottomColor">#FF080808</Color>

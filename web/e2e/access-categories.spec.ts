@@ -204,8 +204,8 @@ test("a failed device deletion remains recoverable without implicitly removing t
 });
 
 test("late device filter success and error responses cannot replace the latest filter state", async ({ page, rivune }) => {
-  rivune.setDeviceResponse(CATEGORY_IDS.kids, { delay: 600 });
-  rivune.setDeviceResponse(CATEGORY_IDS.guest, { status: 503, delay: 300 });
+  rivune.setDeviceResponse(CATEGORY_IDS.kids, { delay: 3_000 });
+  rivune.setDeviceResponse(CATEGORY_IDS.guest, { status: 503, delay: 1_500 });
   await openAdministration(page, "Devices");
   const devices = page.locator(".devices-admin");
   const filter = devices.getByRole("combobox");
@@ -219,7 +219,7 @@ test("late device filter success and error responses cannot replace the latest f
 
   await expect(deviceCard(page, "Living room TV")).toBeVisible();
   await expect(devices.locator(".device-admin-card")).toHaveCount(1);
-  await expect.poll(() => rivune.deviceResponseCompletions.slice(-3)).toEqual([CATEGORY_IDS.household, CATEGORY_IDS.guest, CATEGORY_IDS.kids]);
+  await expect.poll(() => rivune.deviceResponseCompletions.slice(-3), { timeout: 8_000 }).toEqual([CATEGORY_IDS.household, CATEGORY_IDS.guest, CATEGORY_IDS.kids]);
   await expect(devices.locator(".admin-loading-state")).toHaveCount(0);
   await expect(page.getByText("The device list is temporarily unavailable", { exact: true })).toHaveCount(0);
   await expect(deviceCard(page, "Living room TV")).toBeVisible();

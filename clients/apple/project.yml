@@ -1,0 +1,223 @@
+name: Rivune
+options:
+  bundleIdPrefix: io.rivune
+  deploymentTarget:
+    iOS: "15.0"
+    tvOS: "15.0"
+    macOS: "12.0"
+    visionOS: "1.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+packages:
+  RivunePackages:
+    path: .
+settings:
+  base:
+    CURRENT_PROJECT_VERSION: 1
+    MARKETING_VERSION: 1.9.0
+    SWIFT_VERSION: 5.9
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    CLANG_ANALYZER_LOCALIZABILITY_NONLOCALIZED: YES
+    SWIFT_STRICT_CONCURRENCY: complete
+targets:
+  Rivune-iOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: Apps/iOS
+    dependencies:
+      - package: RivunePackages
+        product: RivuneAppCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.rivune.app
+        PRODUCT_NAME: Rivune
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Apps/iOS/Info.plist
+        SUPPORTS_MACCATALYST: NO
+    postBuildScripts:
+      - name: Prune unused package frameworks
+        script: Scripts/prune-unused-package-frameworks.sh
+        inputFiles:
+          - $(SRCROOT)/Scripts/prune-unused-package-frameworks.sh
+        basedOnDependencyAnalysis: false
+      - name: Embed legal notices
+        script: Scripts/embed-legal-notices.sh
+        inputFiles:
+          - $(SRCROOT)/Scripts/embed-legal-notices.sh
+          - $(SRCROOT)/../../LICENSE
+          - $(SRCROOT)/../../NOTICE
+          - $(SRCROOT)/Legal/LGPL-3.0.txt
+          - $(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/LGPL-2.1.txt
+          - $(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/GPL-3.0.txt
+          - $(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/FFmpeg-LICENSE.txt
+          - $(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/mpv-Copyright.txt
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/Rivune-Apache-2.0.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/NOTICE.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/LGPL-3.0.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/LGPL-2.1.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/GPL-3.0.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/FFmpeg-LICENSE.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/mpv-Copyright.txt
+        basedOnDependencyAnalysis: true
+  Rivune-tvOS:
+    type: application
+    platform: tvOS
+    sources:
+      - path: Apps/tvOS
+    dependencies:
+      - package: RivunePackages
+        product: RivuneAppCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.rivune.app.tv
+        PRODUCT_NAME: Rivune
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Apps/tvOS/Info.plist
+    postBuildScripts:
+      - name: Prune unused package frameworks
+        script: Scripts/prune-unused-package-frameworks.sh
+        inputFiles:
+          - $(SRCROOT)/Scripts/prune-unused-package-frameworks.sh
+        basedOnDependencyAnalysis: false
+      - name: Embed legal notices
+        script: Scripts/embed-legal-notices.sh
+        inputFiles:
+          - $(SRCROOT)/Scripts/embed-legal-notices.sh
+          - $(SRCROOT)/../../LICENSE
+          - $(SRCROOT)/../../NOTICE
+          - $(SRCROOT)/Legal/LGPL-3.0.txt
+          - $(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/LGPL-2.1.txt
+          - $(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/GPL-3.0.txt
+          - $(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/FFmpeg-LICENSE.txt
+          - $(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/mpv-Copyright.txt
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/Rivune-Apache-2.0.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/NOTICE.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/LGPL-3.0.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/LGPL-2.1.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/GPL-3.0.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/FFmpeg-LICENSE.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/mpv-Copyright.txt
+        basedOnDependencyAnalysis: true
+  Rivune-visionOS:
+    type: application
+    platform: visionOS
+    sources:
+      - path: Apps/visionOS
+    dependencies:
+      - package: RivunePackages
+        product: RivuneAppCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.rivune.app.vision
+        PRODUCT_NAME: Rivune
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Apps/visionOS/Info.plist
+    postBuildScripts:
+      - name: Prune unused package frameworks
+        script: Scripts/prune-unused-package-frameworks.sh
+        inputFiles:
+          - $(SRCROOT)/Scripts/prune-unused-package-frameworks.sh
+        basedOnDependencyAnalysis: false
+      - name: Embed legal notices
+        script: Scripts/embed-legal-notices.sh
+        inputFiles:
+          - $(SRCROOT)/Scripts/embed-legal-notices.sh
+          - $(SRCROOT)/../../LICENSE
+          - $(SRCROOT)/../../NOTICE
+          - $(SRCROOT)/Legal/LGPL-3.0.txt
+          - $(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/LGPL-2.1.txt
+          - $(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/GPL-3.0.txt
+          - $(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/FFmpeg-LICENSE.txt
+          - $(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/mpv-Copyright.txt
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/Rivune-Apache-2.0.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/NOTICE.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/LGPL-3.0.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/LGPL-2.1.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/GPL-3.0.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/FFmpeg-LICENSE.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/mpv-Copyright.txt
+        basedOnDependencyAnalysis: true
+  Rivune-macOS:
+    type: application
+    platform: macOS
+    sources:
+      - path: Apps/macOS
+    entitlements:
+      path: Apps/macOS/Rivune.entitlements
+    dependencies:
+      - package: RivunePackages
+        product: RivuneAppCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.rivune.app.mac
+        PRODUCT_NAME: Rivune
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Apps/macOS/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Apps/macOS/Rivune.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+    postBuildScripts:
+      - name: Prune unused package frameworks
+        script: Scripts/prune-unused-package-frameworks.sh
+        inputFiles:
+          - $(SRCROOT)/Scripts/prune-unused-package-frameworks.sh
+        basedOnDependencyAnalysis: false
+      - name: Embed legal notices
+        script: Scripts/embed-legal-notices.sh
+        inputFiles:
+          - $(SRCROOT)/Scripts/embed-legal-notices.sh
+          - $(SRCROOT)/../../LICENSE
+          - $(SRCROOT)/../../NOTICE
+          - $(SRCROOT)/Legal/LGPL-3.0.txt
+          - $(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/LGPL-2.1.txt
+          - $(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/GPL-3.0.txt
+          - $(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/FFmpeg-LICENSE.txt
+          - $(SRCROOT)/../../clients/android/app/src/main/assets/legal/licenses/mpv-Copyright.txt
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/Rivune-Apache-2.0.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/NOTICE.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/LGPL-3.0.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/LGPL-2.1.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/GPL-3.0.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/FFmpeg-LICENSE.txt
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Legal/mpv-Copyright.txt
+        basedOnDependencyAnalysis: true
+schemes:
+  Rivune-iOS:
+    build:
+      targets:
+        Rivune-iOS: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+  Rivune-tvOS:
+    build:
+      targets:
+        Rivune-tvOS: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+  Rivune-visionOS:
+    build:
+      targets:
+        Rivune-visionOS: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+  Rivune-macOS:
+    build:
+      targets:
+        Rivune-macOS: all
+    run:
+      config: Debug
+    archive:
+      config: Release

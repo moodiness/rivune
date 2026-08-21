@@ -12,6 +12,7 @@ import android.os.PersistableBundle
 import android.widget.Toast
 import android.view.HapticFeedbackConstants
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -116,6 +117,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.rivune.api.Profile
+import io.rivune.api.normalizeServerUrl
 import io.rivune.app.ui.components.RivuneArtwork
 import io.rivune.app.ui.components.RivuneCinematicBackground
 import io.rivune.app.ui.components.RivuneFunctionalSurface
@@ -161,6 +163,15 @@ internal fun RivuneRoot(
     val diagnosticsExportFailed = stringResource(R.string.diagnostics_export_failed)
     val externalActionFailed = stringResource(R.string.external_action_failed)
     var diagnosticExportRequested by rememberSaveable { mutableStateOf(false) }
+    var pendingLocalNetworkServer by rememberSaveable { mutableStateOf<String?>(null) }
+    var automaticallyRequestedLocalNetworkServer by rememberSaveable { mutableStateOf<String?>(null) }
+    val localNetworkPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        val server = pendingLocalNetworkServer
+        pendingLocalNetworkServer = null
+        if (granted && server != null) viewModel.connect(server)
+    }
     val exportLauncher = rememberLauncherForActivityResult(diagnosticReportDocumentContract()) { uri ->
         val shouldExport = diagnosticExportRequested
         diagnosticExportRequested = false
@@ -197,6 +208,27 @@ internal fun RivuneRoot(
         events = application.diagnostics.snapshot(),
     )
 
+    fun connectToServer(rawServerUrl: String) {
+        viewModel.connect(rawServerUrl)
+        val normalized = normalizeServerUrl(rawServerUrl) ?: return
+        if (requiresLocalNetworkPermission(activity, normalized)) {
+            automaticallyRequestedLocalNetworkServer = normalized
+            pendingLocalNetworkServer = normalized
+            runCatching { localNetworkPermissionLauncher.launch(ACCESS_LOCAL_NETWORK_PERMISSION) }
+        }
+    }
+
+    LaunchedEffect(state.failure, state.serverInput) {
+        val server = state.serverInput
+        if (state.failure == UiFailure.LOCAL_NETWORK_PERMISSION &&
+            server.isNotBlank() && automaticallyRequestedLocalNetworkServer != server
+        ) {
+            automaticallyRequestedLocalNetworkServer = server
+            pendingLocalNetworkServer = server
+            runCatching { localNetworkPermissionLauncher.launch(ACCESS_LOCAL_NETWORK_PERMISSION) }
+        }
+    }
+
     RivuneTheme(
         accentColor = appPreferences.accentColor,
         animationPreference = appPreferences.animationPreference,
@@ -225,7 +257,7 @@ internal fun RivuneRoot(
                             isBusy = state.isBusy,
                             failure = state.failure,
                             isTv = state.isTv,
-                            onConnect = viewModel::connect,
+                            onConnect = ::connectToServer,
                             onClearFailure = viewModel::clearFailure,
                         )
                         AppDestination.Pairing -> PairingScreen(
@@ -468,7 +500,6 @@ private fun AppUpdateDialog(
         is AppUpdateState.NeedsPermission -> stringResource(R.string.update_permission_body)
         is AppUpdateState.Installing -> stringResource(R.string.update_installing)
         is AppUpdateState.Error -> stringResource(R.string.update_error_body)
-        else -> ""
     }
     AlertDialog(
         onDismissRequest = {
@@ -2129,6 +2160,7 @@ private fun failureMessage(failure: UiFailure): String {
     val resource = when (failure) {
         UiFailure.SERVER_INVALID -> R.string.error_invalid_server
         UiFailure.SERVER_UNREACHABLE -> R.string.error_network
+        UiFailure.LOCAL_NETWORK_PERMISSION -> R.string.error_local_network_permission
         UiFailure.PROTOCOL_INCOMPATIBLE -> R.string.error_incompatible_server
         UiFailure.SETUP_REQUIRED -> R.string.error_setup_required
         UiFailure.DEVICE_LIMIT -> R.string.error_device_limit

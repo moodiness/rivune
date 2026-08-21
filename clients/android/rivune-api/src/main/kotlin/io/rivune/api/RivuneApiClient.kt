@@ -30,6 +30,48 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.ResponseBody
 import okio.Buffer
 
+/**
+ * Normalizes a user-entered Rivune server address. Local-network hosts default
+ * to HTTP; public hosts default to HTTPS.
+ */
+fun normalizeServerUrl(value: String): String? {
+    val trimmed = value.trim()
+    if (trimmed.isEmpty() || trimmed.any(Char::isWhitespace)) return null
+    val withScheme = if ("://" in trimmed) {
+        trimmed
+    } else {
+        val host = "http://$trimmed".toHttpUrlOrNull()?.host
+        val scheme = if (host != null && isLocalNetworkHost(host)) "http" else "https"
+        "$scheme://$trimmed"
+    }
+    return withScheme.trimEnd('/').takeIf(String::isNotBlank)
+}
+
+/** Returns whether a supported server URL is known to require local-network access. */
+fun isKnownLocalNetworkServerUrl(value: String): Boolean {
+    if (value.isBlank() || value.any(Char::isWhitespace)) return false
+    val url = value.toHttpUrlOrNull() ?: return false
+    if (hasExplicitUserInfo(value) || url.encodedUsername.isNotEmpty() || url.encodedPassword.isNotEmpty()) return false
+    return when (url.scheme) {
+        "http" -> isPrivateLanLiteralHost(url.host)
+        "https" -> isPrivateLanLiteralHost(url.host) || isLocalHostname(url.host)
+        else -> false
+    }
+}
+
+private fun isLocalHostname(rawHost: String): Boolean {
+    val host = rawHost.lowercase().removeSuffix(".")
+    return host.length > ".local".length && host.endsWith(".local")
+}
+
+private fun hasExplicitUserInfo(value: String): Boolean {
+    val authorityStart = value.indexOf("://").takeIf { it >= 0 }?.plus(3) ?: return false
+    val authorityEnd = value.indexOfAny(charArrayOf('/', '\\', '?', '#'), authorityStart)
+        .takeIf { it >= 0 }
+        ?: value.length
+    return value.indexOf('@', authorityStart) in authorityStart until authorityEnd
+}
+
 private fun validatedServerUrl(value: String): HttpUrl {
     val url = value.toHttpUrlOrNull()?.takeIf(::isCredentialTransportAllowed)
     return url ?: throw RivuneApiException.InvalidServerUrl(value)
@@ -38,9 +80,32 @@ private fun validatedServerUrl(value: String): HttpUrl {
 private fun isCredentialTransportAllowed(url: HttpUrl): Boolean =
     url.encodedUsername.isEmpty() &&
         url.encodedPassword.isEmpty() &&
-        (url.scheme == "https" || (url.scheme == "http" && isLoopbackHost(url.host)))
+        (url.scheme == "https" || (url.scheme == "http" && isLocalNetworkHost(url.host)))
 
-private fun isLoopbackHost(host: String): Boolean = host == "localhost" || host == "127.0.0.1"
+private fun isLocalNetworkHost(rawHost: String): Boolean {
+    val host = rawHost.trim('[', ']').lowercase()
+    if (host == "localhost" || host == "::1") return true
+    if (!host.contains(':')) {
+        val octets = host.split('.', limit = 5).map { it.toIntOrNull() ?: return false }
+        if (octets.size == 4 && octets.all { it in 0..255 } && octets[0] == 127) return true
+    }
+    return isPrivateLanLiteralHost(host)
+}
+
+private fun isPrivateLanLiteralHost(rawHost: String): Boolean {
+    val host = rawHost.trim('[', ']').lowercase()
+    if (host.isEmpty()) return false
+    if (host.contains(':')) {
+        val separator = host.indexOf(':')
+        val prefix = host.substring(0, separator).toIntOrNull(16) ?: return false
+        return prefix and 0xfe00 == 0xfc00
+    }
+    val octets = host.split('.', limit = 5).map { it.toIntOrNull() ?: return false }
+    if (octets.size != 4 || octets.any { it !in 0..255 }) return false
+    return octets[0] == 10 ||
+        (octets[0] == 172 && octets[1] in 16..31) ||
+        (octets[0] == 192 && octets[1] == 168)
+}
 
 private fun canonicalOrigin(url: HttpUrl): String = HttpUrl.Builder()
     .scheme(url.scheme)
