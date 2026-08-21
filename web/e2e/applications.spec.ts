@@ -62,7 +62,7 @@ test("lists exact stable assets, fingerprints, warnings, and QR links without bo
   await expect(page.locator(`[data-asset="Rivune-Android.apk"] code`)).toHaveText("1".repeat(64));
   await expect(page.locator(`[data-asset="Rivune-iOS-unsigned.ipa"]`)).toContainText("cannot be installed as downloaded");
   await expect(page.locator(`[data-asset="Rivune-x64.exe"]`)).toContainText("SmartScreen");
-  await expect(page.locator(`[data-asset="Rivune-iOS-unsigned.ipa"]`).getByRole("link", { name: "Sign and install locally" })).toHaveAttribute("href", "https://github.com/moodiness/rivune#direct-application-downloads");
+  await expect(page.locator(`[data-asset="Rivune-iOS-unsigned.ipa"]`).getByRole("link", { name: "Sign and install locally" })).toHaveAttribute("href", "#apple-signing");
   await expect(page.locator(`[data-asset="Rivune-tvOS-unsigned.ipa"]`).getByRole("link", { name: "Sign and install locally" })).toBeVisible();
   await expect(page.locator(`[data-asset="Rivune-visionOS-unsigned.ipa"]`).getByRole("link", { name: "Sign and install locally" })).toBeVisible();
 
@@ -74,6 +74,36 @@ test("lists exact stable assets, fingerprints, warnings, and QR links without bo
   await android.getByRole("button", { name: "Show QR" }).click();
   await expect(android.getByRole("img", { name: "Download Rivune-Android.apk" })).toBeVisible();
   expect(backendRequests).toBe(0);
+});
+
+test("localizes the page in French and generates an exact local Apple install command", async ({ page }) => {
+  await serveRelease(page);
+
+  await page.goto("/apps?lang=fr");
+
+  await expect(page).toHaveTitle("Applications Rivune");
+  await expect(page.locator("html")).toHaveAttribute("lang", "fr");
+  await expect(page.getByRole("heading", { name: "Rivune sur tous vos écrans." })).toBeVisible();
+  await expect(page.getByText("Dernière release stable")).toBeVisible();
+  await expect(page.locator(`[data-asset="Rivune-iOS-unsigned.ipa"]`)).toContainText("Signer et installer localement");
+  await expect(page.getByRole("heading", { name: "De Xcode à votre écran, sans partager une seule clé." })).toBeVisible();
+  await expect(page.getByText("Vos identifiants restent en local")).toBeVisible();
+
+  const guide = page.locator("#apple-signing");
+  await guide.getByLabel("Identifiant de l’équipe Apple").fill("ABCDE12345");
+  await guide.getByLabel("Identifiant de bundle unique").fill("com.example.rivune");
+  await guide.getByLabel("Identifiant de l’appareil connecté").fill("00008110-001234567890001E");
+  const command = guide.locator(".applications-command code");
+  await expect(command).toContainText("git clone --depth 1 --branch 'v2.0.0'");
+  await expect(command).toContainText("--platform ios");
+  await expect(command).toContainText("--team-id ABCDE12345");
+  await expect(command).toContainText("--bundle-id com.example.rivune");
+  await expect(command).toContainText("--device-id 00008110-001234567890001E");
+  await expect(guide.getByRole("button", { name: "Copier la commande" })).toBeEnabled();
+
+  await page.getByLabel("Langue").selectOption("en");
+  await expect(page.getByRole("heading", { name: "Rivune on every screen." })).toBeVisible();
+  await expect(page).toHaveURL(/lang=en/);
 });
 
 test("recommends the detected Windows ARM64 executable", async ({ page }) => {
@@ -112,7 +142,7 @@ test("rejects release metadata containing an unexpected asset", async ({ page })
 
   await page.goto("/apps");
 
-  await expect(page.getByRole("alert")).toContainText("Release metadata failed validation");
+  await expect(page.getByRole("alert")).toContainText("Downloads are temporarily unavailable");
   await expect(page.locator(".applications-card")).toHaveCount(0);
 });
 

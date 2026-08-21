@@ -1,13 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Check,
+  Cable,
   Code2,
   Copy,
   Download,
   ExternalLink,
   Monitor,
+  KeyRound,
+  Languages,
   QrCode,
   RefreshCw,
+  Terminal,
   ShieldAlert,
   ShieldCheck,
   Smartphone,
@@ -15,11 +19,13 @@ import {
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { Button, RivuneMark } from "../components";
+import { interfaceLanguages, locale, setLocale, translate as t } from "../i18n";
+import type { Locale, TranslationKey } from "../i18n";
 
 const releaseEndpoint = "https://api.github.com/repos/moodiness/rivune/releases/latest";
 const releaseAssetPrefix = "https://github.com/moodiness/rivune/releases/download/";
 const sha256Pattern = /^sha256:([0-9a-f]{64})$/;
-const localSigningGuide = "https://github.com/moodiness/rivune#direct-application-downloads";
+const repositoryURL = "https://github.com/moodiness/rivune";
 const semverTagPattern = /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const maximumReleaseResponseBytes = 512 * 1024;
 
@@ -53,14 +59,14 @@ type Release = {
 type AssetSpec = {
   name: AssetName;
   platform: "Android" | "iPhone & iPad" | "Apple TV" | "Apple Vision Pro" | "macOS" | "Windows";
-  detail: string;
+  detailKey: Extract<TranslationKey, `applications.asset.${string}.detail`>;
   signed: boolean;
-  warning: string;
+  warningKey: Extract<TranslationKey, `applications.asset.${string}.warning`>;
   icon: typeof Smartphone;
 };
 
 type DeviceRecommendation = {
-  label: string;
+  labelKey: Extract<TranslationKey, `applications.device.${string}`>;
   assets: ReadonlySet<AssetName>;
 };
 
@@ -68,57 +74,57 @@ const assetSpecs: AssetSpec[] = [
   {
     name: "Rivune-Android.apk",
     platform: "Android",
-    detail: "Phone · tablet · Android TV · universal APK",
+    detailKey: "applications.asset.android.detail",
     signed: true,
-    warning: "Android may ask you to allow app installs from this browser. Keep that permission temporary and install only the verified Rivune APK.",
+    warningKey: "applications.asset.android.warning",
     icon: Smartphone,
   },
   {
     name: "Rivune-iOS-unsigned.ipa",
     platform: "iPhone & iPad",
-    detail: "iOS 15 or later · arm64",
+    detailKey: "applications.asset.ios.detail",
     signed: false,
-    warning: "This archive is unsigned and cannot be installed as downloaded. Sign it locally with Xcode and your own Apple Developer team.",
+    warningKey: "applications.asset.ios.warning",
     icon: Smartphone,
   },
   {
     name: "Rivune-tvOS-unsigned.ipa",
     platform: "Apple TV",
-    detail: "tvOS 15 or later · arm64",
+    detailKey: "applications.asset.tvos.detail",
     signed: false,
-    warning: "This archive is unsigned. Download it on a Mac, sign it locally with Xcode, then install it on your Apple TV.",
+    warningKey: "applications.asset.tvos.warning",
     icon: Tv,
   },
   {
     name: "Rivune-visionOS-unsigned.ipa",
     platform: "Apple Vision Pro",
-    detail: "visionOS 1 or later · arm64",
+    detailKey: "applications.asset.visionos.detail",
     signed: false,
-    warning: "This archive is unsigned. Download it on a Mac and use your own Apple Developer team to sign and install it with Xcode.",
+    warningKey: "applications.asset.visionos.warning",
     icon: Monitor,
   },
   {
     name: "Rivune-macOS.dmg",
     platform: "macOS",
-    detail: "macOS 12 or later · Apple silicon + Intel",
+    detailKey: "applications.asset.macos.detail",
     signed: false,
-    warning: "The app inside this disk image is unsigned. macOS Gatekeeper will warn before opening it; verify the SHA-256 first.",
+    warningKey: "applications.asset.macos.warning",
     icon: Monitor,
   },
   {
     name: "Rivune-x64.exe",
     platform: "Windows",
-    detail: "Windows 10 2004 or later · x64",
+    detailKey: "applications.asset.windowsX64.detail",
     signed: false,
-    warning: "This portable executable is unsigned. Microsoft SmartScreen may warn; verify the SHA-256 before running it.",
+    warningKey: "applications.asset.windows.warning",
     icon: Monitor,
   },
   {
     name: "Rivune-arm64.exe",
     platform: "Windows",
-    detail: "Windows 10 2004 or later · ARM64",
+    detailKey: "applications.asset.windowsArm.detail",
     signed: false,
-    warning: "This portable executable is unsigned. Microsoft SmartScreen may warn; verify the SHA-256 before running it.",
+    warningKey: "applications.asset.windows.warning",
     icon: Monitor,
   },
 ];
@@ -148,30 +154,30 @@ async function deviceRecommendation(): Promise<DeviceRecommendation> {
   }
 
   if (/android/i.test(userAgent) || /android/i.test(platform)) {
-    return { label: "Android device", assets: new Set(["Rivune-Android.apk"]) };
+    return { labelKey: "applications.device.android", assets: new Set(["Rivune-Android.apk"]) };
   }
   if (/appletv/i.test(userAgent)) {
-    return { label: "Apple TV", assets: new Set(["Rivune-tvOS-unsigned.ipa"]) };
+    return { labelKey: "applications.device.appleTV", assets: new Set(["Rivune-tvOS-unsigned.ipa"]) };
   }
   if (/vision/i.test(userAgent) || /xr/i.test(platform)) {
-    return { label: "Apple Vision Pro", assets: new Set(["Rivune-visionOS-unsigned.ipa"]) };
+    return { labelKey: "applications.device.vision", assets: new Set(["Rivune-visionOS-unsigned.ipa"]) };
   }
   if (/iphone|ipad|ipod/i.test(userAgent) || (/mac/i.test(platform) && navigator.maxTouchPoints > 1)) {
-    return { label: "iPhone or iPad", assets: new Set(["Rivune-iOS-unsigned.ipa"]) };
+    return { labelKey: "applications.device.ios", assets: new Set(["Rivune-iOS-unsigned.ipa"]) };
   }
   if (/mac/i.test(platform) || /macintosh/i.test(userAgent)) {
-    return { label: "Mac", assets: new Set(["Rivune-macOS.dmg"]) };
+    return { labelKey: "applications.device.mac", assets: new Set(["Rivune-macOS.dmg"]) };
   }
   if (/win/i.test(platform) || /windows/i.test(userAgent)) {
     if (architecture.includes("arm") || /arm64/i.test(userAgent)) {
-      return { label: "Windows on ARM64", assets: new Set(["Rivune-arm64.exe"]) };
+      return { labelKey: "applications.device.windowsArm", assets: new Set(["Rivune-arm64.exe"]) };
     }
     if (architecture === "x86" && bitness === "64" || /win64|x64|amd64/i.test(userAgent)) {
-      return { label: "Windows x64", assets: new Set(["Rivune-x64.exe"]) };
+      return { labelKey: "applications.device.windowsX64", assets: new Set(["Rivune-x64.exe"]) };
     }
-    return { label: "Windows (architecture unavailable)", assets: new Set(["Rivune-x64.exe", "Rivune-arm64.exe"]) };
+    return { labelKey: "applications.device.windowsUnknown", assets: new Set(["Rivune-x64.exe", "Rivune-arm64.exe"]) };
   }
-  return { label: "Platform not identified", assets: new Set() };
+  return { labelKey: "applications.device.unknown", assets: new Set() };
 }
 
 function validRelease(value: unknown): value is Release {
@@ -233,7 +239,12 @@ function formatSize(bytes: number): string {
   return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
 }
 
-function ReleaseCard({ asset, spec, recommended }: { asset: ReleaseAsset; spec: AssetSpec; recommended: boolean }) {
+function supportsLocalSigningGuide(tagName: string): boolean {
+  const [major, minor] = tagName.slice(1).split(".").map(Number);
+  return major > 1 || major === 1 && minor >= 10;
+}
+
+function ReleaseCard({ asset, spec, recommended, signingGuideAvailable }: { asset: ReleaseAsset; spec: AssetSpec; recommended: boolean; signingGuideAvailable: boolean }) {
   const [showQR, setShowQR] = useState(false);
   const [copied, setCopied] = useState(false);
   const digest = asset.digest.replace("sha256:", "");
@@ -255,56 +266,148 @@ function ReleaseCard({ asset, spec, recommended }: { asset: ReleaseAsset; spec: 
       <div>
         <div className="applications-card__title-line">
           <h2>{spec.platform}</h2>
-          {recommended && <span className="applications-badge applications-badge--recommended">Recommended</span>}
+          {recommended && <span className="applications-badge applications-badge--recommended">{t("applications.card.recommended")}</span>}
         </div>
-        <p>{spec.detail}</p>
+        <p>{t(spec.detailKey)}</p>
       </div>
     </div>
 
-    <div className="applications-card__facts" aria-label={`${spec.platform} release details`}>
+    <div className="applications-card__facts" aria-label={t("applications.card.releaseDetails", { platform: spec.platform })}>
       <span>{formatSize(asset.size)}</span>
       <span className={spec.signed ? "is-signed" : "is-unsigned"}>
         {spec.signed ? <ShieldCheck size={15} /> : <ShieldAlert size={15} />}
-        {spec.signed ? "Signed" : "Unsigned"}
+        {t(spec.signed ? "applications.card.signed" : "applications.card.unsigned")}
       </span>
     </div>
 
     <div className="applications-card__actions">
       <a className="button button--primary" href={asset.browser_download_url}>
-        <Download size={17} /> Download
+        <Download size={17} /> {t("applications.card.download")}
       </a>
       <Button variant="secondary" type="button" onClick={() => setShowQR((current) => !current)} aria-expanded={showQR}>
-        <QrCode size={17} /> {showQR ? "Hide QR" : "Show QR"}
+        <QrCode size={17} /> {t(showQR ? "applications.card.hideQR" : "applications.card.showQR")}
       </Button>
     </div>
 
     {showQR && <div className="applications-card__qr">
       <div className="applications-card__qr-code">
-        <QRCodeSVG value={asset.browser_download_url} size={156} level="M" marginSize={2} title={`Download ${asset.name}`} />
+        <QRCodeSVG value={asset.browser_download_url} size={156} level="M" marginSize={2} title={t("applications.card.qrTitle", { asset: asset.name })} />
       </div>
-      <p>Scan to open this exact GitHub release asset on another device.</p>
+      <p>{t("applications.card.qrBody")}</p>
     </div>}
-    {!spec.signed && spec.name.endsWith(".ipa") && <a className="applications-card__signing-guide" href={localSigningGuide} target="_blank" rel="noreferrer">Sign and install locally <ExternalLink size={13} /></a>}
+    {signingGuideAvailable && !spec.signed && spec.name.endsWith(".ipa") && <a className="applications-card__signing-guide" href="#apple-signing"><KeyRound size={13} /> {t("applications.card.signLocally")}</a>}
 
     <div className="applications-card__digest">
       <div>
         <span>SHA-256</span>
         <code>{digest}</code>
       </div>
-      <button type="button" onClick={() => void copyDigest()} aria-label={`Copy SHA-256 for ${asset.name}`}>
+      <button type="button" onClick={() => void copyDigest()} aria-label={t("applications.card.copyDigest", { asset: asset.name })}>
         {copied ? <Check size={16} /> : <Copy size={16} />}
-        {copied ? "Copied" : "Copy"}
+        {t(copied ? "applications.card.copied" : "applications.card.copy")}
       </button>
     </div>
 
-    <p className="applications-card__warning"><ShieldAlert size={17} /> <span>{spec.warning}</span></p>
+    <p className="applications-card__warning"><ShieldAlert size={17} /> <span>{t(spec.warningKey)}</span></p>
   </article>;
 }
 
+type ApplePlatform = "ios" | "tvos" | "visionos";
+
+const applicationsLanguages = interfaceLanguages.filter(({ value }) => value === "en" || value === "fr");
+const applePlatforms: ReadonlyArray<{
+  value: ApplePlatform;
+  labelKey: Extract<TranslationKey, `applications.guide.platform.${string}`>;
+  bundleExample: string;
+}> = [
+  { value: "ios", labelKey: "applications.guide.platform.ios", bundleExample: "com.example.rivune" },
+  { value: "tvos", labelKey: "applications.guide.platform.tvos", bundleExample: "com.example.rivune.tv" },
+  { value: "visionos", labelKey: "applications.guide.platform.visionos", bundleExample: "com.example.rivune.vision" },
+];
+
+function AppleSigningGuide({ tagName }: { tagName: string }) {
+  const [platform, setPlatform] = useState<ApplePlatform>("ios");
+  const [teamID, setTeamID] = useState("");
+  const [bundleID, setBundleID] = useState("");
+  const [deviceID, setDeviceID] = useState("");
+  const [copied, setCopied] = useState(false);
+  const selectedPlatform = applePlatforms.find(({ value }) => value === platform)!;
+  const valid = /^[A-Z0-9]{10}$/.test(teamID) &&
+    bundleID.length <= 255 && /^[A-Za-z0-9][A-Za-z0-9-]*(\.[A-Za-z0-9][A-Za-z0-9-]*)+$/.test(bundleID) &&
+    /^[A-Za-z0-9-]{8,80}$/.test(deviceID);
+  const checkoutDirectory = `rivune-${tagName}`;
+  const command = [
+    `git clone --depth 1 --branch '${tagName}' '${repositoryURL}.git' '${checkoutDirectory}'`,
+    `cd '${checkoutDirectory}'`,
+    "./clients/apple/Scripts/sign-and-install.sh \\",
+    `  --platform ${platform} \\`,
+    `  --team-id ${teamID || t("applications.guide.teamPlaceholder")} \\`,
+    `  --bundle-id ${bundleID || selectedPlatform.bundleExample} \\`,
+    `  --device-id ${deviceID || t("applications.guide.devicePlaceholder")}`,
+  ].join("\n");
+
+  async function copyCommand() {
+    if (!valid) return;
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  return <section className="applications-apple-guide" id="apple-signing" aria-labelledby="apple-signing-title">
+    <div className="applications-apple-guide__intro">
+      <span className="applications-kicker">{t("applications.guide.eyebrow")}</span>
+      <h2 id="apple-signing-title">{t("applications.guide.title")}</h2>
+      <p>{t("applications.guide.body")}</p>
+    </div>
+
+    <ol className="applications-apple-guide__steps">
+      <li><span><Code2 size={21} /></span><div><strong>{t("applications.guide.step.account.title")}</strong><p>{t("applications.guide.step.account.body")}</p></div></li>
+      <li><span><Cable size={21} /></span><div><strong>{t("applications.guide.step.device.title")}</strong><p>{t("applications.guide.step.device.body")}</p></div></li>
+      <li><span><Terminal size={21} /></span><div><strong>{t("applications.guide.step.install.title")}</strong><p>{t("applications.guide.step.install.body")}</p></div></li>
+    </ol>
+
+    <div className="applications-apple-guide__builder">
+      <div className="applications-platform-tabs" role="tablist" aria-label={t("applications.guide.platform")}>
+        {applePlatforms.map((option) => <button
+          key={option.value}
+          type="button"
+          role="tab"
+          aria-selected={platform === option.value}
+          className={platform === option.value ? "is-active" : ""}
+          onClick={() => {
+            setPlatform(option.value);
+            setBundleID(option.bundleExample);
+            setCopied(false);
+          }}
+        >{t(option.labelKey)}</button>)}
+      </div>
+
+      <div className="applications-signing-fields">
+        <label><span>{t("applications.guide.team")}</span><input value={teamID} placeholder={t("applications.guide.teamPlaceholder")} maxLength={10} autoComplete="off" spellCheck={false} onChange={(event) => { setTeamID(event.target.value.toUpperCase()); setCopied(false); }} /></label>
+        <label><span>{t("applications.guide.bundle")}</span><input value={bundleID} placeholder={selectedPlatform.bundleExample} maxLength={255} autoComplete="off" spellCheck={false} onChange={(event) => { setBundleID(event.target.value); setCopied(false); }} /></label>
+        <label><span>{t("applications.guide.device")}</span><input value={deviceID} placeholder={t("applications.guide.devicePlaceholder")} maxLength={80} autoComplete="off" spellCheck={false} onChange={(event) => { setDeviceID(event.target.value); setCopied(false); }} /></label>
+      </div>
+
+      <div className="applications-command">
+        <div><span>{t("applications.guide.command")}</span><button type="button" disabled={!valid} onClick={() => void copyCommand()}><Copy size={15} /> {t(copied ? "applications.guide.copied" : "applications.guide.copy")}</button></div>
+        <pre><code>{command}</code></pre>
+        {!valid && <p>{t("applications.guide.invalid")}</p>}
+      </div>
+    </div>
+
+    <aside className="applications-apple-guide__privacy"><KeyRound size={22} /><div><strong>{t("applications.guide.privacyTitle")}</strong><p>{t("applications.guide.privacyBody")}</p></div></aside>
+  </section>;
+}
+
 export function ApplicationsPage() {
+  const [activeLocale, setActiveLocale] = useState<Locale>(locale === "fr" || locale === "fr-CA" ? "fr" : "en");
   const [release, setRelease] = useState<Release | null>(null);
-  const [recommendation, setRecommendation] = useState<DeviceRecommendation>({ label: "Detecting this device…", assets: new Set() });
-  const [failure, setFailure] = useState<string | null>(null);
+  const [recommendation, setRecommendation] = useState<DeviceRecommendation>({ labelKey: "applications.device.detecting", assets: new Set() });
+  const [failure, setFailure] = useState(false);
   const [generation, setGeneration] = useState(0);
 
   useEffect(() => {
@@ -318,14 +421,10 @@ export function ApplicationsPage() {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 12_000);
     setRelease(null);
-    setFailure(null);
+    setFailure(false);
     void loadLatestRelease(controller.signal)
       .then((next) => { if (active) setRelease(next); })
-      .catch((error: unknown) => {
-        if (!active) return;
-        if (!controller.signal.aborted) setFailure(error instanceof Error ? error.message : "Release metadata is unavailable");
-        else setFailure("GitHub did not respond in time");
-      })
+      .catch(() => { if (active) setFailure(true); })
       .finally(() => window.clearTimeout(timeout));
     return () => {
       active = false;
@@ -342,61 +441,83 @@ export function ApplicationsPage() {
       .sort((left, right) => Number(right.recommended) - Number(left.recommended) || left.index - right.index);
   }, [recommendation.assets, release]);
 
-  return <main className="applications-page">
+  async function changeLocale(nextLocale: Locale) {
+    const loadedLocale = await setLocale(nextLocale);
+    const publicLocale = loadedLocale === "fr" || loadedLocale === "fr-CA" ? "fr" : "en";
+    const url = new URL(window.location.href);
+    url.searchParams.set("lang", publicLocale);
+    window.history.replaceState(null, "", url);
+    document.title = t("applications.meta.title");
+    document.querySelector('meta[name="description"]')?.setAttribute("content", t("applications.meta.description"));
+    setActiveLocale(publicLocale);
+  }
+
+  return <main className="applications-page" data-locale={activeLocale}>
     <div className="applications-page__aura applications-page__aura--one" />
     <div className="applications-page__aura applications-page__aura--two" />
     <header className="applications-header">
-      <a href={import.meta.env.BASE_URL} aria-label="Open Rivune"><RivuneMark /></a>
-      <a className="applications-header__github" href="https://github.com/moodiness/rivune" target="_blank" rel="noreferrer">
-        <Code2 size={18} /> Source code <ExternalLink size={14} />
-      </a>
+      <a href={import.meta.env.BASE_URL} aria-label={t("applications.header.open")}><RivuneMark /></a>
+      <div className="applications-header__actions">
+        <label className="applications-language">
+          <Languages size={18} />
+          <span>{t("applications.header.language")}</span>
+          <select aria-label={t("applications.header.language")} value={activeLocale} onChange={(event) => void changeLocale(event.target.value as Locale)}>
+            {applicationsLanguages.map((language) => <option key={language.value} value={language.value}>{language.label}</option>)}
+          </select>
+        </label>
+        <a className="applications-header__github" href={repositoryURL} target="_blank" rel="noreferrer">
+          <Code2 size={18} /> {t("applications.header.source")} <ExternalLink size={14} />
+        </a>
+      </div>
     </header>
 
     <section className="applications-hero">
-      <span className="applications-kicker">Official direct downloads</span>
-      <h1>Rivune on every screen.</h1>
-      <p>Download the latest stable native app directly from its immutable GitHub release. Every file includes its exact size and SHA-256 fingerprint.</p>
+      <span className="applications-kicker">{t("applications.hero.kicker")}</span>
+      <h1>{t("applications.hero.title")}</h1>
+      <p>{t("applications.hero.body")}</p>
       <div className="applications-detection">
         <span className="applications-detection__pulse" />
-        <span>Detected: <strong>{recommendation.label}</strong></span>
+        <span>{t("applications.hero.detected")} <strong>{t(recommendation.labelKey)}</strong></span>
       </div>
     </section>
 
     {!release && !failure && <section className="applications-loading" aria-live="polite">
       <RefreshCw className="spin" size={24} />
-      <div><strong>Loading the latest stable release…</strong><span>Validating GitHub metadata and fingerprints.</span></div>
+      <div><strong>{t("applications.release.loadingTitle")}</strong><span>{t("applications.release.loadingBody")}</span></div>
     </section>}
 
     {failure && <section className="applications-failure" role="alert">
       <ShieldAlert size={24} />
-      <div><strong>Downloads are temporarily unavailable.</strong><span>{failure}</span></div>
-      <Button variant="secondary" onClick={() => setGeneration((current) => current + 1)}><RefreshCw size={17} /> Try again</Button>
+      <div><strong>{t("applications.release.failureTitle")}</strong><span>{t("applications.release.failureBody")}</span></div>
+      <Button variant="secondary" onClick={() => setGeneration((current) => current + 1)}><RefreshCw size={17} /> {t("applications.release.retry")}</Button>
     </section>}
 
     {release && <>
-      <section className="applications-release-bar" aria-label="Latest stable release">
-        <div><span>Latest stable release</span><strong>{release.tag_name}</strong></div>
-        <div><span>Published</span><strong>{new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(release.published_at))}</strong></div>
-        <a href={release.html_url} target="_blank" rel="noreferrer">Release notes <ExternalLink size={14} /></a>
+      <section className="applications-release-bar" aria-label={t("applications.release.latest")}>
+        <div><span>{t("applications.release.latest")}</span><strong>{release.tag_name}</strong></div>
+        <div><span>{t("applications.release.published")}</span><strong>{new Intl.DateTimeFormat(activeLocale, { dateStyle: "medium" }).format(new Date(release.published_at))}</strong></div>
+        <a href={release.html_url} target="_blank" rel="noreferrer">{t("applications.release.notes")} <ExternalLink size={14} /></a>
       </section>
 
-      <section className="applications-grid" aria-label="Rivune application downloads">
-        {assets.map(({ asset, spec, recommended }) => <ReleaseCard key={spec.name} asset={asset} spec={spec} recommended={recommended} />)}
+      <section className="applications-grid" aria-label={t("applications.downloads.label")}>
+        {assets.map(({ asset, spec, recommended }) => <ReleaseCard key={spec.name} asset={asset} spec={spec} recommended={recommended} signingGuideAvailable={supportsLocalSigningGuide(release.tag_name)} />)}
       </section>
+
+      {supportsLocalSigningGuide(release.tag_name) && <AppleSigningGuide tagName={release.tag_name} />}
     </>}
 
     <section className="applications-verify">
       <ShieldCheck size={24} />
       <div>
-        <h2>Verify before you install</h2>
-        <p>Compare the downloaded file with the full SHA-256 shown above. GitHub publishes the same digest in the release asset metadata.</p>
+        <h2>{t("applications.verify.title")}</h2>
+        <p>{t("applications.verify.body")}</p>
       </div>
       <div className="applications-verify__commands"><code>shasum -a 256 &lt;downloaded-file&gt;</code><code>Get-FileHash &lt;downloaded-file&gt; -Algorithm SHA256</code></div>
     </section>
 
     <footer className="applications-footer">
-      <span>Open source. Self-hosted. No public catalogue.</span>
-      <a href="https://github.com/moodiness/rivune/blob/main/LICENSE" target="_blank" rel="noreferrer">Apache 2.0 license <ExternalLink size={13} /></a>
+      <span>{t("applications.footer.tagline")}</span>
+      <a href={`${repositoryURL}/blob/main/LICENSE`} target="_blank" rel="noreferrer">{t("applications.footer.license")} <ExternalLink size={13} /></a>
     </footer>
   </main>;
 }
