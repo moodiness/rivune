@@ -1,13 +1,13 @@
-# Rivune v1.9.0
+# Rivune v1.9.1
 
 ## Highlights
 
-- Rivune now includes native SwiftUI applications for iPhone, iPad, Apple TV, Apple Vision Pro, and macOS, alongside the existing Android and Windows clients.
-- The first direct Apple release publishes unsigned iOS, tvOS, and visionOS archives plus a universal unsigned macOS disk image. These artifacts contain no project signing identity or provisioning profile.
-- Windows x64 and ARM64 remain portable unsigned executables. Automatic replacement verifies the exact GitHub asset URL, manifest version, size, SHA-256, and `ProductVersion` before and after staging, but it cannot verify an Authenticode publisher identity.
-- Native clients now isolate credentials by server origin, reject unsafe credential transports, and bound API response sizes. Android and Windows retain the explicit trusted-LAN HTTP exception for loopback and private addresses.
-- Playback proxy admission, playlist processing, startup reads, and idle reads are bounded to prevent a slow or oversized upstream from exhausting the server.
-- The release pipeline now covers backend, browser E2E, OpenAPI, Android, Apple, Windows x64/ARM64, migrations, HTTPS proxy behavior, and native multi-architecture container builds before publication.
+- This maintenance release refreshes supported dependencies across the server build, web client, Android client, Windows client, and GitHub release pipeline.
+- The container frontend build now uses Node.js 24 LTS instead of the non-LTS Node.js 26 proposal.
+- The web stack moves to Vite 8 and refreshes HLS.js, React tooling, and icons; Android refreshes Compose, Kotlin, Gradle, and OkHttp 5.
+- Release automation updates its pinned build, language, and artifact actions while preserving immutable inputs and the existing publication policy.
+- No public protocol, database schema, configuration, or user workflow changes are introduced by this release.
+- The complete backend, browser, Android, Apple, Windows, migration, proxy, and multi-architecture container gates run before publication.
 
 ## Apple installation
 
@@ -30,16 +30,16 @@
 ## Upgrade notes
 
 - This release adds no database migration and requires no new server environment variable. Back up PostgreSQL and the complete encryption keyring before every upgrade.
-- Existing operators can set `RIVUNE_VERSION=1.9.0`, pull, and recreate only the Rivune service. Fresh Compose deployments now default to the immutable `1.9.0` image tag.
+- Existing operators can set `RIVUNE_VERSION=1.9.1`, pull, and recreate only the Rivune service. Fresh Compose deployments now default to the immutable `1.9.1` image tag.
 - GitHub publishes exactly eight release assets: `Rivune-Android.apk`, the three unsigned IPA files, `Rivune-macOS.dmg`, `rivune-update.json`, `Rivune-x64.exe`, and `Rivune-arm64.exe`.
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.9.0`
+- `ghcr.io/moodiness/rivune:1.9.1`
 - `ghcr.io/moodiness/rivune:1.9`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 - Provenance and SBOM attestations are published for both runnable platforms.
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.8.3...v1.9.0
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.9.0...v1.9.1
