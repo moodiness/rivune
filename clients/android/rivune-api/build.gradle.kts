@@ -29,8 +29,8 @@ kotlin {
 
 dependencies {
     api("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
-    api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1")
-    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.3.10")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.4.10")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
