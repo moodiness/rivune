@@ -1502,7 +1502,7 @@ public actor RivuneAPIClient {
             throw RivuneAPIError.responseTooLarge(maximumBytes: maximumBytes)
         }
     }
-    private static func canonicalServerOrigin(_ value: URL) throws -> URL {
+    public static func canonicalServerOrigin(_ value: URL) throws -> URL {
         guard let components = URLComponents(url: value, resolvingAgainstBaseURL: false),
               let rawScheme = components.scheme,
               let rawHost = components.host,

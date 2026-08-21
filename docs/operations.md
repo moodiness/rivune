@@ -160,6 +160,31 @@ explicit cleartext exception: keep the host firewall limited to the trusted
 LAN and never forward the port from the router. Public and DNS-named HTTP
 origins remain rejected.
 
+### Automatic LAN discovery
+
+`./rivune setup --public-url ...` copies the reachable origin to
+`RIVUNE_DISCOVERY_URL`. The root operator command then activates the optional
+`discovery` profile automatically. Its minimal sidecar joins the Linux host
+network only to publish `_rivune._tcp` through mDNS; the API and PostgreSQL
+containers retain their existing isolated networks. Set
+`RIVUNE_DISCOVERY_NAME` to the 1–63 byte label shown on phones, tablets, TVs,
+and Windows clients.
+
+The announced URL is connection metadata visible to every device on the LAN.
+It never contains credentials. Rivune accepts only HTTPS origins or HTTP with a
+literal private IP, and rejects loopback, wildcard, multicast, link-local,
+paths, queries, fragments, and user information. Leave `RIVUNE_DISCOVERY_URL`
+empty to disable discovery. Raw `docker compose` users must enable the profile
+explicitly:
+
+```sh
+docker compose --profile discovery up -d
+```
+
+Linux host networking is required because Docker bridge multicast does not
+provide reliable host-LAN mDNS. Keep the sidecar disabled on Docker Desktop;
+manual server entry remains available on every client.
+
 The Unraid XML template targets the same topology but expects an existing
 PostgreSQL 18 container. Standard PostgreSQL on a database-only custom network
 uses `RIVUNE_DATABASE_SSLMODE=disable`, an empty CA mount, and an empty CA path.

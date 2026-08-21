@@ -3,6 +3,8 @@ package io.rivune.app.ui.components
 internal object RivuneTestTags {
     const val ServerInput = "rivune.server.input"
     const val ServerSubmit = "rivune.server.submit"
+    const val ServerDiscover = "rivune.server.discover"
+    const val DiscoveredServerPrefix = "rivune.server.discovered."
     const val PairingCode = "rivune.pairing.code"
     const val PairingRestart = "rivune.pairing.restart"
     const val PairingDisconnect = "rivune.pairing.disconnect"

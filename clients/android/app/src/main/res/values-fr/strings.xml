@@ -15,6 +15,16 @@
     <string name="server_supporting">localhost et les adresses du réseau privé utilisent HTTP sans schéma explicite. N’utilisez HTTP que sur un réseau local de confiance.</string>
     <string name="server_retry">Réessayer</string>
     <string name="server_loading_description">Connexion au serveur Rivune</string>
+    <string name="server_discover">Rechercher des serveurs sur ce réseau</string>
+    <string name="server_refresh_discovery">Actualiser les serveurs à proximité</string>
+    <string name="server_discovered">SERVEURS RIVUNE À PROXIMITÉ</string>
+    <string name="server_secure">HTTPS sécurisé</string>
+    <string name="server_local_http">HTTP sur réseau local de confiance</string>
+    <string name="server_confirm_title">Se connecter à %1$s ?</string>
+    <string name="server_secure_explanation">Ce serveur découvert utilise une connexion HTTPS chiffrée. Vérifiez l’adresse avant de continuer.</string>
+    <string name="server_local_http_explanation">Ce serveur découvert utilise une connexion HTTP non chiffrée. Continuez uniquement sur un réseau privé de confiance.</string>
+    <string name="server_confirm_connect">Se connecter</string>
+    <string name="server_confirm_cancel">Annuler</string>
 
 
     <string name="pairing_eyebrow">APPAIRAGE DE L’APPAREIL</string>

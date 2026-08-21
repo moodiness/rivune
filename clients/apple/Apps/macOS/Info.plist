@@ -33,5 +33,9 @@
     <string>Copyright © 2026 Rivune contributors</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Rivune connects to the self-hosted server address you provide.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_rivune._tcp</string>
+    </array>
 </dict>
 </plist>

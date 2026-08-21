@@ -81,6 +81,35 @@ services:
       start_period: 20s
     stop_grace_period: 15s
 
+  discovery:
+    image: ghcr.io/moodiness/rivune:${RIVUNE_VERSION:-1.9.1}
+    profiles:
+      - discovery
+    restart: unless-stopped
+    init: true
+    user: "${PUID:-65532}:${PGID:-65532}"
+    entrypoint:
+      - /usr/local/bin/rivune
+    command:
+      - mdns
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 64M
+          pids: 64
+    read_only: true
+    network_mode: host
+    environment:
+      RIVUNE_DISCOVERY_URL: ${RIVUNE_DISCOVERY_URL:-}
+      RIVUNE_DISCOVERY_NAME: ${RIVUNE_DISCOVERY_NAME:-Rivune}
+    stop_grace_period: 5s
+
   postgres:
     image: postgres:18-trixie
     restart: unless-stopped

@@ -31,6 +31,7 @@ public sealed partial class MainPage : Page
     private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(3);
     private readonly MainPageViewModel _state = new();
     private readonly ServerAddressStore _serverAddressStore = new();
+    private readonly LanServerDiscovery _lanDiscovery = new();
     private WindowsDevicePreferencesStore? _devicePreferencesStore;
     private WindowsDevicePreferences _devicePreferences = new();
     private string? _devicePreferencesFailure;
@@ -118,6 +119,7 @@ public sealed partial class MainPage : Page
         _chromeTimer.Interval = TimeSpan.FromSeconds(5);
         _chromeTimer.Tick += (_, _) => TryHidePlayerChrome();
         Loaded += MainPage_Loaded;
+        _lanDiscovery.ServersChanged += LanDiscovery_ServersChanged;
         Unloaded += MainPage_Unloaded;
     }
 
@@ -354,6 +356,37 @@ public sealed partial class MainPage : Page
     }
 
     private async void Connect_Click(object sender, RoutedEventArgs e) => await ConnectAsync();
+    private void DiscoverServers_Click(object sender, RoutedEventArgs e)
+    {
+        DiscoverServersButtonLabel.Text = "Refreshing nearby servers…";
+        _lanDiscovery.Start();
+    }
+
+    private void LanDiscovery_ServersChanged(object? sender, IReadOnlyList<DiscoveredRivuneServer> servers)
+    {
+        _ = DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_closed) return;
+            DiscoveredServersList.ItemsSource = servers;
+            DiscoveredServersPanel.Visibility = servers.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+            DiscoverServersButtonLabel.Text = servers.Count == 0 ? "Find servers on this network" : "Refresh nearby servers";
+        });
+    }
+
+    private async void DiscoveredServersList_ItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is not DiscoveredRivuneServer server || _closed) return;
+        var transport = server.UsesSecureTransport
+            ? "Encrypted HTTPS connection."
+            : "Unencrypted HTTP. Continue only on a trusted private network.";
+        var dialog = Dialog(
+            $"Connect to {server.Name}?",
+            $"{server.Address.GetLeftPart(UriPartial.Authority)}\n\n{transport}",
+            "Connect");
+        if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary || _closed) return;
+        ServerAddressBox.Text = server.Address.GetLeftPart(UriPartial.Authority);
+        await ConnectAsync();
+    }
 
     private async void ServerAddressBox_KeyDown(object sender, KeyRoutedEventArgs e)
     {
@@ -437,6 +470,8 @@ public sealed partial class MainPage : Page
     private void ShowServer(string? error = null)
     {
         _state.Transition(AppPhase.Server);
+        _lanDiscovery.Start();
+        DiscoverServersButtonLabel.Text = "Find servers on this network";
         ServerPanel.Visibility = Visibility.Visible;
         PairingPanel.Visibility = Visibility.Collapsed;
         ShowOnly(AuthView);
@@ -447,6 +482,7 @@ public sealed partial class MainPage : Page
 
     private async Task StartPairingAsync(string? preservedFailure = null)
     {
+        _lanDiscovery.Stop();
         var client = _state.Client ?? throw new InvalidOperationException("No server connection is active.");
         var generation = _state.Transition(AppPhase.Pairing);
         _deviceAuthorization = null;
@@ -1931,6 +1967,7 @@ public sealed partial class MainPage : Page
                 await updateOperation.WaitAsync(cancellationToken);
             if (_devicePreferencesStore is { } devicePreferencesStore)
                 await devicePreferencesStore.DisposeAsync().AsTask().WaitAsync(cancellationToken);
+            await _lanDiscovery.DisposeAsync().AsTask().WaitAsync(cancellationToken);
             await _serverAddressOperation.WaitAsync(cancellationToken);
 
             Task? ending;

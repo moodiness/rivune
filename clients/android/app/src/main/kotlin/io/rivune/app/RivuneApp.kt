@@ -59,6 +59,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Devices
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Lock
@@ -68,6 +69,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.TextButton as MaterialTextButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -165,12 +167,36 @@ internal fun RivuneRoot(
     var diagnosticExportRequested by rememberSaveable { mutableStateOf(false) }
     var pendingLocalNetworkServer by rememberSaveable { mutableStateOf<String?>(null) }
     var automaticallyRequestedLocalNetworkServer by rememberSaveable { mutableStateOf<String?>(null) }
+    var discoveryRequested by rememberSaveable { mutableStateOf(false) }
+    var discoveredServers by remember { mutableStateOf(emptyList<DiscoveredRivuneServer>()) }
+    val lanDiscovery = remember(activity) { LanServerDiscovery(activity) }
     val localNetworkPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         val server = pendingLocalNetworkServer
         pendingLocalNetworkServer = null
         if (granted && server != null) viewModel.connect(server)
+        if (granted && discoveryRequested) lanDiscovery.start { discoveredServers = it }
+    }
+    androidx.compose.runtime.DisposableEffect(lanDiscovery) {
+        onDispose { lanDiscovery.close() }
+    }
+
+    fun discoverServers() {
+        discoveryRequested = true
+        if (requiresLocalNetworkPermission(activity)) {
+            runCatching { localNetworkPermissionLauncher.launch(ACCESS_LOCAL_NETWORK_PERMISSION) }
+        } else {
+            lanDiscovery.start { discoveredServers = it }
+        }
+    }
+    LaunchedEffect(state.destination) {
+        if (state.destination == AppDestination.Server) {
+            discoverServers()
+        } else {
+            lanDiscovery.stop()
+            discoveredServers = emptyList()
+        }
     }
     val exportLauncher = rememberLauncherForActivityResult(diagnosticReportDocumentContract()) { uri ->
         val shouldExport = diagnosticExportRequested
@@ -257,6 +283,9 @@ internal fun RivuneRoot(
                             isBusy = state.isBusy,
                             failure = state.failure,
                             isTv = state.isTv,
+                            discoveredServers = discoveredServers,
+                            discoveryRequested = discoveryRequested,
+                            onDiscover = ::discoverServers,
                             onConnect = ::connectToServer,
                             onClearFailure = viewModel::clearFailure,
                         )
@@ -592,19 +621,24 @@ internal fun ServerScreen(
     isBusy: Boolean,
     failure: UiFailure?,
     isTv: Boolean,
+    discoveredServers: List<DiscoveredRivuneServer> = emptyList(),
+    discoveryRequested: Boolean = false,
     updateState: AppUpdateState = AppUpdateState.Idle,
     onConnect: (String) -> Unit,
     onClearFailure: () -> Unit,
+    onDiscover: () -> Unit = {},
     onCheckForUpdates: () -> Unit = {},
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
     var server by remember(serverInput) { mutableStateOf(serverInput) }
     var editingServerOnTv by remember { mutableStateOf(false) }
+    var selectedDiscovered by remember { mutableStateOf<DiscoveredRivuneServer?>(null) }
     val view = LocalView.current
     val failureText = failure?.let { failureMessage(it) }
     val submit = { if (server.isNotBlank() && !isBusy) onConnect(server.trim()) }
     val inputFocus = remember { FocusRequester() }
     val submitFocus = remember { FocusRequester() }
+    val discoveryFocus = remember { FocusRequester() }
     val updateFocus = remember { FocusRequester() }
     LaunchedEffect(isTv) {
         if (isTv) {
@@ -645,7 +679,7 @@ internal fun ServerScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .focusRequester(inputFocus)
-                .focusProperties { down = if (server.isNotBlank()) submitFocus else updateFocus }
+                .focusProperties { down = if (server.isNotBlank()) submitFocus else discoveryFocus }
                 .onPreviewKeyEvent { event ->
                     if (
                         isTv &&
@@ -660,7 +694,7 @@ internal fun ServerScreen(
                         editingServerOnTv = true
                         true
                     } else if (isTv && event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
-                        if (server.isNotBlank()) submitFocus.requestFocus() else updateFocus.requestFocus()
+                        if (server.isNotBlank()) submitFocus.requestFocus() else discoveryFocus.requestFocus()
                         true
                     } else {
                         false
@@ -684,6 +718,41 @@ internal fun ServerScreen(
                 submit()
             }),
         )
+        if (discoveredServers.isNotEmpty()) {
+            Spacer(Modifier.height(RivuneSpacing.sm))
+            Text(
+                text = stringResource(R.string.server_discovered),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelMedium,
+            )
+            Spacer(Modifier.height(RivuneSpacing.xs))
+            discoveredServers.forEach { discovered ->
+                RivuneSecondaryButton(
+                    label = "${discovered.name} · ${if (discovered.usesSecureTransport) stringResource(R.string.server_secure) else stringResource(R.string.server_local_http)}",
+                    onClick = { selectedDiscovered = discovered },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("${RivuneTestTags.DiscoveredServerPrefix}${discovered.address}"),
+                    enabled = !isBusy,
+                    isTv = isTv,
+                    icon = Icons.Rounded.Devices,
+                    neutralContent = true,
+                )
+                Spacer(Modifier.height(RivuneSpacing.xs))
+            }
+        }
+        RivuneSecondaryButton(
+            label = stringResource(if (discoveryRequested) R.string.server_refresh_discovery else R.string.server_discover),
+            onClick = onDiscover,
+            modifier = Modifier
+                .fillMaxWidth()
+                .focusRequester(discoveryFocus)
+                .focusProperties { up = inputFocus; down = if (server.isNotBlank()) submitFocus else updateFocus }
+                .testTag(RivuneTestTags.ServerDiscover),
+            enabled = !isBusy,
+            isTv = isTv,
+            icon = Icons.Rounded.Devices,
+        )
         Spacer(Modifier.height(RivuneSpacing.sm))
         RivunePrimaryButton(
             label = stringResource(
@@ -697,7 +766,7 @@ internal fun ServerScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .focusRequester(submitFocus)
-                .focusProperties { up = inputFocus; down = updateFocus }
+                .focusProperties { up = discoveryFocus; down = updateFocus }
                 .testTag(RivuneTestTags.ServerSubmit),
             enabled = server.isNotBlank(),
             isTv = isTv,
@@ -715,7 +784,40 @@ internal fun ServerScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .focusRequester(updateFocus)
-                .focusProperties { up = if (server.isNotBlank()) submitFocus else inputFocus },
+                .focusProperties { up = if (server.isNotBlank()) submitFocus else discoveryFocus },
+        )
+    }
+    selectedDiscovered?.let { discovered ->
+        AlertDialog(
+            onDismissRequest = { selectedDiscovered = null },
+            title = { Text(stringResource(R.string.server_confirm_title, discovered.name)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(RivuneSpacing.sm)) {
+                    Text(
+                        text = discovered.address,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                    Text(
+                        text = stringResource(
+                            if (discovered.usesSecureTransport) R.string.server_secure_explanation
+                            else R.string.server_local_http_explanation,
+                        ),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                MaterialTextButton(onClick = {
+                    selectedDiscovered = null
+                    onConnect(discovered.address)
+                }) { Text(stringResource(R.string.server_confirm_connect)) }
+            },
+            dismissButton = {
+                MaterialTextButton(onClick = { selectedDiscovered = null }) {
+                    Text(stringResource(R.string.server_confirm_cancel))
+                }
+            },
         )
     }
 }
