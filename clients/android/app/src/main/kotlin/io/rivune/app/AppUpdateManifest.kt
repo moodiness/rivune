@@ -177,7 +177,7 @@ internal class AppUpdateManifestClient(
                 } ?: throw InvalidUpdateManifest("The update cache is empty")
                 404 -> throw InvalidUpdateManifest("No application update manifest is published")
                 200 -> {
-                    val body = response.body ?: throw InvalidUpdateManifest("The update manifest is empty")
+                    val body = response.body
                     val declaredLength = body.contentLength()
                     if (declaredLength > MAX_UPDATE_MANIFEST_BYTES) throw InvalidUpdateManifest("The update manifest is too large")
                     val source = body.source()

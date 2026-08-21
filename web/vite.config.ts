@@ -1,30 +1,24 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-function manualChunk(id: string): string | undefined {
-  const modulePath = id.split("\\").join("/");
-  if (modulePath.includes("/node_modules/hls.js/")) return "hls";
-  if (
-    modulePath.includes("/node_modules/react/") ||
-    modulePath.includes("/node_modules/react-dom/") ||
-    modulePath.includes("/node_modules/scheduler/")
-  ) return "react-vendor";
-  if (modulePath.includes("/node_modules/lucide-react/")) return "icons-vendor";
-  if (modulePath.includes("/node_modules/qrcode.react/")) return "qrcode-vendor";
-  return undefined;
-}
 
 export default defineConfig({
   plugins: [react()],
   build: {
-    outDir: resolve(__dirname, "../server/internal/webui/dist"),
+    outDir: fileURLToPath(new URL("../server/internal/webui/dist", import.meta.url)),
     emptyOutDir: true,
     sourcemap: false,
-    rollupOptions: {
+    rolldownOptions: {
       output: {
-        onlyExplicitManualChunks: true,
-        manualChunks: manualChunk,
+        codeSplitting: {
+          groups: [
+            { name: "hls", test: /node_modules[\\/]hls\.js[\\/]/ },
+            { name: "react-vendor", test: /node_modules[\\/](?:react|react-dom|scheduler)[\\/]/ },
+            { name: "icons-vendor", test: /node_modules[\\/]lucide-react[\\/]/ },
+            { name: "qrcode-vendor", test: /node_modules[\\/]qrcode\.react[\\/]/ },
+          ],
+        },
       },
     },
   },
