@@ -1,4 +1,4 @@
-# Rivune v1.10.1
+# Rivune v1.11.0
 
 ## Highlights
 
@@ -32,18 +32,18 @@
 ## Upgrade notes
 
 - This release adds database migrations 76 and 77 for playback coordination and private synchronized-room membership. Back up PostgreSQL and the complete encryption keyring before upgrading; Rivune applies both migrations automatically during startup.
-- Existing operators can set `RIVUNE_VERSION=1.10.1`, pull, and recreate Rivune. Fresh Compose deployments now default to the immutable `1.10.1` image tag.
+- Existing operators can set `RIVUNE_VERSION=1.11.0`, pull, and recreate Rivune. Fresh Compose deployments now default to the immutable `1.11.0` image tag.
 - When LAN discovery is enabled, use `./rivune up` and `./rivune down`; on macOS these commands manage the per-user Bonjour LaunchAgent outside Docker Desktop.
 - Scheduled backups are opt-in and run on the host so Docker cannot retain the signing and restore credentials. Configure and inspect the schedule with the documented `./rivune backup-scheduler` command.
 - GitHub publishes exactly eight release assets: `Rivune-Android.apk`, the three unsigned IPA files, `Rivune-macOS.dmg`, `rivune-update.json`, `Rivune-x64.exe`, and `Rivune-arm64.exe`.
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.10.1`
-- `ghcr.io/moodiness/rivune:1.10`
+- `ghcr.io/moodiness/rivune:1.11.0`
+- `ghcr.io/moodiness/rivune:1.11`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 - Provenance and SBOM attestations are published for both runnable platforms.
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.10.0...v1.10.1
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.10.0...v1.11.0
