@@ -62,10 +62,24 @@ fi
 RIVUNE_BACKUP_INTERVAL_SECONDS=3600 \
   "${TEST_DIR}/scripts/postgres-backup-scheduler.sh" "${TEST_DIR}/backups" >/dev/null &
 scheduler_pid=$!
+lock_file="${TEST_DIR}/backups/.rivune-backup-scheduler.lock"
 for _ in {1..100}; do
-  [[ -f "${TEST_DIR}/backups/.rivune-backup-scheduler.lock" ]] && break
+  if [[ -f "${lock_file}" ]] && [[ "$(cat "${lock_file}")" == "${scheduler_pid}" ]]; then
+    break
+  fi
+  if ! kill -0 "${scheduler_pid}" 2>/dev/null; then
+    wait "${scheduler_pid}" 2>/dev/null || true
+    echo 'persistent scheduler exited before acquiring its lock' >&2
+    exit 1
+  fi
   sleep 0.01
 done
+[[ -f "${lock_file}" ]] && [[ "$(cat "${lock_file}")" == "${scheduler_pid}" ]] || {
+  echo 'persistent scheduler did not acquire its lock' >&2
+  kill -TERM "${scheduler_pid}" 2>/dev/null || true
+  wait "${scheduler_pid}" 2>/dev/null || true
+  exit 1
+}
 if "${TEST_DIR}/scripts/postgres-backup-scheduler.sh" --once "${TEST_DIR}/backups" >/dev/null 2>&1; then
   echo 'scheduler accepted a concurrent owner' >&2
   kill -TERM "${scheduler_pid}" 2>/dev/null || true
