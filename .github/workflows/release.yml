@@ -669,6 +669,10 @@ jobs:
           RIVUNE_RELEASE_WINDOWS_X64_ASSET_URL: ${{ needs.build-assets.outputs.windows_x64_asset_url }}
           RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_URL: ${{ needs.build-assets.outputs.windows_arm64_asset_url }}
           RIVUNE_RELEASE_SIGNING_CERT_SHA256: ${{ needs.sign-android.outputs.signing_certificate_sha256 }}
+          RIVUNE_RELEASE_IOS_ASSET_NAME: Rivune-iOS-unsigned.ipa
+          RIVUNE_RELEASE_TVOS_ASSET_NAME: Rivune-tvOS-unsigned.ipa
+          RIVUNE_RELEASE_VISIONOS_ASSET_NAME: Rivune-visionOS-unsigned.ipa
+          RIVUNE_RELEASE_MACOS_ASSET_NAME: Rivune-macOS.dmg
         shell: bash
         run: |
           set -euo pipefail
@@ -678,6 +682,10 @@ jobs:
             RIVUNE_RELEASE_CHANNEL \
             RIVUNE_RELEASE_PUBLISHED_AT \
             RIVUNE_RELEASE_ANDROID_ASSET_NAME \
+            RIVUNE_RELEASE_IOS_ASSET_NAME \
+            RIVUNE_RELEASE_TVOS_ASSET_NAME \
+            RIVUNE_RELEASE_VISIONOS_ASSET_NAME \
+            RIVUNE_RELEASE_MACOS_ASSET_NAME \
             RIVUNE_RELEASE_WINDOWS_X64_ASSET_NAME \
             RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_NAME \
             RIVUNE_RELEASE_URL \
@@ -690,16 +698,31 @@ jobs:
               exit 1
             fi
           done
+          release_asset_url() {
+            printf 'https://github.com/%s/releases/download/%s/%s' "${GITHUB_REPOSITORY}" "${RELEASE_TAG}" "$1"
+          }
+          ios_asset_url="$(release_asset_url "${RIVUNE_RELEASE_IOS_ASSET_NAME}")"
+          tvos_asset_url="$(release_asset_url "${RIVUNE_RELEASE_TVOS_ASSET_NAME}")"
+          visionos_asset_url="$(release_asset_url "${RIVUNE_RELEASE_VISIONOS_ASSET_NAME}")"
+          macos_asset_url="$(release_asset_url "${RIVUNE_RELEASE_MACOS_ASSET_NAME}")"
           (
             cd clients/update
             go run . generate \
               --apk "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_ANDROID_ASSET_NAME}" \
+              --ios-archive "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_IOS_ASSET_NAME}" \
+              --tvos-archive "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_TVOS_ASSET_NAME}" \
+              --visionos-archive "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_VISIONOS_ASSET_NAME}" \
+              --macos-disk-image "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_MACOS_ASSET_NAME}" \
               --output "${GITHUB_WORKSPACE}/release-assets/rivune-update.json" \
               --channel "${RIVUNE_RELEASE_CHANNEL}" \
               --tag-name "${RELEASE_TAG}" \
               --published-at "${RIVUNE_RELEASE_PUBLISHED_AT}" \
               --release-url "${RIVUNE_RELEASE_URL}" \
               --apk-url "${RIVUNE_RELEASE_ANDROID_ASSET_URL}" \
+              --ios-archive-url "${ios_asset_url}" \
+              --tvos-archive-url "${tvos_asset_url}" \
+              --visionos-archive-url "${visionos_asset_url}" \
+              --macos-disk-image-url "${macos_asset_url}" \
               --application-id io.rivune.app \
               --build-version "${RIVUNE_RELEASE_VERSION_CODE}" \
               --signing-certificate-sha256 "${RIVUNE_RELEASE_SIGNING_CERT_SHA256}" \
@@ -709,10 +732,18 @@ jobs:
               --windows-arm64-executable-url "${RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_URL}"
             go run . validate \
               --apk "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_ANDROID_ASSET_NAME}" \
+              --ios-archive "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_IOS_ASSET_NAME}" \
+              --tvos-archive "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_TVOS_ASSET_NAME}" \
+              --visionos-archive "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_VISIONOS_ASSET_NAME}" \
+              --macos-disk-image "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_MACOS_ASSET_NAME}" \
               --channel "${RIVUNE_RELEASE_CHANNEL}" \
               --tag-name "${RELEASE_TAG}" \
               --release-url "${RIVUNE_RELEASE_URL}" \
               --apk-url "${RIVUNE_RELEASE_ANDROID_ASSET_URL}" \
+              --ios-archive-url "${ios_asset_url}" \
+              --tvos-archive-url "${tvos_asset_url}" \
+              --visionos-archive-url "${visionos_asset_url}" \
+              --macos-disk-image-url "${macos_asset_url}" \
               --application-id io.rivune.app \
               --build-version "${RIVUNE_RELEASE_VERSION_CODE}" \
               --signing-certificate-sha256 "${RIVUNE_RELEASE_SIGNING_CERT_SHA256}" \
@@ -872,16 +903,28 @@ jobs:
           fi
           expected_release_url="https://github.com/${REPOSITORY}/releases/tag/${RELEASE_TAG}"
           expected_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${asset_name}"
+          expected_ios_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${ios_asset_name}"
+          expected_tvos_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${tvos_asset_name}"
+          expected_visionos_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${visionos_asset_name}"
+          expected_macos_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${macos_asset_name}"
           expected_windows_x64_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_x64_asset_name}"
           expected_windows_arm64_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_arm64_asset_name}"
           (
             cd clients/update
             go run . validate \
               --apk "${GITHUB_WORKSPACE}/release-assets/${asset_name}" \
+              --ios-archive "${GITHUB_WORKSPACE}/release-assets/${ios_asset_name}" \
+              --tvos-archive "${GITHUB_WORKSPACE}/release-assets/${tvos_asset_name}" \
+              --visionos-archive "${GITHUB_WORKSPACE}/release-assets/${visionos_asset_name}" \
+              --macos-disk-image "${GITHUB_WORKSPACE}/release-assets/${macos_asset_name}" \
               --channel "${expected_channel}" \
               --tag-name "${RELEASE_TAG}" \
               --release-url "${expected_release_url}" \
               --apk-url "${expected_asset_url}" \
+              --ios-archive-url "${expected_ios_asset_url}" \
+              --tvos-archive-url "${expected_tvos_asset_url}" \
+              --visionos-archive-url "${expected_visionos_asset_url}" \
+              --macos-disk-image-url "${expected_macos_asset_url}" \
               --application-id io.rivune.app \
               --build-version "$(jq -er '.packages.android.buildVersion' "${GITHUB_WORKSPACE}/release-assets/rivune-update.json")" \
               --signing-certificate-sha256 "$(jq -er '.packages.android.signingCertificateSha256' "${GITHUB_WORKSPACE}/release-assets/rivune-update.json")" \
@@ -1226,7 +1269,7 @@ jobs:
             local macos_name='Rivune-macOS.dmg'
             local windows_x64_name='Rivune-x64.exe'
             local windows_arm64_name='Rivune-arm64.exe'
-            local expected_assets actual_assets expected_channel expected_release_url expected_apk_url expected_windows_x64_url expected_windows_arm64_url
+            local expected_assets actual_assets expected_channel expected_release_url expected_apk_url expected_ios_url expected_tvos_url expected_visionos_url expected_macos_url expected_windows_x64_url expected_windows_arm64_url
             expected_assets="$(printf '%s\n' rivune-update.json "${apk_name}" "${ios_name}" "${tvos_name}" "${visionos_name}" "${macos_name}" "${windows_x64_name}" "${windows_arm64_name}" | sort)"
             actual_assets="$(jq -r '.assets[].name' <<<"${release_json}" | sort)"
             if [[ "${actual_assets}" != "${expected_assets}" ]]; then
@@ -1294,16 +1337,28 @@ jobs:
             fi
             expected_release_url="https://github.com/${REPOSITORY}/releases/tag/${RELEASE_TAG}"
             expected_apk_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${apk_name}"
+            expected_ios_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${ios_name}"
+            expected_tvos_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${tvos_name}"
+            expected_visionos_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${visionos_name}"
+            expected_macos_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${macos_name}"
             expected_windows_x64_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_x64_name}"
             expected_windows_arm64_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_arm64_name}"
             (
               cd clients/update
               go run . validate \
                 --apk "${GITHUB_WORKSPACE}/adopted-release-assets/${apk_name}" \
+                --ios-archive "${GITHUB_WORKSPACE}/adopted-release-assets/${ios_name}" \
+                --tvos-archive "${GITHUB_WORKSPACE}/adopted-release-assets/${tvos_name}" \
+                --visionos-archive "${GITHUB_WORKSPACE}/adopted-release-assets/${visionos_name}" \
+                --macos-disk-image "${GITHUB_WORKSPACE}/adopted-release-assets/${macos_name}" \
                 --channel "${expected_channel}" \
                 --tag-name "${RELEASE_TAG}" \
                 --release-url "${expected_release_url}" \
                 --apk-url "${expected_apk_url}" \
+                --ios-archive-url "${expected_ios_url}" \
+                --tvos-archive-url "${expected_tvos_url}" \
+                --visionos-archive-url "${expected_visionos_url}" \
+                --macos-disk-image-url "${expected_macos_url}" \
                 --windows-x64-executable "${GITHUB_WORKSPACE}/adopted-release-assets/${windows_x64_name}" \
                 --windows-x64-executable-url "${expected_windows_x64_url}" \
                 --windows-arm64-executable "${GITHUB_WORKSPACE}/adopted-release-assets/${windows_arm64_name}" \

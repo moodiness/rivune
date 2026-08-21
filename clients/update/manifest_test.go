@@ -11,39 +11,47 @@ import (
 	"testing"
 )
 
-const x64FixtureContents = "Windows x64 executable fixture"
+const (
+	x64FixtureContents      = "Windows x64 executable fixture"
+	iosFixtureContents      = "unsigned iOS archive fixture"
+	tvosFixtureContents     = "unsigned tvOS archive fixture"
+	visionosFixtureContents = "unsigned visionOS archive fixture"
+	macosFixtureContents    = "unsigned macOS disk image fixture"
+)
 
 func fixture(t *testing.T) (generateOptions, map[string]any) {
 	t.Helper()
 	directory := t.TempDir()
-	apk := filepath.Join(directory, "Rivune-Android.apk")
-	x64Executable := filepath.Join(directory, "Rivune-x64.exe")
-	arm64Executable := filepath.Join(directory, "Rivune-arm64.exe")
-	if err := os.WriteFile(apk, []byte("signed apk fixture"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	const x64Contents = x64FixtureContents
-	if err := os.WriteFile(x64Executable, []byte(x64Contents), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(arm64Executable, []byte("Windows ARM64 executable fixture"), 0o600); err != nil {
-		t.Fatal(err)
+	asset := func(name, contents string) string {
+		path := filepath.Join(directory, name)
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
 	}
 	options := generateOptions{
-		apk:                       apk,
-		windowsX64Executable:      x64Executable,
-		windowsArm64Executable:    arm64Executable,
+		apk:                       asset(androidAssetFileName, "signed apk fixture"),
+		iosArchive:                asset(iosAssetFileName, iosFixtureContents),
+		tvosArchive:               asset(tvosAssetFileName, tvosFixtureContents),
+		visionosArchive:           asset(visionosAssetFileName, visionosFixtureContents),
+		macosDiskImage:            asset(macosAssetFileName, macosFixtureContents),
+		windowsX64Executable:      asset("Rivune-x64.exe", x64FixtureContents),
+		windowsArm64Executable:    asset("Rivune-arm64.exe", "Windows ARM64 executable fixture"),
 		output:                    filepath.Join(directory, "rivune-update.json"),
 		channel:                   "stable",
 		tagName:                   "v1.2.3",
 		publishedAt:               "2026-08-14T12:34:56Z",
 		releaseURL:                "https://github.com/moodiness/rivune/releases/tag/v1.2.3",
-		apkURL:                    "https://github.com/moodiness/rivune/releases/download/v1.2.3/Rivune-Android.apk",
+		apkURL:                    releaseAssetURL("v1.2.3", androidAssetFileName),
+		iosArchiveURL:             releaseAssetURL("v1.2.3", iosAssetFileName),
+		tvosArchiveURL:            releaseAssetURL("v1.2.3", tvosAssetFileName),
+		visionosArchiveURL:        releaseAssetURL("v1.2.3", visionosAssetFileName),
+		macosDiskImageURL:         releaseAssetURL("v1.2.3", macosAssetFileName),
 		applicationID:             androidApplicationID,
 		buildVersion:              "123",
 		signingCertificateSHA256:  repeatHex("ab", 32),
-		windowsX64ExecutableURL:   "https://github.com/moodiness/rivune/releases/download/v1.2.3/Rivune-x64.exe",
-		windowsArm64ExecutableURL: "https://github.com/moodiness/rivune/releases/download/v1.2.3/Rivune-arm64.exe",
+		windowsX64ExecutableURL:   releaseAssetURL("v1.2.3", "Rivune-x64.exe"),
+		windowsArm64ExecutableURL: releaseAssetURL("v1.2.3", "Rivune-arm64.exe"),
 	}
 	manifest, err := buildManifest(options)
 	if err != nil {
@@ -52,7 +60,16 @@ func fixture(t *testing.T) (generateOptions, map[string]any) {
 	return options, manifest
 }
 
-func TestGeneratesExactThreePackageContract(t *testing.T) {
+func releaseAssetURL(tag, name string) string {
+	return "https://github.com/moodiness/rivune/releases/download/" + tag + "/" + name
+}
+
+func assetDigest(contents string) string {
+	digest := sha256.Sum256([]byte(contents))
+	return hex.EncodeToString(digest[:])
+}
+
+func TestGeneratesExactSevenPackageContract(t *testing.T) {
 	options, manifest := fixture(t)
 	expectedRootFields := []string{"schemaVersion", "channel", "version", "tagName", "publishedAt", "releaseUrl", "packages"}
 	for _, field := range expectedRootFields {
@@ -60,44 +77,45 @@ func TestGeneratesExactThreePackageContract(t *testing.T) {
 			t.Fatalf("missing root field %q", field)
 		}
 	}
-	if len(manifest) != len(expectedRootFields) {
-		t.Fatalf("unexpected root fields: %#v", manifest)
-	}
-	if manifest["schemaVersion"] != 2 || manifest["version"] != "1.2.3" {
+	if len(manifest) != len(expectedRootFields) || manifest["schemaVersion"] != 2 || manifest["version"] != "1.2.3" {
 		t.Fatalf("wrong root contract: %#v", manifest)
 	}
-
-	apkDigest := sha256.Sum256([]byte("signed apk fixture"))
-	x64ExecutableDigest := sha256.Sum256([]byte(x64FixtureContents))
-	arm64ExecutableDigest := sha256.Sum256([]byte("Windows ARM64 executable fixture"))
 	packages := manifest["packages"].(map[string]any)
-	androidExpected := map[string]any{
-		"format": "apk", "architectures": []string{"universal"}, "minimumOsVersion": "8.0",
-		"applicationId": androidApplicationID, "buildVersion": "123",
-		"signingCertificateSha256": repeatHex("ab", 32), "fileName": filepath.Base(options.apk),
-		"url": options.apkURL, "size": int64(len("signed apk fixture")), "sha256": hex.EncodeToString(apkDigest[:]),
+	expected := map[string]map[string]any{
+		"android": {
+			"format": "apk", "architectures": []string{"universal"}, "minimumOsVersion": "8.0",
+			"applicationId": androidApplicationID, "buildVersion": "123", "signature": "signed",
+			"signingCertificateSha256": repeatHex("ab", 32), "fileName": androidAssetFileName,
+			"url": options.apkURL, "size": int64(len("signed apk fixture")), "sha256": assetDigest("signed apk fixture"),
+		},
+		"ios":      expectedApplePackage("ipa", []string{"arm64"}, "15.0", "io.rivune.app", iosAssetFileName, options.iosArchiveURL, iosFixtureContents),
+		"tvos":     expectedApplePackage("ipa", []string{"arm64"}, "15.0", "io.rivune.app.tv", tvosAssetFileName, options.tvosArchiveURL, tvosFixtureContents),
+		"visionos": expectedApplePackage("ipa", []string{"arm64"}, "1.0", "io.rivune.app.vision", visionosAssetFileName, options.visionosArchiveURL, visionosFixtureContents),
+		"macos":    expectedApplePackage("dmg", []string{"arm64", "x64"}, "12.0", "io.rivune.app.mac", macosAssetFileName, options.macosDiskImageURL, macosFixtureContents),
+		"windowsX64": {
+			"format": "exe", "architectures": []string{"x64"}, "minimumOsVersion": "10.0.19041.0", "signature": "unsigned",
+			"fileName": "Rivune-x64.exe", "url": options.windowsX64ExecutableURL, "size": int64(len(x64FixtureContents)), "sha256": assetDigest(x64FixtureContents),
+		},
+		"windowsArm64": {
+			"format": "exe", "architectures": []string{"arm64"}, "minimumOsVersion": "10.0.19041.0", "signature": "unsigned",
+			"fileName": "Rivune-arm64.exe", "url": options.windowsArm64ExecutableURL, "size": int64(len("Windows ARM64 executable fixture")), "sha256": assetDigest("Windows ARM64 executable fixture"),
+		},
 	}
-	windowsX64Expected := map[string]any{
-		"format": "exe", "architectures": []string{"x64"}, "minimumOsVersion": "10.0.19041.0",
-		"fileName": "Rivune-x64.exe", "url": options.windowsX64ExecutableURL,
-		"size": int64(len(x64FixtureContents)), "sha256": hex.EncodeToString(x64ExecutableDigest[:]),
-	}
-	windowsArm64Expected := map[string]any{
-		"format": "exe", "architectures": []string{"arm64"}, "minimumOsVersion": "10.0.19041.0",
-		"fileName": "Rivune-arm64.exe", "url": options.windowsArm64ExecutableURL,
-		"size": int64(len("Windows ARM64 executable fixture")), "sha256": hex.EncodeToString(arm64ExecutableDigest[:]),
-	}
-	if !reflect.DeepEqual(packages["android"], androidExpected) {
-		t.Fatalf("Android package mismatch\ngot:  %#v\nwant: %#v", packages["android"], androidExpected)
-	}
-	if !reflect.DeepEqual(packages["windowsX64"], windowsX64Expected) {
-		t.Fatalf("Windows x64 package mismatch\ngot:  %#v\nwant: %#v", packages["windowsX64"], windowsX64Expected)
-	}
-	if len(packages) != 3 {
+	if len(packages) != len(expected) {
 		t.Fatalf("unexpected package contract: %#v", packages)
 	}
-	if !reflect.DeepEqual(packages["windowsArm64"], windowsArm64Expected) {
-		t.Fatalf("Windows ARM64 package mismatch\ngot:  %#v\nwant: %#v", packages["windowsArm64"], windowsArm64Expected)
+	for name, want := range expected {
+		if !reflect.DeepEqual(packages[name], want) {
+			t.Fatalf("%s package mismatch\ngot:  %#v\nwant: %#v", name, packages[name], want)
+		}
+	}
+}
+
+func expectedApplePackage(format string, architectures []string, minimumOSVersion, bundleIdentifier, fileName, url, contents string) map[string]any {
+	return map[string]any{
+		"format": format, "architectures": architectures, "minimumOsVersion": minimumOSVersion,
+		"bundleIdentifier": bundleIdentifier, "signature": "unsigned", "fileName": fileName,
+		"url": url, "size": int64(len(contents)), "sha256": assetDigest(contents),
 	}
 }
 
@@ -118,10 +136,14 @@ func TestPrereleaseChannelUsesSemverVersion(t *testing.T) {
 	options, _ := fixture(t)
 	options.tagName = "v2.0.0-rc.1"
 	options.channel = "prerelease"
-	options.releaseURL = "https://github.com/moodiness/rivune/releases/tag/v2.0.0-rc.1"
-	options.apkURL = "https://github.com/moodiness/rivune/releases/download/v2.0.0-rc.1/Rivune-Android.apk"
-	options.windowsX64ExecutableURL = "https://github.com/moodiness/rivune/releases/download/v2.0.0-rc.1/Rivune-x64.exe"
-	options.windowsArm64ExecutableURL = "https://github.com/moodiness/rivune/releases/download/v2.0.0-rc.1/Rivune-arm64.exe"
+	options.releaseURL = githubReleaseURLPrefix + "/tag/" + options.tagName
+	options.apkURL = releaseAssetURL(options.tagName, androidAssetFileName)
+	options.iosArchiveURL = releaseAssetURL(options.tagName, iosAssetFileName)
+	options.tvosArchiveURL = releaseAssetURL(options.tagName, tvosAssetFileName)
+	options.visionosArchiveURL = releaseAssetURL(options.tagName, visionosAssetFileName)
+	options.macosDiskImageURL = releaseAssetURL(options.tagName, macosAssetFileName)
+	options.windowsX64ExecutableURL = releaseAssetURL(options.tagName, "Rivune-x64.exe")
+	options.windowsArm64ExecutableURL = releaseAssetURL(options.tagName, "Rivune-arm64.exe")
 	manifest, err := buildManifest(options)
 	if err != nil {
 		t.Fatal(err)
@@ -140,7 +162,7 @@ func TestRejectsEachMissingRequiredRootAndPlatform(t *testing.T) {
 			assertInvalid(t, invalid)
 		})
 	}
-	for _, platform := range []string{"android", "windowsX64", "windowsArm64"} {
+	for _, platform := range []string{"android", "ios", "tvos", "visionos", "macos", "windowsX64", "windowsArm64"} {
 		t.Run("platform_"+platform, func(t *testing.T) {
 			invalid := cloneManifest(t, manifest)
 			delete(invalid["packages"].(map[string]any), platform)
@@ -152,7 +174,7 @@ func TestRejectsEachMissingRequiredRootAndPlatform(t *testing.T) {
 func TestRejectsEachMissingRequiredKnownPackageField(t *testing.T) {
 	_, manifest := fixture(t)
 	packages := manifest["packages"].(map[string]any)
-	for _, platform := range []string{"android", "windowsX64", "windowsArm64"} {
+	for _, platform := range []string{"android", "ios", "tvos", "visionos", "macos", "windowsX64", "windowsArm64"} {
 		for field := range packages[platform].(map[string]any) {
 			t.Run(platform+"_"+field, func(t *testing.T) {
 				invalid := cloneManifest(t, manifest)
@@ -185,12 +207,19 @@ func TestRejectsWrongFixedPlatformContracts(t *testing.T) {
 	}{
 		{"android", "format", "aab"},
 		{"android", "architectures", []string{"arm64"}},
-
 		{"android", "minimumOsVersion", "7.0"},
 		{"android", "applicationId", "io.example.other"},
+		{"android", "signature", "unsigned"},
+		{"ios", "format", "dmg"},
+		{"ios", "bundleIdentifier", "io.example.other"},
+		{"ios", "signature", "signed"},
+		{"tvos", "architectures", []string{"x64"}},
+		{"visionos", "minimumOsVersion", "2.0"},
+		{"macos", "architectures", []string{"arm64"}},
 		{"windowsX64", "format", "zip"},
 		{"windowsX64", "architectures", []string{"arm64"}},
 		{"windowsX64", "minimumOsVersion", "10.0.17763.0"},
+		{"windowsX64", "signature", "signed"},
 		{"windowsArm64", "format", "zip"},
 		{"windowsArm64", "architectures", []string{"x64"}},
 		{"windowsArm64", "minimumOsVersion", "10.0.17763.0"},
@@ -211,6 +240,10 @@ func TestPackageSizeBoundaries(t *testing.T) {
 		maximum  int64
 	}{
 		{"android", maxAndroidPackageSize},
+		{"ios", maxApplePackageSize},
+		{"tvos", maxApplePackageSize},
+		{"visionos", maxApplePackageSize},
+		{"macos", maxApplePackageSize},
 		{"windowsX64", maxWindowsPackageSize},
 		{"windowsArm64", maxWindowsPackageSize},
 	}
@@ -251,6 +284,11 @@ func TestRejectsUnsafeAndWrongTagAssetURLs(t *testing.T) {
 		{"android", "url", "https://github.com/moodiness/rivune/releases/download/v1.2.4/Rivune-Android.apk"},
 		{"android", "fileName", "rivune-android-1.2.3.apk"},
 		{"android", "fileName", "../Rivune-Android.apk"},
+		{"ios", "url", "https://evil.example/Rivune-iOS-unsigned.ipa"},
+		{"ios", "fileName", "Rivune-iOS.ipa"},
+		{"tvos", "url", "https://github.com/moodiness/rivune/releases/download/v1.2.4/Rivune-tvOS-unsigned.ipa"},
+		{"visionos", "fileName", "../Rivune-visionOS-unsigned.ipa"},
+		{"macos", "url", "https://evil.example/Rivune-macOS.dmg"},
 		{"windowsX64", "url", "https://github.com/moodiness/rivune/releases/download/v1.2.4/Rivune-x64.exe"},
 		{"windowsX64", "url", "https://evil.example/Rivune-x64.exe"},
 		{"windowsX64", "fileName", "other.exe"},
@@ -284,6 +322,9 @@ func TestRejectsMalformedVersionBuildCertificateAndDigestFields(t *testing.T) {
 			root["packages"].(map[string]any)["android"].(map[string]any)["signingCertificateSha256"] = strings.Repeat("A", 64)
 		},
 		func(root map[string]any) {
+			root["packages"].(map[string]any)["ios"].(map[string]any)["sha256"] = strings.Repeat("F", 64)
+		},
+		func(root map[string]any) {
 			root["packages"].(map[string]any)["windowsX64"].(map[string]any)["sha256"] = strings.Repeat("F", 64)
 		},
 		func(root map[string]any) {
@@ -302,9 +343,13 @@ func TestRejectsMalformedVersionBuildCertificateAndDigestFields(t *testing.T) {
 func TestRejectsMismatchedLocalAssetMetadataAndExpectedFields(t *testing.T) {
 	options, manifest := fixture(t)
 	validate := validateOptions{
-		apk: options.apk, windowsX64Executable: options.windowsX64Executable,
-		windowsArm64Executable: options.windowsArm64Executable, channel: options.channel, tagName: options.tagName,
-		publishedAt: options.publishedAt, releaseURL: options.releaseURL, apkURL: options.apkURL,
+		apk: options.apk, iosArchive: options.iosArchive, tvosArchive: options.tvosArchive,
+		visionosArchive: options.visionosArchive, macosDiskImage: options.macosDiskImage,
+		windowsX64Executable: options.windowsX64Executable, windowsArm64Executable: options.windowsArm64Executable,
+		channel: options.channel, tagName: options.tagName, publishedAt: options.publishedAt,
+		releaseURL: options.releaseURL, apkURL: options.apkURL,
+		iosArchiveURL: options.iosArchiveURL, tvosArchiveURL: options.tvosArchiveURL,
+		visionosArchiveURL: options.visionosArchiveURL, macosDiskImageURL: options.macosDiskImageURL,
 		applicationID: options.applicationID, buildVersion: options.buildVersion,
 		signingCertificateSHA256: options.signingCertificateSHA256,
 		windowsX64ExecutableURL:  options.windowsX64ExecutableURL, windowsArm64ExecutableURL: options.windowsArm64ExecutableURL,
@@ -319,6 +364,13 @@ func TestRejectsMismatchedLocalAssetMetadataAndExpectedFields(t *testing.T) {
 		t.Fatal("mismatched local APK was accepted")
 	}
 	validate.apk = ""
+	if err := os.WriteFile(options.iosArchive, []byte("different iOS archive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateExpectedValues(manifest, validate); err == nil {
+		t.Fatal("mismatched local iOS archive was accepted")
+	}
+	validate.iosArchive = ""
 	if err := os.WriteFile(options.windowsX64Executable, []byte("different Windows x64 executable"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +378,7 @@ func TestRejectsMismatchedLocalAssetMetadataAndExpectedFields(t *testing.T) {
 		t.Fatal("mismatched local Windows x64 executable was accepted")
 	}
 	validate.windowsX64Executable = ""
-	validate.windowsX64ExecutableURL = "https://github.com/moodiness/rivune/releases/download/v1.2.4/Rivune-x64.exe"
+	validate.windowsX64ExecutableURL = releaseAssetURL("v1.2.4", "Rivune-x64.exe")
 	if err := validateExpectedValues(manifest, validate); err == nil {
 		t.Fatal("mismatched expected Windows x64 executable URL was accepted")
 	}
@@ -338,7 +390,7 @@ func TestRejectsMismatchedLocalAssetMetadataAndExpectedFields(t *testing.T) {
 		t.Fatal("mismatched local Windows ARM64 executable was accepted")
 	}
 	validate.windowsArm64Executable = ""
-	validate.windowsArm64ExecutableURL = "https://github.com/moodiness/rivune/releases/download/v1.2.4/Rivune-arm64.exe"
+	validate.windowsArm64ExecutableURL = releaseAssetURL("v1.2.4", "Rivune-arm64.exe")
 	if err := validateExpectedValues(manifest, validate); err == nil {
 		t.Fatal("mismatched expected Windows ARM64 executable URL was accepted")
 	}
@@ -348,6 +400,10 @@ func TestGenerateAndValidateGlobalManifest(t *testing.T) {
 	options, _ := fixture(t)
 	generateArguments := []string{
 		"--apk", options.apk,
+		"--ios-archive", options.iosArchive,
+		"--tvos-archive", options.tvosArchive,
+		"--visionos-archive", options.visionosArchive,
+		"--macos-disk-image", options.macosDiskImage,
 		"--windows-x64-executable", options.windowsX64Executable,
 		"--windows-arm64-executable", options.windowsArm64Executable,
 		"--output", options.output,
@@ -356,13 +412,17 @@ func TestGenerateAndValidateGlobalManifest(t *testing.T) {
 		"--published-at", options.publishedAt,
 		"--release-url", options.releaseURL,
 		"--apk-url", options.apkURL,
+		"--ios-archive-url", options.iosArchiveURL,
+		"--tvos-archive-url", options.tvosArchiveURL,
+		"--visionos-archive-url", options.visionosArchiveURL,
+		"--macos-disk-image-url", options.macosDiskImageURL,
 		"--application-id", options.applicationID,
 		"--build-version", options.buildVersion,
 		"--signing-certificate-sha256", options.signingCertificateSHA256,
 		"--windows-x64-executable-url", options.windowsX64ExecutableURL,
 		"--windows-arm64-executable-url", options.windowsArm64ExecutableURL,
 	}
-	for _, flagName := range []string{"--windows-x64-executable", "--windows-x64-executable-url", "--windows-arm64-executable", "--windows-arm64-executable-url"} {
+	for _, flagName := range []string{"--ios-archive", "--ios-archive-url", "--tvos-archive", "--tvos-archive-url", "--visionos-archive", "--visionos-archive-url", "--macos-disk-image", "--macos-disk-image-url", "--windows-x64-executable", "--windows-x64-executable-url", "--windows-arm64-executable", "--windows-arm64-executable-url"} {
 		err := runGenerate(argumentsWithoutFlag(generateArguments, flagName))
 		if err == nil || !strings.Contains(err.Error(), flagName+" is required") {
 			t.Fatalf("generate without %s returned %v", flagName, err)
@@ -373,6 +433,10 @@ func TestGenerateAndValidateGlobalManifest(t *testing.T) {
 	}
 	validateArguments := []string{
 		"--apk", options.apk,
+		"--ios-archive", options.iosArchive,
+		"--tvos-archive", options.tvosArchive,
+		"--visionos-archive", options.visionosArchive,
+		"--macos-disk-image", options.macosDiskImage,
 		"--windows-x64-executable", options.windowsX64Executable,
 		"--windows-arm64-executable", options.windowsArm64Executable,
 		"--channel", options.channel,
@@ -380,6 +444,10 @@ func TestGenerateAndValidateGlobalManifest(t *testing.T) {
 		"--published-at", options.publishedAt,
 		"--release-url", options.releaseURL,
 		"--apk-url", options.apkURL,
+		"--ios-archive-url", options.iosArchiveURL,
+		"--tvos-archive-url", options.tvosArchiveURL,
+		"--visionos-archive-url", options.visionosArchiveURL,
+		"--macos-disk-image-url", options.macosDiskImageURL,
 		"--application-id", options.applicationID,
 		"--build-version", options.buildVersion,
 		"--signing-certificate-sha256", options.signingCertificateSHA256,
@@ -387,7 +455,7 @@ func TestGenerateAndValidateGlobalManifest(t *testing.T) {
 		"--windows-arm64-executable-url", options.windowsArm64ExecutableURL,
 		options.output,
 	}
-	for _, flagName := range []string{"--windows-x64-executable", "--windows-x64-executable-url", "--windows-arm64-executable", "--windows-arm64-executable-url"} {
+	for _, flagName := range []string{"--ios-archive", "--ios-archive-url", "--tvos-archive", "--tvos-archive-url", "--visionos-archive", "--visionos-archive-url", "--macos-disk-image", "--macos-disk-image-url", "--windows-x64-executable", "--windows-x64-executable-url", "--windows-arm64-executable", "--windows-arm64-executable-url"} {
 		err := runValidate(argumentsWithoutFlag(validateArguments, flagName))
 		if err == nil || !strings.Contains(err.Error(), flagName+" is required") {
 			t.Fatalf("validate without %s returned %v", flagName, err)

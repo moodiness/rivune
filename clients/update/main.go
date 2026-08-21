@@ -57,6 +57,10 @@ func runGenerate(arguments []string) error {
 		value string
 	}{
 		{"apk", options.apk},
+		{"ios-archive", options.iosArchive},
+		{"tvos-archive", options.tvosArchive},
+		{"visionos-archive", options.visionosArchive},
+		{"macos-disk-image", options.macosDiskImage},
 		{"windows-x64-executable", options.windowsX64Executable},
 		{"windows-arm64-executable", options.windowsArm64Executable},
 		{"output", options.output},
@@ -65,6 +69,10 @@ func runGenerate(arguments []string) error {
 		{"published-at", options.publishedAt},
 		{"release-url", options.releaseURL},
 		{"apk-url", options.apkURL},
+		{"ios-archive-url", options.iosArchiveURL},
+		{"tvos-archive-url", options.tvosArchiveURL},
+		{"visionos-archive-url", options.visionosArchiveURL},
+		{"macos-disk-image-url", options.macosDiskImageURL},
 		{"application-id", options.applicationID},
 		{"build-version", options.buildVersion},
 		{"signing-certificate-sha256", options.signingCertificateSHA256},
@@ -85,6 +93,10 @@ func runGenerate(arguments []string) error {
 
 func addGenerateFlags(flags *flag.FlagSet, options *generateOptions) {
 	flags.StringVar(&options.apk, "apk", "", "path to the signed universal APK")
+	flags.StringVar(&options.iosArchive, "ios-archive", "", "path to the unsigned iOS IPA")
+	flags.StringVar(&options.tvosArchive, "tvos-archive", "", "path to the unsigned tvOS IPA")
+	flags.StringVar(&options.visionosArchive, "visionos-archive", "", "path to the unsigned visionOS IPA")
+	flags.StringVar(&options.macosDiskImage, "macos-disk-image", "", "path to the unsigned universal macOS disk image")
 	flags.StringVar(&options.windowsX64Executable, "windows-x64-executable", "", "path to the Windows x64 executable")
 	flags.StringVar(&options.windowsArm64Executable, "windows-arm64-executable", "", "path to the Windows ARM64 executable")
 	flags.StringVar(&options.output, "output", "", "path for the generated global manifest")
@@ -93,6 +105,10 @@ func addGenerateFlags(flags *flag.FlagSet, options *generateOptions) {
 	flags.StringVar(&options.publishedAt, "published-at", "", "RFC3339 release timestamp")
 	flags.StringVar(&options.releaseURL, "release-url", "", "exact HTTPS GitHub release URL")
 	flags.StringVar(&options.apkURL, "apk-url", "", "exact HTTPS APK release asset URL")
+	flags.StringVar(&options.iosArchiveURL, "ios-archive-url", "", "exact HTTPS iOS release asset URL")
+	flags.StringVar(&options.tvosArchiveURL, "tvos-archive-url", "", "exact HTTPS tvOS release asset URL")
+	flags.StringVar(&options.visionosArchiveURL, "visionos-archive-url", "", "exact HTTPS visionOS release asset URL")
+	flags.StringVar(&options.macosDiskImageURL, "macos-disk-image-url", "", "exact HTTPS macOS release asset URL")
 	flags.StringVar(&options.applicationID, "application-id", "", "Android application ID")
 	flags.StringVar(&options.buildVersion, "build-version", "", "positive Android versionCode")
 	flags.StringVar(&options.signingCertificateSHA256, "signing-certificate-sha256", "", "lowercase Android signing certificate SHA-256")
@@ -135,6 +151,23 @@ func runValidate(arguments []string) error {
 	if options.apk == "" {
 		return fmt.Errorf("--apk is required")
 	}
+	for _, required := range []struct {
+		name  string
+		value string
+	}{
+		{"ios-archive", options.iosArchive},
+		{"tvos-archive", options.tvosArchive},
+		{"visionos-archive", options.visionosArchive},
+		{"macos-disk-image", options.macosDiskImage},
+		{"ios-archive-url", options.iosArchiveURL},
+		{"tvos-archive-url", options.tvosArchiveURL},
+		{"visionos-archive-url", options.visionosArchiveURL},
+		{"macos-disk-image-url", options.macosDiskImageURL},
+	} {
+		if required.value == "" {
+			return fmt.Errorf("--%s is required", required.name)
+		}
+	}
 	if options.windowsX64Executable == "" {
 		return fmt.Errorf("--windows-x64-executable is required")
 	}
@@ -152,6 +185,10 @@ func runValidate(arguments []string) error {
 
 func addValidateFlags(flags *flag.FlagSet, options *validateOptions) {
 	flags.StringVar(&options.apk, "apk", "", "APK whose file name, size, and SHA-256 must match")
+	flags.StringVar(&options.iosArchive, "ios-archive", "", "iOS IPA whose file name, size, and SHA-256 must match")
+	flags.StringVar(&options.tvosArchive, "tvos-archive", "", "tvOS IPA whose file name, size, and SHA-256 must match")
+	flags.StringVar(&options.visionosArchive, "visionos-archive", "", "visionOS IPA whose file name, size, and SHA-256 must match")
+	flags.StringVar(&options.macosDiskImage, "macos-disk-image", "", "macOS disk image whose file name, size, and SHA-256 must match")
 	flags.StringVar(&options.windowsX64Executable, "windows-x64-executable", "", "Windows x64 executable whose file name, size, and SHA-256 must match")
 	flags.StringVar(&options.windowsArm64Executable, "windows-arm64-executable", "", "Windows ARM64 executable whose file name, size, and SHA-256 must match")
 	flags.StringVar(&options.channel, "channel", "", "expected release channel")
@@ -159,6 +196,10 @@ func addValidateFlags(flags *flag.FlagSet, options *validateOptions) {
 	flags.StringVar(&options.publishedAt, "published-at", "", "expected RFC3339 publication timestamp")
 	flags.StringVar(&options.releaseURL, "release-url", "", "expected release URL")
 	flags.StringVar(&options.apkURL, "apk-url", "", "expected APK URL")
+	flags.StringVar(&options.iosArchiveURL, "ios-archive-url", "", "expected iOS asset URL")
+	flags.StringVar(&options.tvosArchiveURL, "tvos-archive-url", "", "expected tvOS asset URL")
+	flags.StringVar(&options.visionosArchiveURL, "visionos-archive-url", "", "expected visionOS asset URL")
+	flags.StringVar(&options.macosDiskImageURL, "macos-disk-image-url", "", "expected macOS asset URL")
 	flags.StringVar(&options.applicationID, "application-id", "", "expected Android application ID")
 	flags.StringVar(&options.buildVersion, "build-version", "", "expected Android versionCode")
 	flags.StringVar(&options.signingCertificateSHA256, "signing-certificate-sha256", "", "expected Android signing certificate SHA-256")
@@ -173,11 +214,11 @@ func printUsage(output *os.File) {
 }
 
 func printGenerateUsage(output anyWriter) {
-	fmt.Fprintln(output, "Usage: go run . generate --apk <path> --windows-x64-executable <path> --windows-arm64-executable <path> --output <path> --channel <channel> --tag-name <tag> --published-at <timestamp> --release-url <url> --apk-url <url> --application-id <id> --build-version <version> --signing-certificate-sha256 <digest> --windows-x64-executable-url <url> --windows-arm64-executable-url <url>")
+	fmt.Fprintln(output, "Usage: go run . generate --apk <path> --ios-archive <path> --tvos-archive <path> --visionos-archive <path> --macos-disk-image <path> --windows-x64-executable <path> --windows-arm64-executable <path> --output <path> --channel <channel> --tag-name <tag> --published-at <timestamp> --release-url <url> --apk-url <url> --ios-archive-url <url> --tvos-archive-url <url> --visionos-archive-url <url> --macos-disk-image-url <url> --application-id <id> --build-version <version> --signing-certificate-sha256 <digest> --windows-x64-executable-url <url> --windows-arm64-executable-url <url>")
 }
 
 func printValidateUsage(output anyWriter) {
-	fmt.Fprintln(output, "Usage: go run . validate --apk <path> --windows-x64-executable <path> --windows-arm64-executable <path> --windows-x64-executable-url <url> --windows-arm64-executable-url <url> [expected-value options] <global-manifest>")
+	fmt.Fprintln(output, "Usage: go run . validate --apk <path> --ios-archive <path> --tvos-archive <path> --visionos-archive <path> --macos-disk-image <path> --windows-x64-executable <path> --windows-arm64-executable <path> --ios-archive-url <url> --tvos-archive-url <url> --visionos-archive-url <url> --macos-disk-image-url <url> --windows-x64-executable-url <url> --windows-arm64-executable-url <url> [expected-value options] <global-manifest>")
 }
 
 type anyWriter interface {

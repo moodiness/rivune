@@ -19,7 +19,12 @@ const (
 	androidApplicationID   = "io.rivune.app"
 	githubReleaseURLPrefix = "https://github.com/moodiness/rivune/releases"
 	androidAssetFileName   = "Rivune-Android.apk"
+	iosAssetFileName       = "Rivune-iOS-unsigned.ipa"
+	tvosAssetFileName      = "Rivune-tvOS-unsigned.ipa"
+	visionosAssetFileName  = "Rivune-visionOS-unsigned.ipa"
+	macosAssetFileName     = "Rivune-macOS.dmg"
 	maxAndroidPackageSize  = int64(512 * 1024 * 1024)
+	maxApplePackageSize    = int64(512 * 1024 * 1024)
 	maxWindowsPackageSize  = int64(2*1024*1024*1024 - 1)
 )
 
@@ -33,6 +38,10 @@ var (
 
 type generateOptions struct {
 	apk                       string
+	iosArchive                string
+	tvosArchive               string
+	visionosArchive           string
+	macosDiskImage            string
 	windowsX64Executable      string
 	windowsArm64Executable    string
 	output                    string
@@ -41,6 +50,10 @@ type generateOptions struct {
 	publishedAt               string
 	releaseURL                string
 	apkURL                    string
+	iosArchiveURL             string
+	tvosArchiveURL            string
+	visionosArchiveURL        string
+	macosDiskImageURL         string
 	applicationID             string
 	buildVersion              string
 	signingCertificateSHA256  string
@@ -50,6 +63,10 @@ type generateOptions struct {
 
 type validateOptions struct {
 	apk                       string
+	iosArchive                string
+	tvosArchive               string
+	visionosArchive           string
+	macosDiskImage            string
 	windowsX64Executable      string
 	windowsArm64Executable    string
 	channel                   string
@@ -57,6 +74,10 @@ type validateOptions struct {
 	publishedAt               string
 	releaseURL                string
 	apkURL                    string
+	iosArchiveURL             string
+	tvosArchiveURL            string
+	visionosArchiveURL        string
+	macosDiskImageURL         string
 	applicationID             string
 	buildVersion              string
 	signingCertificateSHA256  string
@@ -66,6 +87,22 @@ type validateOptions struct {
 
 func buildManifest(options generateOptions) (map[string]any, error) {
 	apkSize, apkDigest, err := assetMetadata(options.apk, "APK", maxAndroidPackageSize)
+	if err != nil {
+		return nil, err
+	}
+	iosSize, iosDigest, err := assetMetadata(options.iosArchive, "iOS archive", maxApplePackageSize)
+	if err != nil {
+		return nil, err
+	}
+	tvosSize, tvosDigest, err := assetMetadata(options.tvosArchive, "tvOS archive", maxApplePackageSize)
+	if err != nil {
+		return nil, err
+	}
+	visionosSize, visionosDigest, err := assetMetadata(options.visionosArchive, "visionOS archive", maxApplePackageSize)
+	if err != nil {
+		return nil, err
+	}
+	macosSize, macosDigest, err := assetMetadata(options.macosDiskImage, "macOS disk image", maxApplePackageSize)
 	if err != nil {
 		return nil, err
 	}
@@ -91,16 +128,22 @@ func buildManifest(options generateOptions) (map[string]any, error) {
 				"minimumOsVersion":         "8.0",
 				"applicationId":            options.applicationID,
 				"buildVersion":             options.buildVersion,
+				"signature":                "signed",
 				"signingCertificateSha256": options.signingCertificateSHA256,
 				"fileName":                 filepath.Base(options.apk),
 				"url":                      options.apkURL,
 				"size":                     apkSize,
 				"sha256":                   apkDigest,
 			},
+			"ios":      applePackage("ipa", []string{"arm64"}, "15.0", "io.rivune.app", options.iosArchive, options.iosArchiveURL, iosSize, iosDigest),
+			"tvos":     applePackage("ipa", []string{"arm64"}, "15.0", "io.rivune.app.tv", options.tvosArchive, options.tvosArchiveURL, tvosSize, tvosDigest),
+			"visionos": applePackage("ipa", []string{"arm64"}, "1.0", "io.rivune.app.vision", options.visionosArchive, options.visionosArchiveURL, visionosSize, visionosDigest),
+			"macos":    applePackage("dmg", []string{"arm64", "x64"}, "12.0", "io.rivune.app.mac", options.macosDiskImage, options.macosDiskImageURL, macosSize, macosDigest),
 			"windowsX64": map[string]any{
 				"format":           "exe",
 				"architectures":    []string{"x64"},
 				"minimumOsVersion": "10.0.19041.0",
+				"signature":        "unsigned",
 				"fileName":         filepath.Base(options.windowsX64Executable),
 				"url":              options.windowsX64ExecutableURL,
 				"size":             windowsX64Size,
@@ -110,6 +153,7 @@ func buildManifest(options generateOptions) (map[string]any, error) {
 				"format":           "exe",
 				"architectures":    []string{"arm64"},
 				"minimumOsVersion": "10.0.19041.0",
+				"signature":        "unsigned",
 				"fileName":         filepath.Base(options.windowsArm64Executable),
 				"url":              options.windowsArm64ExecutableURL,
 				"size":             windowsArm64Size,
@@ -121,6 +165,20 @@ func buildManifest(options generateOptions) (map[string]any, error) {
 		return nil, err
 	}
 	return manifest, nil
+}
+
+func applePackage(format string, architectures []string, minimumOSVersion, bundleIdentifier, path, url string, size int64, digest string) map[string]any {
+	return map[string]any{
+		"format":           format,
+		"architectures":    architectures,
+		"minimumOsVersion": minimumOSVersion,
+		"bundleIdentifier": bundleIdentifier,
+		"signature":        "unsigned",
+		"fileName":         filepath.Base(path),
+		"url":              url,
+		"size":             size,
+		"sha256":           digest,
+	}
 }
 
 func validateManifestFile(manifestPath string, options validateOptions) error {
@@ -233,37 +291,55 @@ func validateManifest(manifest any) error {
 	if err != nil {
 		return err
 	}
-	androidValue, err := required(packages, "android", "manifest.packages")
-	if err != nil {
-		return err
-	}
-	androidPackage, err := object(androidValue, "manifest.packages.android")
+	androidPackage, err := requiredPackage(packages, "android")
 	if err != nil {
 		return err
 	}
 	if err := validateAndroidPackage(androidPackage, tagName, "manifest.packages.android"); err != nil {
 		return err
 	}
-	windowsX64Value, err := required(packages, "windowsX64", "manifest.packages")
-	if err != nil {
-		return err
+	applePackages := []struct {
+		key              string
+		format           string
+		architectures    []string
+		minimumOSVersion string
+		bundleIdentifier string
+		fileName         string
+	}{
+		{"ios", "ipa", []string{"arm64"}, "15.0", "io.rivune.app", iosAssetFileName},
+		{"tvos", "ipa", []string{"arm64"}, "15.0", "io.rivune.app.tv", tvosAssetFileName},
+		{"visionos", "ipa", []string{"arm64"}, "1.0", "io.rivune.app.vision", visionosAssetFileName},
+		{"macos", "dmg", []string{"arm64", "x64"}, "12.0", "io.rivune.app.mac", macosAssetFileName},
 	}
-	windowsX64Package, err := object(windowsX64Value, "manifest.packages.windowsX64")
+	for _, specification := range applePackages {
+		packageObject, err := requiredPackage(packages, specification.key)
+		if err != nil {
+			return err
+		}
+		if err := validateApplePackage(packageObject, tagName, "manifest.packages."+specification.key, specification.format, specification.architectures, specification.minimumOSVersion, specification.bundleIdentifier, specification.fileName); err != nil {
+			return err
+		}
+	}
+	windowsX64Package, err := requiredPackage(packages, "windowsX64")
 	if err != nil {
 		return err
 	}
 	if err := validateWindowsPackage(windowsX64Package, tagName, "manifest.packages.windowsX64", "x64", "Rivune-x64.exe"); err != nil {
 		return err
 	}
-	windowsArm64Value, err := required(packages, "windowsArm64", "manifest.packages")
-	if err != nil {
-		return err
-	}
-	windowsArm64Package, err := object(windowsArm64Value, "manifest.packages.windowsArm64")
+	windowsArm64Package, err := requiredPackage(packages, "windowsArm64")
 	if err != nil {
 		return err
 	}
 	return validateWindowsPackage(windowsArm64Package, tagName, "manifest.packages.windowsArm64", "arm64", "Rivune-arm64.exe")
+}
+
+func requiredPackage(packages map[string]any, key string) (map[string]any, error) {
+	value, err := required(packages, key, "manifest.packages")
+	if err != nil {
+		return nil, err
+	}
+	return object(value, "manifest.packages."+key)
 }
 
 func requireSchema(root map[string]any, expected int) error {
@@ -334,6 +410,9 @@ func validateAndroidPackage(packageObject map[string]any, tagName, context strin
 	if err := requireExactString(packageObject, "format", "apk", context); err != nil {
 		return err
 	}
+	if err := requireExactString(packageObject, "signature", "signed", context); err != nil {
+		return err
+	}
 	if err := requireArchitectures(packageObject, []string{"universal"}, context); err != nil {
 		return err
 	}
@@ -356,6 +435,25 @@ func validateAndroidPackage(packageObject map[string]any, tagName, context strin
 	return validateCommonPackageFields(packageObject, context, tagName, androidAssetFileName, maxAndroidPackageSize)
 }
 
+func validateApplePackage(packageObject map[string]any, tagName, context, format string, architectures []string, minimumOSVersion, bundleIdentifier, fileName string) error {
+	if err := requireExactString(packageObject, "format", format, context); err != nil {
+		return err
+	}
+	if err := requireArchitectures(packageObject, architectures, context); err != nil {
+		return err
+	}
+	if err := requireExactString(packageObject, "minimumOsVersion", minimumOSVersion, context); err != nil {
+		return err
+	}
+	if err := requireExactString(packageObject, "bundleIdentifier", bundleIdentifier, context); err != nil {
+		return err
+	}
+	if err := requireExactString(packageObject, "signature", "unsigned", context); err != nil {
+		return err
+	}
+	return validateCommonPackageFields(packageObject, context, tagName, fileName, maxApplePackageSize)
+}
+
 func validateWindowsPackage(packageObject map[string]any, tagName, context, architecture, fileName string) error {
 	for _, obsoleteField := range []string{"identityName", "publisher", "packageVersion", "signingCertificateSha256"} {
 		if _, present := packageObject[obsoleteField]; present {
@@ -363,6 +461,9 @@ func validateWindowsPackage(packageObject map[string]any, tagName, context, arch
 		}
 	}
 	if err := requireExactString(packageObject, "format", "exe", context); err != nil {
+		return err
+	}
+	if err := requireExactString(packageObject, "signature", "unsigned", context); err != nil {
 		return err
 	}
 	if err := requireArchitectures(packageObject, []string{architecture}, context); err != nil {
@@ -405,6 +506,10 @@ func validateExpectedValues(manifest any, options validateOptions) error {
 	root := manifest.(map[string]any)
 	packages := root["packages"].(map[string]any)
 	androidPackage := packages["android"].(map[string]any)
+	iosPackage := packages["ios"].(map[string]any)
+	tvosPackage := packages["tvos"].(map[string]any)
+	visionosPackage := packages["visionos"].(map[string]any)
+	macosPackage := packages["macos"].(map[string]any)
 	windowsX64Package := packages["windowsX64"].(map[string]any)
 	windowsArm64Package := packages["windowsArm64"].(map[string]any)
 	expected := []struct {
@@ -420,6 +525,10 @@ func validateExpectedValues(manifest any, options validateOptions) error {
 		{androidPackage["applicationId"], options.applicationID, "Android applicationId"},
 		{androidPackage["buildVersion"], options.buildVersion, "Android buildVersion"},
 		{androidPackage["signingCertificateSha256"], options.signingCertificateSHA256, "Android signing certificate"},
+		{iosPackage["url"], options.iosArchiveURL, "iOS package URL"},
+		{tvosPackage["url"], options.tvosArchiveURL, "tvOS package URL"},
+		{visionosPackage["url"], options.visionosArchiveURL, "visionOS package URL"},
+		{macosPackage["url"], options.macosDiskImageURL, "macOS package URL"},
 		{windowsX64Package["url"], options.windowsX64ExecutableURL, "Windows x64 executable URL"},
 		{windowsArm64Package["url"], options.windowsArm64ExecutableURL, "Windows ARM64 executable URL"},
 	}
@@ -428,13 +537,26 @@ func validateExpectedValues(manifest any, options validateOptions) error {
 			return fmt.Errorf("%s does not match expected value", item.label)
 		}
 	}
-	if err := validateExpectedAsset(androidPackage, options.apk, "APK", maxAndroidPackageSize); err != nil {
-		return err
+	assets := []struct {
+		packageObject map[string]any
+		path          string
+		label         string
+		maximumSize   int64
+	}{
+		{androidPackage, options.apk, "APK", maxAndroidPackageSize},
+		{iosPackage, options.iosArchive, "iOS archive", maxApplePackageSize},
+		{tvosPackage, options.tvosArchive, "tvOS archive", maxApplePackageSize},
+		{visionosPackage, options.visionosArchive, "visionOS archive", maxApplePackageSize},
+		{macosPackage, options.macosDiskImage, "macOS disk image", maxApplePackageSize},
+		{windowsX64Package, options.windowsX64Executable, "Windows x64 executable", maxWindowsPackageSize},
+		{windowsArm64Package, options.windowsArm64Executable, "Windows ARM64 executable", maxWindowsPackageSize},
 	}
-	if err := validateExpectedAsset(windowsX64Package, options.windowsX64Executable, "Windows x64 executable", maxWindowsPackageSize); err != nil {
-		return err
+	for _, asset := range assets {
+		if err := validateExpectedAsset(asset.packageObject, asset.path, asset.label, asset.maximumSize); err != nil {
+			return err
+		}
 	}
-	return validateExpectedAsset(windowsArm64Package, options.windowsArm64Executable, "Windows ARM64 executable", maxWindowsPackageSize)
+	return nil
 }
 
 func validateExpectedAsset(packageObject map[string]any, assetPath, label string, maximumSize int64) error {

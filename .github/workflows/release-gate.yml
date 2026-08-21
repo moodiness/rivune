@@ -154,6 +154,8 @@ jobs:
       - name: Test Swift package
         timeout-minutes: 10
         run: swift test --disable-swift-testing --package-path clients/apple
+      - name: Test local Apple signing command
+        run: clients/apple/Scripts/test-sign-and-install.sh
 
   android-client:
     name: Android client

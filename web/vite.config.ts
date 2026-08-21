@@ -2,8 +2,8 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 
-
 export default defineConfig({
+  base: process.env.RIVUNE_PUBLIC_APPS_BUILD === "1" ? "/rivune/" : "/",
   plugins: [react()],
   build: {
     outDir: fileURLToPath(new URL("../server/internal/webui/dist", import.meta.url)),

@@ -7,7 +7,7 @@ import type { ButtonHTMLAttributes, CSSProperties, HTMLAttributes, KeyboardEvent
 export function RivuneMark({ compact = false }: { compact?: boolean }) {
   return (
     <div className={`brand ${compact ? "brand--compact" : ""}`} aria-label="Rivune">
-      <img className="brand__mark" src="/rivune-mark.svg" alt="" aria-hidden="true" />
+      <img className="brand__mark" src={`${import.meta.env.BASE_URL}rivune-mark.svg`} alt="" aria-hidden="true" />
       {!compact && <span className="brand__word">Rivune</span>}
     </div>
   );
