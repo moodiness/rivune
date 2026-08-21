@@ -31,7 +31,7 @@ func (a *API) RunMaintenance(ctx context.Context) {
 			a.calendarRefresh.Run(ctx)
 		}()
 	}
-	runMaintenance(ctx, a.logger, a.authMaintenance, a.playbackMaintenance, maintenanceInterval, a.operations)
+	runMaintenance(ctx, a.logger, a.authMaintenance, a.playbackMaintenance, maintenanceInterval, a.operations, a.coordination)
 	if calendarDone != nil {
 		<-calendarDone
 	}

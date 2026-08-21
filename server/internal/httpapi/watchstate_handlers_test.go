@@ -61,6 +61,9 @@ type fakeWatchstateService struct {
 	continueErr           error
 	dismissTitleID        string
 	dismissErr            error
+	recommendationLimit   int
+	recommendationValue   watchstate.RecommendationPage
+	recommendationErr     error
 }
 
 func (f *fakeWatchstateService) ResolveTitle(_ context.Context, _ auth.Principal, input watchstate.ResolveTitleInput) (watchstate.TitleReference, error) {
@@ -132,6 +135,10 @@ func (f *fakeWatchstateService) ContinueWatching(_ context.Context, _ auth.Princ
 func (f *fakeWatchstateService) DismissContinue(_ context.Context, _ auth.Principal, titleID string) error {
 	f.dismissTitleID = titleID
 	return f.dismissErr
+}
+func (f *fakeWatchstateService) Recommendations(_ context.Context, _ auth.Principal, limit int) (watchstate.RecommendationPage, error) {
+	f.recommendationLimit = limit
+	return f.recommendationValue, f.recommendationErr
 }
 
 func TestResolveTitlePassesProviderSnapshot(t *testing.T) {
@@ -563,6 +570,35 @@ func TestContinueWatchingStopsWhenEffectiveSettingsFail(t *testing.T) {
 
 	if response.Code != http.StatusConflict || service.continueCalls != 0 {
 		t.Fatalf("settings failure response status=%d watchstate calls=%d", response.Code, service.continueCalls)
+	}
+}
+
+func TestRecommendationsPassLimitAndReturnLocalRanks(t *testing.T) {
+	service := &fakeWatchstateService{recommendationValue: watchstate.RecommendationPage{Items: []watchstate.Recommendation{{
+		Item:   watchstate.RecommendationTitle{ID: "00000000-0000-4000-8000-000000000101", MediaType: "movie", Title: "Local title", ProviderIDs: map[string]string{}},
+		Reason: "Because you like Drama", Score: 11.5,
+	}}}}
+	api := watchstateAPI(service)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/recommendations?limit=7", nil)
+	response := httptest.NewRecorder()
+
+	api.recommendations(response, request, auth.Principal{})
+
+	if response.Code != http.StatusOK || service.recommendationLimit != 7 || !strings.Contains(response.Body.String(), `"reason":"Because you like Drama"`) {
+		t.Fatalf("unexpected recommendations response status=%d limit=%d body=%s", response.Code, service.recommendationLimit, response.Body.String())
+	}
+}
+
+func TestRecommendationsRejectMalformedLimitBeforeService(t *testing.T) {
+	service := &fakeWatchstateService{}
+	api := watchstateAPI(service)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/recommendations?limit=not-a-number", nil)
+	response := httptest.NewRecorder()
+
+	api.recommendations(response, request, auth.Principal{})
+
+	if response.Code != http.StatusUnprocessableEntity || service.recommendationLimit != 0 {
+		t.Fatalf("unexpected malformed recommendation response status=%d calls=%d", response.Code, service.recommendationLimit)
 	}
 }
 

@@ -3832,6 +3832,262 @@ paths:
           $ref: "#/components/responses/ArtworkError"
         "502":
           $ref: "#/components/responses/ArtworkError"
+  /playback/device:
+    put:
+      summary: Publish this device's current playback presence
+      operationId: updatePlaybackDevice
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlaybackDeviceHeartbeatInput"
+      responses:
+        "200":
+          description: Canonical current-device presence.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackDevice"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /playback/devices:
+    get:
+      summary: List active playback devices for the selected profile
+      operationId: listPlaybackDevices
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Active devices belonging to the same account and selected profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackDeviceList"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /playback/devices/{sessionId}/commands:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      summary: Send a bounded playback command to another active device
+      operationId: sendPlaybackCommand
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlaybackCommandInput"
+      responses:
+        "201":
+          description: Queued command.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackCommand"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /playback/commands:
+    get:
+      summary: Poll unacknowledged commands for this device
+      operationId: listPlaybackCommands
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: after
+          in: query
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: Pending commands in ascending identifier order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackCommandList"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /playback/commands/{commandId}/ack:
+    parameters:
+      - name: commandId
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+          minimum: 1
+    post:
+      summary: Acknowledge a playback command
+      operationId: acknowledgePlaybackCommand
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Command acknowledged.
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /playback/rooms:
+    post:
+      summary: Start a synchronized playback room
+      operationId: createPlaybackRoom
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlaybackRoomCreateInput"
+      responses:
+        "201":
+          description: Room hosted by this session, including its join code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackRoom"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /playback/rooms/join:
+    post:
+      summary: Join a synchronized playback room
+      operationId: joinPlaybackRoom
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlaybackRoomJoinInput"
+      responses:
+        "200":
+          description: Joined room state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackRoom"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /playback/rooms/{roomId}:
+    parameters:
+      - name: roomId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      summary: Read and refresh membership in a synchronized playback room
+      operationId: getPlaybackRoom
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current room state and members.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackRoom"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+    put:
+      summary: Publish host playback state with optimistic concurrency
+      operationId: updatePlaybackRoom
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlaybackRoomUpdateInput"
+      responses:
+        "200":
+          description: Updated room state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackRoom"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+    delete:
+      summary: Leave a room or close it when called by the host
+      operationId: leavePlaybackRoom
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Membership removed or hosted room closed.
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
   /playback/sources:
     post:
       summary: List opaque playback source references for a device
@@ -4753,6 +5009,34 @@ paths:
         "401":
           $ref: "#/components/responses/Error"
         "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /recommendations:
+    get:
+      summary: Rank local catalog titles for the selected profile
+      description: Uses only metadata and watch-state signals already stored by this Rivune instance; no profile signal or candidate is sent to a recommendation service.
+      operationId: listLocalRecommendations
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+      responses:
+        "200":
+          description: Deterministically ranked local recommendations and human-readable reasons.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalRecommendationPage"
+        "401":
           $ref: "#/components/responses/Error"
         "409":
           $ref: "#/components/responses/Error"
@@ -9353,6 +9637,324 @@ components:
           maxItems: 100
           items:
             $ref: "#/components/schemas/TVLibraryMembership"
+    CoordinatedPlaybackItem:
+      type: object
+      additionalProperties: false
+      required: [titleId, mediaType, resourceId, title]
+      properties:
+        titleId:
+          type: string
+          format: uuid
+        mediaType:
+          type: string
+          enum: [movie, episode, video, tv]
+        resourceId:
+          type: string
+          minLength: 1
+          maxLength: 2048
+        sourceAddonId:
+          type: string
+          format: uuid
+        title:
+          type: string
+          minLength: 1
+          maxLength: 512
+        posterUrl:
+          type: string
+          maxLength: 4096
+    PlaybackDeviceState:
+      type: object
+      additionalProperties: false
+      required: [status, positionMilliseconds, durationMilliseconds]
+      properties:
+        status:
+          type: string
+          enum: [idle, playing, paused, ended]
+        item:
+          $ref: "#/components/schemas/CoordinatedPlaybackItem"
+        positionMilliseconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 604800000
+        durationMilliseconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 604800000
+        updatedAt:
+          type: string
+          format: date-time
+    PlaybackDeviceHeartbeatInput:
+      type: object
+      additionalProperties: false
+      required: [capabilities, state]
+      properties:
+        capabilities:
+          type: array
+          maxItems: 16
+          uniqueItems: true
+          items:
+            type: string
+            pattern: "^[a-z][a-z0-9_-]{0,31}$"
+        state:
+          $ref: "#/components/schemas/PlaybackDeviceState"
+    PlaybackDevice:
+      type: object
+      additionalProperties: false
+      required: [sessionId, deviceId, name, platform, capabilities, state, current, lastSeenAt]
+      properties:
+        sessionId:
+          type: string
+          format: uuid
+        deviceId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        platform:
+          type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+        state:
+          $ref: "#/components/schemas/PlaybackDeviceState"
+        current:
+          type: boolean
+        lastSeenAt:
+          type: string
+          format: date-time
+    PlaybackDeviceList:
+      type: object
+      additionalProperties: false
+      required: [devices]
+      properties:
+        devices:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlaybackDevice"
+    PlaybackCommandInput:
+      type: object
+      additionalProperties: false
+      required: [command]
+      description: load requires item and positionMilliseconds; seek requires only positionMilliseconds; play, pause, and stop accept neither.
+      properties:
+        command:
+          type: string
+          enum: [load, play, pause, seek, stop]
+        item:
+          $ref: "#/components/schemas/CoordinatedPlaybackItem"
+        positionMilliseconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 604800000
+    PlaybackCommand:
+      type: object
+      additionalProperties: false
+      required: [id, command, senderDeviceName, createdAt, expiresAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+          minimum: 1
+        command:
+          type: string
+          enum: [load, play, pause, seek, stop]
+        item:
+          $ref: "#/components/schemas/CoordinatedPlaybackItem"
+        positionMilliseconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 604800000
+        senderDeviceName:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+    PlaybackCommandList:
+      type: object
+      additionalProperties: false
+      required: [commands]
+      properties:
+        commands:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/PlaybackCommand"
+    PlaybackRoomCreateInput:
+      type: object
+      additionalProperties: false
+      required: [item, state, positionMilliseconds, durationMilliseconds]
+      properties:
+        item:
+          $ref: "#/components/schemas/CoordinatedPlaybackItem"
+        state:
+          type: string
+          enum: [playing, paused, ended]
+        positionMilliseconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 604800000
+        durationMilliseconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 604800000
+    PlaybackRoomJoinInput:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code:
+          type: string
+          minLength: 10
+          maxLength: 32
+    PlaybackRoomUpdateInput:
+      type: object
+      additionalProperties: false
+      required: [state, positionMilliseconds, durationMilliseconds, expectedVersion]
+      properties:
+        state:
+          type: string
+          enum: [playing, paused, ended]
+        positionMilliseconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 604800000
+        durationMilliseconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 604800000
+        expectedVersion:
+          type: integer
+          format: int64
+          minimum: 1
+    PlaybackRoomMember:
+      type: object
+      additionalProperties: false
+      required: [memberId, profile, deviceName, platform, role, current, joinedAt, lastSeenAt]
+      properties:
+        memberId:
+          type: string
+          format: uuid
+        profile:
+          type: string
+        deviceName:
+          type: string
+        platform:
+          type: string
+        role:
+          type: string
+          enum: [host, participant]
+        current:
+          type: boolean
+        joinedAt:
+          type: string
+          format: date-time
+        lastSeenAt:
+          type: string
+          format: date-time
+    PlaybackRoom:
+      type: object
+      additionalProperties: false
+      required: [id, item, state, positionMilliseconds, durationMilliseconds, version, updatedAt, expiresAt, members]
+      properties:
+        id:
+          type: string
+          format: uuid
+        joinCode:
+          type: string
+          pattern: "^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{10}$"
+        item:
+          $ref: "#/components/schemas/CoordinatedPlaybackItem"
+        state:
+          type: string
+          enum: [playing, paused, ended]
+        positionMilliseconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 604800000
+        durationMilliseconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 604800000
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        updatedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        members:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/PlaybackRoomMember"
+    LocalRecommendationTitle:
+      type: object
+      additionalProperties: false
+      required: [id, mediaType, providerIds]
+      properties:
+        id:
+          type: string
+          format: uuid
+        mediaType:
+          type: string
+        title:
+          type: string
+        posterUrl:
+          type: string
+        backgroundUrl:
+          type: string
+        releaseInfo:
+          type: string
+        resourceId:
+          type: string
+        resourceProvider:
+          type: string
+        sourceAddonId:
+          type: string
+          format: uuid
+        providerIds:
+          type: object
+          additionalProperties:
+            type: string
+    LocalRecommendation:
+      type: object
+      additionalProperties: false
+      required: [item, reason, score]
+      properties:
+        item:
+          $ref: "#/components/schemas/LocalRecommendationTitle"
+        reason:
+          type: string
+        score:
+          type: number
+          format: double
+    LocalRecommendationPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/LocalRecommendation"
     PlaybackMarkerList:
       type: object
       additionalProperties: false

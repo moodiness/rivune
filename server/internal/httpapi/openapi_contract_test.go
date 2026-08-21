@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/category"
 	"github.com/moodiness/rivune/server/internal/collection"
+	"github.com/moodiness/rivune/server/internal/coordination"
 	"github.com/moodiness/rivune/server/internal/instance"
 	"github.com/moodiness/rivune/server/internal/jellyfin"
 	"github.com/moodiness/rivune/server/internal/metadata"
@@ -850,6 +852,69 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/titles/custom-series/resolve", `{"sourceAddonId":"`+contractAddonID+`","sourceType":"anime","series":{"resourceId":"opaque","title":"Show"},"videos":[],"externalId":"canonical-leak"}`, false)
 	})
 
+	t.Run("local recommendations", func(t *testing.T) {
+		service := &fakeWatchstateService{recommendationValue: watchstate.RecommendationPage{Items: []watchstate.Recommendation{{
+			Item: watchstate.RecommendationTitle{
+				ID: contractTitleID, MediaType: "movie", Title: "Contract recommendation",
+				PosterURL:  "/api/v1/artwork/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				ResourceID: "opaque-title", ResourceProvider: "tmdb", ProviderIDs: map[string]string{"tmdb": "42"},
+			},
+			Reason: "Because you like Drama", Score: 12.5,
+		}}}}
+		api := watchstateAPI(service)
+		api.auth = &fakeAuthService{principal: contractPrincipal()}
+		request := authenticatedContractRequest(http.MethodGet, "/api/v1/recommendations?limit=12", nil)
+		response := serveContractRequest(t, api, request, http.StatusOK)
+		validateContractResponse(t, document, "/recommendations", nil, request, response)
+	})
+
+	t.Run("playback coordination", func(t *testing.T) {
+		now := time.Date(2026, time.August, 21, 20, 0, 0, 0, time.UTC)
+		item := coordination.PlaybackItem{TitleID: contractTitleID, MediaType: "movie", ResourceID: "opaque", Title: "Contract movie"}
+		service := &fakeCoordinationService{
+			device:  coordination.Device{SessionID: contractSessionID, DeviceID: contractDeviceID, Name: "TV", Platform: "tvos", Capabilities: []string{"remote-control"}, State: coordination.DeviceState{Status: "paused", Item: &item, PositionMilliseconds: 1000, DurationMilliseconds: 10000, UpdatedAt: now}, Current: true, LastSeenAt: now},
+			command: coordination.Command{ID: 10, Command: "play", SenderDeviceName: "Phone", CreatedAt: now, ExpiresAt: now.Add(2 * time.Minute)},
+			room:    coordination.Room{ID: "88888888-8888-4888-8888-888888888888", JoinCode: "23456789AB", Item: item, State: "paused", PositionMilliseconds: 1000, DurationMilliseconds: 10000, Version: 1, UpdatedAt: now, ExpiresAt: now.Add(8 * time.Hour), Members: []coordination.RoomMember{{MemberID: "99999999-9999-4999-8999-999999999999", Profile: "Viewer", DeviceName: "Phone", Platform: "ios", Role: "host", Current: true, JoinedAt: now, LastSeenAt: now}}},
+		}
+		api := testAPI(&fakeInstanceService{})
+		api.coordination = service
+		api.auth = &fakeAuthService{principal: contractPrincipal()}
+		roomPath := "/api/v1/playback/rooms/88888888-8888-4888-8888-888888888888"
+		requests := []struct {
+			method, target, contractPath, body string
+			status                             int
+		}{
+			{http.MethodPut, "/api/v1/playback/device", "/playback/device", `{"capabilities":["remote-control"],"state":{"status":"paused","item":{"titleId":"` + contractTitleID + `","mediaType":"movie","resourceId":"opaque","title":"Contract movie"},"positionMilliseconds":1000,"durationMilliseconds":10000}}`, http.StatusOK},
+			{http.MethodGet, "/api/v1/playback/devices", "/playback/devices", "", http.StatusOK},
+			{http.MethodPost, "/api/v1/playback/devices/" + contractSessionID + "/commands", "/playback/devices/{sessionId}/commands", `{"command":"play"}`, http.StatusCreated},
+			{http.MethodGet, "/api/v1/playback/commands?after=9", "/playback/commands", "", http.StatusOK},
+			{http.MethodPost, "/api/v1/playback/commands/10/ack", "/playback/commands/{commandId}/ack", "", http.StatusNoContent},
+			{http.MethodPost, "/api/v1/playback/rooms", "/playback/rooms", `{"item":{"titleId":"` + contractTitleID + `","mediaType":"movie","resourceId":"opaque","title":"Contract movie"},"state":"paused","positionMilliseconds":1000,"durationMilliseconds":10000}`, http.StatusCreated},
+			{http.MethodPost, "/api/v1/playback/rooms/join", "/playback/rooms/join", `{"code":"23456789AB"}`, http.StatusOK},
+			{http.MethodGet, roomPath, "/playback/rooms/{roomId}", "", http.StatusOK},
+			{http.MethodPut, roomPath, "/playback/rooms/{roomId}", `{"state":"playing","positionMilliseconds":2000,"durationMilliseconds":10000,"expectedVersion":1}`, http.StatusOK},
+			{http.MethodDelete, roomPath, "/playback/rooms/{roomId}", "", http.StatusNoContent},
+		}
+		for _, test := range requests {
+			request := authenticatedContractRequest(test.method, test.target, bytes.NewBufferString(test.body))
+			if test.body != "" {
+				request.Header.Set("Content-Type", "application/json")
+			}
+			response := serveContractRequest(t, api, request, test.status)
+			parameters := map[string]string(nil)
+			if strings.Contains(test.contractPath, "{sessionId}") {
+				parameters = map[string]string{"sessionId": contractSessionID}
+			}
+			if strings.Contains(test.contractPath, "{commandId}") {
+				parameters = map[string]string{"commandId": "10"}
+			}
+			if strings.Contains(test.contractPath, "{roomId}") {
+				parameters = map[string]string{"roomId": service.room.ID}
+			}
+			validateContractResponse(t, document, test.contractPath, parameters, request, response)
+		}
+	})
+
 	t.Run("operations", func(t *testing.T) {
 		nextRun := time.Date(2026, time.August, 3, 2, 0, 0, 0, time.UTC)
 		lastStarted := nextRun.Add(-24 * time.Hour)
@@ -1101,3 +1166,41 @@ func contractUUIDArray(count int) string {
 func contractCollectionAssignmentBody(assignments string) string {
 	return `{"title":"Contract collection","heroEnabled":false,"pinToTop":false,"focusGlowEnabled":false,"viewMode":"rows","folderCoverShape":"poster","folders":[{"title":"Featured","tileShape":"poster","focusGifEnabled":false,"hideTitle":false,"sources":[{"kind":"tmdb","title":"Popular","tmdb":{"sourceType":"discover","mediaType":"movie","sort":"popularity.desc","filters":{}}}]}]` + assignments + `}`
 }
+
+type fakeCoordinationService struct {
+	device  coordination.Device
+	command coordination.Command
+	room    coordination.Room
+}
+
+func (f *fakeCoordinationService) Heartbeat(context.Context, auth.Principal, coordination.DeviceHeartbeatInput) (coordination.Device, error) {
+	return f.device, nil
+}
+func (f *fakeCoordinationService) Devices(context.Context, auth.Principal) (coordination.DeviceList, error) {
+	return coordination.DeviceList{Devices: []coordination.Device{f.device}}, nil
+}
+func (f *fakeCoordinationService) SendCommand(context.Context, auth.Principal, string, coordination.CommandInput) (coordination.Command, error) {
+	return f.command, nil
+}
+func (f *fakeCoordinationService) Commands(context.Context, auth.Principal, int64) (coordination.CommandList, error) {
+	return coordination.CommandList{Commands: []coordination.Command{f.command}}, nil
+}
+func (f *fakeCoordinationService) AcknowledgeCommand(context.Context, auth.Principal, int64) error {
+	return nil
+}
+func (f *fakeCoordinationService) CreateRoom(context.Context, auth.Principal, coordination.CreateRoomInput) (coordination.Room, error) {
+	return f.room, nil
+}
+func (f *fakeCoordinationService) JoinRoom(context.Context, auth.Principal, string) (coordination.Room, error) {
+	return f.room, nil
+}
+func (f *fakeCoordinationService) Room(context.Context, auth.Principal, string) (coordination.Room, error) {
+	return f.room, nil
+}
+func (f *fakeCoordinationService) UpdateRoom(context.Context, auth.Principal, string, coordination.UpdateRoomInput) (coordination.Room, error) {
+	return f.room, nil
+}
+func (f *fakeCoordinationService) LeaveRoom(context.Context, auth.Principal, string) error {
+	return nil
+}
+func (f *fakeCoordinationService) RunScheduled(context.Context) error { return nil }
