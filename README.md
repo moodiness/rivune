@@ -68,11 +68,27 @@ The Windows project includes a native responsive WinUI 3 application plus the re
 
 The Windows executables are portable, but local state is not stored beside them. The last server address and device-only preferences are kept under `%LOCALAPPDATA%\Rivune\` and may be backed up while Rivune is closed. Session files under `%LOCALAPPDATA%\Rivune\credentials\` are encrypted with Windows DPAPI for the current Windows user; they are not a portable backup and normally cannot be restored under another account or Windows installation. After a migration, pair or sign in again. Profiles, library, progress, and other account data remain on the self-hosted Rivune server. The Windows client has no installer or Store package. Official Windows executables are unsigned. Automatic replacement accepts only the exact GitHub asset URL recorded by the release manifest and verifies the manifest `ProductVersion`, size, and SHA-256 before starting and again after staging; it cannot authenticate a publisher independently of GitHub. SmartScreen may warn. Keep the executable in a writable local folder because automatic replacement cannot update a read-only location such as a protected `Program Files` directory.
 
+### Direct application downloads
+
+The public [Rivune applications page](https://moodiness.github.io/rivune/) detects the current platform, links each stable GitHub Release asset directly, and displays its byte-derived size and SHA-256 fingerprint. It includes Android, iPhone/iPad, Apple TV, Apple Vision Pro, universal macOS, and x64/ARM64 Windows builds. Apple device archives, the macOS app, and Windows executables are intentionally unsigned; read the per-platform warning before installing. The page never receives signing credentials or private server data.
+
 ### Android app
 
 Official Android releases provide a universal APK for phones, tablets, and Android TV. Beginning with v1.8.3, releases use the stable filename `Rivune-Android.apk`; the already-published v1.8.2 release retains `rivune-android-1.8.2.apk`. Download the APK from the matching [GitHub Release](https://github.com/moodiness/rivune/releases), compare its SHA-256 with the digest GitHub publishes for that asset, and complete Android's normal package-installation prompt. The public application ID is `io.rivune.app` and Android 8.0 or newer is required.
 
 Beginning with the first direct Apple release, each matching GitHub Release contains exactly eight assets: the stable Android `Rivune-Android.apk`, unsigned device archives `Rivune-iOS-unsigned.ipa`, `Rivune-tvOS-unsigned.ipa`, and `Rivune-visionOS-unsigned.ipa`, the unsigned universal macOS disk image `Rivune-macOS.dmg`, the sole schema-v2 `rivune-update.json` feed, and x64/ARM64 Windows executables. The unsigned IPA files contain no Apple account, certificate, provisioning profile, or valid code signature; stock iOS, tvOS, and visionOS will not install them as downloaded. A recipient must sign the app with a provisioning identity authorized for that device, typically by rebuilding this open-source project with Xcode or by using lawful personal sideloading tooling. The unsigned macOS app likewise triggers Gatekeeper unless the recipient explicitly permits it or builds it locally. The installed Android and Windows apps check the update feed at most once every 24 hours and also offer a manual check in Settings. Neither client contains a GitHub token. An Android update is downloaded only after consent, then its size, SHA-256, package identity, version code, and signing certificate are verified before Android's package installer is opened.
+
+To build, provision, sign, and install a device app with an Apple account already configured in Xcode, connect the device, enable Developer Mode, and list its identifier with `xcrun devicectl list devices`. Then run, for example:
+
+```sh
+clients/apple/Scripts/sign-and-install.sh \
+  --platform ios \
+  --team-id ABCDE12345 \
+  --bundle-id com.example.rivune \
+  --device-id 00008110-001234567890001E
+```
+
+Use `--platform tvos` or `--platform visionos` with a unique reverse-DNS bundle identifier for those targets. The script passes the selected development team and bundle identifier directly to Xcode, lets automatic provisioning register the connected device when permitted, verifies the resulting signature and embedded provisioning profile, and installs with `devicectl`. It deliberately accepts no Apple password, private key, certificate, or provisioning profile: those remain in Xcode and the local macOS Keychain. `--dry-run` validates the arguments and prints the local commands without accessing an Apple account or device.
 
 Android Settings keeps device-specific startup, preferred-player, motion, language, accent, frame-rate matching, picture-format, and Wi-Fi/Ethernet versus mobile-network quality choices local to the device. Preferred-player choices include asking every time, Rivune automatic (AndroidX Media3 first with an embedded mpv fallback for unsupported media), explicit Media3, explicit mpv, and detected external players. Profile controls display the effective Rivune server value and its provenance, support clearing a profile override to inherit the server policy, and cover resolution, direct play, automatic next episode, audio, subtitles, forced subtitles, and metadata language. The effective transcoding permission remains visible but read-only because only a global administrator may change that server policy. Internal episode playback exposes a one-shot Next action and starts the next episode after a natural end when the effective profile setting allows it; an external player continues only after returning an explicit completed result. About shows the connected server/build details and can copy or export a bounded in-memory diagnostic report through Android's document picker; the report excludes credentials, profile/media data, URL paths, queries, and raw exception text.
 
@@ -81,6 +97,7 @@ cd web && npm ci && npm run build
 cd ../server && go test ./...
 cd ../clients/update && go test ./...
 cd ../apple && swift test
+Scripts/test-sign-and-install.sh
 cd ../android && ./gradlew :rivune-api:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
 cd ../windows && dotnet test Rivune.Windows.slnx --configuration Release --nologo
 ```

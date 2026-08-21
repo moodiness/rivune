@@ -42,6 +42,10 @@ The release-candidate workflow also runs `clients/apple/Scripts/package-direct-r
 
 Each Apple application embeds `Legal/NOTICE.txt`, Rivune's Apache-2.0 terms, MPVKit's LGPL-3.0 terms and incorporated GPL-3.0 terms, mpv/FFmpeg LGPL-2.1 terms, and the pinned mpv/FFmpeg licensing notices. `NOTICE` remains the attribution and source-location index; complete license texts remain separate files rather than being pasted into `NOTICE`.
 
+The public applications page at `https://moodiness.github.io/rivune/` reads the latest stable GitHub Release metadata directly from GitHub's public API. The schema-v2 `rivune-update.json` must therefore include all seven application packages—Android, iOS, tvOS, visionOS, macOS, Windows x64, and Windows ARM64—with the exact release URL, file name, size, SHA-256, architecture, minimum OS, and signing state. GitHub Pages builds the same `web/src/pages/Applications.tsx` surface served at `/apps` by every Rivune instance; it receives no release or signing secret.
+
+Apple device archives stay unsigned in public releases. Local installation is handled only by `clients/apple/Scripts/sign-and-install.sh`: it builds from source with a caller-selected Xcode development team, unique bundle identifier, and connected-device identifier; verifies the generated code signature and embedded provisioning profile; then calls `xcrun devicectl device install app`. The script has no credential or provisioning-profile input and writes signed products only beneath a temporary directory removed on exit. Its deterministic argument validation and emitted-command contract are checked by `clients/apple/Scripts/test-sign-and-install.sh`.
+
 
 The global Android/Windows update-manifest contract has no secret dependency and can be checked locally with:
 
