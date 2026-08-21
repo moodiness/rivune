@@ -1,17 +1,18 @@
-# Rivune v1.9.1
+# Rivune v1.10.0
 
 ## Highlights
 
-- This maintenance release refreshes supported dependencies across the server build, web client, Android client, Windows client, and GitHub release pipeline.
-- The container frontend build now uses Node.js 24 LTS instead of the non-LTS Node.js 26 proposal.
-- The web stack moves to Vite 8 and refreshes HLS.js, React tooling, and icons; Android refreshes Compose, Kotlin, Gradle, and OkHttp 5.
-- Release automation updates its pinned build, language, and artifact actions while preserving immutable inputs and the existing publication policy.
-- No public protocol, database schema, configuration, or user workflow changes are introduced by this release.
+- Android, Apple, and Windows clients can now discover nearby self-hosted Rivune servers through the opt-in `_rivune._tcp` DNS-SD service. Each client shows the announced origin and transport security before an explicit connection; manual address entry remains available.
+- The public Rivune applications page is now available in English and French with platform detection, immutable GitHub release links, QR codes, complete SHA-256 fingerprints, and platform-specific installation warnings.
+- Apple users can generate a local command for iOS, tvOS, or visionOS that checks out this exact release, builds with their selected team and bundle identifier, verifies the signature and provisioning profile, and installs on the connected device. Apple credentials and signing material never leave Xcode and the local Keychain.
+- The schema-v2 update manifest and release pipeline now describe, fingerprint, and validate all seven application packages while preserving the exact eight-asset release contract.
+- Horizontal web carousels retain momentum when Chromium rounds subpixel scroll positions, eliminating premature drag stops.
 - The complete backend, browser, Android, Apple, Windows, migration, proxy, and multi-architecture container gates run before publication.
 
 ## Apple installation
 
 - `Rivune-iOS-unsigned.ipa`, `Rivune-tvOS-unsigned.ipa`, and `Rivune-visionOS-unsigned.ipa` must be re-signed with an identity and provisioning profile authorized for the destination device. Stock devices cannot install them as downloaded.
+- The applications page generates the exact `clients/apple/Scripts/sign-and-install.sh` command for this release. The script accepts only the platform, development team, unique bundle identifier, and connected-device identifier; it accepts no password, private key, certificate, or provisioning profile.
 - `Rivune-macOS.dmg` contains an unsigned universal arm64/x86_64 application. Gatekeeper may require explicit local approval; rebuilding from source with Xcode remains the recommended trusted path.
 - Every Apple artifact embeds Rivune, MPVKit, mpv, and FFmpeg licensing notices.
 
@@ -29,17 +30,18 @@
 
 ## Upgrade notes
 
-- This release adds no database migration and requires no new server environment variable. Back up PostgreSQL and the complete encryption keyring before every upgrade.
-- Existing operators can set `RIVUNE_VERSION=1.9.1`, pull, and recreate only the Rivune service. Fresh Compose deployments now default to the immutable `1.9.1` image tag.
+- This release adds no database migration or required server environment variable. Back up PostgreSQL and the complete encryption keyring before every upgrade.
+- Automatic LAN discovery is optional and requires Linux host networking. Existing operators can set `RIVUNE_DISCOVERY_URL` to their reachable HTTPS or literal private-IP HTTP origin and optionally set `RIVUNE_DISCOVERY_NAME`; leave the URL empty to keep discovery disabled and use manual server entry.
+- Existing operators can set `RIVUNE_VERSION=1.10.0`, pull, and recreate only the Rivune service. Fresh Compose deployments now default to the immutable `1.10.0` image tag.
 - GitHub publishes exactly eight release assets: `Rivune-Android.apk`, the three unsigned IPA files, `Rivune-macOS.dmg`, `rivune-update.json`, `Rivune-x64.exe`, and `Rivune-arm64.exe`.
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.9.1`
-- `ghcr.io/moodiness/rivune:1.9`
+- `ghcr.io/moodiness/rivune:1.10.0`
+- `ghcr.io/moodiness/rivune:1.10`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 - Provenance and SBOM attestations are published for both runnable platforms.
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.9.0...v1.9.1
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.9.1...v1.10.0
