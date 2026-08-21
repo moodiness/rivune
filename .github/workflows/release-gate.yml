@@ -279,10 +279,10 @@ jobs:
             -p:IncludeAllContentForSelfExtract=true `
             -p:SelfContained=true `
             -p:WindowsAppSDKSelfContained=true `
-            -p:Version=1.10.0 `
-            -p:AssemblyVersion=1.10.0.0 `
-            -p:FileVersion=1.10.0.0 `
-            -p:InformationalVersion=1.10.0 `
+            -p:Version=1.10.1 `
+            -p:AssemblyVersion=1.10.1.0 `
+            -p:FileVersion=1.10.1.0 `
+            -p:InformationalVersion=1.10.1 `
             -p:IncludeSourceRevisionInInformationalVersion=false
           if ($LASTEXITCODE -ne 0) { throw "Windows $env:PLATFORM portable publish failed." }
 
@@ -314,7 +314,7 @@ jobs:
             if ($null -ne $reader) { $reader.Dispose() } else { $stream.Dispose() }
           }
           $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($executable)
-          if ($version.FileVersion -ne '1.10.0.0' -or $version.ProductVersion -ne '1.10.0') {
+          if ($version.FileVersion -ne '1.10.1.0' -or $version.ProductVersion -ne '1.10.1') {
             throw "Portable executable version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
           }
           if ((Get-AuthenticodeSignature -FilePath $executable).Status -ne 'NotSigned') {
@@ -338,6 +338,8 @@ jobs:
           persist-credentials: false
       - name: Test private POSIX environment-file creation
         run: bash scripts/create-env_test.sh
+      - name: Test operator CLI and macOS discovery delegation
+        run: bash scripts/rivune_test.sh
       - name: Validate CPU-only and optional AMD/Intel Compose modes
         env:
           RIVUNE_DATABASE_PASSWORD: compose-validation-database-password
@@ -384,8 +386,10 @@ jobs:
             .services.rivune.devices == [{"source":"/dev/dri/renderD129","target":"/dev/dri/renderD128","permissions":"rwm"}] and
             .services.rivune.group_add == ["109"]
           ' >/dev/null
-      - name: Test PostgreSQL backup hardening
-        run: bash scripts/postgres-backup_test.sh
+      - name: Test PostgreSQL backup hardening and scheduling
+        run: |
+          bash scripts/postgres-backup_test.sh
+          bash scripts/postgres-backup-scheduler_test.sh
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
       - name: Build testable linux/amd64 image

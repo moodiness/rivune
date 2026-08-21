@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Most cases exercise platform-neutral behavior and inject command doubles.
+# The dedicated macOS case overrides this value explicitly.
+export OSTYPE=linux-gnu
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_DIR="$(mktemp -d)"
@@ -17,6 +20,8 @@ prepare_case() {
   local name="$1"
   local case_dir="${TEST_DIR}/${name}"
   mkdir -p "${case_dir}/root/scripts" "${case_dir}/bin" "${case_dir}/work"
+  cp "${ROOT_DIR}/scripts/macos-discovery.sh" "${case_dir}/root/scripts/macos-discovery.sh"
+  chmod +x "${case_dir}/root/scripts/macos-discovery.sh"
   cp "${ROOT_DIR}/rivune" "${case_dir}/root/rivune"
   cp "${ROOT_DIR}/.env.example" "${case_dir}/root/.env.example"
   chmod +x "${case_dir}/root/rivune"
@@ -249,6 +254,52 @@ for hostile_version in latest '../latest' '1.6' 'v1.6.0' '1.6.0;touch-pwned' $'1
   version_index=$((version_index + 1))
 done
 
+macos_case="$(prepare_case macos-discovery)"
+write_environment "${macos_case}/root"
+export ARGV_LOG="${macos_case}/argv.log"
+cat > "${macos_case}/bin/docker" <<'FAKE_MACOS_DOCKER'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '<%s>\n' "$@" >> "${ARGV_LOG}"
+FAKE_MACOS_DOCKER
+cat > "${macos_case}/root/scripts/macos-discovery.sh" <<'FAKE_MACOS_DISCOVERY'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '<%s>\n' "$@" >> "${ARGV_LOG}"
+FAKE_MACOS_DISCOVERY
+chmod +x "${macos_case}/bin/docker" "${macos_case}/root/scripts/macos-discovery.sh"
+OSTYPE=darwin25 PATH="${macos_case}/bin:${PATH}" "${macos_case}/root/rivune" up
+cat > "${macos_case}/expected" <<'EXPECTED_MACOS_UP'
+<compose>
+<--env-file>
+<.env>
+<-f>
+<compose.yaml>
+<up>
+<-d>
+<start>
+<https://media.example.com>
+<Rivune>
+<1.6.0>
+EXPECTED_MACOS_UP
+assert_file_equals "${macos_case}/expected" "${ARGV_LOG}" 'macOS up and discovery argv'
+: > "${ARGV_LOG}"
+OSTYPE=darwin25 PATH="${macos_case}/bin:${PATH}" "${macos_case}/root/rivune" down
+cat > "${macos_case}/expected" <<'EXPECTED_MACOS_DOWN'
+<compose>
+<--env-file>
+<.env>
+<-f>
+<compose.yaml>
+<down>
+<stop>
+EXPECTED_MACOS_DOWN
+assert_file_equals "${macos_case}/expected" "${ARGV_LOG}" 'macOS down and discovery argv'
+: > "${ARGV_LOG}"
+OSTYPE=darwin25 PATH="${macos_case}/bin:${PATH}" "${macos_case}/root/rivune" logs discovery
+printf '<logs>\n' > "${macos_case}/expected"
+assert_file_equals "${macos_case}/expected" "${ARGV_LOG}" 'macOS discovery logs argv'
+
 wrapper_case="$(prepare_case wrappers)"
 write_environment "${wrapper_case}/root"
 export ARGV_LOG="${wrapper_case}/argv.log"
@@ -288,9 +339,10 @@ if PATH="${wrapper_case}/bin:${PATH}" "${wrapper_case}/root/rivune" logs 'postgr
   fail 'logs accepted an unrecognized service'
 fi
 
-for delegated in backup verify-backup restore; do
+for delegated in backup backup-scheduler verify-backup restore; do
   case "${delegated}" in
     backup) helper=postgres-backup.sh; args=(archive.dump) ;;
+    backup-scheduler) helper=postgres-backup-scheduler.sh; args=(--once backups) ;;
     verify-backup) helper=postgres-verify-backup.sh; args=(--expect-backup-id 0123456789abcdef0123456789abcdef archive.dump) ;;
     restore) helper=postgres-restore.sh; args=(--allow-rollback fedcba9876543210fedcba9876543210 archive.dump) ;;
   esac
@@ -327,7 +379,7 @@ EXPECTED_ENV
 done
 
 help_output="$("${ROOT_DIR}/rivune" help)"
-for command in setup up down restart pull status logs doctor backup verify-backup restore help; do
+for command in setup up down restart pull status logs doctor backup backup-scheduler verify-backup restore help; do
   [[ "${help_output}" == *"${command}"* ]] || fail "help omitted ${command}"
 done
 [[ "${help_output}" == *'setup --version X.Y.Z [--public-url HTTPS_OR_LOCAL_HTTP_ORIGIN] [--discovery-name NAME]'* ]] || \
