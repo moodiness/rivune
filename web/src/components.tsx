@@ -364,17 +364,23 @@ export function HorizontalDragRow({
     if (typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     let velocity = Math.max(-2.5, Math.min(2.5, initialVelocity));
     let previousTime = performance.now();
+    // Preserve subpixel travel across frames because some browsers expose integer scrollLeft values.
+    let intendedScrollLeft = element.scrollLeft;
     const advance = (time: number) => {
       if (typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
         momentumFrame.current = 0;
         return;
       }
-      const elapsed = Math.min(32, time - previousTime);
+      const elapsed = Math.min(32, Math.max(0, time - previousTime));
       previousTime = time;
       const previousScrollLeft = element.scrollLeft;
-      element.scrollLeft += velocity * elapsed;
+      intendedScrollLeft += velocity * elapsed;
+      element.scrollLeft = intendedScrollLeft;
+      const currentScrollLeft = element.scrollLeft;
+      const blocked = currentScrollLeft === previousScrollLeft && Math.abs(intendedScrollLeft - previousScrollLeft) >= 1;
+      if (currentScrollLeft !== previousScrollLeft) intendedScrollLeft = currentScrollLeft;
       velocity *= Math.pow(0.94, elapsed / (1000 / 60));
-      if (Math.abs(velocity) < 0.02 || element.scrollLeft === previousScrollLeft) {
+      if (Math.abs(velocity) < 0.02 || blocked) {
         momentumFrame.current = 0;
         return;
       }
