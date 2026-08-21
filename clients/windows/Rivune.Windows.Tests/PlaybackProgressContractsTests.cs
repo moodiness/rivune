@@ -202,6 +202,40 @@ public sealed class PlaybackProgressContractsTests
         Assert.True(resolveBody.RootElement.GetProperty("externalPlayer").GetBoolean());
     }
 
+    [Fact]
+    public async Task CoordinationAndRecommendationsUseRequiredRoutesAndBodies()
+    {
+        var handler = new CoordinationContractHandler();
+        using var client = CreateClient(handler);
+        var token = TestContext.Current.CancellationToken;
+        var sessionId = Guid.Parse("77777777-7777-4777-8777-777777777777");
+        var roomId = Guid.Parse("88888888-8888-4888-8888-888888888888");
+        var item = new CoordinatedPlaybackItem { TitleId = TitleId, MediaType = "movie", ResourceId = "opaque", Title = "Movie" };
+
+        await client.UpdatePlaybackDeviceAsync(new PlaybackDeviceHeartbeatInput { Capabilities = ["remote-control"], State = new PlaybackDeviceState { Status = "paused", Item = item, PositionMilliseconds = 1000, DurationMilliseconds = 10000 } }, token);
+        await client.GetPlaybackDevicesAsync(token);
+        await client.SendPlaybackCommandAsync(sessionId, new PlaybackCommandInput { Command = "load", Item = item, PositionMilliseconds = 1000 }, token);
+        await client.GetPlaybackCommandsAsync(9, token);
+        await client.AcknowledgePlaybackCommandAsync(10, token);
+        await client.CreatePlaybackRoomAsync(new PlaybackRoomCreateInput { Item = item, State = "paused", PositionMilliseconds = 1000, DurationMilliseconds = 10000 }, token);
+        await client.JoinPlaybackRoomAsync("23456789AB", token);
+        await client.GetPlaybackRoomAsync(roomId, token);
+        await client.UpdatePlaybackRoomAsync(roomId, new PlaybackRoomUpdateInput { State = "playing", PositionMilliseconds = 2000, DurationMilliseconds = 10000, ExpectedVersion = 1 }, token);
+        await client.LeavePlaybackRoomAsync(roomId, token);
+        var recommendations = await client.GetLocalRecommendationsAsync(12, token);
+
+        Assert.Equal("Because you like Drama", Assert.Single(recommendations.Items).Reason);
+        AssertRequest(handler, HttpMethod.Put, "/api/v1/playback/device", "");
+        AssertRequest(handler, HttpMethod.Get, "/api/v1/playback/devices", "");
+        AssertRequest(handler, HttpMethod.Post, $"/api/v1/playback/devices/{sessionId:D}/commands", "");
+        AssertRequest(handler, HttpMethod.Get, "/api/v1/playback/commands", "after=9");
+        AssertRequest(handler, HttpMethod.Post, "/api/v1/playback/commands/10/ack", "");
+        AssertRequest(handler, HttpMethod.Post, "/api/v1/playback/rooms", "");
+        AssertRequest(handler, HttpMethod.Post, "/api/v1/playback/rooms/join", "");
+        Assert.Equal(3, handler.Requests.Count(request => request.Path == $"/api/v1/playback/rooms/{roomId:D}"));
+        AssertRequest(handler, HttpMethod.Get, "/api/v1/recommendations", "limit=12");
+    }
+
     private static CapturedRequest AssertRequest(
         ContractHandler handler,
         HttpMethod method,
@@ -217,7 +251,7 @@ public sealed class PlaybackProgressContractsTests
     private static RivuneApiClient CreateClient(HttpMessageHandler handler) =>
         new("https://rivune.test", handler, new FixedCredentialStore());
 
-    private sealed class ContractHandler(
+    private class ContractHandler(
         Func<HttpRequestMessage, CancellationToken, HttpResponseMessage?>? response = null) : HttpMessageHandler
     {
         public List<CapturedRequest> Requests { get; } = [];
@@ -243,28 +277,51 @@ public sealed class PlaybackProgressContractsTests
                 return custom;
             }
 
-            return request.RequestUri.AbsolutePath switch
-            {
-                "/api/v1/metadata/series/11111111-1111-4111-8111-111111111111" => JsonResponse("""{"id":"11111111-1111-4111-8111-111111111111","mediaType":"series","name":"Series","originalName":"Series","originalLanguage":"en","overview":"","genres":[],"cast":[],"voteAverage":0,"voteCount":0,"seasons":[],"aliases":[],"episodeOrders":[],"selectedEpisodeOrderId":"9876543210","mappingProvider":"tvdb","externalIds":{}}"""),
-                "/api/v1/playback/markers" => JsonResponse("""{"markers":[{"type":"intro","startSeconds":1.5,"endSeconds":2.5,"confidence":1,"submissionCount":1}]}"""),
-                "/api/v1/playback/sources" => JsonResponse("""{"sources":[{"id":"stream-1","sourceRef":"opaque-source-reference","stableIdentity":"stable-stream-1","addonId":"22222222-2222-4222-8222-222222222222","manifestId":"manifest","streamIndex":0,"name":"External","protocol":"external","mode":"external","expiresAt":"2099-01-01T00:00:00Z"}],"providerErrors":[]}"""),
-                "/api/v1/playback/prepare" => JsonResponse("""{"sourceRef":"opaque-source-reference","mode":"direct","protocol":"http","subtitleCount":0,"expiresAt":"2099-01-01T00:00:00Z"}"""),
-                "/api/v1/playback/resolve" => JsonResponse("""{"id":"44444444-4444-4444-8444-444444444444","selectedSourceId":"stream-1","sources":[],"subtitles":[],"providerErrors":[],"expiresAt":"2099-01-01T00:00:00Z"}"""),
-                "/api/v1/progress/batch" => JsonResponse("""{"items":[{"titleId":"11111111-1111-4111-8111-111111111111","progress":null}]}"""),
-                "/api/v1/titles/watched/batch" => JsonResponse($$"""{"items":[{"titleId":"{{TitleId:D}}","progress":{{ProgressJson(5)}}}]}"""),
-                "/api/v1/continue-watching" => JsonResponse("""{"items":[]}"""),
-                _ when request.Method == HttpMethod.Delete && request.RequestUri.AbsolutePath.StartsWith("/api/v1/continue-watching/", StringComparison.Ordinal) => new HttpResponseMessage(HttpStatusCode.NoContent),
-                _ when request.Method == HttpMethod.Delete && request.RequestUri.AbsolutePath.StartsWith("/api/v1/progress/", StringComparison.Ordinal) => new HttpResponseMessage(HttpStatusCode.NoContent),
-                _ => JsonResponse(ProgressJson(5)),
-            };
+            return DefaultResponse(request);
         }
+
+        protected virtual HttpResponseMessage DefaultResponse(HttpRequestMessage request) => request.RequestUri!.AbsolutePath switch
+        {
+            "/api/v1/metadata/series/11111111-1111-4111-8111-111111111111" => JsonResponse("""{"id":"11111111-1111-4111-8111-111111111111","mediaType":"series","name":"Series","originalName":"Series","originalLanguage":"en","overview":"","genres":[],"cast":[],"voteAverage":0,"voteCount":0,"seasons":[],"aliases":[],"episodeOrders":[],"selectedEpisodeOrderId":"9876543210","mappingProvider":"tvdb","externalIds":{}}"""),
+            "/api/v1/playback/markers" => JsonResponse("""{"markers":[{"type":"intro","startSeconds":1.5,"endSeconds":2.5,"confidence":1,"submissionCount":1}]}"""),
+            "/api/v1/playback/sources" => JsonResponse("""{"sources":[{"id":"stream-1","sourceRef":"opaque-source-reference","stableIdentity":"stable-stream-1","addonId":"22222222-2222-4222-8222-222222222222","manifestId":"manifest","streamIndex":0,"name":"External","protocol":"external","mode":"external","expiresAt":"2099-01-01T00:00:00Z"}],"providerErrors":[]}"""),
+            "/api/v1/playback/prepare" => JsonResponse("""{"sourceRef":"opaque-source-reference","mode":"direct","protocol":"http","subtitleCount":0,"expiresAt":"2099-01-01T00:00:00Z"}"""),
+            "/api/v1/playback/resolve" => JsonResponse("""{"id":"44444444-4444-4444-8444-444444444444","selectedSourceId":"stream-1","sources":[],"subtitles":[],"providerErrors":[],"expiresAt":"2099-01-01T00:00:00Z"}"""),
+            "/api/v1/progress/batch" => JsonResponse("""{"items":[{"titleId":"11111111-1111-4111-8111-111111111111","progress":null}]}"""),
+            "/api/v1/titles/watched/batch" => JsonResponse($$"""{"items":[{"titleId":"{{TitleId:D}}","progress":{{ProgressJson(5)}}}]}"""),
+            "/api/v1/continue-watching" => JsonResponse("""{"items":[]}"""),
+            _ when request.Method == HttpMethod.Delete && request.RequestUri.AbsolutePath.StartsWith("/api/v1/continue-watching/", StringComparison.Ordinal) => new HttpResponseMessage(HttpStatusCode.NoContent),
+            _ when request.Method == HttpMethod.Delete && request.RequestUri.AbsolutePath.StartsWith("/api/v1/progress/", StringComparison.Ordinal) => new HttpResponseMessage(HttpStatusCode.NoContent),
+            _ => JsonResponse(ProgressJson(5)),
+        };
     }
 
+
+    private sealed class CoordinationContractHandler : ContractHandler
+    {
+        protected override HttpResponseMessage DefaultResponse(HttpRequestMessage request) => request.RequestUri!.AbsolutePath switch
+        {
+            "/api/v1/playback/device" => JsonResponse(DeviceJson),
+            "/api/v1/playback/devices" => JsonResponse("{\"devices\":[]}"),
+            var path when path.Contains("/playback/devices/", StringComparison.Ordinal) => JsonResponse(CommandJson, HttpStatusCode.Created),
+            "/api/v1/playback/commands" => JsonResponse("{\"commands\":[]}"),
+            var path when path.EndsWith("/ack", StringComparison.Ordinal) => new HttpResponseMessage(HttpStatusCode.NoContent),
+            "/api/v1/playback/rooms" => JsonResponse(RoomJson, request.Method == HttpMethod.Post ? HttpStatusCode.Created : HttpStatusCode.OK),
+            "/api/v1/playback/rooms/join" => JsonResponse(RoomJson),
+            var path when path.Contains("/playback/rooms/", StringComparison.Ordinal) => request.Method == HttpMethod.Delete ? new HttpResponseMessage(HttpStatusCode.NoContent) : JsonResponse(RoomJson),
+            "/api/v1/recommendations" => JsonResponse("{\"items\":[{\"item\":{\"id\":\"11111111-1111-4111-8111-111111111111\",\"mediaType\":\"movie\",\"title\":\"Movie\",\"providerIds\":{}},\"reason\":\"Because you like Drama\",\"score\":4.5}]}"),
+            _ => base.DefaultResponse(request),
+        };
+
+        private const string DeviceJson = "{\"sessionId\":\"55555555-5555-4555-8555-555555555555\",\"deviceId\":\"66666666-6666-4666-8666-666666666666\",\"name\":\"Device\",\"platform\":\"windows\",\"capabilities\":[\"remote-control\"],\"state\":{\"status\":\"idle\",\"positionMilliseconds\":0,\"durationMilliseconds\":0},\"current\":true,\"lastSeenAt\":\"2099-01-01T00:00:00Z\"}";
+        private const string CommandJson = "{\"id\":10,\"command\":\"play\",\"senderDeviceName\":\"Sender\",\"createdAt\":\"2099-01-01T00:00:00Z\",\"expiresAt\":\"2099-01-01T00:02:00Z\"}";
+        private const string RoomJson = "{\"id\":\"88888888-8888-4888-8888-888888888888\",\"joinCode\":\"23456789AB\",\"item\":{\"titleId\":\"11111111-1111-4111-8111-111111111111\",\"mediaType\":\"movie\",\"resourceId\":\"opaque\",\"title\":\"Movie\"},\"state\":\"paused\",\"positionMilliseconds\":1000,\"durationMilliseconds\":10000,\"version\":1,\"updatedAt\":\"2099-01-01T00:00:00Z\",\"expiresAt\":\"2099-01-01T08:00:00Z\",\"members\":[]}";
+    }
     private static string ProgressJson(long version) => $$"""
         {"titleId":"{{TitleId:D}}","mediaType":"movie","positionSeconds":125,"durationSeconds":7200,"completed":false,"version":{{version}},"lastWatchedAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:01Z"}
         """;
 
-    private static HttpResponseMessage JsonResponse(string json) => new(HttpStatusCode.OK)
+    private static HttpResponseMessage JsonResponse(string json, HttpStatusCode status = HttpStatusCode.OK) => new(status)
     {
         Content = new StringContent(json, Encoding.UTF8, "application/json"),
     };

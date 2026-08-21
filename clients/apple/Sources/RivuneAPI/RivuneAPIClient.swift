@@ -955,6 +955,50 @@ public actor RivuneAPIClient {
     public func stopPlayback(sessionId: UUID) async throws {
         _ = try await requestData("playback/sessions/\(sessionId.uuidString.lowercased())", method: "DELETE", body: Optional<Data>.none, authenticated: true)
     }
+    public func updatePlaybackDevice(_ input: PlaybackDeviceHeartbeatInput) async throws -> PlaybackDevice {
+        try await request("playback/device", method: "PUT", body: input, authenticated: true)
+    }
+
+    public func playbackDevices() async throws -> PlaybackDeviceList {
+        try await request("playback/devices", authenticated: true)
+    }
+
+    public func sendPlaybackCommand(sessionId: UUID, input: PlaybackCommandInput) async throws -> PlaybackCommand {
+        try await request("playback/devices/\(sessionId.uuidString.lowercased())/commands", method: "POST", body: input, authenticated: true)
+    }
+
+    public func playbackCommands(after: Int64 = 0) async throws -> PlaybackCommandList {
+        try await request("playback/commands", query: queryItems(("after", String(after))), authenticated: true)
+    }
+
+    public func acknowledgePlaybackCommand(_ id: Int64) async throws {
+        _ = try await requestData("playback/commands/\(id)/ack", method: "POST", body: Optional<Data>.none, authenticated: true)
+    }
+
+    public func createPlaybackRoom(_ input: PlaybackRoomCreateInput) async throws -> PlaybackRoom {
+        try await request("playback/rooms", method: "POST", body: input, authenticated: true)
+    }
+
+    public func joinPlaybackRoom(code: String) async throws -> PlaybackRoom {
+        try await request("playback/rooms/join", method: "POST", body: PlaybackRoomJoinInput(code: code), authenticated: true)
+    }
+
+    public func playbackRoom(id: UUID) async throws -> PlaybackRoom {
+        try await request("playback/rooms/\(id.uuidString.lowercased())", authenticated: true)
+    }
+
+    public func updatePlaybackRoom(id: UUID, input: PlaybackRoomUpdateInput) async throws -> PlaybackRoom {
+        try await request("playback/rooms/\(id.uuidString.lowercased())", method: "PUT", body: input, authenticated: true)
+    }
+
+    public func leavePlaybackRoom(id: UUID) async throws {
+        _ = try await requestData("playback/rooms/\(id.uuidString.lowercased())", method: "DELETE", body: Optional<Data>.none, authenticated: true)
+    }
+
+    public func localRecommendations(limit: Int = 20) async throws -> LocalRecommendationPage {
+        try await request("recommendations", query: queryItems(("limit", String(limit))), authenticated: true)
+    }
+
 
     public func playbackActivity() async throws -> PlaybackActivity {
         try await request("playback/activity", authenticated: true)

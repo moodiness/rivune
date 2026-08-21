@@ -46,6 +46,30 @@ internal sealed record MediaTarget
     public int DurationSeconds { get; init; }
 }
 
+internal static class PlaybackCoordinationMapping
+{
+    public static CoordinatedPlaybackItem CoordinatedItem(this MediaTarget target, Guid titleId, string? title = null) => new()
+    {
+        TitleId = titleId,
+        MediaType = target.MediaType,
+        ResourceId = target.ResourceId,
+        SourceAddonId = target.SourceAddonId,
+        Title = title ?? target.Title,
+        PosterUrl = target.PosterUrl,
+    };
+
+    public static MediaTarget MediaTarget(this CoordinatedPlaybackItem item) => new()
+    {
+        Id = item.ResourceId,
+        ResourceId = item.ResourceId,
+        MediaType = item.MediaType,
+        Title = item.Title,
+        TitleId = item.TitleId,
+        SourceAddonId = item.SourceAddonId,
+        PosterUrl = item.PosterUrl,
+    };
+}
+
 internal static class MediaTargetMapping
 {
     private static readonly HashSet<string> GlobalMediaTypes = new(StringComparer.OrdinalIgnoreCase)
@@ -104,6 +128,28 @@ internal static class MediaTargetMapping
         Category = item.Category,
         Available = item.Available,
     };
+
+    public static MediaTarget ToMediaTarget(this LocalRecommendation recommendation)
+    {
+        var item = recommendation.Item;
+        var resourceId = string.IsNullOrWhiteSpace(item.ResourceId) ? item.Id.ToString("D") : item.ResourceId;
+        return new MediaTarget
+        {
+            Id = resourceId,
+            ResourceId = resourceId,
+            MediaType = item.MediaType,
+            Title = string.IsNullOrWhiteSpace(item.Title) ? "Untitled" : item.Title,
+            TitleId = item.Id,
+            Provider = item.ResourceProvider,
+            ExternalId = item.ResourceProvider is null ? null : resourceId,
+            ExternalIds = item.ProviderIds,
+            SourceAddonId = item.SourceAddonId,
+            PosterUrl = item.PosterUrl,
+            BackgroundUrl = item.BackgroundUrl,
+            Description = recommendation.Reason,
+            ReleaseInfo = item.ReleaseInfo,
+        };
+    }
 
     public static MediaTarget ToMediaTarget(this ContinueWatchingItem item)
     {

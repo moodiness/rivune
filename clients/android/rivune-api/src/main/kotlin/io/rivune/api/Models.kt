@@ -27,6 +27,8 @@ enum class DiscoveryCapability(val identifier: String) {
     BOUNDED_AGGREGATE_RESOURCES("bounded-aggregate-resources"),
     PROFILE_ARCHIVES_V1("profile-archives-v1"),
     REQUEST_CORRELATION("request-correlation"),
+    LOCAL_RECOMMENDATIONS("local-recommendations"),
+    PLAYBACK_COORDINATION("playback-coordination"),
 }
 
 private const val MAX_DISCOVERY_CAPABILITIES = 64
@@ -746,6 +748,132 @@ data class PlaybackSession(
     val providerErrors: List<PlaybackProviderError> = emptyList(),
     val expiresAt: String,
 )
+@Serializable
+data class CoordinatedPlaybackItem(
+    @Serializable(with = UUIDSerializer::class) val titleId: UUID,
+    val mediaType: String = "",
+    val resourceId: String = "",
+    @Serializable(with = UUIDSerializer::class) val sourceAddonId: UUID? = null,
+    val title: String = "",
+    val posterUrl: String? = null,
+)
+
+@Serializable
+data class PlaybackDeviceState(
+    val status: String,
+    val item: CoordinatedPlaybackItem? = null,
+    val positionMilliseconds: Long = 0,
+    val durationMilliseconds: Long = 0,
+    val updatedAt: String? = null,
+)
+
+@Serializable
+data class PlaybackDeviceHeartbeatInput(val capabilities: List<String>, val state: PlaybackDeviceState)
+
+@Serializable
+data class PlaybackDevice(
+    @Serializable(with = UUIDSerializer::class) val sessionId: UUID,
+    @Serializable(with = UUIDSerializer::class) val deviceId: UUID,
+    val name: String,
+    val platform: String,
+    val capabilities: List<String>,
+    val state: PlaybackDeviceState,
+    val current: Boolean,
+    val lastSeenAt: String,
+)
+
+@Serializable
+data class PlaybackDeviceList(val devices: List<PlaybackDevice>)
+
+@Serializable
+data class PlaybackCommandInput(
+    val command: String,
+    val item: CoordinatedPlaybackItem? = null,
+    val positionMilliseconds: Long? = null,
+)
+
+@Serializable
+data class PlaybackCommand(
+    val id: Long,
+    val command: String,
+    val item: CoordinatedPlaybackItem? = null,
+    val positionMilliseconds: Long? = null,
+    val senderDeviceName: String,
+    val createdAt: String,
+    val expiresAt: String,
+)
+
+@Serializable
+data class PlaybackCommandList(val commands: List<PlaybackCommand>)
+
+@Serializable
+data class PlaybackRoomCreateInput(
+    val item: CoordinatedPlaybackItem,
+    val state: String,
+    val positionMilliseconds: Long,
+    val durationMilliseconds: Long,
+)
+
+@Serializable
+data class PlaybackRoomJoinInput(val code: String)
+
+@Serializable
+data class PlaybackRoomUpdateInput(
+    val state: String,
+    val positionMilliseconds: Long,
+    val durationMilliseconds: Long,
+    val expectedVersion: Long,
+)
+
+@Serializable
+data class PlaybackRoomMember(
+    @Serializable(with = UUIDSerializer::class) val memberId: UUID,
+    val profile: String,
+    val deviceName: String,
+    val platform: String,
+    val role: String,
+    val current: Boolean,
+    val joinedAt: String,
+    val lastSeenAt: String,
+)
+
+@Serializable
+data class PlaybackRoom(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val joinCode: String? = null,
+    val item: CoordinatedPlaybackItem,
+    val state: String,
+    val positionMilliseconds: Long,
+    val durationMilliseconds: Long,
+    val version: Long,
+    val updatedAt: String,
+    val expiresAt: String,
+    val members: List<PlaybackRoomMember>,
+) {
+    val currentMember: PlaybackRoomMember? get() = members.firstOrNull(PlaybackRoomMember::current)
+    val currentMemberIsHost: Boolean get() = currentMember?.role == "host"
+}
+
+@Serializable
+data class LocalRecommendationTitle(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val mediaType: String,
+    val title: String? = null,
+    val posterUrl: String? = null,
+    val backgroundUrl: String? = null,
+    val releaseInfo: String? = null,
+    val resourceId: String? = null,
+    val resourceProvider: String? = null,
+    @Serializable(with = UUIDSerializer::class) val sourceAddonId: UUID? = null,
+    val providerIds: Map<String, String> = emptyMap(),
+)
+
+@Serializable
+data class LocalRecommendation(val item: LocalRecommendationTitle, val reason: String, val score: Double)
+
+@Serializable
+data class LocalRecommendationPage(val items: List<LocalRecommendation>)
+
 
 @Serializable
 data class PlaybackSource(

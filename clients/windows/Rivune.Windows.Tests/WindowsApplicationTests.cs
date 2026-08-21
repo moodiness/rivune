@@ -105,6 +105,63 @@ public sealed class WindowsApplicationTests
     }
 
     [Fact]
+    public void CoordinatedPlaybackMapsToAndFromMediaTargetWithoutLosingIdentity()
+    {
+        var titleId = Guid.Parse("11111111-1111-4111-8111-111111111111");
+        var addonId = Guid.Parse("22222222-2222-4222-8222-222222222222");
+        var target = new MediaTarget
+        {
+            Id = "episode:opaque",
+            ResourceId = "episode:opaque",
+            MediaType = "episode",
+            Title = "Episode",
+            TitleId = titleId,
+            SourceAddonId = addonId,
+            PosterUrl = "https://rivune.example/poster.jpg",
+        };
+
+        var item = target.CoordinatedItem(titleId);
+        var restored = item.MediaTarget();
+
+        Assert.Equal(titleId, item.TitleId);
+        Assert.Equal(addonId, item.SourceAddonId);
+        Assert.Equal(target.ResourceId, restored.ResourceId);
+        Assert.Equal(target.MediaType, restored.MediaType);
+        Assert.Equal(target.Title, restored.Title);
+    }
+
+    [Fact]
+    public void PlaybackRoomRefreshPreservesHostJoinCodeOnlyForSameRoom()
+    {
+        var initial = PlaybackRoom(joinCode: "23456789AB");
+        var refreshed = PlaybackRoom(id: initial.Id, joinCode: null, version: 2).PreservingJoinCodeFrom(initial);
+        var replacement = PlaybackRoom(joinCode: null).PreservingJoinCodeFrom(initial);
+
+        Assert.Equal("23456789AB", refreshed.JoinCode);
+        Assert.Null(replacement.JoinCode);
+        Assert.True(initial.CurrentMemberIsHost);
+    }
+
+    private static PlaybackRoom PlaybackRoom(Guid? id = null, string? joinCode = null, long version = 1) => new()
+    {
+        Id = id ?? Guid.NewGuid(),
+        JoinCode = joinCode,
+        Item = new CoordinatedPlaybackItem { TitleId = Guid.NewGuid() },
+        State = "paused",
+        PositionMilliseconds = 0,
+        DurationMilliseconds = 0,
+        Version = version,
+        UpdatedAt = "2026-08-21T00:00:00Z",
+        ExpiresAt = "2026-08-22T00:00:00Z",
+        Members = [new PlaybackRoomMember
+        {
+            MemberId = Guid.NewGuid().ToString("D"), Profile = "Profile", DeviceName = "Device",
+            Platform = "windows", Role = "host", Current = true,
+            JoinedAt = "2026-08-21T00:00:00Z", LastSeenAt = "2026-08-21T00:00:00Z",
+        }],
+    };
+
+    [Fact]
     public async Task DirectMediaProxyForwardsRangeOnFixedSameOriginTarget()
     {
         RangeHeaderValue? observedRange = null;

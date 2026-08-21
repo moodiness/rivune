@@ -13,6 +13,8 @@ public static class DiscoveryCapabilityIdentifiers
     public const string BoundedAggregateResources = "bounded-aggregate-resources";
     public const string ProfileArchivesV1 = "profile-archives-v1";
     public const string RequestCorrelation = "request-correlation";
+    public const string LocalRecommendations = "local-recommendations";
+    public const string PlaybackCoordination = "playback-coordination";
 }
 
 public enum DiscoveryCapability
@@ -20,6 +22,8 @@ public enum DiscoveryCapability
     BoundedAggregateResources,
     ProfileArchivesV1,
     RequestCorrelation,
+    LocalRecommendations,
+    PlaybackCoordination,
 }
 
 internal sealed class DiscoveryCapabilitiesJsonConverter : JsonConverter<IReadOnlyList<string>>
@@ -139,6 +143,8 @@ public sealed record Discovery
             DiscoveryCapability.BoundedAggregateResources => DiscoveryCapabilityIdentifiers.BoundedAggregateResources,
             DiscoveryCapability.ProfileArchivesV1 => DiscoveryCapabilityIdentifiers.ProfileArchivesV1,
             DiscoveryCapability.RequestCorrelation => DiscoveryCapabilityIdentifiers.RequestCorrelation,
+            DiscoveryCapability.LocalRecommendations => DiscoveryCapabilityIdentifiers.LocalRecommendations,
+            DiscoveryCapability.PlaybackCoordination => DiscoveryCapabilityIdentifiers.PlaybackCoordination,
             _ => null,
         };
         if (identifier is null || Capabilities is null)
@@ -1443,6 +1449,139 @@ public sealed record PlaybackSession : IJsonOnDeserialized
         }
     }
 }
+public sealed record CoordinatedPlaybackItem
+{
+    public required Guid TitleId { get; init; }
+    public string MediaType { get; init; } = string.Empty;
+    public string ResourceId { get; init; } = string.Empty;
+    public Guid? SourceAddonId { get; init; }
+    public string Title { get; init; } = string.Empty;
+    public string? PosterUrl { get; init; }
+}
+
+public sealed record PlaybackDeviceState
+{
+    public required string Status { get; init; }
+    public CoordinatedPlaybackItem? Item { get; init; }
+    public long PositionMilliseconds { get; init; }
+    public long DurationMilliseconds { get; init; }
+    public string? UpdatedAt { get; init; }
+}
+
+public sealed record PlaybackDeviceHeartbeatInput
+{
+    public required IReadOnlyList<string> Capabilities { get; init; }
+    public required PlaybackDeviceState State { get; init; }
+}
+
+public sealed record PlaybackDevice
+{
+    public required Guid SessionId { get; init; }
+    public required Guid DeviceId { get; init; }
+    public required string Name { get; init; }
+    public required string Platform { get; init; }
+    public required IReadOnlyList<string> Capabilities { get; init; }
+    public required PlaybackDeviceState State { get; init; }
+    public required bool Current { get; init; }
+    public required string LastSeenAt { get; init; }
+}
+
+public sealed record PlaybackDeviceList { public required IReadOnlyList<PlaybackDevice> Devices { get; init; } }
+
+public sealed record PlaybackCommandInput
+{
+    public required string Command { get; init; }
+    public CoordinatedPlaybackItem? Item { get; init; }
+    public long? PositionMilliseconds { get; init; }
+}
+
+public sealed record PlaybackCommand
+{
+    public required long Id { get; init; }
+    public required string Command { get; init; }
+    public CoordinatedPlaybackItem? Item { get; init; }
+    public long? PositionMilliseconds { get; init; }
+    public required string SenderDeviceName { get; init; }
+    public required string CreatedAt { get; init; }
+    public required string ExpiresAt { get; init; }
+}
+
+public sealed record PlaybackCommandList { public required IReadOnlyList<PlaybackCommand> Commands { get; init; } }
+
+public sealed record PlaybackRoomCreateInput
+{
+    public required CoordinatedPlaybackItem Item { get; init; }
+    public required string State { get; init; }
+    public required long PositionMilliseconds { get; init; }
+    public required long DurationMilliseconds { get; init; }
+}
+
+public sealed record PlaybackRoomJoinInput { public required string Code { get; init; } }
+
+public sealed record PlaybackRoomUpdateInput
+{
+    public required string State { get; init; }
+    public required long PositionMilliseconds { get; init; }
+    public required long DurationMilliseconds { get; init; }
+    public required long ExpectedVersion { get; init; }
+}
+
+public sealed record PlaybackRoomMember
+{
+    public required string MemberId { get; init; }
+    public required string Profile { get; init; }
+    public required string DeviceName { get; init; }
+    public required string Platform { get; init; }
+    public required string Role { get; init; }
+    public required bool Current { get; init; }
+    public required string JoinedAt { get; init; }
+    public required string LastSeenAt { get; init; }
+}
+
+public sealed record PlaybackRoom
+{
+    public required Guid Id { get; init; }
+    public string? JoinCode { get; init; }
+    public required CoordinatedPlaybackItem Item { get; init; }
+    public required string State { get; init; }
+    public required long PositionMilliseconds { get; init; }
+    public required long DurationMilliseconds { get; init; }
+    public required long Version { get; init; }
+    public required string UpdatedAt { get; init; }
+    public required string ExpiresAt { get; init; }
+    public required IReadOnlyList<PlaybackRoomMember> Members { get; init; }
+
+    public bool CurrentMemberIsHost => Members.FirstOrDefault(member => member.Current)?.Role == "host";
+
+    public PlaybackRoom PreservingJoinCodeFrom(PlaybackRoom previous) =>
+        Id == previous.Id && JoinCode is null && previous.JoinCode is not null
+            ? this with { JoinCode = previous.JoinCode }
+            : this;
+}
+
+public sealed record LocalRecommendationTitle
+{
+    public required Guid Id { get; init; }
+    public required string MediaType { get; init; }
+    public string? Title { get; init; }
+    public string? PosterUrl { get; init; }
+    public string? BackgroundUrl { get; init; }
+    public string? ReleaseInfo { get; init; }
+    public string? ResourceId { get; init; }
+    public string? ResourceProvider { get; init; }
+    public Guid? SourceAddonId { get; init; }
+    public required IReadOnlyDictionary<string, string> ProviderIds { get; init; }
+}
+
+public sealed record LocalRecommendation
+{
+    public required LocalRecommendationTitle Item { get; init; }
+    public required string Reason { get; init; }
+    public required double Score { get; init; }
+}
+
+public sealed record LocalRecommendationPage { public required IReadOnlyList<LocalRecommendation> Items { get; init; } }
+
 
 public sealed record PlaybackSource : IJsonOnDeserialized
 {

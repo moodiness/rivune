@@ -16,6 +16,8 @@ public sealed class DiscoveryCapabilitiesTests
         Assert.Equal("bounded-aggregate-resources", DiscoveryCapabilityIdentifiers.BoundedAggregateResources);
         Assert.Equal("profile-archives-v1", DiscoveryCapabilityIdentifiers.ProfileArchivesV1);
         Assert.Equal("request-correlation", DiscoveryCapabilityIdentifiers.RequestCorrelation);
+        Assert.Equal("local-recommendations", DiscoveryCapabilityIdentifiers.LocalRecommendations);
+        Assert.Equal("playback-coordination", DiscoveryCapabilityIdentifiers.PlaybackCoordination);
     }
 
     [Fact]

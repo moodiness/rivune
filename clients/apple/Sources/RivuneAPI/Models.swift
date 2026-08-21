@@ -8,6 +8,8 @@ public enum DiscoveryCapability: String, Codable, CaseIterable, Sendable, Equata
     case boundedAggregateResources = "bounded-aggregate-resources"
     case profileArchivesV1 = "profile-archives-v1"
     case requestCorrelation = "request-correlation"
+    case localRecommendations = "local-recommendations"
+    case playbackCoordination = "playback-coordination"
 }
 
 public struct Discovery: Codable, Sendable, Equatable {
@@ -1253,6 +1255,172 @@ public struct PlaybackSession: Codable, Sendable, Equatable, Identifiable {
     public let providerErrors: [PlaybackProviderError]
     public let expiresAt: String
 }
+public struct CoordinatedPlaybackItem: Codable, Sendable, Equatable {
+    public let titleId: UUID
+    public let mediaType: String
+    public let resourceId: String
+    public let sourceAddonId: UUID?
+    public let title: String
+    public let posterUrl: String?
+
+    public init(titleId: UUID, mediaType: String = "", resourceId: String = "", sourceAddonId: UUID? = nil, title: String = "", posterUrl: String? = nil) {
+        self.titleId = titleId
+        self.mediaType = mediaType
+        self.resourceId = resourceId
+        self.sourceAddonId = sourceAddonId
+        self.title = title
+        self.posterUrl = posterUrl
+    }
+}
+
+public struct PlaybackDeviceState: Codable, Sendable, Equatable {
+    public let status: String
+    public let item: CoordinatedPlaybackItem?
+    public let positionMilliseconds: Int64
+    public let durationMilliseconds: Int64
+    public let updatedAt: String?
+
+    public init(status: String, item: CoordinatedPlaybackItem? = nil, positionMilliseconds: Int64 = 0, durationMilliseconds: Int64 = 0) {
+        self.status = status
+        self.item = item
+        self.positionMilliseconds = positionMilliseconds
+        self.durationMilliseconds = durationMilliseconds
+        self.updatedAt = nil
+    }
+}
+
+public struct PlaybackDeviceHeartbeatInput: Codable, Sendable, Equatable {
+    public let capabilities: [String]
+    public let state: PlaybackDeviceState
+    public init(capabilities: [String], state: PlaybackDeviceState) { self.capabilities = capabilities; self.state = state }
+}
+
+public struct PlaybackDevice: Codable, Sendable, Equatable, Identifiable {
+    public var id: UUID { sessionId }
+    public let sessionId: UUID
+    public let deviceId: UUID
+    public let name: String
+    public let platform: String
+    public let capabilities: [String]
+    public let state: PlaybackDeviceState
+    public let current: Bool
+    public let lastSeenAt: String
+}
+
+public struct PlaybackDeviceList: Codable, Sendable, Equatable { public let devices: [PlaybackDevice] }
+
+public struct PlaybackCommandInput: Codable, Sendable, Equatable {
+    public let command: String
+    public let item: CoordinatedPlaybackItem?
+    public let positionMilliseconds: Int64?
+    public init(command: String, item: CoordinatedPlaybackItem? = nil, positionMilliseconds: Int64? = nil) {
+        self.command = command; self.item = item; self.positionMilliseconds = positionMilliseconds
+    }
+}
+
+public struct PlaybackCommand: Codable, Sendable, Equatable, Identifiable {
+    public let id: Int64
+    public let command: String
+    public let item: CoordinatedPlaybackItem?
+    public let positionMilliseconds: Int64?
+    public let senderDeviceName: String
+    public let createdAt: String
+    public let expiresAt: String
+}
+
+public struct PlaybackCommandList: Codable, Sendable, Equatable { public let commands: [PlaybackCommand] }
+
+public struct PlaybackRoomCreateInput: Codable, Sendable, Equatable {
+    public let item: CoordinatedPlaybackItem
+    public let state: String
+    public let positionMilliseconds: Int64
+    public let durationMilliseconds: Int64
+    public init(item: CoordinatedPlaybackItem, state: String, positionMilliseconds: Int64, durationMilliseconds: Int64) {
+        self.item = item; self.state = state; self.positionMilliseconds = positionMilliseconds; self.durationMilliseconds = durationMilliseconds
+    }
+}
+
+public struct PlaybackRoomJoinInput: Codable, Sendable, Equatable {
+    public let code: String
+    public init(code: String) { self.code = code }
+}
+
+public struct PlaybackRoomUpdateInput: Codable, Sendable, Equatable {
+    public let state: String
+    public let positionMilliseconds: Int64
+    public let durationMilliseconds: Int64
+    public let expectedVersion: Int64
+    public init(state: String, positionMilliseconds: Int64, durationMilliseconds: Int64, expectedVersion: Int64) {
+        self.state = state; self.positionMilliseconds = positionMilliseconds; self.durationMilliseconds = durationMilliseconds; self.expectedVersion = expectedVersion
+    }
+}
+
+public struct PlaybackRoomMember: Codable, Sendable, Equatable, Identifiable {
+    public var id: UUID { memberId }
+    public let memberId: UUID
+    public let profile: String
+    public let deviceName: String
+    public let platform: String
+    public let role: String
+    public let current: Bool
+    public let joinedAt: String
+    public let lastSeenAt: String
+}
+
+public struct PlaybackRoom: Codable, Sendable, Equatable, Identifiable {
+    public let id: UUID
+    public let joinCode: String?
+    public let item: CoordinatedPlaybackItem
+    public let state: String
+    public let positionMilliseconds: Int64
+    public let durationMilliseconds: Int64
+    public let version: Int64
+    public let updatedAt: String
+    public let expiresAt: String
+    public let members: [PlaybackRoomMember]
+
+    public var currentMember: PlaybackRoomMember? { members.first(where: \.current) }
+    public var currentMemberIsHost: Bool { currentMember?.role == "host" }
+
+    public func preservingJoinCode(from previous: PlaybackRoom) -> PlaybackRoom {
+        guard id == previous.id, joinCode == nil, let joinCode = previous.joinCode else { return self }
+        return PlaybackRoom(
+            id: id,
+            joinCode: joinCode,
+            item: item,
+            state: state,
+            positionMilliseconds: positionMilliseconds,
+            durationMilliseconds: durationMilliseconds,
+            version: version,
+            updatedAt: updatedAt,
+            expiresAt: expiresAt,
+            members: members
+        )
+    }
+}
+
+public struct LocalRecommendationTitle: Codable, Sendable, Equatable, Identifiable {
+    public let id: UUID
+    public let mediaType: String
+    public let title: String?
+    public let posterUrl: String?
+    public let backgroundUrl: String?
+    public let releaseInfo: String?
+    public let resourceId: String?
+    public let resourceProvider: String?
+    public let sourceAddonId: UUID?
+    public let providerIds: [String: String]
+}
+
+public struct LocalRecommendation: Codable, Sendable, Equatable, Identifiable {
+    public var id: UUID { item.id }
+    public let item: LocalRecommendationTitle
+    public let reason: String
+    public let score: Double
+}
+
+public struct LocalRecommendationPage: Codable, Sendable, Equatable { public let items: [LocalRecommendation] }
+
 
 public struct PlaybackSource: Codable, Sendable, Equatable, Identifiable {
     public let id: String

@@ -79,6 +79,8 @@ class ApiV20ContractsTest {
         assertEquals("bounded-aggregate-resources", DiscoveryCapability.BOUNDED_AGGREGATE_RESOURCES.identifier)
         assertEquals("profile-archives-v1", DiscoveryCapability.PROFILE_ARCHIVES_V1.identifier)
         assertEquals("request-correlation", DiscoveryCapability.REQUEST_CORRELATION.identifier)
+        assertEquals("local-recommendations", DiscoveryCapability.LOCAL_RECOMMENDATIONS.identifier)
+        assertEquals("playback-coordination", DiscoveryCapability.PLAYBACK_COORDINATION.identifier)
         val server = MockWebServer()
         server.enqueue(discoveryResponse())
         server.enqueue(
@@ -260,6 +262,57 @@ class ApiV20ContractsTest {
             assertEquals(false, defaultBody.containsKey("externalPlayer"))
             assertEquals(true, externalPrepareBody.getValue("externalPlayer").jsonPrimitive.content.toBoolean())
             assertEquals(true, externalResolveBody.getValue("externalPlayer").jsonPrimitive.content.toBoolean())
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun coordinationAndRecommendationRoutesMatchV20Contract() = runBlocking {
+        val targetSession = UUID.fromString("77777777-7777-4777-8777-777777777777")
+        val roomId = UUID.fromString("88888888-8888-4888-8888-888888888888")
+        val memberId = UUID.fromString("99999999-9999-4999-8999-999999999999")
+        val item = CoordinatedPlaybackItem(titleId, "movie", "opaque", title = "Movie")
+        val device = """{"sessionId":"55555555-5555-4555-8555-555555555555","deviceId":"66666666-6666-4666-8666-666666666666","name":"Device","platform":"android","capabilities":["remote-control"],"state":{"status":"idle","positionMilliseconds":0,"durationMilliseconds":0},"current":true,"lastSeenAt":"2099-01-01T00:00:00Z"}"""
+        val command = """{"id":10,"command":"play","senderDeviceName":"Sender","createdAt":"2099-01-01T00:00:00Z","expiresAt":"2099-01-01T00:02:00Z"}"""
+        val room = """{"id":"$roomId","joinCode":"23456789AB","item":{"titleId":"$titleId","mediaType":"movie","resourceId":"opaque","title":"Movie"},"state":"paused","positionMilliseconds":1000,"durationMilliseconds":10000,"version":1,"updatedAt":"2099-01-01T00:00:00Z","expiresAt":"2099-01-01T08:00:00Z","members":[{"memberId":"$memberId","profile":"Viewer","deviceName":"Phone","platform":"android","role":"host","current":true,"joinedAt":"2099-01-01T00:00:00Z","lastSeenAt":"2099-01-01T00:00:01Z"}]}"""
+        val decodedMember = json.decodeFromString<PlaybackRoom>(room).members.single()
+        assertEquals(memberId, decodedMember.memberId)
+        assertEquals("Viewer", decodedMember.profile)
+        val server = MockWebServer()
+        listOf(
+            discoveryResponse(), jsonResponse(device), jsonResponse("{\"devices\":[]}"),
+            jsonResponse(command).setResponseCode(201), jsonResponse("{\"commands\":[]}"), MockResponse().setResponseCode(204),
+            jsonResponse(room).setResponseCode(201), jsonResponse(room), jsonResponse(room), jsonResponse(room),
+            MockResponse().setResponseCode(204),
+            jsonResponse("""{"items":[{"item":{"id":"$titleId","mediaType":"movie","title":"Movie","providerIds":{}},"reason":"Because you like Drama","score":4.5}]}"""),
+        ).forEach(server::enqueue)
+        server.start()
+        try {
+            val serverUrl = server.loopbackUrl("/").toString()
+            val client = RivuneApiClient(serverUrl, V20CredentialStore(serverUrl, tokenPair()))
+            client.discover()
+            client.updatePlaybackDevice(PlaybackDeviceHeartbeatInput(listOf("remote-control"), PlaybackDeviceState("paused", item, 1_000, 10_000)))
+            client.playbackDevices()
+            client.sendPlaybackCommand(targetSession, PlaybackCommandInput("load", item, 1_000))
+            client.playbackCommands(9)
+            client.acknowledgePlaybackCommand(10)
+            client.createPlaybackRoom(PlaybackRoomCreateInput(item, "paused", 1_000, 10_000))
+            client.joinPlaybackRoom("23456789AB")
+            client.playbackRoom(roomId)
+            client.updatePlaybackRoom(roomId, PlaybackRoomUpdateInput("playing", 2_000, 10_000, 1))
+            client.leavePlaybackRoom(roomId)
+            assertEquals("Because you like Drama", client.localRecommendations(12).items.single().reason)
+
+            val requests = (0 until 12).map { server.takeRequest() }
+            assertEquals(listOf(
+                "/.well-known/rivune", "/api/v1/playback/device", "/api/v1/playback/devices",
+                "/api/v1/playback/devices/$targetSession/commands", "/api/v1/playback/commands?after=9",
+                "/api/v1/playback/commands/10/ack", "/api/v1/playback/rooms", "/api/v1/playback/rooms/join",
+                "/api/v1/playback/rooms/$roomId", "/api/v1/playback/rooms/$roomId", "/api/v1/playback/rooms/$roomId",
+                "/api/v1/recommendations?limit=12",
+            ), requests.map { it.path })
+            assertEquals(listOf("GET", "PUT", "GET", "POST", "GET", "POST", "POST", "POST", "GET", "PUT", "DELETE", "GET"), requests.map { it.method })
         } finally {
             server.shutdown()
         }

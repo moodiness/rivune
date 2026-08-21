@@ -1114,6 +1114,39 @@ public sealed class RivuneApiClient : IDisposable
             ["playback", "sessions", sessionId.ToString("D")],
             true,
             cancellationToken);
+    public Task<PlaybackDevice> UpdatePlaybackDeviceAsync(PlaybackDeviceHeartbeatInput input, CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<PlaybackDevice>(HttpMethod.Put, ["playback", "device"], null, input, true, cancellationToken);
+
+    public Task<PlaybackDeviceList> GetPlaybackDevicesAsync(CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<PlaybackDeviceList>(HttpMethod.Get, ["playback", "devices"], null, null, true, cancellationToken);
+
+    public Task<PlaybackCommand> SendPlaybackCommandAsync(Guid sessionId, PlaybackCommandInput input, CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<PlaybackCommand>(HttpMethod.Post, ["playback", "devices", sessionId.ToString("D"), "commands"], null, input, true, cancellationToken);
+
+    public Task<PlaybackCommandList> GetPlaybackCommandsAsync(long after = 0, CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<PlaybackCommandList>(HttpMethod.Get, ["playback", "commands"], Query(("after", after.ToString(System.Globalization.CultureInfo.InvariantCulture))), null, true, cancellationToken);
+
+    public Task AcknowledgePlaybackCommandAsync(long id, CancellationToken cancellationToken = default) =>
+        RequestEmptyAsync(HttpMethod.Post, ["playback", "commands", id.ToString(System.Globalization.CultureInfo.InvariantCulture), "ack"], true, cancellationToken);
+
+    public Task<PlaybackRoom> CreatePlaybackRoomAsync(PlaybackRoomCreateInput input, CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<PlaybackRoom>(HttpMethod.Post, ["playback", "rooms"], null, input, true, cancellationToken);
+
+    public Task<PlaybackRoom> JoinPlaybackRoomAsync(string code, CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<PlaybackRoom>(HttpMethod.Post, ["playback", "rooms", "join"], null, new PlaybackRoomJoinInput { Code = code }, true, cancellationToken);
+
+    public Task<PlaybackRoom> GetPlaybackRoomAsync(Guid id, CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<PlaybackRoom>(HttpMethod.Get, ["playback", "rooms", id.ToString("D")], null, null, true, cancellationToken);
+
+    public Task<PlaybackRoom> UpdatePlaybackRoomAsync(Guid id, PlaybackRoomUpdateInput input, CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<PlaybackRoom>(HttpMethod.Put, ["playback", "rooms", id.ToString("D")], null, input, true, cancellationToken);
+
+    public Task LeavePlaybackRoomAsync(Guid id, CancellationToken cancellationToken = default) =>
+        RequestEmptyAsync(HttpMethod.Delete, ["playback", "rooms", id.ToString("D")], true, cancellationToken);
+
+    public Task<LocalRecommendationPage> GetLocalRecommendationsAsync(int limit = 20, CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<LocalRecommendationPage>(HttpMethod.Get, ["recommendations"], Query(("limit", limit.ToString(System.Globalization.CultureInfo.InvariantCulture))), null, true, cancellationToken);
+
 
     public Task<PlaybackActivity> GetPlaybackActivityAsync(CancellationToken cancellationToken = default) =>
         RequestJsonAsync<PlaybackActivity>(

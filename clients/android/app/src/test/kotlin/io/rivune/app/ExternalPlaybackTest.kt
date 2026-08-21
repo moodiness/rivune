@@ -181,6 +181,65 @@ class ExternalPlaybackTest {
     }
 
     @Test
+    fun playbackPresentationRetainsCanonicalCoordinationIdentity() {
+        val titleId = java.util.UUID.randomUUID()
+        val addonId = java.util.UUID.randomUUID()
+        val presentation = PlayerPresentation(
+            key = "coordinated",
+            sessionId = java.util.UUID.randomUUID(),
+            titleId = titleId,
+            title = "Film",
+            mediaType = "movie",
+            resourceId = "opaque-resource",
+            sourceAddonId = addonId,
+            posterUrl = "/poster.jpg",
+            mediaUrl = "https://media.example/film.mkv",
+            protocol = "http",
+            container = "mkv",
+            mediaTimeline = null,
+            startPositionMs = 0,
+            timelineStartPositionMs = 0,
+            durationSeconds = 0,
+            expectedProgressVersion = 0,
+            engine = EmbeddedPlayerEngine.MEDIA3,
+            fallbackAllowed = false,
+        )
+
+        assertEquals(
+            io.rivune.api.CoordinatedPlaybackItem(
+                titleId = titleId,
+                mediaType = "movie",
+                resourceId = "opaque-resource",
+                sourceAddonId = addonId,
+                title = "Film",
+                posterUrl = "/poster.jpg",
+            ),
+            presentation.coordinatedItem(),
+        )
+    }
+
+    @Test
+    fun refreshedRoomRetainsHostOnlyJoinCode() {
+        val room = playbackRoom(joinCode = "23456789AB")
+        assertEquals("23456789AB", room.copy(joinCode = null, version = 2).preservingJoinCode(room).joinCode)
+        assertEquals("ABCDEFGHJK", room.copy(joinCode = "ABCDEFGHJK", version = 2).preservingJoinCode(room).joinCode)
+        assertEquals(null, playbackRoom(joinCode = null).preservingJoinCode(room).joinCode)
+    }
+
+    private fun playbackRoom(joinCode: String?) = io.rivune.api.PlaybackRoom(
+        id = java.util.UUID.randomUUID(),
+        joinCode = joinCode,
+        item = io.rivune.api.CoordinatedPlaybackItem(java.util.UUID.randomUUID()),
+        state = "paused",
+        positionMilliseconds = 0,
+        durationMilliseconds = 0,
+        version = 1,
+        updatedAt = "2026-08-21T00:00:00Z",
+        expiresAt = "2026-08-22T00:00:00Z",
+        members = emptyList(),
+    )
+
+    @Test
     fun eligibleAutomaticMedia3FailureTransitionsSameSessionToMpv() {
         val sessionId = java.util.UUID.randomUUID()
         val presentation = PlayerPresentation(
@@ -188,6 +247,8 @@ class ExternalPlaybackTest {
             sessionId = sessionId,
             titleId = java.util.UUID.randomUUID(),
             title = "Film",
+            mediaType = "movie",
+            resourceId = "film",
             mediaUrl = "https://media.example/film.mkv",
             protocol = "http",
             container = "mkv",

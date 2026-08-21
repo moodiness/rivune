@@ -99,6 +99,15 @@ class RivunePlayerTest {
     }
 
     @Test
+    fun coordinatedPauseCancelsDeferredLifecycleResumeForBothEngines() {
+        assertFalse(coordinatedLifecycleResumeIntent(current = true, state = "pause"))
+        assertFalse(coordinatedLifecycleResumeIntent(current = true, state = "paused"))
+        assertFalse(coordinatedLifecycleResumeIntent(current = true, state = "ended"))
+        assertTrue(coordinatedLifecycleResumeIntent(current = false, state = "play"))
+        assertTrue(coordinatedLifecycleResumeIntent(current = false, state = "playing"))
+    }
+
+    @Test
     fun mpvRemainsPreparingUntilPlaybackRestartAndBuffersOnlyAfterStartup() {
         assertEquals(MpvPlaybackState.PREPARING, mpvPlaybackState(startupSucceeded = false, pausedForCache = false))
         assertEquals(MpvPlaybackState.PREPARING, mpvPlaybackState(startupSucceeded = false, pausedForCache = true))
@@ -547,6 +556,8 @@ class RivunePlayerTest {
         sessionId = java.util.UUID.randomUUID(),
         titleId = java.util.UUID.randomUUID(),
         title = "Title",
+        mediaType = "movie",
+        resourceId = "title",
         mediaUrl = "https://media.example/video",
         protocol = "http",
         container = "mkv",

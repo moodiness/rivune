@@ -14,7 +14,7 @@ packages:
 settings:
   base:
     CURRENT_PROJECT_VERSION: 1
-    MARKETING_VERSION: 1.10.0
+    MARKETING_VERSION: 1.10.1
     SWIFT_VERSION: 5.9
     DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Automatic
@@ -43,6 +43,7 @@ targets:
         script: Scripts/prune-unused-package-frameworks.sh
         inputFiles:
           - $(SRCROOT)/Scripts/prune-unused-package-frameworks.sh
+          - $(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)
         basedOnDependencyAnalysis: false
       - name: Embed legal notices
         script: Scripts/embed-legal-notices.sh
@@ -83,6 +84,7 @@ targets:
         script: Scripts/prune-unused-package-frameworks.sh
         inputFiles:
           - $(SRCROOT)/Scripts/prune-unused-package-frameworks.sh
+          - $(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)
         basedOnDependencyAnalysis: false
       - name: Embed legal notices
         script: Scripts/embed-legal-notices.sh
@@ -123,6 +125,7 @@ targets:
         script: Scripts/prune-unused-package-frameworks.sh
         inputFiles:
           - $(SRCROOT)/Scripts/prune-unused-package-frameworks.sh
+          - $(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)
         basedOnDependencyAnalysis: false
       - name: Embed legal notices
         script: Scripts/embed-legal-notices.sh
@@ -167,6 +170,7 @@ targets:
         script: Scripts/prune-unused-package-frameworks.sh
         inputFiles:
           - $(SRCROOT)/Scripts/prune-unused-package-frameworks.sh
+          - $(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)
         basedOnDependencyAnalysis: false
       - name: Embed legal notices
         script: Scripts/embed-legal-notices.sh
