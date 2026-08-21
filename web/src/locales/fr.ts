@@ -1,6 +1,8 @@
 import type { TranslationCatalog } from "../i18n";
+import { applicationsFr } from "./applications-fr";
 
 const catalog = {
+  ...applicationsFr,
   "common.close": "Fermer",
   "common.back": "Retour",
   "common.continue": "Continuer",

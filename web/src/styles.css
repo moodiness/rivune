@@ -2609,6 +2609,9 @@
   .applications-header > a:first-child { text-decoration: none; }
   .applications-header__github { display: inline-flex; align-items: center; gap: 8px; padding: 10px 13px; border-radius: 12px; color: var(--text-soft) !important; text-decoration: none; transition: color .2s, background .2s; }
   .applications-header__github:hover { color: var(--text) !important; background: var(--surface-interactive); }
+  .applications-header__actions { display: flex; align-items: center; gap: 8px; }
+  .applications-language { min-height: 42px; padding: 0 11px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 12px; color: var(--text-soft); background: rgba(20, 21, 28, .68); font-size: 12px; }
+  .applications-language select { min-width: 82px; padding: 4px 18px 4px 4px; border: 0; color: var(--text); background: transparent; font: inherit; font-weight: 700; }
   .applications-hero { max-width: 900px; margin: 0 auto; padding: clamp(66px, 9vw, 126px) 0 clamp(48px, 7vw, 86px); text-align: center; }
   .applications-kicker { display: inline-flex; padding: 7px 12px; border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent); border-radius: 999px; color: var(--accent-strong); background: var(--surface-accent); font-size: var(--font-size-sm); font-weight: 740; letter-spacing: .12em; text-transform: uppercase; }
   .applications-hero h1 { margin: 22px 0 20px; font-size: clamp(48px, 8vw, 92px); line-height: .94; letter-spacing: -.065em; text-wrap: balance; }
@@ -2658,6 +2661,30 @@
   .applications-card__digest button:hover { color: var(--text); background: var(--surface-hover); }
   .applications-card__warning { margin: auto 0 0; padding-top: 14px; display: flex; align-items: flex-start; gap: 8px; border-top: 1px solid var(--line); color: var(--text-soft); font-size: 11px; line-height: 1.5; }
   .applications-card__warning > svg { margin-top: 1px; flex: 0 0 auto; color: var(--warning); }
+  .applications-apple-guide { max-width: 1440px; margin: 44px auto 0; padding: clamp(26px, 4vw, 48px); display: grid; grid-template-columns: minmax(0, .8fr) minmax(480px, 1.2fr); gap: 28px 48px; border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line)); border-radius: 28px; background: linear-gradient(145deg, rgba(31, 25, 30, .94), rgba(13, 17, 24, .97)); box-shadow: 0 24px 80px rgba(0, 0, 0, .3); scroll-margin-top: 24px; }
+  .applications-apple-guide__intro h2 { max-width: 620px; margin: 18px 0 14px; font-size: clamp(30px, 4vw, 52px); line-height: 1; letter-spacing: -.045em; text-wrap: balance; }
+  .applications-apple-guide__intro > p { max-width: 640px; margin: 0; color: var(--text-soft); line-height: 1.65; }
+  .applications-apple-guide__steps { margin: 0; padding: 0; display: grid; gap: 12px; list-style: none; counter-reset: apple-step; }
+  .applications-apple-guide__steps li { padding: 15px; display: grid; grid-template-columns: auto 1fr; gap: 13px; border: 1px solid var(--line); border-radius: 15px; background: rgba(255, 255, 255, .025); counter-increment: apple-step; }
+  .applications-apple-guide__steps li > span { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; color: var(--accent-strong); background: var(--surface-accent); }
+  .applications-apple-guide__steps strong::before { content: counter(apple-step) ". "; color: var(--accent); }
+  .applications-apple-guide__steps p { margin: 4px 0 0; color: var(--text-soft); font-size: 12px; line-height: 1.5; }
+  .applications-apple-guide__builder { grid-column: 1 / -1; padding: 20px; display: grid; gap: 18px; border: 1px solid var(--line); border-radius: 20px; background: rgba(6, 8, 12, .44); }
+  .applications-platform-tabs { display: flex; flex-wrap: wrap; gap: 8px; }
+  .applications-platform-tabs button { min-height: 38px; padding: 8px 13px; border: 1px solid var(--line); border-radius: 999px; color: var(--text-soft); background: var(--surface-interactive); font-size: 12px; font-weight: 720; }
+  .applications-platform-tabs button.is-active { border-color: color-mix(in srgb, var(--accent) 60%, transparent); color: var(--accent-ink); background: var(--accent); }
+  .applications-signing-fields { display: grid; grid-template-columns: .7fr 1fr 1.2fr; gap: 12px; }
+  .applications-signing-fields label { min-width: 0; display: grid; gap: 7px; color: var(--text-soft); font-size: 11px; font-weight: 700; }
+  .applications-signing-fields input { width: 100%; min-height: 43px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px; color: var(--text); background: rgba(255, 255, 255, .035); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .applications-signing-fields input:focus { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); outline: 2px solid color-mix(in srgb, var(--accent) 18%, transparent); }
+  .applications-command { min-width: 0; display: grid; gap: 9px; }
+  .applications-command > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--text-soft); font-size: 11px; font-weight: 720; text-transform: uppercase; letter-spacing: .08em; }
+  .applications-command button { min-height: 34px; padding: 6px 9px; display: inline-flex; align-items: center; gap: 6px; border-radius: 9px; color: var(--text); background: var(--surface-interactive); font-size: 11px; font-weight: 700; letter-spacing: 0; text-transform: none; }
+  .applications-command button:disabled { opacity: .42; cursor: not-allowed; }
+  .applications-command pre { max-width: 100%; margin: 0; padding: 16px; overflow-x: auto; border: 1px solid var(--line); border-radius: 13px; color: var(--success); background: rgba(0, 0, 0, .32); font-size: 11px; line-height: 1.65; }
+  .applications-command p { margin: 0; color: var(--warning); font-size: 11px; }
+  .applications-apple-guide__privacy { grid-column: 1 / -1; padding: 16px 18px; display: grid; grid-template-columns: auto 1fr; gap: 12px; border: 1px solid color-mix(in srgb, var(--success) 24%, var(--line)); border-radius: 15px; color: var(--success); background: var(--surface-success); }
+  .applications-apple-guide__privacy p { margin: 4px 0 0; color: var(--text-soft); font-size: 12px; line-height: 1.5; }
   .applications-verify { max-width: 1440px; margin: 28px auto 0; padding: 24px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 16px; border: 1px solid color-mix(in srgb, var(--success) 22%, var(--line)); border-radius: var(--radius-lg); background: var(--surface-success); }
   .applications-verify > svg { color: var(--success); }
   .applications-verify h2 { margin: 0 0 3px; font-size: 16px; }
@@ -2670,6 +2697,9 @@
 
 @media (max-width: 1080px) {
   .applications-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .applications-apple-guide { grid-template-columns: 1fr; }
+  .applications-apple-guide__builder, .applications-apple-guide__privacy { grid-column: auto; }
+  .applications-signing-fields { grid-template-columns: 1fr 1fr; }
 }
 
 @media (max-width: 720px) {
@@ -2689,10 +2719,21 @@
   .applications-verify { grid-template-columns: auto minmax(0, 1fr); }
   .applications-verify__commands { grid-column: 1 / -1; }
   .applications-footer { align-items: flex-start; flex-direction: column; }
+  .applications-header__actions { gap: 4px; }
+  .applications-language { padding-inline: 8px; }
+  .applications-language > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .applications-language select { min-width: 62px; }
+  .applications-apple-guide { margin-top: 28px; padding: 22px 18px; border-radius: 20px; }
+  .applications-signing-fields { grid-template-columns: 1fr; }
+  .applications-command > div { align-items: flex-start; flex-direction: column; }
+  .applications-command button { width: 100%; justify-content: center; }
+  .applications-command pre { font-size: 10px; }
 }
 
 @media (max-width: 390px) {
   .applications-card__actions { grid-template-columns: 1fr; }
   .applications-card__digest { align-items: flex-start; flex-direction: column; }
   .applications-card__digest button { width: 100%; margin-left: 0; }
+  .applications-header__github { display: none; }
+  .applications-language select { min-width: 58px; }
 }

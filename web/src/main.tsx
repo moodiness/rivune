@@ -5,20 +5,21 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import { AuthProvider } from "./auth";
 import { ApplicationsPage } from "./pages/Applications";
-import { setLocale } from "./i18n";
+import { setLocale, translate as t } from "./i18n";
 import { NotificationViewport } from "./notifications";
 import "./styles.css";
 
-await setLocale();
 
 const basePath = import.meta.env.BASE_URL;
 const relativePath = window.location.pathname.startsWith(basePath)
   ? window.location.pathname.slice(basePath.length).replace(/^\/+|\/+$/g, "")
   : window.location.pathname.replace(/^\/+|\/+$/g, "");
 const applicationsRoute = basePath !== "/" || relativePath === "apps";
+const requestedApplicationsLocale = applicationsRoute ? new URLSearchParams(window.location.search).get("lang") : null;
+await setLocale(requestedApplicationsLocale);
 if (applicationsRoute) {
-  document.title = "Rivune applications";
-  document.querySelector('meta[name="description"]')?.setAttribute("content", "Download verified Rivune applications for Android, Apple, and Windows.");
+  document.title = t("applications.meta.title");
+  document.querySelector('meta[name="description"]')?.setAttribute("content", t("applications.meta.description"));
 }
 
 createRoot(document.getElementById("root")!).render(
