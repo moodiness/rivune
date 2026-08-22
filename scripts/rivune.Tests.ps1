@@ -151,8 +151,7 @@ exit /b 0
     Reset-Logs
     Assert-Fails { & (Join-Path $caseRoot 'rivune.ps1') logs 'postgres;ignored' } 'Hostile log service'
     Assert-Lines $dockerLog @() 'Rejected service Docker isolation'
-
-    Add-Content -LiteralPath (Join-Path $caseRoot '.env') -Value 'RIVUNE_VERSION=9.9.9'
+    Add-Content -LiteralPath (Join-Path $caseRoot '.env') -Value "`nRIVUNE_VERSION=9.9.9"
     Reset-Logs
     Assert-Fails { & (Join-Path $caseRoot 'rivune.ps1') up } 'Duplicate discovery version'
     Assert-Lines $dockerLog @() 'Duplicate environment Docker isolation'
