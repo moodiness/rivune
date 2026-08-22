@@ -313,6 +313,7 @@ public sealed partial class MainPage
         {
             _endingTask = null;
             _playerReturnTask = null;
+            _diagnosticPlaybackActive = false;
         }
         var startSeconds = requestedPositionSeconds ?? (item.Completed ? 0 : (int)Math.Clamp(item.PositionMilliseconds / 1_000, 0, int.MaxValue));
         var source = new PlaybackSource
@@ -332,6 +333,7 @@ public sealed partial class MainPage
         try { await ShowOfflinePlayerAsync(source, startSeconds); }
         catch
         {
+            _diagnostics.Record(DiagnosticEventCode.PlaybackFailed);
             StopOfflinePlayback();
             throw;
         }
@@ -366,8 +368,15 @@ public sealed partial class MainPage
         _mediaPlayer.Source = _mediaSource;
         _mediaPlayer.PlaybackSession.PlaybackRate = PlaybackRates[_playbackRateIndex];
         if (startSeconds > 0) _mediaPlayer.PlaybackSession.Position = TimeSpan.FromSeconds(startSeconds);
-        _mediaPlayer.Play();
-        _positionTimer.Start();
+        lock (_endingSync)
+        {
+            if (_endingTask is not null || _playerReturnTask is not null || _closed)
+                throw new OperationCanceledException();
+            _mediaPlayer.Play();
+            _positionTimer.Start();
+            _diagnosticPlaybackActive = true;
+            _diagnostics.Record(DiagnosticEventCode.PlaybackStarted);
+        }
         StartPlayerStartupWatchdog(generation);
         UpdateTrackButtonLabels();
         PlayerAudioButton.IsEnabled = false;

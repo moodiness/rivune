@@ -1589,6 +1589,13 @@ private struct LibraryHeader: View {
 private struct AppearanceSettingsView: View {
     @ObservedObject var model: RivuneAppModel
     @Environment(\.dismiss) private var dismiss
+    @State private var diagnosticStatus: String?
+    @State private var diagnosticPreview = ""
+    @State private var diagnosticPreviewPresented = false
+#if !os(tvOS)
+    @State private var diagnosticDocument: RivuneDiagnosticTextDocument?
+    @State private var diagnosticExporterPresented = false
+#endif
 
     private let columns = [GridItem(.adaptive(minimum: 140, maximum: 220), spacing: 14)]
 
@@ -1721,8 +1728,44 @@ private struct AppearanceSettingsView: View {
 
                     settingsSection("CONNECTION") {
                         settingsValue("Server", value: model.serverName)
-                        settingsValue("Address", value: model.serverAddress)
+                        settingsValue("Address", value: RivuneDiagnosticsReport.sanitizeServerOrigin(model.serverAddress) ?? "Unavailable")
+                        settingsValue("Server version", value: model.serverVersion ?? "Unavailable")
+                        settingsValue("Protocol", value: model.serverProtocolVersion.map(String.init) ?? "Unavailable")
                         settingsValue("Profile", value: model.activeProfile?.name ?? "None")
+                    }
+
+                    settingsSection("DIAGNOSTICS") {
+                        Text("The report is generated only from allowlisted system fields and recent in-memory event codes. It contains no token, media title, profile identifier, request payload, or error detail, and Rivune never uploads it.")
+                            .foregroundStyle(RivunePalette.secondary)
+#if os(tvOS)
+                        Button("View or scan diagnostics") {
+                            diagnosticPreview = model.diagnosticReport()
+                            diagnosticPreviewPresented = true
+                            model.recordDiagnosticExport(succeeded: true)
+                        }
+                        .buttonStyle(.borderedProminent)
+#else
+#if os(iOS) || os(visionOS)
+                        Button("Copy diagnostics") {
+                            let copied = copyRivuneDiagnosticReport(model.diagnosticReport())
+                            model.recordDiagnosticExport(succeeded: copied)
+                            diagnosticStatus = copied
+                                ? "Diagnostics copied locally for 60 seconds. Universal Clipboard is disabled."
+                                : "Diagnostics could not be copied."
+                        }
+                        .buttonStyle(.bordered)
+#endif
+                        Button("Export logs") {
+                            diagnosticDocument = RivuneDiagnosticTextDocument(report: model.diagnosticReport())
+                            diagnosticExporterPresented = true
+                        }
+                        .buttonStyle(.borderedProminent)
+#endif
+                        if let diagnosticStatus {
+                            Text(diagnosticStatus)
+                                .font(.caption)
+                                .foregroundStyle(RivunePalette.secondary)
+                        }
                     }
                 }
                 .padding(28).frame(maxWidth: 820).frame(maxWidth: .infinity)
@@ -1730,6 +1773,30 @@ private struct AppearanceSettingsView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear(perform: model.loadProfileSettings)
+#if os(tvOS)
+        .sheet(isPresented: $diagnosticPreviewPresented) {
+            RivuneTelevisionDiagnosticView(report: diagnosticPreview)
+        }
+#else
+        .fileExporter(
+            isPresented: $diagnosticExporterPresented,
+            document: diagnosticDocument,
+            contentType: .utf8PlainText,
+            defaultFilename: "rivune-diagnostics"
+        ) { result in
+            let succeeded: Bool
+            switch result {
+            case .success:
+                succeeded = true
+                diagnosticStatus = "Diagnostic log exported."
+            case .failure:
+                succeeded = false
+                diagnosticStatus = "Diagnostic log could not be exported."
+            }
+            diagnosticDocument = nil
+            model.recordDiagnosticExport(succeeded: succeeded)
+        }
+#endif
     }
 
     @ViewBuilder private func settingsSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {

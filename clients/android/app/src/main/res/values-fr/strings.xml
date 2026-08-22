@@ -161,7 +161,12 @@
     <string name="preferences_diagnostics_body">Copiez un résumé système privé et sans jeton ou exportez les journaux récents de l’application pour l’assistance.</string>
     <string name="preferences_copy_diagnostics">Copier le diagnostic</string>
     <string name="preferences_export_logs">Exporter les journaux</string>
-    <string name="diagnostics_copied">Diagnostic copié. Android masquera l’aperçu du presse-papiers.</string>
+    <string name="preferences_view_diagnostics">Afficher le diagnostic</string>
+    <string name="preferences_diagnostics_body_tv">Affichez localement le rapport borné et sans jeton, ou exportez-le vers une destination choisie. Rivune ne le téléverse jamais.</string>
+    <string name="diagnostics_private_title">Diagnostic privé</string>
+    <string name="diagnostics_private_body">Rien n’est téléversé. Photographiez le rapport autorisé si ce téléviseur n’a aucun fournisseur de documents.</string>
+    <string name="diagnostics_done">Terminé</string>
+    <string name="diagnostics_copied">Diagnostic copié avec aperçu masqué. Rivune l’efface après 60 secondes ou lorsque vous quittez l’application.</string>
     <string name="diagnostics_copy_failed">Le diagnostic n’a pas pu être copié.</string>
     <string name="diagnostics_exported">Journal de diagnostic exporté.</string>
     <string name="diagnostics_export_failed">Le journal de diagnostic n’a pas pu être exporté.</string>

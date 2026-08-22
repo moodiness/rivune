@@ -7,7 +7,7 @@ The supported container deployment is the root [`compose.yaml`](../compose.yaml)
 For the standard Linux Compose deployment, use the repository-root command instead of reconstructing Docker arguments:
 
 ```sh
-./rivune setup --public-url https://media.example.com --version 1.11.2
+./rivune setup --public-url https://media.example.com --version 1.11.3
 ./rivune up
 ./rivune status
 ./rivune logs rivune
@@ -23,6 +23,8 @@ For the standard Linux Compose deployment, use the repository-root command inste
 Every native HTTP response carries `X-Request-ID`. Rivune accepts a caller ID only when it is a single 1–128-byte ASCII token from the documented allowlist; otherwise it generates a cryptographically random 128-bit hexadecimal ID. The same value is propagated to supported outbound provider requests and written to completion and panic logs with the matched route, method, status, duration, response bytes, database call count/duration, outbound call count/duration, and upstream bytes. Do not put credentials or media identifiers in caller-supplied IDs.
 
 The global-administrator `GET /api/v1/operations` response adds bounded PostgreSQL pool, tracking-outbox, add-on, and active/transcoding-playback aggregates to the existing metadata and housekeeping status. These fields intentionally contain no profile, title, URL, token, or credential identifiers.
+
+The Android, Apple, and Windows clients keep at most 64 KiB of structured event codes in memory for the current process and build reports no larger than 64 KiB. Reports contain only explicit app/build, platform, device, preference, server-origin/name/version/protocol, and timestamped event-code fields. They never contain credentials, cookies, headers, request or response bodies, media or profile identifiers, titles, provider data, filesystem paths, raw errors, or URL credentials/path/query/fragment. Rivune never uploads a report: export always uses a user-selected local destination. Windows clipboard copies opt out of history and roaming/device sync and clear after 60 seconds; Apple device copies are local-only with a 60-second expiry. While Rivune remains alive, Android marks copies sensitive and clears them after 60 seconds or when Rivune leaves the foreground, whichever comes first. Android exposes neither a standard per-clip local-only guarantee nor expiry that survives process death; use **Export logs** wherever clipboard synchronization or retention cannot be ruled out. Android TV displays the allowlisted report locally when clipboard support is unsuitable. Apple TV shows the same report and a local QR representation because tvOS has no public clipboard, share sheet, or document exporter.
 
 ## Portable profile archives
 
@@ -52,7 +54,7 @@ login used only by the restore scripts.
 
 ```dotenv
 RIVUNE_PUBLIC_URL=https://media.example.com
-RIVUNE_VERSION=1.11.2
+RIVUNE_VERSION=1.11.3
 RIVUNE_POSTGRES_SUPERUSER_PASSWORD=<output of: openssl rand -hex 32>
 RIVUNE_DATABASE_PASSWORD=<different output of: openssl rand -hex 32>
 RIVUNE_RESTORE_PASSWORD=<different output of: openssl rand -hex 32>
@@ -387,9 +389,9 @@ The subshell and its `EXIT` trap discard the exported secrets even when migratio
 After exporting the signing and verification key paths, lineage, and trusted state path described below, update to a stable release by changing `RIVUNE_VERSION` to an exact released version, backing up first, recording the printed backup ID outside the repository, and recreating only the application:
 
 ```sh
-COMPOSE_FILE=compose.yaml ./scripts/postgres-backup.sh backups/rivune-before-1.11.2.dump
-./scripts/postgres-verify-backup.sh --expect-backup-id '<recorded ID>' backups/rivune-before-1.11.2.dump
-# edit RIVUNE_VERSION=1.11.2 in .env
+COMPOSE_FILE=compose.yaml ./scripts/postgres-backup.sh backups/rivune-before-1.11.3.dump
+./scripts/postgres-verify-backup.sh --expect-backup-id '<recorded ID>' backups/rivune-before-1.11.3.dump
+# edit RIVUNE_VERSION=1.11.3 in .env
 docker compose --env-file .env -f compose.yaml pull rivune
 docker compose --env-file .env -f compose.yaml up -d rivune
 curl --fail --show-error https://media.example.com/ready

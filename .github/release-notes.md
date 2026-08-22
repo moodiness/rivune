@@ -1,21 +1,23 @@
-# Rivune v1.11.2
+# Rivune v1.11.3
 
 ## Highlights
 
-- Windows Docker Desktop hosts can now publish Rivune through `_rivune._tcp` without relying on multicast escaping the Docker VM. The new `.\rivune.ps1` lifecycle wrapper installs and supervises a native Windows DNS-SD publisher when `RIVUNE_DISCOVERY_URL` is configured.
-- The publisher runs as a limited per-user scheduled task with no elevation, starts immediately and at logon, retries bounded failures, and is removed by `.\rivune.ps1 down`.
-- Windows publishes the same `url`, `protocol=20`, and `version` TXT contract as Linux and macOS. The release gate starts the real scheduled publisher and discovers its emitted TXT record through the Windows client's mDNS parser.
-- Discovery configuration, bounded logs, and active PID state remain private to the current Windows identity under `%LOCALAPPDATA%\Rivune\discovery`; no application secret is copied there or advertised.
-- `.\rivune.ps1` pins `.env` and `compose.yaml`, clears ambient Compose control variables, validates discovery before starting containers, and provides `up`, `down`, `restart`, `pull`, `status`, and bounded service-log delegation.
-- Discovery still accepts only HTTPS origins or literal private-IP HTTP origins and rejects credentials, paths, queries, fragments, loopback, wildcard, multicast, and link-local addresses.
+- Android, Apple, and Windows clients now expose the same bounded, token-free support report from their settings surfaces.
+- Each process keeps at most 64 KiB of structured event codes in memory, and every exported UTF-8 report is capped at 64 KiB.
+- Reports use a strict allowlist: app/build, platform and device metadata, selected local preferences, the server origin/name/version/protocol, and timestamped lifecycle event codes.
+- Credentials, cookies, headers, payloads, media and profile identifiers, titles, provider data, filesystem paths, raw errors, and URL credentials/path/query/fragment are excluded by construction.
+- Rivune never uploads diagnostics. Android, Apple, and Windows use user-initiated local copy or export surfaces; Android TV displays the report locally, and Apple TV adds a local QR representation because tvOS has no public clipboard, share sheet, or file exporter.
+- Windows copies opt out of clipboard history and roaming/device sync and clear after 60 seconds. Apple device copies are local-only and expire after 60 seconds. While Rivune remains alive, Android marks copies sensitive and clears them after 60 seconds or when Rivune leaves the foreground, whichever comes first; Android has no standard per-clip local-only or process-death-safe expiry guarantee, so use **Export logs** wherever clipboard synchronization or retention cannot be ruled out.
+- Connection, catalogue, playback, update, and export outcomes are recorded only as stable event codes without attached values or exception text.
 - The complete backend, browser, Android, Apple, Windows, migration, proxy, backup, and multi-architecture container gates run before publication.
 
-## Windows host installation
+## Using diagnostics
 
-- Run `.\scripts\create-env.ps1`, fill the private `.env`, then use `.\rivune.ps1 up`. Set `RIVUNE_DISCOVERY_URL` to the reachable HTTPS origin or literal private-IP HTTP origin and optionally set `RIVUNE_DISCOVERY_NAME`.
-- Use `.\rivune.ps1 status` to inspect both Compose and the host publisher, `.\rivune.ps1 logs discovery` for its private bounded log, and `.\rivune.ps1 down` to remove the scheduled publisher.
-- A direct trusted-LAN HTTP origin also requires `RIVUNE_BIND_ADDRESS=0.0.0.0`; keep that port restricted to the trusted LAN and never forward it from the router.
-- Raw Docker Compose does not install the Windows host publisher. Manual server entry remains available when discovery is disabled.
+- On Android mobile or tablet, open Settings → About, then choose **Copy diagnostics** or **Export logs**. On Android TV, choose **View diagnostics** to inspect or photograph the local report; **Export logs** remains available when the TV provides a document destination.
+- On iPhone, iPad, or visionOS, open Settings → Diagnostics, then copy locally or export the text report. On macOS, export the text report to a user-selected file.
+- On Apple TV, open Settings → Diagnostics and choose **View or scan diagnostics**. Scan the QR code on the local display or photograph the visible allowlisted report.
+- On Windows, open Settings → About, then choose **Copy diagnostics** or **Export logs**.
+- Review every report before sharing it. Diagnostics are designed to exclude secrets, but device and server-origin metadata may still identify an installation.
 
 ## Application installation
 
@@ -27,17 +29,17 @@
 ## Upgrade notes
 
 - This patch release adds no database migration. The current schema remains unchanged from v1.11.0.
-- Existing operators can set `RIVUNE_VERSION=1.11.2`, pull, and recreate Rivune. Fresh Compose deployments now default to the immutable `1.11.2` image tag.
-- Existing Windows `.env` files remain valid. Use `.\rivune.ps1 up` instead of raw Compose to activate host-network discovery; leave `RIVUNE_DISCOVERY_URL` empty to keep it disabled.
+- Existing operators can set `RIVUNE_VERSION=1.11.3`, pull, and recreate Rivune. Fresh Compose deployments now default to the immutable `1.11.3` image tag.
+- Diagnostic history exists only in process memory and begins empty after every app restart; no new persistent file or permission is introduced.
 - GitHub publishes exactly eight release assets: `Rivune-Android.apk`, the three unsigned IPA files, `Rivune-macOS.dmg`, `rivune-update.json`, `Rivune-x64.exe`, and `Rivune-arm64.exe`.
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.11.2`
+- `ghcr.io/moodiness/rivune:1.11.3`
 - `ghcr.io/moodiness/rivune:1.11`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 - Provenance and SBOM attestations are published for both runnable platforms.
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.11.1...v1.11.2
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.11.2...v1.11.3

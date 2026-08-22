@@ -186,6 +186,7 @@ public sealed partial class MainPage
     {
         if (_updateCheckInProgress) return;
         _updateCheckInProgress = true;
+        _diagnostics.Record(DiagnosticEventCode.UpdateCheckStarted);
         CheckUpdatesButton.IsEnabled = false;
         try
         {
@@ -195,6 +196,7 @@ public sealed partial class MainPage
             if (_closed) return;
             if (!result.IsUpdateAvailable)
             {
+                _diagnostics.Record(DiagnosticEventCode.UpdateUpToDate);
                 if (automatic && !_manualUpdateCheckRequested) return;
                 var comparison = AppUpdateChecker.CompareSemanticVersions(
                     result.CurrentVersion,
@@ -207,6 +209,7 @@ public sealed partial class MainPage
                 return;
             }
 
+            _diagnostics.Record(DiagnosticEventCode.UpdateAvailable);
             var available = new ContentDialog
             {
                 XamlRoot = XamlRoot,
@@ -300,6 +303,7 @@ public sealed partial class MainPage
         }
         catch (Exception exception)
         {
+            _diagnostics.Record(DiagnosticEventCode.UpdateCheckFailed);
             if (!_closed && (!automatic || _manualUpdateCheckRequested))
             {
                 var message = exception is HttpRequestException
@@ -471,6 +475,7 @@ public sealed partial class MainPage
             DashboardLoadingStatus.Visibility = Visibility.Collapsed;
             return;
         }
+        _diagnostics.Record(DiagnosticEventCode.CatalogRefreshStarted);
         var cancellationToken = _state.Token;
         var collectionsTask = client.GetCollectionsAsync(cancellationToken);
         var continueWatchingTask = GetHomeContinueWatchingAsync(client, cancellationToken);
@@ -528,10 +533,12 @@ public sealed partial class MainPage
             if (!HomeRequestCurrent(client, generation)) return;
 
             await PresentHomeHeroAsync(client, heroTargets, generation);
+            _diagnostics.Record(DiagnosticEventCode.CatalogRefreshSucceeded);
         }
         catch (OperationCanceledException) { }
         catch (Exception exception)
         {
+            _diagnostics.Record(DiagnosticEventCode.CatalogRefreshFailed);
             if (!HomeRequestCurrent(client, generation)) return;
             DashboardBanner.Severity = InfoBarSeverity.Error;
             DashboardBanner.Message = FriendlyError(exception);

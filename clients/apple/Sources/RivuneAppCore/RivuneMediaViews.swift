@@ -666,6 +666,7 @@ private struct RivuneNativeInternalPlayerView: View {
     }
     private func handlePlaybackFailure(_ error: Error?) {
         guard failureMessage == nil, !handoffToMPV, !finished else { return }
+        model.recordPlaybackFailure()
         let detail = error?.localizedDescription
             ?? player.currentItem?.errorLog()?.events.last?.errorComment
             ?? "The media format or server response was rejected"
@@ -1055,7 +1056,7 @@ private struct RivuneMPVInternalPlayerView: View {
             model.updateCoordinationPlayback(position: value, duration: player.duration, playing: player.playing)
         }
         .onReceive(player.$playing) { active in model.updateCoordinationPlayback(position: player.position, duration: player.duration, playing: active) }
-        .onReceive(player.$failureMessage.compactMap { $0 }) { failureMessage = $0; controlsVisible = true }
+        .onReceive(player.$failureMessage.compactMap { $0 }) { failureMessage = $0; controlsVisible = true; model.recordPlaybackFailure() }
         .onChange(of: model.pendingPlaybackCommands.first?.id) { _ in applyRemoteCommand() }
         .onChange(of: model.activePlaybackRoom?.version) { _ in applyRoomState() }
         .onReceive(player.$ended.filter { $0 }) { _ in finish(completed: true) }
@@ -1359,6 +1360,7 @@ private struct RivuneNativeMiniPlayerView: View {
 
     private func handlePlaybackFailure(_ error: Error?) {
         guard failureMessage == nil, !handoff, !finished else { return }
+        model.recordPlaybackFailure()
         let detail = error?.localizedDescription ?? "The media format or server response was rejected"
         if presentation.fallbackAllowed {
             handoff = true
@@ -1490,7 +1492,7 @@ private struct RivuneMPVMiniPlayerView: View {
         }
         .onChange(of: model.pendingPlaybackCommands.first?.id) { _ in applyRemoteCommand() }
         .onChange(of: model.activePlaybackRoom?.version) { _ in applyRoomState() }
-        .onReceive(player.$failureMessage.compactMap { $0 }) { failureMessage = $0 }
+        .onReceive(player.$failureMessage.compactMap { $0 }) { failureMessage = $0; model.recordPlaybackFailure() }
         .onReceive(player.$ended.filter { $0 }) { _ in finish(completed: true) }
         .onDisappear {
             player.shutdown()

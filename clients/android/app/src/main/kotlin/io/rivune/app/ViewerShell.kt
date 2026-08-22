@@ -2036,12 +2036,12 @@ private fun AboutPreferencesPanel(
                     isTv = isTv,
                 )
                 Text(
-                    text = stringResource(R.string.preferences_diagnostics_body),
+                    text = stringResource(if (isTv) R.string.preferences_diagnostics_body_tv else R.string.preferences_diagnostics_body),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = if (isTv) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.bodyMedium,
                 )
                 RivuneSecondaryButton(
-                    label = stringResource(R.string.preferences_copy_diagnostics),
+                    label = stringResource(if (isTv) R.string.preferences_view_diagnostics else R.string.preferences_copy_diagnostics),
                     onClick = onCopyDiagnostics,
                     isTv = isTv,
                     icon = Icons.Rounded.ContentCopy,

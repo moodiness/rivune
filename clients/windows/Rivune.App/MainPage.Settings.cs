@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Runtime.InteropServices;
+using Microsoft.Windows.Storage.Pickers;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
@@ -464,21 +466,125 @@ public sealed partial class MainPage
         var diagnostics = AboutSection("Diagnostics", "\uE8C8");
         diagnostics.Children.Add(new TextBlock
         {
-            Text = "Copy a private, token-free summary for support.",
+            Text = "Copy a private, token-free summary or export recent in-memory event codes. Reports are limited to 64 KiB and Rivune never uploads them.",
             Style = (Style)Application.Current.Resources["RivuneBodyMediumTextStyle"],
             Foreground = (Brush)Application.Current.Resources["RivuneSecondaryTextBrush"],
+            TextWrapping = TextWrapping.Wrap,
         });
         diagnostics.Children.Add(AboutSecondaryAction("Copy diagnostics", "\uE8C8", CopyDiagnosticsAsync));
+        diagnostics.Children.Add(AboutSecondaryAction("Export logs", "\uE74E", ExportDiagnosticsAsync));
         SettingsPanelHost.Children.Add(AboutSurface(diagnostics));
+    }
+
+    private DiagnosticReportInput BuildDiagnosticReportInput()
+    {
+        var discovery = _state.Discovery;
+        return new DiagnosticReportInput
+        {
+            GeneratedAt = DateTimeOffset.UtcNow,
+            AppVersion = CurrentAppVersion,
+            AppBuild = typeof(App).Assembly.GetName().Version?.ToString() ?? "unavailable",
+            Platform = "windows",
+            OperatingSystemVersion = Environment.OSVersion.Version.ToString(),
+            Architecture = RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant(),
+            IsTelevision = false,
+            ServerAddress = ServerAddressBox.Text,
+            ServerDisplayName = discovery?.Name,
+            ServerVersion = discovery?.ServerVersion,
+            ServerProtocolVersion = discovery?.ProtocolVersion,
+            StartupTab = _devicePreferences.StartupTab.ToString().ToLowerInvariant(),
+            PreferredPlayer = "windows-native",
+            AnimationPreference = _devicePreferences.Motion.ToString().ToLowerInvariant(),
+            AccentColor = _devicePreferences.AccentColor,
+            VideoAspect = new[] { "fit", "fill", "zoom" }[_devicePreferences.VideoAspectIndex],
+            Events = _diagnostics.Snapshot(),
+        };
     }
 
     private async Task CopyDiagnosticsAsync()
     {
-        var discovery = _state.Discovery;
-        var package = new DataPackage();
-        package.SetText($"Rivune Windows {CurrentAppVersion}\nServer: {discovery?.Name ?? "unknown"}\nAddress: {DisplayServerAddress(discovery)}\nServer version: {discovery?.ServerVersion ?? "unknown"}\nProtocol: {discovery?.ProtocolVersion.ToString() ?? "unknown"}");
-        Clipboard.SetContent(package);
-        await ShowUpdateDialogAsync("Diagnostics copied", "A token-free system summary was copied to the clipboard.");
+        var report = DiagnosticsReport.Build(BuildDiagnosticReportInput());
+        var package = new DataPackage { RequestedOperation = DataPackageOperation.Copy };
+        package.SetText(report);
+        var copied = false;
+        try
+        {
+            copied = Clipboard.SetContentWithOptions(package, new ClipboardContentOptions
+            {
+                IsAllowedInHistory = false,
+                IsRoamable = false,
+            });
+        }
+        catch
+        {
+        }
+        _diagnostics.Record(copied
+            ? DiagnosticEventCode.DiagnosticExportSucceeded
+            : DiagnosticEventCode.DiagnosticExportFailed);
+        if (!copied)
+        {
+            await ShowUpdateDialogAsync("Diagnostics unavailable", "Windows could not place the private report on the clipboard.");
+            return;
+        }
+        _diagnosticClipboardReport = report;
+        var generation = Interlocked.Increment(ref _diagnosticClipboardGeneration);
+        _ = ClearDiagnosticClipboardAsync(report, generation, waitForExpiry: true);
+        await ShowUpdateDialogAsync("Diagnostics copied", "The token-free report is excluded from clipboard history and device sync, and will be cleared after 60 seconds if unchanged.");
+    }
+
+    private async Task ClearDiagnosticClipboardAsync(string report, long generation, bool waitForExpiry)
+    {
+        if (waitForExpiry) await Task.Delay(TimeSpan.FromSeconds(60));
+        while (generation == Volatile.Read(ref _diagnosticClipboardGeneration))
+        {
+            try
+            {
+                var content = Clipboard.GetContent();
+                if (!content.Contains(StandardDataFormats.Text) || await content.GetTextAsync() != report)
+                {
+                    Interlocked.CompareExchange(ref _diagnosticClipboardReport, null, report);
+                    return;
+                }
+                if (generation != Volatile.Read(ref _diagnosticClipboardGeneration)) return;
+                Clipboard.Clear();
+                Interlocked.CompareExchange(ref _diagnosticClipboardReport, null, report);
+                return;
+            }
+            catch (Exception exception) when (exception is COMException or UnauthorizedAccessException)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(250));
+            }
+            catch
+            {
+                return;
+            }
+        }
+    }
+
+    private async Task ExportDiagnosticsAsync()
+    {
+        try
+        {
+            var picker = new FileSavePicker(App.MainWindow.AppWindow.Id)
+            {
+                SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
+                SuggestedFileName = "rivune-diagnostics",
+                DefaultFileExtension = ".txt",
+                CommitButtonText = "Export",
+                ShowOverwritePrompt = true,
+            };
+            picker.FileTypeChoices.Add("Text document", new List<string> { ".txt" });
+            var file = await picker.PickSaveFileAsync();
+            if (file is null) return;
+            await File.WriteAllBytesAsync(file.Path, DiagnosticsReport.BuildUtf8(BuildDiagnosticReportInput()));
+            _diagnostics.Record(DiagnosticEventCode.DiagnosticExportSucceeded);
+            await ShowUpdateDialogAsync("Diagnostics exported", "The bounded token-free diagnostic log was exported to the selected file.");
+        }
+        catch
+        {
+            _diagnostics.Record(DiagnosticEventCode.DiagnosticExportFailed);
+            await ShowUpdateDialogAsync("Diagnostics unavailable", "The diagnostic log could not be exported.");
+        }
     }
 
     private async Task OpenAboutLinkAsync(Uri uri)

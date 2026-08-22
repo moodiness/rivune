@@ -162,7 +162,7 @@ internal fun collectAndroidDiagnosticMetadata(context: Context): AndroidDiagnost
     )
 
 internal fun sanitizeServerOrigin(value: String?): String? {
-    val candidate = value?.trim()?.takeIf { it.isNotEmpty() && it.length <= MAX_SERVER_URL_LENGTH } ?: return null
+    val candidate = value?.trim()?.takeIf { it.isNotEmpty() && it.utf8Size() <= MAX_SERVER_URL_LENGTH } ?: return null
     if (candidate.any { isUnsafeScalarCodePoint(it.code) }) return null
     val uri = try {
         URI(candidate)
@@ -174,12 +174,12 @@ internal fun sanitizeServerOrigin(value: String?): String? {
     if (scheme != "http" && scheme != "https") return null
     val rawHost = uri.host?.takeIf(String::isNotBlank) ?: return null
     val host = rawHost.removePrefix("[").removeSuffix("]").lowercase(Locale.ROOT)
-    if (host.any { isUnsafeScalarCodePoint(it.code) }) return null
+    if (host.contains('%') || host.any { isUnsafeScalarCodePoint(it.code) }) return null
     val renderedHost = if (host.contains(':')) "[$host]" else host
     val port = uri.port
     if (port > 65_535) return null
     val includePort = port >= 0 && !((scheme == "http" && port == 80) || (scheme == "https" && port == 443))
-    return buildString {
+    val origin = buildString {
         append(scheme)
         append("://")
         append(renderedHost)
@@ -188,6 +188,7 @@ internal fun sanitizeServerOrigin(value: String?): String? {
             append(port)
         }
     }
+    return origin.takeIf { it.utf8Size() <= MAX_SERVER_URL_LENGTH }
 }
 
 internal fun buildDiagnosticReport(input: DiagnosticReportInput): String {
