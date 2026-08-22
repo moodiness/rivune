@@ -76,6 +76,8 @@ public sealed partial class MainPage
         _state.Preparation = null;
         PlaySourceButton.IsEnabled = false;
         PlaySourceButton.Visibility = Visibility.Collapsed;
+        DownloadSourceButton.IsEnabled = false;
+        DownloadSourceButton.Visibility = Visibility.Collapsed;
         var filtered = addonId is null ? _sourceOptions : _sourceOptions.Where(value => value.AddonId == addonId).ToArray();
         SourceList.ItemsSource = filtered;
         SourceStatus.Text = filtered.Count == 0
@@ -145,6 +147,8 @@ public sealed partial class MainPage
         SourceBanner.IsOpen = false;
         SourceProgress.IsActive = true;
         PlaySourceButton.IsEnabled = false;
+        DownloadSourceButton.IsEnabled = false;
+        DownloadSourceButton.Visibility = Visibility.Collapsed;
         try
         {
             await LoadSourcesAsync(request.MediaType, request.ResourceId, request.TitleId, generation, request.AddonId, request.TracksProgress);

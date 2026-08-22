@@ -554,13 +554,15 @@ public sealed partial class MainPage
         IReadOnlyList<MediaTarget> recommendationTargets)
     {
         DashboardSections.Children.Clear();
+        if (_offlineItems.Count > 0)
+            DashboardSections.Children.Add(CreateOfflineMediaRow());
         if (continueTargets.Count > 0)
             DashboardSections.Children.Add(CreateMediaRow(UiText("Continue watching", "Continuer à regarder"), continueTargets, landscape: true));
         if (recommendationTargets.Count > 0)
             DashboardSections.Children.Add(CreateMediaRow(UiText("Recommended for you", "Recommandé pour vous"), recommendationTargets, landscape: false));
         foreach (var collection in collections)
             DashboardSections.Children.Add(CreateCollectionRow(collection));
-        DashboardEmpty.Visibility = collections.Count == 0 && continueTargets.Count == 0 && recommendationTargets.Count == 0
+        DashboardEmpty.Visibility = collections.Count == 0 && continueTargets.Count == 0 && recommendationTargets.Count == 0 && _offlineItems.Count == 0
             ? Visibility.Visible
             : Visibility.Collapsed;
     }

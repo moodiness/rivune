@@ -35,6 +35,13 @@ public sealed partial class MainPage : Page
     private WindowsDevicePreferencesStore? _devicePreferencesStore;
     private WindowsDevicePreferences _devicePreferences = new();
     private string? _devicePreferencesFailure;
+    private OfflineMediaStore? _offlineMediaStore;
+    private string? _offlineScope;
+    private IReadOnlyList<OfflineMediaItem> _offlineItems = [];
+    private CancellationTokenSource? _offlineDownloadCancellation;
+    private Task? _offlineDownloadTask;
+    private OfflinePlaybackServer? _offlinePlaybackServer;
+    private OfflineMediaItem? _activeOfflineItem;
     private MediaPlayer _mediaPlayer;
     private readonly MicrosoftDispatcherQueueTimer _positionTimer;
     private readonly MicrosoftDispatcherQueueTimer _chromeTimer;
@@ -87,6 +94,7 @@ public sealed partial class MainPage : Page
     private readonly HashSet<ButtonBase> _zoomPointerButtons = [];
     private readonly HashSet<ButtonBase> _zoomFocusedButtons = [];
     private bool _closed;
+    private bool _offlineOnlySession;
     private string? _startupUpdateError;
     private const VirtualKey MediaNextTrackKey = (VirtualKey)0xB0;
     private const VirtualKey MediaPreviousTrackKey = (VirtualKey)0xB1;
@@ -109,6 +117,7 @@ public sealed partial class MainPage : Page
         ConfigureZoomButton(CloseSourcesButton);
         ConfigureZoomButton(RefreshSourcesButton);
         ConfigureZoomButton(PlaySourceButton);
+        ConfigureZoomButton(DownloadSourceButton);
         try
         {
             _devicePreferencesStore = new WindowsDevicePreferencesStore();
@@ -117,6 +126,15 @@ public sealed partial class MainPage : Page
         catch (Exception exception)
         {
             _devicePreferencesFailure = FriendlyError(exception);
+        }
+        try
+        {
+            _offlineMediaStore = new OfflineMediaStore();
+            RefreshOfflineProfiles();
+        }
+        catch (Exception exception)
+        {
+            _devicePreferencesFailure = string.Join(" ", new[] { _devicePreferencesFailure, $"Offline storage: {FriendlyError(exception)}" }.Where(value => !string.IsNullOrWhiteSpace(value)));
         }
         InitializeAccentPalette();
         InitializeViewerSurface();
@@ -325,6 +343,7 @@ public sealed partial class MainPage : Page
                         p.Id == _state.Account.Session.ActiveProfile.Id && p.Accessible && p.Enabled);
                     if (_state.Profile is not null)
                     {
+                        RestoreOfflineProfile(_state.Profile);
                         await ShowDashboardAsync();
                         return;
                     }
@@ -487,6 +506,7 @@ public sealed partial class MainPage : Page
         ShowOnly(AuthView);
         ServerError.Message = error ?? string.Empty;
         ServerError.IsOpen = !string.IsNullOrWhiteSpace(error);
+        RefreshOfflineProfiles();
         ServerAddressBox.Focus(FocusState.Programmatic);
     }
 
@@ -790,6 +810,7 @@ public sealed partial class MainPage : Page
             var selection = await client.SelectProfileAsync(profile.Id, pin, _state.Token);
             if (!_state.IsCurrent(generation) || !ReferenceEquals(client, _state.Client)) return false;
             _state.Profile = selection.Profile;
+            RegisterOfflineProfile(selection.Profile, pin);
             await ShowDashboardAsync();
             return true;
         }
@@ -824,6 +845,8 @@ public sealed partial class MainPage : Page
         var profileInitial = ProfileInitial(_state.Profile?.Name);
         CompactProfileInitial.Text = profileInitial;
         DockProfileInitial.Text = profileInitial;
+        SetOnlineNavigationEnabled(true);
+        await OfferOfflineUnlockForActiveProfileAsync();
         var profileName = _state.Profile?.Name ?? "profile";
         AutomationProperties.SetName(ProfileMenuButton, $"Account for {profileName}");
         AutomationProperties.SetName(DockAccountButton, $"Account for {profileName}");
@@ -1020,6 +1043,12 @@ public sealed partial class MainPage : Page
             SourceStatus.Text = $"Ready · {preparation.Mode} · {preparation.Protocol} · {preparation.Container ?? "automatic"}";
             PlaySourceButton.IsEnabled = true;
             PlaySourceButton.Visibility = Visibility.Visible;
+            var downloadable = !preparation.Protocol.Equals("hls", StringComparison.OrdinalIgnoreCase) &&
+                !preparation.Protocol.Equals("dash", StringComparison.OrdinalIgnoreCase) &&
+                _offlineMediaStore is not null && _offlineScope is not null;
+            DownloadSourceButton.IsEnabled = downloadable && _offlineDownloadTask is not { IsCompleted: false };
+            DownloadSourceButton.Visibility = downloadable ? Visibility.Visible : Visibility.Collapsed;
+            DownloadSourceLabel.Text = "Download";
             if (_autoStartNextEpisode)
             {
                 _autoStartNextEpisode = false;
@@ -1038,6 +1067,8 @@ public sealed partial class MainPage : Page
             SourceBanner.Message = FriendlyError(exception);
             SourceBanner.IsOpen = true;
             SourceStatus.Text = "Preparation failed. Choose another source or select this one to retry.";
+            DownloadSourceButton.IsEnabled = false;
+            DownloadSourceButton.Visibility = Visibility.Collapsed;
         }
         finally
         {
@@ -1062,6 +1093,8 @@ public sealed partial class MainPage : Page
         PlaySourceButton.IsEnabled = false;
         SourceBanner.IsOpen = false;
         SourceProgress.IsActive = true;
+        DownloadSourceButton.IsEnabled = false;
+        DownloadSourceButton.Visibility = Visibility.Collapsed;
         SourceStatus.Text = "Refreshing expired sources…";
         try
         {
@@ -1087,6 +1120,117 @@ public sealed partial class MainPage : Page
         var generation = _state.Transition(AppPhase.Sources);
         await ResolveSelectedSourceAsync(generation);
     }
+    private async void DownloadSource_Click(object sender, RoutedEventArgs e)
+    {
+        if (_offlineMediaStore is null || _offlineScope is null || _state.SelectedSource is null ||
+            _offlineDownloadTask is { IsCompleted: false }) return;
+        var store = _offlineMediaStore;
+        var scope = _offlineScope;
+        var selected = _state.SelectedSource;
+        var titleId = _progressTitleId;
+        var title = _playbackTitle ?? _detailTitleForPlayback();
+        var posterUrl = _detailTarget?.PosterUrl;
+        var client = _state.Client;
+        if (client is null) return;
+        _offlineDownloadCancellation = CancellationTokenSource.CreateLinkedTokenSource(_state.Token);
+        var cancellation = _offlineDownloadCancellation;
+        DownloadSourceButton.IsEnabled = false;
+        PlaySourceButton.IsEnabled = false;
+        DownloadSourceLabel.Text = "Starting…";
+        SourceBanner.IsOpen = false;
+        var progress = new Progress<long>(bytes =>
+        {
+            if (!_closed && StringComparer.Ordinal.Equals(_offlineScope, scope))
+                DownloadSourceLabel.Text = $"Downloading {FormatBytes(bytes)}";
+        });
+        try
+        {
+            _offlineDownloadTask = DownloadSelectedSourceAsync(store, scope, selected, titleId, title, posterUrl, client, progress, cancellation.Token);
+            await _offlineDownloadTask;
+            if (_closed || !StringComparer.Ordinal.Equals(_offlineScope, scope)) return;
+            DownloadSourceLabel.Text = "Downloaded";
+            SourceBanner.Severity = InfoBarSeverity.Success;
+            SourceBanner.Message = "The encrypted download is ready for offline playback.";
+            SourceBanner.IsOpen = true;
+            LoadOfflineItems();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception)
+        {
+            if (_closed) return;
+            DownloadSourceLabel.Text = "Download";
+            SourceBanner.Severity = InfoBarSeverity.Error;
+            SourceBanner.Message = FriendlyError(exception);
+            SourceBanner.IsOpen = true;
+        }
+        finally
+        {
+            if (ReferenceEquals(_offlineDownloadCancellation, cancellation))
+            {
+                _offlineDownloadCancellation = null;
+                cancellation.Dispose();
+            }
+            _offlineDownloadTask = null;
+            if (!_closed)
+            {
+                PlaySourceButton.IsEnabled = _state.Preparation is not null;
+                DownloadSourceButton.IsEnabled = _state.Preparation is not null;
+            }
+        }
+    }
+
+    private static async Task DownloadSelectedSourceAsync(
+        OfflineMediaStore store,
+        string scope,
+        PlaybackSourceOption selected,
+        Guid titleId,
+        string title,
+        string? posterUrl,
+        RivuneApiClient client,
+        IProgress<long> progress,
+        CancellationToken cancellationToken)
+    {
+        PlaybackSession? session = null;
+        try
+        {
+            await client.PreparePlaybackAsync(selected.SourceRef, cancellationToken: cancellationToken, externalPlayer: true);
+            session = await client.ResolvePlaybackAsync(
+                selected.SourceRef,
+                titleId.ToString("D"),
+                cancellationToken: cancellationToken,
+                externalPlayer: true);
+            var source = session.Sources.FirstOrDefault(value => value.Id == session.SelectedSourceId) ?? session.Sources.FirstOrDefault();
+            if (source?.Url is null || source.Protocol.Equals("hls", StringComparison.OrdinalIgnoreCase) || source.Protocol.Equals("dash", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("This stream cannot be downloaded as one offline file.");
+            var uri = client.ResolveResponseResourceUrl(source.Url);
+            await store.DownloadAsync(
+                scope,
+                uri,
+                client.IsAllowedResponseResourceUrl,
+                titleId,
+                title,
+                source.Container ?? selected.Container,
+                posterUrl,
+                progress,
+                cancellationToken: cancellationToken);
+        }
+        finally
+        {
+            if (session is not null)
+            {
+                try { await client.StopPlaybackAsync(session.Id, CancellationToken.None); }
+                catch { }
+            }
+        }
+    }
+
+    private static string FormatBytes(long bytes) => bytes switch
+    {
+        >= 1024L * 1024L * 1024L => $"{bytes / (1024d * 1024d * 1024d):0.0} GB",
+        >= 1024L * 1024L => $"{bytes / (1024d * 1024d):0.0} MB",
+        >= 1024L => $"{bytes / 1024d:0.0} KB",
+        _ => $"{bytes} B",
+    };
 
     private Task ResolveSelectedSourceAsync(long generation) => ResolveSelectedSourceAtAsync(generation, startOverrideSeconds: null, throwOnFailure: false);
 
@@ -1274,11 +1418,12 @@ public sealed partial class MainPage : Page
         try
         {
             await Task.Delay(TimeSpan.FromSeconds(45), cancellationToken);
-            if (!_state.IsCurrent(generation) || PlayerView.Visibility != Visibility.Visible || _state.PlaybackSession is null) return;
+            if (!_state.IsCurrent(generation) || PlayerView.Visibility != Visibility.Visible ||
+                _state.PlaybackSession is null && _activeOfflineItem is null) return;
             var failedPosition = (int)Math.Max(0, AbsolutePlaybackPosition(_mediaPlayer.PlaybackSession.Position));
             await DispatcherQueue.EnqueueAsync(async () =>
             {
-                if (!_state.IsCurrent(generation) || _state.PlaybackSession is null) return;
+                if (!_state.IsCurrent(generation) || _state.PlaybackSession is null && _activeOfflineItem is null) return;
                 SetPlayerStatus("Playback did not start within 45 seconds.", liveSetting: AutomationLiveSetting.Assertive);
                 await EndPlaybackAsync(completed: false, returnToDashboard: false);
                 await ShowPlaybackRecoveryAsync("Playback did not start within 45 seconds.", failedPosition);
@@ -1417,6 +1562,7 @@ public sealed partial class MainPage : Page
         if (!ReferenceEquals(player, _mediaPlayer)) return;
         player.Pause();
         ClearMediaSource();
+        StopOfflinePlayback(clearItem: false);
         SetPlayerControlsLocked(false);
     }
 
@@ -1424,6 +1570,7 @@ public sealed partial class MainPage : Page
     private async Task ReturnFromPlayerAsync(Task ending)
     {
         await ending;
+        StopOfflinePlayback();
         if (_closed) return;
         ExitPlayerPresenterMode();
         var returnView = _playerReturnView ?? DashboardView;
@@ -1509,7 +1656,8 @@ public sealed partial class MainPage : Page
         var failedPosition = (int)Math.Max(0, AbsolutePlaybackPosition(sender.PlaybackSession.Position));
         _ = DispatcherQueue.EnqueueAsync(async () =>
         {
-            if (!ReferenceEquals(sender, _mediaPlayer) || PlayerView.Visibility != Visibility.Visible || _state.PlaybackSession is null) return;
+            if (!ReferenceEquals(sender, _mediaPlayer) || PlayerView.Visibility != Visibility.Visible ||
+                _state.PlaybackSession is null && _activeOfflineItem is null) return;
             SetPlayerStatus($"Playback failed: {args.ErrorMessage}", liveSetting: AutomationLiveSetting.Assertive);
             await EndPlaybackAsync(completed: false, returnToDashboard: false);
             if (!ReferenceEquals(sender, _mediaPlayer)) return;
@@ -1519,6 +1667,7 @@ public sealed partial class MainPage : Page
 
     private async Task ShowPlaybackRecoveryAsync(string errorMessage, int failedPosition)
     {
+        var offline = _activeOfflineItem is not null;
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
@@ -1526,10 +1675,17 @@ public sealed partial class MainPage : Page
             Content = string.IsNullOrWhiteSpace(errorMessage) ? "Rivune couldn’t continue this source." : errorMessage,
             PrimaryButtonText = "Retry",
             SecondaryButtonText = "Start over",
-            CloseButtonText = "Choose another source",
+            CloseButtonText = offline ? "Close player" : "Choose another source",
             DefaultButton = ContentDialogButton.Primary,
         };
         var result = await ShowDialogAsync(dialog);
+        if (offline)
+        {
+            if (result is ContentDialogResult.Primary or ContentDialogResult.Secondary)
+                await RestartOfflinePlaybackAsync(result == ContentDialogResult.Secondary ? 0 : failedPosition);
+            else await EndPlaybackAsync(completed: false, returnToDashboard: true);
+            return;
+        }
         if (result is ContentDialogResult.Primary or ContentDialogResult.Secondary)
         {
             await RestartPlaybackWithTracksAsync(result == ContentDialogResult.Secondary ? 0 : failedPosition);
@@ -1606,6 +1762,11 @@ public sealed partial class MainPage : Page
     private async void PlayPause_Click(object sender, RoutedEventArgs e)
     {
         if (_playerControlsLocked) return;
+        if (_mediaPlayer.Source is null && _activeOfflineItem is not null)
+        {
+            await RestartOfflinePlaybackAsync(0);
+            return;
+        }
         if (_mediaPlayer.Source is null && _state.PlaybackSession is not null)
         {
             await RestartPlaybackWithTracksAsync(0);
@@ -1757,6 +1918,11 @@ public sealed partial class MainPage : Page
 
     private async Task WriteProgressSnapshotAsync(ProgressSnapshot snapshot, CancellationToken cancellationToken)
     {
+        if (_activeOfflineItem is not null)
+        {
+            await WriteOfflineProgressSnapshotAsync(snapshot);
+            return;
+        }
         var client = _state.Client ?? throw new NotAuthenticatedException();
         try
         {
@@ -1818,6 +1984,7 @@ public sealed partial class MainPage : Page
         StopPlaybackCoordinationPolling();
         if (_state.PlaybackSession is not null) await EndPlaybackAsync(false, false);
         else await EndActivePlaybackRoomAsync(null, _state.Client);
+        LockOfflineAccess();
         AbandonPlaybackCoordination();
         var client = _state.Client;
         var discovery = _state.Discovery;
@@ -1968,11 +2135,21 @@ public sealed partial class MainPage : Page
         }
     }
 
-    public Task HandleWindowActivationAsync(bool active)
+    public async Task HandleWindowActivationAsync(bool active)
     {
-        if (active || PlayerView.Visibility != Visibility.Visible || _mediaPlayer.Source is null)
-            return Task.CompletedTask;
-        return QueueProgress(false);
+        if (!active && _offlineScope is not null && _offlineMediaStore?.Profile(_offlineScope)?.RequiresPin == true)
+        {
+            var offlineOnly = _offlineOnlySession;
+            if (_activeOfflineItem is not null && PlayerView.Visibility == Visibility.Visible)
+                await EndPlaybackAsync(completed: false, returnToDashboard: true);
+            LockOfflineAccess();
+            if (_closed) return;
+            if (offlineOnly) ShowServer("Downloaded media was locked when Rivune moved to the background.");
+            else RebuildHomeSections(_viewerCollections, _continueWatchingTargets, _recommendationTargets);
+            return;
+        }
+        if (!active && PlayerView.Visibility == Visibility.Visible && _mediaPlayer.Source is not null)
+            await QueueProgress(false);
     }
 
     private void StartPlaybackCoordination()
@@ -2236,6 +2413,7 @@ public sealed partial class MainPage : Page
             StopPlaybackCoordinationPolling();
             _heroTimer.Stop();
             _updateOperationCancellation?.Cancel();
+            _offlineDownloadCancellation?.Cancel();
             DismissDialogForShutdown();
             _heroSlideCancellation?.Cancel();
             return _shutdownTask = ShutdownAsync();
@@ -2250,6 +2428,8 @@ public sealed partial class MainPage : Page
                 await updateOperation.WaitAsync(cancellationToken);
             if (_devicePreferencesStore is { } devicePreferencesStore)
                 await devicePreferencesStore.DisposeAsync().AsTask().WaitAsync(cancellationToken);
+            if (_offlineDownloadTask is { } offlineDownloadTask)
+                await offlineDownloadTask.WaitAsync(cancellationToken);
             await _lanDiscovery.DisposeAsync().AsTask().WaitAsync(cancellationToken);
             await _serverAddressOperation.WaitAsync(cancellationToken);
 
@@ -2269,6 +2449,8 @@ public sealed partial class MainPage : Page
             ClearMediaSource();
             ReleaseMediaPlayer(_mediaPlayer);
             _state.Dispose();
+            StopOfflinePlayback();
+            _offlineMediaStore?.Dispose();
             _serverAddressStore.Dispose();
         });
 

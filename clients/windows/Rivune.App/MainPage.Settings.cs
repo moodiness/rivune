@@ -151,6 +151,24 @@ public sealed partial class MainPage
 
     private async Task ShowAccountDialogAsync()
     {
+        if (_offlineOnlySession)
+        {
+            var offlineDialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Offline downloads",
+                Content = "Downloaded media is decrypted only while this profile is unlocked.",
+                PrimaryButtonText = "Lock downloads",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+            if (await ShowDialogAsync(offlineDialog) == ContentDialogResult.Primary)
+            {
+                LockOfflineAccess();
+                ShowServer();
+            }
+            return;
+        }
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
@@ -194,6 +212,7 @@ public sealed partial class MainPage
         try
         {
             await client.ClearProfileSelectionAsync(_state.Token);
+            LockOfflineAccess();
             if (!_state.IsCurrent(generation) || !ReferenceEquals(client, _state.Client)) return;
             _state.Profile = null;
             ResetViewerProfileState();
