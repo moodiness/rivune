@@ -54,7 +54,7 @@ public sealed partial class MainPage
         AutomationProperties.SetName(LibraryNav, ViewerTabLabel(ViewerTab.Library));
         AutomationProperties.SetName(CalendarNav, ViewerTabLabel(ViewerTab.Calendar));
         if (DashboardSections.Children.Count > 0)
-            RebuildHomeSections(_viewerCollections, _continueWatchingTargets);
+            RebuildHomeSections(_viewerCollections, _continueWatchingTargets, _recommendationTargets);
     }
 
     private void BuildSettingsCategories()

@@ -170,6 +170,71 @@ final class PlaybackV20ContractsTests: XCTestCase {
         XCTAssertEqual(resolveBody["externalPlayer"] as? Bool, true)
     }
 
+    func testCoordinationAndLocalRecommendationRoutes() async throws {
+        let transport = V20RecordingTransport()
+        let client = try makeClient(transport: transport)
+        let targetSession = UUID(uuidString: "77777777-7777-4777-8777-777777777777")!
+        let roomId = UUID(uuidString: "88888888-8888-4888-8888-888888888888")!
+        let item = CoordinatedPlaybackItem(titleId: titleId, mediaType: "movie", resourceId: "opaque", title: "Movie")
+
+        _ = try await client.updatePlaybackDevice(PlaybackDeviceHeartbeatInput(
+            capabilities: ["remote-control"],
+            state: PlaybackDeviceState(status: "paused", item: item, positionMilliseconds: 1_000, durationMilliseconds: 10_000)
+        ))
+        _ = try await client.playbackDevices()
+        _ = try await client.sendPlaybackCommand(sessionId: targetSession, input: PlaybackCommandInput(command: "load", item: item, positionMilliseconds: 1_000))
+        _ = try await client.playbackCommands(after: 9)
+        try await client.acknowledgePlaybackCommand(10)
+        _ = try await client.createPlaybackRoom(PlaybackRoomCreateInput(item: item, state: "paused", positionMilliseconds: 1_000, durationMilliseconds: 10_000))
+        _ = try await client.joinPlaybackRoom(code: "23456789AB")
+        _ = try await client.playbackRoom(id: roomId)
+        _ = try await client.updatePlaybackRoom(id: roomId, input: PlaybackRoomUpdateInput(state: "playing", positionMilliseconds: 2_000, durationMilliseconds: 10_000, expectedVersion: 1))
+        try await client.leavePlaybackRoom(id: roomId)
+        let recommendations = try await client.localRecommendations(limit: 12)
+
+        XCTAssertEqual(recommendations.items.first?.reason, "Because you like Drama")
+        let requests = transport.apiRequests()
+        XCTAssertEqual(requests.map { $0.url?.path }, [
+            "/api/v1/playback/device", "/api/v1/playback/devices",
+            "/api/v1/playback/devices/\(targetSession.uuidString.lowercased())/commands",
+            "/api/v1/playback/commands", "/api/v1/playback/commands/10/ack",
+            "/api/v1/playback/rooms", "/api/v1/playback/rooms/join",
+            "/api/v1/playback/rooms/\(roomId.uuidString.lowercased())",
+            "/api/v1/playback/rooms/\(roomId.uuidString.lowercased())",
+            "/api/v1/playback/rooms/\(roomId.uuidString.lowercased())", "/api/v1/recommendations",
+        ])
+        XCTAssertEqual(query(requests[3])["after"], "9")
+        XCTAssertEqual(query(requests[10])["limit"], "12")
+    }
+
+    func testPlaybackRoomMemberUsesOpaqueMemberID() throws {
+        let room = try JSONDecoder().decode(PlaybackRoom.self, from: Data(V20RecordingTransport().roomJSON.utf8))
+        let member = try XCTUnwrap(room.currentMember)
+
+        XCTAssertEqual(member.id, member.memberId)
+        XCTAssertEqual(member.memberId.uuidString.lowercased(), "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        XCTAssertEqual(member.profile, "Viewer")
+        XCTAssertTrue(room.currentMemberIsHost)
+        XCTAssertThrowsError(try JSONDecoder().decode(PlaybackRoomMember.self, from: Data("""
+        {"sessionId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","profileId":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","profile":"Viewer","deviceName":"Apple TV","platform":"tvos","role":"host","current":true,"joinedAt":"2099-01-01T00:00:00Z","lastSeenAt":"2099-01-01T00:00:01Z"}
+        """.utf8)))
+    }
+
+    func testPlaybackRoomRefreshPreservesHostJoinCodeOnlyForSameRoom() throws {
+        let initial = try decodeRoom(id: "88888888-8888-4888-8888-888888888888", joinCode: "23456789AB", version: 1)
+        let refreshed = try decodeRoom(id: "88888888-8888-4888-8888-888888888888", joinCode: nil, version: 2)
+        let replacement = try decodeRoom(id: "99999999-9999-4999-8999-999999999999", joinCode: nil, version: 1)
+
+        XCTAssertEqual(refreshed.preservingJoinCode(from: initial).joinCode, "23456789AB")
+        XCTAssertNil(replacement.preservingJoinCode(from: initial).joinCode)
+    }
+
+    private func decodeRoom(id: String, joinCode: String?, version: Int64) throws -> PlaybackRoom {
+        let code = joinCode.map { "\"joinCode\":\"\($0)\"," } ?? ""
+        return try JSONDecoder().decode(PlaybackRoom.self, from: Data("""
+        {"id":"\(id)",\(code)"item":{"titleId":"11111111-1111-4111-8111-111111111111","mediaType":"movie","resourceId":"opaque","title":"Movie"},"state":"paused","positionMilliseconds":0,"durationMilliseconds":0,"version":\(version),"updatedAt":"2026-08-21T00:00:00Z","expiresAt":"2026-08-22T00:00:00Z","members":[]}
+        """.utf8))
+    }
     private var progressJSON: Data {
         Data("""
         {"titleId":"11111111-1111-4111-8111-111111111111","mediaType":"movie","positionSeconds":12,"durationSeconds":100,"completed":false,"version":9223372036854775000,"lastWatchedAt":"2026-08-03T10:00:00Z","updatedAt":"2026-08-03T10:01:00Z"}
@@ -252,6 +317,28 @@ private final class V20RecordingTransport: HTTPTransport, @unchecked Sendable {
             {"items":[{"titleId":"11111111-1111-4111-8111-111111111111","mediaType":"episode","seriesId":"22222222-2222-4222-8222-222222222222","seasonId":"33333333-3333-4333-8333-333333333333","seasonNumber":2,"episodeNumber":3,"positionSeconds":120,"durationSeconds":1800,"version":1,"reason":"resume","title":"Signal Horizon","posterUrl":"/series-poster","backgroundUrl":"/series-background","releaseInfo":"2026","resourceId":"tt9000:2:3","resourceProvider":"imdb","episodeTitle":"Moonrise","episodeStillUrl":"/episode-still","episodeAirDate":"2026-08-15","lastWatchedAt":"2026-08-15T00:00:00Z"}]}
             """.utf8))
         }
+        if path.hasSuffix("/playback/device") {
+            return response(request, body: Data(deviceJSON.utf8))
+        }
+        if path.hasSuffix("/playback/devices") {
+            return response(request, body: Data("{\"devices\":[]}".utf8))
+        }
+        if path.contains("/playback/devices/") && path.hasSuffix("/commands") {
+            return response(request, status: 201, body: Data(commandJSON.utf8))
+        }
+        if path.hasSuffix("/playback/commands") {
+            return response(request, body: Data("{\"commands\":[]}".utf8))
+        }
+        if path.hasSuffix("/ack") {
+            return response(request, status: 204, body: Data())
+        }
+        if path.hasSuffix("/playback/rooms") || path.hasSuffix("/playback/rooms/join") || path.contains("/playback/rooms/") {
+            if request.httpMethod == "DELETE" { return response(request, status: 204, body: Data()) }
+            return response(request, status: path.hasSuffix("/playback/rooms") && request.httpMethod == "POST" ? 201 : 200, body: Data(roomJSON.utf8))
+        }
+        if path.hasSuffix("/recommendations") {
+            return response(request, body: Data("{\"items\":[{\"item\":{\"id\":\"11111111-1111-4111-8111-111111111111\",\"mediaType\":\"movie\",\"title\":\"Movie\",\"providerIds\":{}},\"reason\":\"Because you like Drama\",\"score\":4.5}]}".utf8))
+        }
         if request.httpMethod == "DELETE" {
             if path.contains("/watched") { return response(request, body: Data(progress.utf8)) }
             return response(request, status: 204, body: Data())
@@ -265,6 +352,18 @@ private final class V20RecordingTransport: HTTPTransport, @unchecked Sendable {
 
     private var progress: String {
         "{\"titleId\":\"11111111-1111-4111-8111-111111111111\",\"mediaType\":\"movie\",\"positionSeconds\":12,\"durationSeconds\":100,\"completed\":false,\"version\":10,\"lastWatchedAt\":\"2026-08-03T10:00:00Z\",\"updatedAt\":\"2026-08-03T10:01:00Z\"}"
+    }
+
+    private var deviceJSON: String {
+        "{\"sessionId\":\"55555555-5555-4555-8555-555555555555\",\"deviceId\":\"66666666-6666-4666-8666-666666666666\",\"name\":\"Device\",\"platform\":\"apple\",\"capabilities\":[\"remote-control\"],\"state\":{\"status\":\"idle\",\"positionMilliseconds\":0,\"durationMilliseconds\":0},\"current\":true,\"lastSeenAt\":\"2099-01-01T00:00:00Z\"}"
+    }
+
+    private var commandJSON: String {
+        "{\"id\":10,\"command\":\"play\",\"senderDeviceName\":\"Sender\",\"createdAt\":\"2099-01-01T00:00:00Z\",\"expiresAt\":\"2099-01-01T00:02:00Z\"}"
+    }
+
+    fileprivate var roomJSON: String {
+        "{\"id\":\"88888888-8888-4888-8888-888888888888\",\"joinCode\":\"23456789AB\",\"item\":{\"titleId\":\"11111111-1111-4111-8111-111111111111\",\"mediaType\":\"movie\",\"resourceId\":\"opaque\",\"title\":\"Movie\"},\"state\":\"paused\",\"positionMilliseconds\":1000,\"durationMilliseconds\":10000,\"version\":1,\"updatedAt\":\"2099-01-01T00:00:00Z\",\"expiresAt\":\"2099-01-01T08:00:00Z\",\"members\":[{\"memberId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"profile\":\"Viewer\",\"deviceName\":\"Apple TV\",\"platform\":\"tvos\",\"role\":\"host\",\"current\":true,\"joinedAt\":\"2099-01-01T00:00:00Z\",\"lastSeenAt\":\"2099-01-01T00:00:01Z\"}]}"
     }
 
     private func response(_ request: URLRequest, status: Int = 200, body: Data) -> (Data, HTTPURLResponse) {

@@ -32,9 +32,11 @@ import kotlin.test.assertEquals
 import kotlin.test.assertContentEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -59,7 +61,15 @@ class RivuneViewModelTest {
 
     @AfterTest
     fun tearDown() {
-        viewModels.forEach { it.viewModelScope.cancel() }
+        val jobs = viewModels.mapNotNull { it.viewModelScope.coroutineContext[Job] }
+        jobs.forEach(Job::cancel)
+        var attempts = 0
+        while (jobs.any { !it.isCompleted } && attempts < 1_000) {
+            dispatcher.scheduler.runCurrent()
+            if (jobs.any { !it.isCompleted }) Thread.sleep(1)
+            attempts += 1
+        }
+        check(jobs.all(Job::isCompleted)) { "ViewModel coroutines did not stop during test teardown" }
         viewModels.clear()
         Dispatchers.resetMain()
     }
@@ -165,6 +175,22 @@ class RivuneViewModelTest {
         gateway.pairingPending = false
         advanceTimeBy(1_000)
         runCurrent()
+    }
+
+    @Test
+    fun unsupportedOptionalCapabilitiesDoNotStartTheirRequests() = runTest(dispatcher) {
+        val gateway = FakeGateway(
+            discovery = discovery(capabilities = emptyList()),
+            restored = true,
+        )
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+
+        advanceUntilIdle()
+
+        assertFalse(viewModel.state.value.viewer.playbackCoordinationAvailable)
+        assertEquals(0, gateway.playbackHeartbeatRequests)
+        assertEquals(0, gateway.playbackDeviceListRequests)
+        assertEquals(0, gateway.localRecommendationRequests)
     }
 
     @Test
@@ -3144,6 +3170,182 @@ class RivuneViewModelTest {
         assertNull(viewModel.state.value.viewer.loading)
     }
 
+    @Test
+    fun remoteTargetsExcludeCurrentAndNonControllableDevices() {
+        fun device(name: String, current: Boolean, capabilities: List<String>) = io.rivune.api.PlaybackDevice(
+            UUID.randomUUID(),
+            UUID.randomUUID(),
+            name,
+            "android",
+            capabilities,
+            io.rivune.api.PlaybackDeviceState("idle"),
+            current,
+            "2099-01-01T00:00:00Z",
+        )
+        val controllable = device("Remote", false, listOf("remote-control", "watch-room"))
+
+        assertEquals(
+            listOf(controllable),
+            controllablePlaybackDevices(
+                listOf(
+                    controllable,
+                    device("Room only", false, listOf("watch-room")),
+                    device("Current", true, listOf("remote-control")),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun terminalRoomIntentAlwaysPreemptsPeriodicHostProgress() {
+        assertEquals("playing", coordinatedHostRoomState(ending = false, playing = true))
+        assertEquals("paused", coordinatedHostRoomState(ending = false, playing = false))
+        assertEquals("ended", coordinatedHostRoomState(ending = true, playing = true))
+        assertEquals("ended", coordinatedHostRoomState(ending = true, playing = false))
+        assertTrue(shouldPublishHostRoomProgress(ending = false, ended = false))
+        assertFalse(shouldPublishHostRoomProgress(ending = true, ended = false))
+        assertFalse(shouldPublishHostRoomProgress(ending = false, ended = true))
+    }
+
+    @Test
+    fun offlineResumeUsesLocalPositionUnlessPlaybackCompleted() {
+        val item = OfflineMediaItem(
+            id = UUID.randomUUID(),
+            titleId = UUID.randomUUID(),
+            title = "Downloaded",
+            fileName = "media.rvn",
+            container = "mp4",
+            sizeBytes = 100,
+            createdAtEpochMs = 1,
+            posterUrl = null,
+            positionMs = 42_000,
+            durationMs = 90_000,
+        )
+
+        assertEquals(42_000, offlineStartPositionMs(item))
+        assertEquals(0, offlineStartPositionMs(item.copy(completed = true)))
+    }
+
+    @Test
+    fun offlineStartupUnlocksDownloadsWithoutGatewayAndDisconnectRelocksScope() {
+        val root = kotlin.io.path.createTempDirectory("rivune-offline-startup").toFile()
+        try {
+            val offlineStore = OfflineMediaStore(root, testing = true)
+            val scope = offlineStore.registerProfile("https://offline.example", UUID.randomUUID(), "Offline", hasPin = false, pin = null)
+            val mediaId = UUID.randomUUID()
+            val titleId = UUID.randomUUID()
+            val directory = java.io.File(root, scope)
+            java.io.File(directory, "$mediaId.rvn").writeBytes(byteArrayOf(1))
+            java.io.File(directory, "manifest.json").writeText(
+                """[{"id":"$mediaId","titleId":"$titleId","title":"Saved","fileName":"$mediaId.rvn","container":"mp4","sizeBytes":1,"createdAtEpochMs":1,"posterUrl":""}]""",
+            )
+            offlineStore.lock()
+            val viewModel = viewModel(FakeServerStore(), FakeGateway(), offlineMediaStore = offlineStore)
+
+            assertEquals(AppDestination.Server, viewModel.state.value.destination)
+            val gate = viewModel.state.value.offlineProfiles.single()
+            viewModel.selectOfflineProfile(gate)
+            assertEquals(AppDestination.Viewer, viewModel.state.value.destination)
+            assertEquals("Saved", viewModel.state.value.viewer.offlineItems.single().title)
+
+            viewModel.disconnectServer()
+            assertEquals(AppDestination.Server, viewModel.state.value.destination)
+            assertEquals(listOf(scope), viewModel.state.value.offlineProfiles.map(OfflineProfileGate::scope))
+            assertFailsWith<IllegalArgumentException> { offlineStore.items(scope) }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+    @Test
+    fun backgroundRelocksProtectedOfflineOnlyButLeavesUnprotectedOpen() {
+        val protected = offlineFixture(hasPin = true)
+        val unprotected = offlineFixture(hasPin = false)
+        try {
+            val protectedVm = viewModel(FakeServerStore(), FakeGateway(), offlineMediaStore = protected.store)
+            protectedVm.selectOfflineProfile(protected.store.profiles().single())
+            protectedVm.submitPin("1234")
+            assertEquals(AppDestination.Viewer, protectedVm.state.value.destination)
+
+            protectedVm.lockOfflineAccessOnBackground()
+
+            assertEquals(AppDestination.Server, protectedVm.state.value.destination)
+            assertTrue(protectedVm.state.value.viewer.offlineItems.isEmpty())
+            assertFailsWith<IllegalArgumentException> { protected.store.items(protected.scope) }
+
+            val unprotectedVm = viewModel(FakeServerStore(), FakeGateway(), offlineMediaStore = unprotected.store)
+            unprotectedVm.selectOfflineProfile(unprotected.store.profiles().single())
+            unprotectedVm.lockOfflineAccessOnBackground()
+            assertEquals(AppDestination.Viewer, unprotectedVm.state.value.destination)
+            assertEquals("Saved", unprotectedVm.state.value.viewer.offlineItems.single().title)
+        } finally {
+            protected.root.deleteRecursively()
+            unprotected.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun backgroundRelocksProtectedOnlineDownloadsButPreservesOnlineViewer() = runTest(dispatcher) {
+        val viewerProfile = profile(hasPin = true)
+        val fixture = offlineFixture(hasPin = true, profileId = viewerProfile.id, withMedia = false)
+        try {
+            val viewModel = viewModel(
+                FakeServerStore("https://saved.example.com"),
+                FakeGateway(restored = true, account = account(viewerProfile, active = true), collections = listOf(collection())),
+                offlineMediaStore = fixture.store,
+            )
+            advanceUntilIdle()
+            viewModel.selectOfflineProfile(requireNotNull(fixture.store.profileGate(fixture.scope)))
+            viewModel.submitPin("1234")
+
+            viewModel.lockOfflineAccessOnBackground()
+
+            assertEquals(AppDestination.Viewer, viewModel.state.value.destination)
+            assertEquals(viewerProfile.id, viewModel.state.value.activeProfile?.id)
+            assertTrue(viewModel.state.value.viewer.offlineItems.isEmpty())
+            assertEquals(fixture.scope, viewModel.state.value.pendingOfflineProfile?.scope)
+            assertFailsWith<IllegalArgumentException> { fixture.store.items(fixture.scope) }
+        } finally {
+            fixture.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun restoredProtectedOnlineProfilePromptsAndUnlocksDownloadsWithoutLosingViewer() = runTest(dispatcher) {
+        val viewerProfile = profile(hasPin = true)
+        val fixture = offlineFixture(hasPin = true, profileId = viewerProfile.id)
+        try {
+            val gateway = FakeGateway(restored = true, account = account(viewerProfile, active = true), collections = listOf(collection()))
+            val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway, offlineMediaStore = fixture.store)
+            advanceUntilIdle()
+
+            assertEquals(AppDestination.Viewer, viewModel.state.value.destination)
+            assertEquals(viewerProfile.id, viewModel.state.value.activeProfile?.id)
+            assertNotNull(viewModel.state.value.pendingOfflineProfile)
+            assertTrue(viewModel.state.value.viewer.offlineItems.isEmpty())
+
+            viewModel.dismissPin()
+            assertEquals(AppDestination.Viewer, viewModel.state.value.destination)
+            assertEquals(viewerProfile.id, viewModel.state.value.activeProfile?.id)
+            assertNull(viewModel.state.value.pendingOfflineProfile)
+            assertNull(viewModel.requireOfflineDownloadScope())
+            assertEquals(fixture.scope, viewModel.state.value.pendingOfflineProfile?.scope)
+
+
+            viewModel.selectOfflineProfile(fixture.store.profiles().single())
+            viewModel.submitPin("0000")
+            assertEquals(UiFailure.PROFILE_PIN_INVALID, viewModel.state.value.failure)
+            assertTrue(viewModel.state.value.viewer.offlineItems.isEmpty())
+
+            viewModel.submitPin("1234")
+            assertEquals(AppDestination.Viewer, viewModel.state.value.destination)
+            assertEquals(viewerProfile.id, viewModel.state.value.activeProfile?.id)
+            assertEquals("Saved", viewModel.state.value.viewer.offlineItems.single().title)
+        } finally {
+            fixture.root.deleteRecursively()
+        }
+    }
+
+
     private fun viewModel(
         store: FakeServerStore,
         gateway: FakeGateway,
@@ -3154,6 +3356,7 @@ class RivuneViewModelTest {
         playbackNetwork: PlaybackNetwork = PlaybackNetwork.WIFI_OR_ETHERNET,
         serverConnectionAllowed: (String) -> Boolean = { true },
         instantNow: () -> Instant = Instant::now,
+        offlineMediaStore: OfflineMediaStore? = null,
     ) = RivuneViewModel(
         store,
         RivuneGatewayFactory { gateway },
@@ -3166,8 +3369,38 @@ class RivuneViewModelTest {
         playbackNetworkProvider = { playbackNetwork },
         serverConnectionAllowed = serverConnectionAllowed,
         instantNow = instantNow,
+        awaitCoordinationTick = { kotlinx.coroutines.awaitCancellation() },
+        offlineMediaStore = offlineMediaStore,
     ).also(viewModels::add)
 }
+private data class OfflineFixture(
+    val root: java.io.File,
+    val store: OfflineMediaStore,
+    val scope: String,
+)
+
+private fun offlineFixture(
+    hasPin: Boolean,
+    profileId: UUID = UUID.randomUUID(),
+    origin: String = "https://saved.example.com",
+    withMedia: Boolean = true,
+): OfflineFixture {
+    val root = kotlin.io.path.createTempDirectory("rivune-offline-vm").toFile()
+    val store = OfflineMediaStore(root, testing = true)
+    val scope = store.registerProfile(origin, profileId, "Offline", hasPin, if (hasPin) "1234" else null)
+    if (withMedia) {
+        val mediaId = UUID.randomUUID()
+        val titleId = UUID.randomUUID()
+        val directory = java.io.File(root, scope)
+        java.io.File(directory, "$mediaId.rvn").writeBytes(byteArrayOf(1))
+        java.io.File(directory, "manifest.json").writeText(
+            """[{"id":"$mediaId","titleId":"$titleId","title":"Saved","fileName":"$mediaId.rvn","container":"mp4","sizeBytes":1,"createdAtEpochMs":1,"posterUrl":""}]""",
+        )
+    }
+    store.lock()
+    return OfflineFixture(root, store, scope)
+}
+
 
 private class FakeServerStore(initial: String? = null) : ServerAddressStore {
     var value: String? = initial
@@ -3259,6 +3492,9 @@ private class FakeGateway(
         sources = io.rivune.api.EffectiveSettingsSources(),
     )
     val profileSettingsUpdates = mutableListOf<io.rivune.api.ProfileSettingsUpdate>()
+    var playbackHeartbeatRequests = 0
+    var playbackDeviceListRequests = 0
+    var localRecommendationRequests = 0
 
     override suspend fun discover() = discovery
     override suspend fun restoreSession() = restored
@@ -3459,6 +3695,26 @@ private class FakeGateway(
         playbackEvents += "progress:${input.positionSeconds}"
         return requireNotNull(progress).copy(positionSeconds = input.positionSeconds, durationSeconds = input.durationSeconds, completed = input.completed, version = input.expectedVersion + 1)
     }
+    override suspend fun updatePlaybackDevice(input: io.rivune.api.PlaybackDeviceHeartbeatInput): io.rivune.api.PlaybackDevice {
+        playbackHeartbeatRequests += 1
+        return io.rivune.api.PlaybackDevice(UUID.randomUUID(), UUID.randomUUID(), "Current", "android", input.capabilities, input.state, true, "2099-01-01T00:00:00Z")
+    }
+    override suspend fun playbackDevices(): io.rivune.api.PlaybackDeviceList {
+        playbackDeviceListRequests += 1
+        return io.rivune.api.PlaybackDeviceList(emptyList())
+    }
+    override suspend fun sendPlaybackCommand(sessionId: UUID, input: io.rivune.api.PlaybackCommandInput) = Unit
+    override suspend fun playbackCommands(after: Long) = io.rivune.api.PlaybackCommandList(emptyList())
+    override suspend fun acknowledgePlaybackCommand(id: Long) = Unit
+    override suspend fun createPlaybackRoom(input: io.rivune.api.PlaybackRoomCreateInput) = fakePlaybackRoom(input.item, input.state, input.positionMilliseconds, input.durationMilliseconds)
+    override suspend fun joinPlaybackRoom(code: String) = fakePlaybackRoom(io.rivune.api.CoordinatedPlaybackItem(UUID.randomUUID()), "paused", 0, 0)
+    override suspend fun playbackRoom(id: UUID) = fakePlaybackRoom(io.rivune.api.CoordinatedPlaybackItem(UUID.randomUUID()), "paused", 0, 0, id)
+    override suspend fun updatePlaybackRoom(id: UUID, input: io.rivune.api.PlaybackRoomUpdateInput) = fakePlaybackRoom(io.rivune.api.CoordinatedPlaybackItem(UUID.randomUUID()), input.state, input.positionMilliseconds, input.durationMilliseconds, id)
+    override suspend fun leavePlaybackRoom(id: UUID) = Unit
+    override suspend fun localRecommendations(limit: Int): io.rivune.api.LocalRecommendationPage {
+        localRecommendationRequests += 1
+        return io.rivune.api.LocalRecommendationPage(emptyList())
+    }
     override suspend fun calendar(from: String, to: String, language: String?): List<io.rivune.api.CalendarEvent> {
         metadataRequests += "calendar" to language
         return calendarEvents
@@ -3555,7 +3811,10 @@ private fun <T> io.rivune.api.PatchField<T>.applySourceTo(current: String?): Str
     is io.rivune.api.PatchField.Value -> "profile"
 }
 
-private fun discovery(setupRequired: Boolean = false) = Discovery(
+private fun discovery(
+    setupRequired: Boolean = false,
+    capabilities: List<String> = listOf("local-recommendations", "playback-coordination"),
+) = Discovery(
     name = "Family server",
     serverVersion = "20.0.0",
     protocolVersion = 20,
@@ -3565,6 +3824,7 @@ private fun discovery(setupRequired: Boolean = false) = Discovery(
     demoAvailable = false,
     timezone = "UTC",
     interfaceLanguage = "fr-FR",
+    capabilities = capabilities,
 )
 
 private fun profile(
@@ -3733,6 +3993,24 @@ private fun resolvedFolder(
     page = page,
     hasMore = hasMore,
     errors = emptyList(),
+)
+
+private fun fakePlaybackRoom(
+    item: io.rivune.api.CoordinatedPlaybackItem,
+    state: String,
+    positionMilliseconds: Long,
+    durationMilliseconds: Long,
+    id: UUID = UUID.randomUUID(),
+) = io.rivune.api.PlaybackRoom(
+    id = id,
+    item = item,
+    state = state,
+    positionMilliseconds = positionMilliseconds,
+    durationMilliseconds = durationMilliseconds,
+    version = 1,
+    updatedAt = "2099-01-01T00:00:00Z",
+    expiresAt = "2099-01-01T01:00:00Z",
+    members = emptyList(),
 )
 
 private val USER_ID = UUID.fromString("11111111-1111-4111-8111-111111111111")

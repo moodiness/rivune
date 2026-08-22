@@ -194,21 +194,39 @@ reserve_and_stage_repository_file() {
   local source_path="$1"
   local destination_path="$2"
   local copy_limit="$3"
-  local staged_size
+  local source_size reservation_size staged_size reserved=false
 
-  # Reservation is the capacity control. There is deliberately no sparse or
-  # best-effort fallback: failure must happen before the repository file opens.
-  if ! fallocate --keep-size --length "$(( copy_limit + 1 ))" -- "${destination_path}"; then
+  source_size="$(stat -c '%s' -- "${source_path}")" || return
+  if (( source_size < 1 || source_size > copy_limit )); then
     return 1
   fi
+  reservation_size="$(( source_size + 1 ))"
+
+  # Reserve the complete bounded copy before opening the repository archive.
+  # Linux supplies fallocate; macOS supplies mkfile, which allocates real blocks.
+  if command -v fallocate >/dev/null 2>&1; then
+    if fallocate --keep-size --length "${reservation_size}" -- "${destination_path}"; then
+      reserved=true
+    elif (( $? != 127 )); then
+      return 1
+    fi
+  fi
+  if [[ "${reserved}" == false ]]; then
+    command -v mkfile >/dev/null 2>&1 || return 1
+    mkfile "${reservation_size}" "${destination_path}" || return
+  fi
   if ! dd if="${source_path}" of="${destination_path}" \
-       bs=1048576 count="$(( copy_limit + 1 ))" \
+       bs=1048576 count="${reservation_size}" \
        iflag=nofollow,nonblock,fullblock,count_bytes conv=notrunc \
        status=none 2>/dev/null; then
     return 1
   fi
+  if [[ "${reserved}" == false ]]; then
+    [[ "$(stat -c '%s' -- "${source_path}")" == "${source_size}" ]] || return 1
+    truncate -s "${source_size}" -- "${destination_path}" || return
+  fi
   staged_size="$(stat -c '%s' -- "${destination_path}")"
-  (( staged_size > 0 && staged_size <= copy_limit ))
+  (( staged_size == source_size && staged_size <= copy_limit ))
 }
 
 stage_repository_file_exact() {
@@ -486,19 +504,39 @@ lock_backup_state() {
     return
   fi
   umask 077
-  exec 9>> "${lock_file}"
-  chmod 600 -- "${lock_file}"
-  if [[ ! -f "${lock_file}" || "$(stat -c '%u' -- "${lock_file}")" != "$(id -u)" ]]; then
-    exec 9>&-
-    backup_error "Backup state lock is unsafe"
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>> "${lock_file}"
+    chmod 600 -- "${lock_file}"
+    if [[ ! -f "${lock_file}" || "$(stat -c '%u' -- "${lock_file}")" != "$(id -u)" ]]; then
+      exec 9>&-
+      backup_error "Backup state lock is unsafe"
+      return
+    fi
+    flock -x 9
+    BACKUP_STATE_LOCK_KIND=flock
     return
   fi
-  flock -x 9
+  if command -v lockf >/dev/null 2>&1; then
+    exec 9>> "${lock_file}"
+    chmod 600 -- "${lock_file}"
+    if [[ ! -f "${lock_file}" || "$(stat -c '%u' -- "${lock_file}")" != "$(id -u)" ]]; then
+      exec 9>&-
+      backup_error "Backup state lock is unsafe"
+      return
+    fi
+    lockf -s 9
+    BACKUP_STATE_LOCK_KIND=lockf
+    return
+  fi
+  backup_error "A supported file-lock utility (flock or lockf) is required"
 }
 
 unlock_backup_state() {
-  flock -u 9
-  exec 9>&-
+  case "${BACKUP_STATE_LOCK_KIND:-}" in
+    flock) flock -u 9; exec 9>&- ;;
+    lockf) exec 9>&- ;;
+  esac
+  BACKUP_STATE_LOCK_KIND=
 }
 
 load_backup_state() {

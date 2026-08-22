@@ -73,6 +73,8 @@ import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.FileUpload
+import androidx.compose.material.icons.rounded.FileDownload
+import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.LiveTv
@@ -163,6 +165,7 @@ import io.rivune.api.CollectionItem
 import io.rivune.api.LibraryItem
 import io.rivune.api.PlaybackProgress
 import io.rivune.api.PlaybackSourceOption
+import io.rivune.api.LocalRecommendation
 import io.rivune.api.PatchField
 import io.rivune.api.ProfileSettingsUpdate
 import io.rivune.api.ResolvedCollectionFolder
@@ -339,6 +342,10 @@ internal fun ViewerShell(
                 RivunePlayerScreen(
                     presentation = viewer.player,
                     failure = playerFailure,
+                    remoteCommand = viewer.pendingPlaybackCommands.firstOrNull(),
+                    playbackRoom = viewer.activePlaybackRoom,
+                    onCommandConsumed = viewModel::consumePlaybackCommand,
+                    onPlaybackState = viewModel::reportPlaybackState,
                     isTv = state.isTv,
                     onProgress = viewModel::reportPlayerProgress,
                     onPlaybackEnded = viewModel::playerPlaybackEnded,
@@ -427,6 +434,14 @@ internal fun ViewerShell(
                 onToggleWatched = viewModel::toggleWatched,
                 externalPlayers = state.externalPlayers,
                 onSelectSource = viewModel::selectPlaybackSource,
+                onDownloadSource = viewModel::downloadPlaybackSource,
+                playbackDevices = state.viewer.playbackDevices,
+                activePlaybackRoom = state.viewer.activePlaybackRoom,
+                onHandoff = viewModel::handoffPlayback,
+                onRemoteCommand = viewModel::controlPlayback,
+                onCreateRoom = viewModel::createPlaybackRoom,
+                onJoinRoom = viewModel::joinPlaybackRoom,
+                onLeaveRoom = viewModel::leavePlaybackRoom,
                 onChooseTarget = viewModel::choosePlaybackTarget,
                 onDismissTarget = viewModel::dismissPlaybackTarget,
                 onDismissSources = viewModel::dismissSourcePicker,
@@ -462,6 +477,8 @@ internal fun ViewerShell(
         else -> ViewerRoot(
             state = state,
             onTab = viewModel::selectViewerTab,
+            onPlayOffline = viewModel::playOffline,
+            onRemoveOffline = viewModel::removeOffline,
             onOpenFolder = viewModel::openFolder,
             onOpenCollection = viewModel::selectCollection,
             onMedia = viewModel::openMedia,
@@ -488,6 +505,8 @@ internal fun ViewerShell(
 private fun ViewerRoot(
     state: RivuneUiState,
     onTab: (ViewerTab) -> Unit,
+    onPlayOffline: (OfflineMediaItem) -> Unit,
+    onRemoveOffline: (OfflineMediaItem) -> Unit,
     onOpenFolder: (java.util.UUID, CollectionFolder) -> Unit,
     onOpenCollection: (java.util.UUID) -> Unit,
     onMedia: (MediaTarget) -> Unit,
@@ -551,6 +570,8 @@ private fun ViewerRoot(
                         when (state.viewer.selectedTab) {
                             ViewerTab.HOME -> HomeRoot(
                                 collections = state.collections,
+                                recommendations = state.viewer.recommendations,
+                                offlineItems = state.viewer.offlineItems,
                                 heroSlides = state.viewer.heroSlides,
                                 continueWatching = state.viewer.continueWatching,
                                 loading = state.viewer.loading,
@@ -559,6 +580,8 @@ private fun ViewerRoot(
                                 artworkUrl = artworkUrl,
                                 onOpenFolder = onOpenFolder,
                                 onOpenCollection = onOpenCollection,
+                                onPlayOffline = onPlayOffline,
+                                onRemoveOffline = onRemoveOffline,
                                 onMedia = onMedia,
                                 onPlayMedia = onPlayMedia,
                                 onRetry = onRefresh,
@@ -2686,6 +2709,8 @@ private fun ViewerBottomBar(
 private fun HomeRoot(
     collections: List<Collection>,
     heroSlides: List<HomeHeroSlide>,
+    recommendations: List<LocalRecommendation>,
+    offlineItems: List<OfflineMediaItem>,
     continueWatching: List<MediaTarget>,
     loading: ViewerLoading?,
     failure: UiFailure?,
@@ -2694,6 +2719,8 @@ private fun HomeRoot(
     onOpenFolder: (java.util.UUID, CollectionFolder) -> Unit,
     onOpenCollection: (java.util.UUID) -> Unit,
     onMedia: (MediaTarget) -> Unit,
+    onPlayOffline: (OfflineMediaItem) -> Unit,
+    onRemoveOffline: (OfflineMediaItem) -> Unit,
     onPlayMedia: (MediaTarget) -> Unit,
     onRetry: () -> Unit,
 ) {
@@ -2769,6 +2796,28 @@ private fun HomeRoot(
                     isTv = isTv,
                     artworkUrl = artworkUrl,
                     onMedia = onMedia,
+                )
+            }
+        }
+        if (recommendations.isNotEmpty()) {
+            item(key = "recommendations") {
+                MediaRow(
+                    title = "Recommended for you",
+                    items = recommendations.mapNotNull(::recommendationTarget),
+                    isTv = isTv,
+                    artworkUrl = artworkUrl,
+                    onMedia = onMedia,
+                )
+            }
+        }
+        if (offlineItems.isNotEmpty()) {
+            item(key = "offline-media") {
+                OfflineMediaRow(
+                    items = offlineItems,
+                    isTv = isTv,
+                    artworkUrl = artworkUrl,
+                    onPlay = onPlayOffline,
+                    onRemove = onRemoveOffline,
                 )
             }
         }
@@ -4180,8 +4229,16 @@ private fun DetailScreen(
     onPlay: () -> Unit,
     onToggleLibrary: () -> Unit,
     onToggleWatched: () -> Unit,
+    playbackDevices: List<io.rivune.api.PlaybackDevice>,
+    activePlaybackRoom: io.rivune.api.PlaybackRoom?,
+    onHandoff: (io.rivune.api.PlaybackDevice) -> Unit,
+    onRemoteCommand: (io.rivune.api.PlaybackDevice, String) -> Unit,
+    onCreateRoom: () -> Unit,
+    onJoinRoom: (String) -> Unit,
+    onLeaveRoom: () -> Unit,
     externalPlayers: List<ExternalPlayerApp>,
     onSelectSource: (PlaybackSourceOption) -> Unit,
+    onDownloadSource: (PlaybackSourceOption) -> Unit,
     onChooseTarget: (PlaybackTargetSelection) -> Unit,
     onDismissTarget: () -> Unit,
     onDismissSources: () -> Unit,
@@ -4278,6 +4335,14 @@ private fun DetailScreen(
                             onToggleWatched = onToggleWatched,
                             onTrailer = onTrailer,
                             playModifier = Modifier.focusRequester(playFocus),
+                            playbackDevices = state.playbackDevices,
+                            activePlaybackRoom = state.activePlaybackRoom,
+                            playbackCoordinationAvailable = state.playbackCoordinationAvailable,
+                            onHandoff = onHandoff,
+                            onCreateRoom = onCreateRoom,
+                            onJoinRoom = onJoinRoom,
+                            onRemoteCommand = onRemoteCommand,
+                            onLeaveRoom = onLeaveRoom,
                             modifier = Modifier
                                 .padding(
                                     start = padding,
@@ -4484,6 +4549,7 @@ private fun DetailScreen(
                 onBack = if (automaticallyShowStreams) onBack else onDismissSources,
                 onRefresh = onRefreshSources,
                 onSelectSource = onSelectSource,
+                onDownloadSource = onDownloadSource,
                 onChooseTarget = onChooseTarget,
                 onDismissTarget = onDismissTarget,
                 modifier = Modifier.fillMaxSize(),
@@ -4510,6 +4576,14 @@ private fun DetailSummary(
     onToggleLibrary: () -> Unit,
     onToggleWatched: () -> Unit,
     onTrailer: (() -> Unit)?,
+    playbackDevices: List<io.rivune.api.PlaybackDevice>,
+    activePlaybackRoom: io.rivune.api.PlaybackRoom?,
+    playbackCoordinationAvailable: Boolean,
+    onHandoff: (io.rivune.api.PlaybackDevice) -> Unit,
+    onCreateRoom: () -> Unit,
+    onJoinRoom: (String) -> Unit,
+    onLeaveRoom: () -> Unit,
+    onRemoteCommand: (io.rivune.api.PlaybackDevice, String) -> Unit,
     playModifier: Modifier = Modifier,
     modifier: Modifier = Modifier,
 ) {
@@ -4562,6 +4636,8 @@ private fun DetailSummary(
         val fraction = (progress.positionSeconds.toFloat() / progress.durationSeconds).coerceIn(0f, 1f)
         stringResource(R.string.viewer_progress_percent, (fraction * 100).toInt())
     }
+    var joinRoomVisible by remember { mutableStateOf(false) }
+    var roomCode by remember { mutableStateOf("") }
     Column(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(
@@ -4665,6 +4741,39 @@ private fun DetailSummary(
                     progressDescription = null,
                 )
             }
+        }
+        if (playbackCoordinationAvailable && playbackDevices.isNotEmpty()) {
+            Text("Play on another device", style = MaterialTheme.typography.titleSmall)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.xs)) {
+                playbackDevices.forEach { device ->
+                    RivuneSecondaryButton(label = device.name, onClick = { onHandoff(device) }, isTv = isTv)
+                    RivuneTextButton(label = "Play", onClick = { onRemoteCommand(device, "play") }, isTv = isTv)
+                    RivuneTextButton(label = "Pause", onClick = { onRemoteCommand(device, "pause") }, isTv = isTv)
+                    RivuneTextButton(label = "Match position", onClick = { onRemoteCommand(device, "seek") }, isTv = isTv)
+                    RivuneTextButton(label = "Stop", onClick = { onRemoteCommand(device, "stop") }, isTv = isTv)
+                }
+            }
+        }
+        if (playbackCoordinationAvailable) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.xs)) {
+                if (activePlaybackRoom == null) {
+                    RivuneSecondaryButton(label = "Start watch room", onClick = onCreateRoom, isTv = isTv)
+                    RivuneSecondaryButton(label = "Join room", onClick = { joinRoomVisible = true }, isTv = isTv)
+                } else {
+                    Text(activePlaybackRoom.joinCode?.let { "Room $it" } ?: "Watch room", style = MaterialTheme.typography.titleSmall)
+                    Text("${activePlaybackRoom.members.size} watching", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    RivuneSecondaryButton(label = "Leave", onClick = onLeaveRoom, isTv = isTv)
+                }
+            }
+        }
+        if (joinRoomVisible) {
+            AlertDialog(
+                onDismissRequest = { joinRoomVisible = false },
+                title = { Text("Join watch room") },
+                text = { RivuneTextField(value = roomCode, onValueChange = { roomCode = it }, label = "Room code") },
+                confirmButton = { RivuneTextButton(label = "Join", onClick = { onJoinRoom(roomCode); roomCode = ""; joinRoomVisible = false }, isTv = isTv) },
+                dismissButton = { RivuneTextButton(label = "Cancel", onClick = { joinRoomVisible = false }, isTv = isTv) },
+            )
         }
         if (!overview.isNullOrBlank()) {
             DetailOverview(
@@ -4834,6 +4943,7 @@ internal fun SourcePickerOverlay(
     onBack: () -> Unit,
     onRefresh: () -> Unit,
     onSelectSource: (PlaybackSourceOption) -> Unit,
+    onDownloadSource: (PlaybackSourceOption) -> Unit,
     onChooseTarget: (PlaybackTargetSelection) -> Unit,
     onDismissTarget: () -> Unit,
     modifier: Modifier = Modifier,
@@ -4876,6 +4986,7 @@ internal fun SourcePickerOverlay(
             firstSourceFocus = firstSourceFocus,
             onRefresh = onRefresh,
             onSelect = onSelectSource,
+            onDownload = onDownloadSource,
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .padding(end = horizontalMargin)
@@ -4904,6 +5015,7 @@ private fun SourcePickerContent(
     firstSourceFocus: FocusRequester,
     onRefresh: () -> Unit,
     onSelect: (PlaybackSourceOption) -> Unit,
+    onDownload: (PlaybackSourceOption) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var selectedAddonId by remember(picker.target.id, picker.target.resourceId, picker.titleId) {
@@ -5045,12 +5157,19 @@ private fun SourcePickerContent(
                                         style = MaterialTheme.typography.labelSmall,
                                     )
                                 }
-                                Icon(
-                                    Icons.Rounded.ChevronRight,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(RivuneDimensions.iconSmall),
-                                    tint = MaterialTheme.colorScheme.primary,
-                                )
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    if (option.protocol.lowercase() !in setOf("hls", "dash")) {
+                                        IconButton(onClick = { onDownload(option) }, enabled = enabled && !loading) {
+                                            Icon(Icons.Rounded.FileDownload, contentDescription = "Download")
+                                        }
+                                    }
+                                    Icon(
+                                        Icons.Rounded.ChevronRight,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(RivuneDimensions.iconSmall),
+                                        tint = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
                             }
                         }
                     }
@@ -5730,6 +5849,7 @@ private fun AccountAction(
         ) {
             Icon(
                 imageVector = icon,
+
                 contentDescription = null,
                 modifier = Modifier.size(RivuneDimensions.iconMedium),
                 tint = if (destructive) contentColor else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -5740,6 +5860,48 @@ private fun AccountAction(
                 color = contentColor,
                 style = MaterialTheme.typography.bodyLarge,
             )
+        }
+    }
+}
+private fun recommendationTarget(recommendation: LocalRecommendation): MediaTarget? {
+    val item = recommendation.item
+    val title = item.title?.takeIf(String::isNotBlank) ?: return null
+    return MediaTarget(
+        id = item.resourceId ?: item.id.toString(), resourceId = item.resourceId ?: item.id.toString(),
+        mediaType = item.mediaType, title = title, titleId = item.id, provider = item.resourceProvider,
+        externalIds = item.providerIds, sourceAddonId = item.sourceAddonId, posterUrl = item.posterUrl,
+        backgroundUrl = item.backgroundUrl, releaseInfo = item.releaseInfo,
+    )
+}
+
+@Composable
+private fun OfflineMediaRow(
+    items: List<OfflineMediaItem>,
+    isTv: Boolean,
+    artworkUrl: (String?) -> String?,
+    onPlay: (OfflineMediaItem) -> Unit,
+    onRemove: (OfflineMediaItem) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(RivuneSpacing.sm)) {
+        RivuneSectionHeading(title = "Downloads")
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val cardWidth = viewerRowCardWidth(maxWidth, if (isTv) ViewerTvLandscapeTarget else RivuneDimensions.landscapeCardWidth, 2.4f, isTv)
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(ViewerMediaRowGap)) {
+                items(items, key = OfflineMediaItem::id) { item ->
+                    Column(modifier = Modifier.width(cardWidth)) {
+                        RivuneFocusSurface(onClick = { onPlay(item) }, isTv = isTv, modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                AsyncImage(model = artworkUrl(item.posterUrl), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                Icon(Icons.Rounded.PlayArrow, contentDescription = "Play download", modifier = Modifier.size(RivuneDimensions.iconMedium))
+                            }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(item.title, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            IconButton(onClick = { onRemove(item) }) { Icon(Icons.Rounded.Delete, contentDescription = "Delete download") }
+                        }
+                    }
+                }
+            }
         }
     }
 }

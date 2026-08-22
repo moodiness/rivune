@@ -9,7 +9,7 @@ final class DiscoveryCapabilitiesTests: XCTestCase {
     func testStableCapabilityIdentifiersAndOmittedCapabilities() throws {
         XCTAssertEqual(
             DiscoveryCapability.allCases.map(\.rawValue),
-            ["bounded-aggregate-resources", "profile-archives-v1", "request-correlation"]
+            ["bounded-aggregate-resources", "profile-archives-v1", "request-correlation", "local-recommendations", "playback-coordination"]
         )
 
         let discovery = try JSONDecoder().decode(Discovery.self, from: Data("""

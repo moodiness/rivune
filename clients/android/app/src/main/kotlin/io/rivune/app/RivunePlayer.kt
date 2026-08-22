@@ -127,6 +127,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import io.rivune.api.PlaybackMarker
@@ -172,6 +173,11 @@ internal enum class PlayerOptionsMenu {
     Subtitles,
     Speed,
 }
+internal fun coordinatedLifecycleResumeIntent(current: Boolean, state: String): Boolean = when (state) {
+    "play", "playing" -> true
+    "pause", "paused", "stop", "ended" -> false
+    else -> current
+}
 
 internal data class PlayerTrackKey(
     val groupIndex: Int,
@@ -200,6 +206,10 @@ private data class PlayerMenuChoice(
 internal fun RivunePlayerScreen(
     presentation: PlayerPresentation,
     failure: PlayerEngineFailure?,
+    remoteCommand: io.rivune.api.PlaybackCommand?,
+    playbackRoom: io.rivune.api.PlaybackRoom?,
+    onCommandConsumed: () -> Unit,
+    onPlaybackState: (Long, Long, Boolean) -> Unit,
     isTv: Boolean,
     frameRateMatching: FrameRateMatchingPreference,
     videoAspect: VideoAspectPreference,
@@ -220,6 +230,10 @@ internal fun RivunePlayerScreen(
             when (presentation.engine) {
                 EmbeddedPlayerEngine.MEDIA3 -> Media3PlayerScreen(
                     presentation = presentation,
+                    remoteCommand = remoteCommand,
+                    playbackRoom = playbackRoom,
+                    onCommandConsumed = onCommandConsumed,
+                    onPlaybackState = onPlaybackState,
                     isTv = isTv,
                     frameRateMatching = frameRateMatching,
                     videoAspect = videoAspect,
@@ -234,6 +248,10 @@ internal fun RivunePlayerScreen(
                 )
                 EmbeddedPlayerEngine.MPV -> MpvPlayerScreen(
                     presentation = presentation,
+                    remoteCommand = remoteCommand,
+                    playbackRoom = playbackRoom,
+                    onCommandConsumed = onCommandConsumed,
+                    onPlaybackState = onPlaybackState,
                     isTv = isTv,
                     videoAspect = videoAspect,
                     autoSkipIntro = autoSkipIntro,
@@ -488,6 +506,10 @@ private fun Media3PlayerScreen(
     onNext: () -> Unit,
     onClose: () -> Unit,
     onPlaybackError: (PlayerEngineFailure) -> Unit,
+    remoteCommand: io.rivune.api.PlaybackCommand?,
+    playbackRoom: io.rivune.api.PlaybackRoom?,
+    onCommandConsumed: () -> Unit,
+    onPlaybackState: (Long, Long, Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -519,6 +541,7 @@ private fun Media3PlayerScreen(
     var unlockVisible by remember(presentation.key) { mutableStateOf(false) }
     var playbackEnded by remember(presentation.key) { mutableStateOf(false) }
     var isPlaying by remember(presentation.key) { mutableStateOf(false) }
+    var resumeAfterLifecyclePause by remember(presentation.key) { mutableStateOf(true) }
     val inspectedDurationMs = presentation.durationSeconds.coerceAtLeast(0).toLong() * 1_000L
     var positionMs by remember(presentation.key) { mutableLongStateOf(presentation.startPositionMs.coerceAtLeast(0L)) }
     var durationMs by remember(presentation.key) { mutableLongStateOf(inspectedDurationMs) }
@@ -598,6 +621,7 @@ private fun Media3PlayerScreen(
 
     val player = remember(context, presentation.key, frameRateMatching) {
         ExoPlayer.Builder(context)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(RivuneDataSourceFactory(context)))
             .setVideoChangeFrameRateStrategy(frameRateMatching.media3Strategy(Build.VERSION.SDK_INT))
             .build()
             .also { newPlayer ->
@@ -715,7 +739,7 @@ private fun Media3PlayerScreen(
         var finished = false
         var errorDelivered = false
         var endDelivered = false
-        var resumeAfterLifecyclePause = player.playWhenReady
+        resumeAfterLifecyclePause = player.playWhenReady
         var reportingJob: Job? = null
 
         fun reportProgress(naturalEnd: Boolean = false) {
@@ -857,9 +881,40 @@ private fun Media3PlayerScreen(
                 presentation.timelineStartPositionMs,
                 presentation.mediaTimeline,
             )
+            onPlaybackState(positionMs, durationMs, player.isPlaying)
             delay(PLAYER_POSITION_INTERVAL_MS)
         }
     }
+    LaunchedEffect(remoteCommand?.id) {
+        val command = remoteCommand ?: return@LaunchedEffect
+        command.positionMilliseconds?.let { target ->
+            player.seekTo(mediaPlaybackPositionMs(target, presentation.timelineStartPositionMs, presentation.mediaTimeline))
+        }
+        resumeAfterLifecyclePause = coordinatedLifecycleResumeIntent(resumeAfterLifecyclePause, command.command)
+        when (command.command) {
+            "play" -> player.play()
+            "pause" -> player.pause()
+            "seek" -> Unit
+            "stop" -> onClose()
+        }
+        onCommandConsumed()
+    }
+
+    LaunchedEffect(playbackRoom?.version) {
+        val room = playbackRoom ?: return@LaunchedEffect
+        if (room.currentMemberIsHost) return@LaunchedEffect
+        val target = room.positionMilliseconds
+        if (kotlin.math.abs(positionMs - target) > 1_500) {
+            player.seekTo(mediaPlaybackPositionMs(target, presentation.timelineStartPositionMs, presentation.mediaTimeline))
+        }
+        resumeAfterLifecyclePause = coordinatedLifecycleResumeIntent(resumeAfterLifecyclePause, room.state)
+        when (room.state) {
+            "playing" -> player.play()
+            "paused" -> player.pause()
+            "ended" -> onClose()
+        }
+    }
+
 
     LaunchedEffect(controlsVisible, isPlaying, interactionGeneration, playbackEnded, optionsMenu, controlsLocked) {
         if (controlsVisible && isPlaying && !playbackEnded && optionsMenu == null && !controlsLocked) {
@@ -1252,6 +1307,10 @@ private fun MpvPlayerScreen(
     onNext: () -> Unit,
     onClose: () -> Unit,
     onPlaybackError: (PlayerEngineFailure) -> Unit,
+    remoteCommand: io.rivune.api.PlaybackCommand?,
+    playbackRoom: io.rivune.api.PlaybackRoom?,
+    onCommandConsumed: () -> Unit,
+    onPlaybackState: (Long, Long, Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -1282,6 +1341,7 @@ private fun MpvPlayerScreen(
     var unlockVisible by remember(presentation.key) { mutableStateOf(false) }
     var playbackEnded by remember(presentation.key) { mutableStateOf(false) }
     var playbackRequested by remember(presentation.key) { mutableStateOf(true) }
+    var resumeAfterPause by remember(presentation.key) { mutableStateOf(true) }
     var playbackIsPlaying by remember(presentation.key) { mutableStateOf(false) }
     var playbackPositionMs by remember(presentation.key) { mutableLongStateOf(presentation.startPositionMs.coerceAtLeast(0L)) }
     var playbackDurationMs by remember(presentation.key) { mutableLongStateOf(presentation.durationSeconds.coerceAtLeast(0).toLong() * 1_000L) }
@@ -1415,7 +1475,7 @@ private fun MpvPlayerScreen(
 
     BackHandler(enabled = !closeRequested, onBack = ::dismissChromeOrClose)
     DisposableEffect(controller, lifecycleOwner) {
-        var resumeAfterPause = playbackRequested
+        resumeAfterPause = playbackRequested
         var finished = false
         val lifecycleObserver = LifecycleEventObserver { _, event ->
             when (event) {
@@ -1432,6 +1492,33 @@ private fun MpvPlayerScreen(
             reportingJob.cancel(); lifecycleOwner.lifecycle.removeObserver(lifecycleObserver); finalProgressReporter = null
             if (!finished) { finished = true; reportProgress(); controller.release() }
         }
+    }
+    LaunchedEffect(remoteCommand?.id) {
+        val command = remoteCommand ?: return@LaunchedEffect
+        command.positionMilliseconds?.let(::seekTo)
+        resumeAfterPause = coordinatedLifecycleResumeIntent(resumeAfterPause, command.command)
+        when (command.command) {
+            "play" -> { playbackRequested = true; controller.play() }
+            "pause" -> { playbackRequested = false; controller.pause() }
+            "seek" -> Unit
+            "stop" -> onClose()
+        }
+        onCommandConsumed()
+    }
+    LaunchedEffect(playbackRoom?.version) {
+        val room = playbackRoom ?: return@LaunchedEffect
+        if (room.currentMemberIsHost) return@LaunchedEffect
+        if (kotlin.math.abs(playbackPositionMs - room.positionMilliseconds) > 1_500) seekTo(room.positionMilliseconds)
+        playbackRequested = room.state == "playing"
+        resumeAfterPause = coordinatedLifecycleResumeIntent(resumeAfterPause, room.state)
+        when (room.state) {
+            "playing" -> controller.play()
+            "paused" -> controller.pause()
+            "ended" -> onClose()
+        }
+    }
+    LaunchedEffect(playbackPositionMs, playbackDurationMs, playbackIsPlaying) {
+        onPlaybackState(playbackPositionMs, playbackDurationMs, playbackIsPlaying)
     }
     LaunchedEffect(controller, sessionAspect) { controller.setAspect(sessionAspect) }
     LaunchedEffect(controlsVisible, playbackIsPlaying, interactionGeneration, playbackEnded, optionsMenu, controlsLocked) {

@@ -9,6 +9,8 @@ import AppKit
 @MainActor
 public struct RivuneRootView: View {
     @StateObject private var model: RivuneAppModel
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var offlinePIN = ""
 
     public init(model: RivuneAppModel) {
         _model = StateObject(wrappedValue: model)
@@ -44,12 +46,21 @@ public struct RivuneRootView: View {
         .accentColor(RivunePalette.color(for: model.accent))
         .preferredColorScheme(.dark)
         .task { model.start() }
+        .onChange(of: scenePhase) { phase in
+            if phase != .active { model.handleSceneBackground() }
+        }
         .animation(.easeInOut(duration: 0.22), value: model.destination)
         .mediaPlayerPresentation(item: Binding(
             get: { model.mediaDetail == nil ? model.playbackPresentation : nil },
             set: { _ in }
         )) { presentation in
             RivuneInternalPlayerView(presentation: presentation, model: model)
+        }
+        .sheet(item: Binding(
+            get: { model.pendingOfflineProfile },
+            set: { if $0 == nil { offlinePIN = ""; model.dismissOfflineUnlock() } }
+        )) { profile in
+            OfflineUnlockView(profile: profile, pin: $offlinePIN, model: model)
         }
     }
 }
@@ -102,6 +113,11 @@ private struct RivuneGlassButtonModifier: ViewModifier {
 private extension View {
     func rivuneGlassButton(prominent: Bool = false) -> some View {
         modifier(RivuneGlassButtonModifier(prominent: prominent))
+    }
+
+    func rivuneDestructiveButton() -> some View {
+        buttonStyle(.plain)
+            .foregroundStyle(.red)
     }
 }
 
@@ -202,6 +218,43 @@ private struct FailureText: View {
     }
 }
 
+private struct OfflineUnlockView: View {
+    let profile: RivuneOfflineProfileAccess
+    @Binding var pin: String
+    @ObservedObject var model: RivuneAppModel
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 18) {
+                Image(systemName: "lock.fill").font(.largeTitle)
+                Text("Unlock \(profile.name)").font(.title2.bold())
+                SecureField("Profile PIN", text: $pin)
+#if os(tvOS)
+                    .textFieldStyle(.plain).padding(.horizontal, 16).frame(minHeight: 54)
+                    .background(RivunePalette.raised, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+#else
+                    .textFieldStyle(.roundedBorder)
+#endif
+#if os(iOS) || os(visionOS)
+                    .keyboardType(.numberPad)
+#endif
+                FailureText(failure: model.offlineUnlockFailure)
+                HStack {
+                    Button("Cancel") { pin = ""; model.dismissOfflineUnlock() }
+                    Button("Unlock") {
+                        let normalized = String(pin.filter(\.isNumber).prefix(8))
+                        model.unlockOfflineProfile(profile, pin: normalized)
+                        if model.offlineAccessUnlocked { pin = "" }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(pin.filter(\.isNumber).count < 4)
+                }
+            }
+            .padding(28).frame(maxWidth: 480)
+        }
+    }
+}
+
 private struct PrimaryButton: View {
     let title: String
     let busy: Bool
@@ -229,6 +282,8 @@ private struct ServerView: View {
     @StateObject private var browser = RivuneLANBrowser()
     @State private var address = ""
     @State private var selectedServer: DiscoveredRivuneServer?
+    @State private var discoveryGeneration = 0
+    @State private var isSearching = true
 
     var body: some View {
         AuthFrame {
@@ -237,81 +292,27 @@ private struct ServerView: View {
                 title: "Connect to Rivune",
                 bodyText: "Choose a Rivune server found on this network, or enter its address manually. This app has no public catalog or hosted account."
             )
-            VStack(alignment: .leading, spacing: 14) {
-                if !browser.servers.isEmpty {
-                    Text("NEARBY RIVUNE SERVERS")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(RivunePalette.secondary)
-                    ForEach(browser.servers) { server in
-                        Button {
-                            selectedServer = server
-                        } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: "network")
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(server.name)
-                                        .font(.body.weight(.semibold))
-                                    Text(server.usesSecureTransport ? "Secure HTTPS" : "Trusted-LAN HTTP")
-                                        .font(.caption)
-                                        .foregroundStyle(RivunePalette.secondary)
-                                }
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .foregroundStyle(RivunePalette.secondary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 16)
-                            .frame(minHeight: 58)
-                        }
-                        .rivuneGlassButton()
-                        .accessibilityIdentifier("discovered-server-\(server.id)")
-                    }
-                }
-                Button(browser.servers.isEmpty ? "Find servers on this network" : "Refresh nearby servers") {
-                    browser.start()
-                }
-                .rivuneGlassButton()
-                .accessibilityIdentifier("server-discover")
-
-                Text("SERVER ADDRESS")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(RivunePalette.secondary)
-                TextField("https://rivune.example.com", text: $address)
-                    .textFieldStyle(.plain)
-                    .font(.body.monospaced())
-                    .padding(.horizontal, 16)
-                    .frame(minHeight: 54)
-                    .background(RivunePalette.raised, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 13, style: .continuous)
-                            .stroke(model.failure == nil ? Color.white.opacity(0.10) : Color.red.opacity(0.75), lineWidth: 1)
-                    }
-#if os(iOS) || os(visionOS)
-                    .textInputAutocapitalization(.never)
-                    .keyboardType(.URL)
-                    .autocorrectionDisabled()
-#endif
-                    .onSubmit(submit)
-                    .accessibilityIdentifier("server-address")
-                FailureText(failure: model.failure)
-                Text("Localhost and private-network addresses use HTTP when no scheme is supplied. Public addresses default to HTTPS. Use HTTP only on a trusted local network.")
-                    .font(.footnote)
-                    .foregroundStyle(RivunePalette.secondary)
-                PrimaryButton(
-                    title: model.isBusy ? "Connecting…" : (model.failure == nil ? "Connect" : "Try again"),
-                    busy: model.isBusy,
-                    action: submit
-                )
-                .disabled(address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .accessibilityIdentifier("server-connect")
-            }
+            serverSections
+            offlineProfilesSection
         }
         .onAppear {
             address = model.serverAddress
-            browser.start()
+            refreshDiscovery()
         }
-        .onDisappear { browser.stop() }
+        .onDisappear {
+            discoveryGeneration += 1
+            browser.stop()
+        }
         .onChange(of: address) { _ in model.clearFailure() }
+        .onChange(of: browser.servers) { servers in
+            if !servers.isEmpty { isSearching = false }
+        }
+        .task(id: discoveryGeneration) {
+            guard discoveryGeneration > 0, isSearching else { return }
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled else { return }
+            isSearching = false
+        }
         .confirmationDialog(
             selectedServer.map { "Connect to \($0.name)?" } ?? "Connect to this server?",
             isPresented: Binding(
@@ -331,10 +332,345 @@ private struct ServerView: View {
         }
     }
 
+    private var serverSections: some View {
+        VStack(alignment: .leading, spacing: sectionSpacing) {
+            LANDiscoveryCard(
+                servers: browser.servers,
+                isSearching: isSearching,
+                refresh: refreshDiscovery,
+                select: { selectedServer = $0 }
+            )
+            serverAddressSection
+        }
+    }
+
+    private var serverAddressSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("SERVER ADDRESS")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(RivunePalette.secondary)
+            TextField("https://rivune.example.com", text: $address)
+                .textFieldStyle(.plain)
+                .font(.body.monospaced())
+                .padding(.horizontal, 16)
+                .frame(minHeight: addressFieldHeight)
+                .background(RivunePalette.raised, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .stroke(addressStrokeColor, lineWidth: 1)
+                }
+#if os(iOS) || os(visionOS)
+                .textInputAutocapitalization(.never)
+                .keyboardType(.URL)
+                .autocorrectionDisabled()
+#endif
+                .onSubmit(submit)
+                .accessibilityIdentifier("server-address")
+            FailureText(failure: model.failure)
+            Text("Localhost and private-network addresses use HTTP when no scheme is supplied. Public addresses default to HTTPS. Use HTTP only on a trusted local network.")
+                .font(.footnote)
+                .foregroundStyle(RivunePalette.secondary)
+            PrimaryButton(title: connectButtonTitle, busy: model.isBusy, action: submit)
+                .disabled(address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityIdentifier("server-connect")
+        }
+    }
+
+    @ViewBuilder
+    private var offlineProfilesSection: some View {
+        if !model.offlineProfiles.isEmpty {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("OFFLINE PROFILES")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(RivunePalette.secondary)
+                ForEach(model.offlineProfiles) { profile in
+                    offlineProfileButton(profile)
+                }
+                if model.offlineAccessUnlocked {
+                    Button("Lock offline access") { model.lockOffline() }.buttonStyle(.bordered)
+                }
+                FailureText(failure: model.offlineUnlockFailure)
+            }
+            if !model.offlineItems.isEmpty {
+                OfflineMediaSection(items: model.offlineItems, model: model, availableWidth: 620)
+                    .padding(.top, 8)
+            }
+        }
+    }
+
+    private func offlineProfileButton(_ profile: RivuneOfflineProfileAccess) -> some View {
+        let icon = profile.requiresPIN ? "lock.fill" : "arrow.down.circle.fill"
+        return Button { model.requestOfflineUnlock(profile) } label: {
+            Label(profile.name, systemImage: icon)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .rivuneGlassButton(prominent: false)
+    }
+
+    private var addressStrokeColor: Color {
+        model.failure == nil ? Color.white.opacity(0.10) : Color.red.opacity(0.75)
+    }
+
+    private var connectButtonTitle: String {
+        if model.isBusy { return "Connecting…" }
+        return model.failure == nil ? "Connect" : "Try again"
+    }
+
+    private var sectionSpacing: CGFloat {
+#if os(tvOS)
+        30
+#else
+        24
+#endif
+    }
+
+    private var addressFieldHeight: CGFloat {
+#if os(tvOS)
+        64
+#else
+        54
+#endif
+    }
+
+    private func refreshDiscovery() {
+        discoveryGeneration += 1
+        isSearching = true
+        browser.start()
+    }
+
     private func submit() {
         let value = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
         model.connect(to: value)
+    }
+}
+
+private struct LANDiscoveryCard: View {
+    let servers: [DiscoveredRivuneServer]
+    let isSearching: Bool
+    let refresh: () -> Void
+    let select: (DiscoveredRivuneServer) -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Nearby servers")
+                        .font(.headline)
+                    Text("Rivune on your local network")
+                        .font(.caption)
+                        .foregroundStyle(RivunePalette.secondary)
+                }
+                Spacer(minLength: 10)
+                discoveryStatus
+                Button(action: refresh) {
+                    Group {
+                        if isSearching {
+                            ProgressView()
+                                .tint(RivunePalette.secondary)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.body.weight(.semibold))
+                        }
+                    }
+                    .frame(width: refreshButtonSize, height: refreshButtonSize)
+                    .background(RivunePalette.raised, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(isSearching)
+                .accessibilityLabel(isSearching ? "Searching for nearby servers" : "Refresh nearby servers")
+                .accessibilityIdentifier("server-discover")
+            }
+            .padding(cardPadding)
+
+            Divider()
+
+            if servers.isEmpty {
+                LANDiscoveryEmptyState(isSearching: isSearching)
+                    .padding(.horizontal, cardPadding)
+                    .padding(.vertical, emptyStatePadding)
+            } else {
+                ForEach(servers) { server in
+                    Button {
+                        select(server)
+                    } label: {
+                        DiscoveredServerRow(server: server)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("discovered-server-\(server.id)")
+
+                    if server.id != servers.last?.id {
+                        Divider().padding(.leading, rowDividerInset)
+                    }
+                }
+            }
+        }
+        .background(RivunePalette.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        }
+    }
+
+    @ViewBuilder
+    private var discoveryStatus: some View {
+        if servers.isEmpty && isSearching {
+            Text("Searching")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(RivunePalette.secondary)
+        } else if servers.isEmpty {
+            Text("Listening")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(RivunePalette.secondary)
+        } else {
+            Text("\(servers.count) \(servers.count == 1 ? "server" : "servers")")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(RivunePalette.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(RivunePalette.raised, in: Capsule())
+        }
+    }
+
+    private var cardPadding: CGFloat {
+#if os(tvOS)
+        24
+#else
+        18
+#endif
+    }
+
+    private var emptyStatePadding: CGFloat {
+#if os(tvOS)
+        40
+#else
+        28
+#endif
+    }
+
+    private var refreshButtonSize: CGFloat {
+#if os(tvOS)
+        52
+#else
+        40
+#endif
+    }
+
+    private var rowDividerInset: CGFloat {
+#if os(tvOS)
+        86
+#else
+        66
+#endif
+    }
+}
+
+private struct LANDiscoveryEmptyState: View {
+    let isSearching: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Group {
+                if isSearching {
+                    ProgressView()
+                        .tint(RivunePalette.accent)
+                } else {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(RivunePalette.secondary)
+                }
+            }
+            .frame(width: 28, height: 28)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(isSearching ? "Looking on your local network" : "No servers yet")
+                    .font(.subheadline.weight(.semibold))
+                Text(isSearching
+                     ? "Nearby Rivune servers will appear here. This can take a few seconds."
+                     : "Discovery is still active. Make sure Rivune is running and this device is on the same network.")
+                    .font(.caption)
+                    .foregroundStyle(RivunePalette.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct DiscoveredServerRow: View {
+    @Environment(\.isFocused) private var isFocused
+    let server: DiscoveredRivuneServer
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "network")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(RivunePalette.accent)
+                .frame(width: serverIconSize, height: serverIconSize)
+                .background(RivunePalette.raised, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            VStack(alignment: .leading, spacing: 5) {
+                Text(server.name)
+                    .font(.body.weight(.semibold))
+                    .lineLimit(1)
+                Text(server.address.absoluteString)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(RivunePalette.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            ServerTransportBadge(secure: server.usesSecureTransport)
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(RivunePalette.secondary)
+        }
+        .padding(.horizontal, rowHorizontalPadding)
+        .padding(.vertical, rowVerticalPadding)
+        .contentShape(Rectangle())
+        .background(isFocused ? RivunePalette.raised : Color.clear)
+        .foregroundStyle(.primary)
+    }
+
+    private var serverIconSize: CGFloat {
+#if os(tvOS)
+        48
+#else
+        38
+#endif
+    }
+
+    private var rowHorizontalPadding: CGFloat {
+#if os(tvOS)
+        24
+#else
+        14
+#endif
+    }
+
+    private var rowVerticalPadding: CGFloat {
+#if os(tvOS)
+        20
+#else
+        14
+#endif
+    }
+}
+
+private struct ServerTransportBadge: View {
+    let secure: Bool
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: secure ? "lock.fill" : "wifi")
+            Text(secure ? "HTTPS" : "LAN")
+        }
+        .font(.caption2.weight(.bold))
+        .foregroundStyle(secure ? RivunePalette.accent : RivunePalette.secondary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(RivunePalette.raised, in: Capsule())
+        .accessibilityLabel(secure ? "Secure HTTPS" : "Local network HTTP")
     }
 }
 
@@ -375,6 +711,7 @@ private struct PairingView: View {
                 Label("Disconnect", systemImage: "rectangle.portrait.and.arrow.right")
                     .frame(maxWidth: .infinity, minHeight: 48)
             }
+            .rivuneDestructiveButton()
         }
         .confirmationDialog("Disconnect from \(model.serverName)?", isPresented: $confirmDisconnect) {
             Button("Disconnect", role: .destructive, action: model.disconnect)
@@ -464,6 +801,7 @@ private struct ProfilesView: View {
                         Button(role: .destructive) { confirmDisconnect = true } label: {
                             Label("Disconnect", systemImage: "rectangle.portrait.and.arrow.right")
                         }
+                        .rivuneDestructiveButton()
                     }
                     ScreenHeading(
                         eyebrow: model.serverName,
@@ -941,6 +1279,12 @@ private struct LibraryView: View {
                                 availableWidth: proxy.size.width - (proxy.size.width < 620 ? 40 : 56)
                             )
                         }
+                        if !model.recommendationItems.isEmpty {
+                            RecommendationSection(items: model.recommendationItems, model: model, availableWidth: proxy.size.width - (proxy.size.width < 620 ? 40 : 56))
+                        }
+                        if !model.offlineItems.isEmpty {
+                            OfflineMediaSection(items: model.offlineItems, model: model, availableWidth: proxy.size.width - (proxy.size.width < 620 ? 40 : 56))
+                        }
                         if model.isBusy {
                             HStack(spacing: 12) {
                                 ProgressView()
@@ -1234,9 +1578,7 @@ private struct LibraryHeader: View {
                     Button(role: .destructive, action: disconnect) {
                         Label("Disconnect", systemImage: "rectangle.portrait.and.arrow.right")
                     }
-                    .buttonStyle(.bordered)
-                    .tint(.red)
-                    .foregroundStyle(.red)
+                    .rivuneDestructiveButton()
                 }
             }
         }
@@ -1549,6 +1891,64 @@ private struct ContinueWatchingSection: View {
                             }
                         }
                         .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct RecommendationSection: View {
+    let items: [RivuneRecommendationItem]
+    @ObservedObject var model: RivuneAppModel
+    let availableWidth: CGFloat
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Recommended for you").font(.title2.bold())
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 16) {
+                    ForEach(items) { item in
+                        let width = responsiveTileWidth(for: .poster, availableWidth: availableWidth)
+                        Button { model.openMedia(item.target) } label: {
+                            VStack(alignment: .leading, spacing: 8) {
+                                AsyncImage(url: item.target.posterUrl.flatMap(model.resolvedResourceURL)) { phase in
+                                    if let image = phase.image { image.resizable().scaledToFill() }
+                                    else { ZStack { RivunePalette.surface; Image(systemName: "sparkles.tv") } }
+                                }
+                                .frame(width: width, height: width * 1.5).clipShape(RoundedRectangle(cornerRadius: 14))
+                                Text(item.target.title).font(.subheadline.weight(.semibold)).lineLimit(1).frame(width: width, alignment: .leading)
+                                Text(item.reason).font(.caption).foregroundStyle(RivunePalette.secondary).lineLimit(2).frame(width: width, alignment: .leading)
+                            }
+                        }.buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct OfflineMediaSection: View {
+    let items: [RivuneOfflineMediaItem]
+    @ObservedObject var model: RivuneAppModel
+    let availableWidth: CGFloat
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Downloads").font(.title2.bold())
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 16) {
+                    ForEach(items) { item in
+                        let width = responsiveTileWidth(for: .landscape, availableWidth: availableWidth)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Button { model.playOffline(item) } label: {
+                                ZStack { RivunePalette.surface; Image(systemName: "play.circle.fill").font(.largeTitle) }
+                                    .frame(width: width, height: width * 9 / 16).clipShape(RoundedRectangle(cornerRadius: 14))
+                            }.buttonStyle(.plain)
+                            Text(item.title).font(.subheadline.weight(.semibold)).lineLimit(1).frame(width: width, alignment: .leading)
+                            HStack { Text(ByteCountFormatter.string(fromByteCount: item.sizeBytes, countStyle: .file)); Spacer(); Button(role: .destructive) { model.removeOffline(item) } label: { Image(systemName: "trash") } }
+                                .font(.caption).foregroundStyle(RivunePalette.secondary).frame(width: width)
+                        }
                     }
                 }
             }

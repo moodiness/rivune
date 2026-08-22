@@ -25,6 +25,9 @@
     <string name="server_local_http_explanation">This discovered server uses unencrypted HTTP. Continue only on a trusted private network.</string>
     <string name="server_confirm_connect">Connect</string>
     <string name="server_confirm_cancel">Cancel</string>
+    <string name="offline_profiles_title">WATCH OFFLINE</string>
+    <string name="offline_pin_label">Offline profile PIN</string>
+    <string name="offline_open">Open downloads</string>
 
 
     <string name="pairing_eyebrow">DEVICE PAIRING</string>

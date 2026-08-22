@@ -27,6 +27,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/calendar"
 	"github.com/moodiness/rivune/server/internal/category"
 	"github.com/moodiness/rivune/server/internal/collection"
+	"github.com/moodiness/rivune/server/internal/coordination"
 
 	"github.com/moodiness/rivune/server/internal/config"
 	"github.com/moodiness/rivune/server/internal/demo"
@@ -54,6 +55,8 @@ var nativeCapabilities = [...]string{
 	"bounded-aggregate-resources",
 	"profile-archives-v1",
 	"request-correlation",
+	"local-recommendations",
+	"playback-coordination",
 }
 
 type instanceService interface {
@@ -216,6 +219,7 @@ type watchstateService interface {
 	ClearProgress(context.Context, auth.Principal, string, int64) error
 	ContinueWatching(context.Context, auth.Principal, string, int) (watchstate.ContinuePage, error)
 	DismissContinue(context.Context, auth.Principal, string) error
+	Recommendations(context.Context, auth.Principal, int) (watchstate.RecommendationPage, error)
 }
 
 type trackingService interface {
@@ -237,6 +241,19 @@ type playbackService interface {
 	StopActivitySession(context.Context, auth.Principal, string) error
 	PurgeActivity(context.Context, auth.Principal) (playback.PurgeResult, error)
 	ProxyAsset(http.ResponseWriter, *http.Request, string, string, string, string) error
+}
+type coordinationService interface {
+	Heartbeat(context.Context, auth.Principal, coordination.DeviceHeartbeatInput) (coordination.Device, error)
+	Devices(context.Context, auth.Principal) (coordination.DeviceList, error)
+	SendCommand(context.Context, auth.Principal, string, coordination.CommandInput) (coordination.Command, error)
+	Commands(context.Context, auth.Principal, int64) (coordination.CommandList, error)
+	AcknowledgeCommand(context.Context, auth.Principal, int64) error
+	CreateRoom(context.Context, auth.Principal, coordination.CreateRoomInput) (coordination.Room, error)
+	JoinRoom(context.Context, auth.Principal, string) (coordination.Room, error)
+	Room(context.Context, auth.Principal, string) (coordination.Room, error)
+	UpdateRoom(context.Context, auth.Principal, string, coordination.UpdateRoomInput) (coordination.Room, error)
+	LeaveRoom(context.Context, auth.Principal, string) error
+	RunScheduled(context.Context) error
 }
 
 type operationsService interface {
@@ -304,6 +321,7 @@ type API struct {
 	playback                                playbackService
 	playbackMaintenance                     playbackMaintenanceService
 	operations                              operationsService
+	coordination                            coordinationService
 	portable                                portableService
 	settings                                settingsService
 	integrationConfiguration                integrationSettingsService
@@ -448,6 +466,7 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 	collectionService := collection.NewServiceWithProviderSource(pool, addonService, providerRuntime)
 	collectionService.SetArtworkPresenter(artworkService)
 	watchstateService := watchstate.NewServiceWithRuntimeSettings(pool, runtimeSource, providerRuntime, trackingService)
+	coordinationService := coordination.NewService(pool, watchstateService)
 	profileManager := profile.NewServiceWithRuntimeSettings(pool, cfg.ProfileGrantTTL, runtimeSource)
 	instanceManager := instance.NewServiceWithRuntimeSettings(pool, cfg.SetupToken, runtimeSource)
 	portableService := portable.NewService(pool, runtimeSource)
@@ -470,6 +489,7 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 		calendarRefresh:          calendarService,
 		categories:               category.NewService(pool),
 		collections:              collectionService,
+		coordination:             coordinationService,
 		pool:                     pool,
 		instances:                instanceManager,
 		demo:                     demo.New(instanceManager, demo.Options{}),
@@ -661,6 +681,16 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/playback/activity/sessions/{sessionId}", a.requireAuthentication(a.stopPlaybackActivitySession))
 	mux.Handle("POST /api/v1/playback/activity/purge", a.requireAuthentication(a.purgePlaybackActivity))
 	mux.HandleFunc("GET /api/v1/playback/sessions/{sessionId}/assets/{assetId}", a.playbackAsset)
+	mux.Handle("PUT /api/v1/playback/device", a.requireAuthentication(a.playbackDeviceHeartbeat))
+	mux.Handle("GET /api/v1/playback/devices", a.requireAuthentication(a.playbackDevices))
+	mux.Handle("POST /api/v1/playback/devices/{sessionId}/commands", a.requireAuthentication(a.sendPlaybackCommand))
+	mux.Handle("GET /api/v1/playback/commands", a.requireAuthentication(a.playbackCommands))
+	mux.Handle("POST /api/v1/playback/commands/{commandId}/ack", a.requireAuthentication(a.acknowledgePlaybackCommand))
+	mux.Handle("POST /api/v1/playback/rooms", a.requireAuthentication(a.createPlaybackRoom))
+	mux.Handle("POST /api/v1/playback/rooms/join", a.requireAuthentication(a.joinPlaybackRoom))
+	mux.Handle("GET /api/v1/playback/rooms/{roomId}", a.requireAuthentication(a.playbackRoom))
+	mux.Handle("PUT /api/v1/playback/rooms/{roomId}", a.requireAuthentication(a.updatePlaybackRoom))
+	mux.Handle("DELETE /api/v1/playback/rooms/{roomId}", a.requireAuthentication(a.leavePlaybackRoom))
 	mux.HandleFunc("HEAD /api/v1/playback/sessions/{sessionId}/assets/{assetId}", a.playbackAsset)
 	mux.Handle("GET /api/v1/calendar", a.requireAuthentication(a.calendarEvents))
 	mux.Handle("GET /api/v1/profiles/{profileId}/calendar-link", a.requireAuthentication(a.calendarLinkStatus))
@@ -673,6 +703,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("POST /api/v1/library/membership", a.requireAuthentication(a.tvLibraryMembership))
 	mux.Handle("PUT /api/v1/library/{titleId}", a.requireAuthentication(a.addLibrary))
 	mux.Handle("DELETE /api/v1/library/{titleId}", a.requireAuthentication(a.removeLibrary))
+	mux.Handle("GET /api/v1/recommendations", a.requireAuthentication(a.recommendations))
 	mux.Handle("POST /api/v1/progress/batch", a.requireAuthentication(a.getProgressBatch))
 	mux.Handle("GET /api/v1/progress/{titleId}", a.requireAuthentication(a.getProgress))
 	mux.Handle("PUT /api/v1/progress/{titleId}", a.requireAuthentication(a.updateProgress))

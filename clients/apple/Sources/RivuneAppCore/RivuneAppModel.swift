@@ -182,6 +182,7 @@ public struct RivunePlaybackPresentation: Identifiable, Equatable, Sendable {
     public let subtitles: [PlaybackSubtitle]
     public let selectedAudioTrack: Int?
     public let selectedSubtitleId: String?
+    public let coordinatedItem: CoordinatedPlaybackItem?
 }
 
 
@@ -211,6 +212,12 @@ public struct RivuneHeroItem: Identifiable, Equatable, Sendable {
     public let releaseInfo: String?
     public let target: RivuneMediaTarget
 }
+public struct RivuneRecommendationItem: Identifiable, Equatable, Sendable {
+    public let id: UUID
+    public let reason: String
+    public let target: RivuneMediaTarget
+}
+
 
 public enum RivuneAppFailure: Equatable, LocalizedError {
     case invalidServer
@@ -293,6 +300,17 @@ public final class RivuneAppModel: ObservableObject {
     @Published public private(set) var folderArtworkURLs: [UUID: String] = [:]
     @Published public private(set) var continueWatchingItems: [ContinueWatchingItem] = []
     @Published public private(set) var heroItems: [RivuneHeroItem] = []
+    @Published public private(set) var recommendationItems: [RivuneRecommendationItem] = []
+    @Published public private(set) var offlineItems: [RivuneOfflineMediaItem] = []
+    @Published public private(set) var offlineProfiles: [RivuneOfflineProfileAccess] = []
+    @Published public private(set) var offlineUnlockFailure: RivuneAppFailure?
+    @Published public private(set) var pendingOfflineProfile: RivuneOfflineProfileAccess?
+    @Published public private(set) var offlineDownloadBytes: Int64 = 0
+    @Published public private(set) var offlineDownloadActive = false
+    @Published public private(set) var playbackDevices: [PlaybackDevice] = []
+    @Published public private(set) var activePlaybackRoom: PlaybackRoom?
+    @Published public private(set) var playbackCoordinationAvailable = false
+    @Published public private(set) var pendingPlaybackCommands: [PlaybackCommand] = []
     @Published public private(set) var openedFolder: OpenedCollectionFolder?
     @Published public private(set) var selectedTab: RivuneViewerTab = .home
     @Published public var searchQuery = ""
@@ -337,6 +355,9 @@ public final class RivuneAppModel: ObservableObject {
     private let defaults: UserDefaults
     private var serverOrigin: URL?
     private var client: RivuneAPIClient?
+    private var offlineScope: RivuneOfflineMediaScope?
+    private var currentOfflineAccess: RivuneOfflineProfileAccess?
+    private var storedOfflineProfiles: [RivuneOfflineProfileAccess] = []
     private var operation: Task<Void, Never>?
     private var tabOperation: Task<Void, Never>?
     private var tabGeneration: UInt64 = 0
@@ -344,10 +365,19 @@ public final class RivuneAppModel: ObservableObject {
     private var mediaOperation: Task<Void, Never>?
     private var mediaGeneration: UInt64 = 0
     private var settingsOperation: Task<Void, Never>?
+    private var coordinationOperation: Task<Void, Never>?
+    private var coordinationPositionMilliseconds: Int64 = 0
+    private var coordinationDurationMilliseconds: Int64 = 0
+    private var coordinationStatus = "idle"
+    private var executedPlaybackCommandID: Int64?
+    private var lastPlaybackCommandID: Int64 = 0
+    private var localRecommendationsAvailable = false
+    private var coordinationEndedPlaybackID: UUID?
     private var settingsGeneration: UInt64 = 0
     private var previousMediaDetail: RivuneMediaDetail?
     private let pathMonitor = NWPathMonitor()
     private let pathMonitorQueue = DispatchQueue(label: "io.rivune.network-path")
+    public var offlineAccessUnlocked: Bool { offlineScope != nil }
     private var usesCellularNetwork = false
     public var canNavigateBackFromMedia: Bool { selectedSeason != nil || previousMediaDetail != nil }
 
@@ -373,6 +403,11 @@ public final class RivuneAppModel: ObservableObject {
             }
         }
         pathMonitor.start(queue: pathMonitorQueue)
+        if let data = defaults.data(forKey: Self.offlineProfilesKey),
+           let profiles = try? JSONDecoder().decode([RivuneOfflineProfileAccess].self, from: data) {
+            storedOfflineProfiles = profiles
+        }
+        defaults.removeObject(forKey: Self.offlineScopeKey)
     }
 
     deinit {
@@ -380,16 +415,20 @@ public final class RivuneAppModel: ObservableObject {
         tabOperation?.cancel()
         mediaOperation?.cancel()
         settingsOperation?.cancel()
+        coordinationOperation?.cancel()
+        Task { await RivuneOfflineMediaStore.shared.stopPlayback() }
         pathMonitor.cancel()
     }
 
     public func start() {
+        refreshAvailableOfflineProfiles()
         guard destination == .server, !serverAddress.isEmpty else { return }
         connect(to: serverAddress)
     }
 
 
     public func connect(to address: String) {
+        lockOffline()
         beginOperation()
         let currentGeneration = generation
         let normalized = ServerAddressNormalizer.normalize(address)
@@ -403,6 +442,7 @@ public final class RivuneAppModel: ObservableObject {
 
     public func restartPairing() {
         guard client != nil else { return }
+        lockOffline()
         beginOperation()
         let currentGeneration = generation
         destination = .pairing
@@ -417,6 +457,7 @@ public final class RivuneAppModel: ObservableObject {
 
     public func selectProfile(_ profile: Profile, pin: String? = nil) {
         guard profile.accessible, let client else { return }
+        lockOffline()
         resetProfileSettings()
         beginOperation()
         let currentGeneration = generation
@@ -428,6 +469,7 @@ public final class RivuneAppModel: ObservableObject {
                 guard let self, self.isCurrent(currentGeneration) else { return }
                 self.resetTabState()
                 self.activeProfile = profile
+                self.registerOfflineProfile(profile, serverOrigin: self.serverOrigin, pin: pin)
                 self.destination = .library
                 await self.loadCollections(using: client, generation: currentGeneration)
             } catch is CancellationError {
@@ -565,6 +607,7 @@ public final class RivuneAppModel: ObservableObject {
 
     public func chooseAnotherProfile() {
         guard let client else { return }
+        lockOffline()
         beginOperation()
         let currentGeneration = generation
         isBusy = true
@@ -575,6 +618,7 @@ public final class RivuneAppModel: ObservableObject {
                 guard let self, self.isCurrent(currentGeneration) else { return }
                 self.resetProfileSettings()
                 self.activeProfile = nil
+                self.lockOffline()
                 self.collections = []
                 self.resetTabState()
                 self.destination = .profiles
@@ -670,12 +714,66 @@ public final class RivuneAppModel: ObservableObject {
         beginOperation()
         client = nil
         resetSessionState()
+        lockOffline()
         defaults.removeObject(forKey: Self.serverKey)
         serverAddress = ""
         destination = .server
         isBusy = false
         guard let currentClient else { return }
         operation = Task { try? await currentClient.logout() }
+    }
+
+    public func requestOfflineUnlock(_ profile: RivuneOfflineProfileAccess) {
+        guard profile.scope != nil else { return }
+        if profile.requiresPIN {
+            offlineUnlockFailure = nil
+            pendingOfflineProfile = profile
+        } else {
+            unlockOfflineProfile(profile)
+        }
+    }
+
+    public func unlockOfflineProfile(_ profile: RivuneOfflineProfileAccess, pin: String? = nil) {
+        guard pendingOfflineProfile == nil || pendingOfflineProfile?.id == profile.id,
+              let scope = profile.scope, profile.permits(pin: pin) else {
+            lockOffline(clearPending: false)
+            pendingOfflineProfile = profile.requiresPIN ? profile : nil
+            offlineUnlockFailure = .invalidPin
+            return
+        }
+        lockOffline(clearPending: false)
+        offlineUnlockFailure = nil
+        pendingOfflineProfile = nil
+        currentOfflineAccess = profile
+        offlineScope = scope
+        loadOfflineItems()
+    }
+
+    public func dismissOfflineUnlock() {
+        pendingOfflineProfile = nil
+        offlineUnlockFailure = nil
+    }
+
+    public func lockOffline(clearPending: Bool = true) {
+        beginMediaOperation()
+        if playbackPresentation?.sourceRef.hasPrefix("offline:") == true { playbackPresentation = nil }
+        if minimizedPlaybackPresentation?.sourceRef.hasPrefix("offline:") == true { minimizedPlaybackPresentation = nil }
+        offlineScope = nil
+        offlineItems = []
+        offlineUnlockFailure = nil
+        if clearPending { pendingOfflineProfile = nil; currentOfflineAccess = nil }
+        Task { await RivuneOfflineMediaStore.shared.stopPlayback() }
+    }
+
+    public func handleSceneBackground() {
+        guard let scope = offlineScope,
+              let access = currentOfflineAccess ?? storedOfflineProfiles.first(where: { $0.id == scope.identifier }),
+              access.requiresPIN else { return }
+        let offlineOnly = client == nil || destination == .server
+        let shouldPrompt = !offlineItems.isEmpty
+        lockOffline(clearPending: false)
+        pendingOfflineProfile = shouldPrompt ? access : nil
+        if offlineOnly { destination = .server }
     }
 
     public func clearFailure() { failure = nil }
@@ -938,6 +1036,136 @@ public final class RivuneAppModel: ObservableObject {
             }
         }
     }
+
+    public func download(_ source: PlaybackSourceOption) {
+        guard let client, let detail = mediaDetail, !offlineDownloadActive else { return }
+        guard let scope = offlineScope else {
+            showPlaybackSources = false
+            requestActiveOfflineUnlockIfAvailable()
+            return
+        }
+        beginMediaOperation()
+        let current = mediaGeneration
+        offlineDownloadActive = true
+        offlineDownloadBytes = 0
+        mediaFailure = nil
+        mediaOperation = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.mediaGeneration == current { self.offlineDownloadActive = false }
+            }
+            do {
+                _ = try await client.preparePlayback(sourceRef: source.sourceRef, externalPlayer: true)
+                let session = try await client.resolvePlayback(sourceRef: source.sourceRef, titleId: detail.titleId.uuidString.lowercased(), externalPlayer: true)
+                guard let selected = session.sources.first(where: { $0.id == session.selectedSourceId }) ?? session.sources.first,
+                      let rawURL = selected.url, self.isCurrentMedia(current),
+                      let url = self.resolvedResourceURL(rawURL), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                      !["hls", "dash"].contains(selected.protocol.lowercased()) else { throw RivuneOfflineMediaError.unsupportedSource }
+                let item = try await RivuneOfflineMediaStore.shared.download(
+                    from: url, titleId: detail.titleId, title: detail.target.title,
+                    container: selected.container ?? source.container, posterURL: detail.target.posterUrl,
+                    in: scope
+                ) { [weak self] bytes in
+                    Task { @MainActor in self?.offlineDownloadBytes = bytes }
+                }
+                if let access = self.currentOfflineAccess, access.id == scope.identifier {
+                    self.persistOfflineAccess(access)
+                }
+                guard self.isCurrentMedia(current), self.offlineScope == scope else { return }
+                self.offlineItems.removeAll { $0.id == item.id }
+                self.offlineItems.insert(item, at: 0)
+            } catch is CancellationError {
+            } catch {
+                guard self.isCurrentMedia(current) else { return }
+                self.mediaFailure = self.map(error, fallback: .message(error.localizedDescription))
+            }
+        }
+    }
+
+    public func playOffline(_ item: RivuneOfflineMediaItem) {
+        guard let scope = offlineScope else { return }
+        Task { [weak self] in
+            do {
+                let url = try await RivuneOfflineMediaStore.shared.playbackURL(for: item, in: scope)
+                guard let self, self.offlineScope == scope else { return }
+                self.playbackPresentation = RivunePlaybackPresentation(
+                    id: UUID(), sessionId: UUID(), sourceRef: "offline:\(item.id.uuidString)", titleId: item.titleId,
+                    title: item.title, url: url, engine: .native, fallbackAllowed: true, startSeconds: 0,
+                    markers: [], durationSeconds: nil, expectedVersion: 0, audioTracks: [], subtitles: [],
+                    selectedAudioTrack: nil, selectedSubtitleId: nil, coordinatedItem: nil
+                )
+            } catch { self?.mediaFailure = .message(error.localizedDescription) }
+        }
+    }
+
+    public func removeOffline(_ item: RivuneOfflineMediaItem) {
+        guard let scope = offlineScope else { return }
+        Task { [weak self] in
+            do {
+                try await RivuneOfflineMediaStore.shared.remove(item, in: scope)
+                guard let self, self.offlineScope == scope else { return }
+                self.offlineItems.removeAll { $0.id == item.id }
+                if self.offlineItems.isEmpty { self.removePersistedOfflineAccess(for: scope) }
+            } catch { self?.mediaFailure = .message(error.localizedDescription) }
+        }
+    }
+
+    public func handoffPlayback(to device: PlaybackDevice) {
+        guard let client, let detail = mediaDetail else { return }
+        let item = coordinatedItem(for: detail)
+        Task { _ = try? await client.sendPlaybackCommand(sessionId: device.sessionId, input: PlaybackCommandInput(command: "load", item: item, positionMilliseconds: Int64((detail.progress?.positionSeconds ?? 0) * 1_000))) }
+    }
+    public func controlPlayback(on device: PlaybackDevice, command: String) {
+        guard let client, ["play", "pause", "seek", "stop"].contains(command) else { return }
+        let position = command == "seek" ? coordinationPositionMilliseconds : nil
+        Task {
+            _ = try? await client.sendPlaybackCommand(
+                sessionId: device.sessionId,
+                input: PlaybackCommandInput(command: command, positionMilliseconds: position)
+            )
+        }
+    }
+
+
+    public func createPlaybackRoom() {
+        guard playbackCoordinationAvailable else { return }
+        guard let client, let detail = mediaDetail else { return }
+        Task { [weak self] in self?.activePlaybackRoom = try? await client.createPlaybackRoom(PlaybackRoomCreateInput(item: self?.coordinatedItem(for: detail) ?? CoordinatedPlaybackItem(titleId: detail.titleId), state: "paused", positionMilliseconds: Int64((detail.progress?.positionSeconds ?? 0) * 1_000), durationMilliseconds: Int64((detail.progress?.durationSeconds ?? 0) * 1_000))) }
+    }
+
+    public func joinPlaybackRoom(code: String) {
+        guard playbackCoordinationAvailable else { return }
+        guard let client, !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        Task { [weak self] in
+            guard let self, let room = try? await client.joinPlaybackRoom(code: code) else { return }
+            self.activePlaybackRoom = room
+            await self.startCoordinatedPlayback(room.item, positionMilliseconds: room.positionMilliseconds, using: client)
+            if self.playbackPresentation == nil {
+                self.activePlaybackRoom = nil
+                try? await client.leavePlaybackRoom(id: room.id)
+            }
+        }
+    }
+
+    public func leavePlaybackRoom() {
+        guard let client, let room = activePlaybackRoom else { return }
+        activePlaybackRoom = nil
+        pendingPlaybackCommands = []
+        executedPlaybackCommandID = nil
+        Task { try? await client.leavePlaybackRoom(id: room.id) }
+    }
+
+    public func consumePlaybackCommand() {
+        guard !pendingPlaybackCommands.isEmpty else { return }
+        let command = pendingPlaybackCommands.removeFirst()
+        executedPlaybackCommandID = command.id
+    }
+
+    public func updateCoordinationPlayback(position: Double, duration: Double, playing: Bool) {
+        coordinationPositionMilliseconds = Int64(max(position, 0) * 1_000)
+        coordinationDurationMilliseconds = Int64(max(duration, 0) * 1_000)
+        coordinationStatus = playing ? "playing" : "paused"
+    }
     public func closePlaybackSources() { showPlaybackSources = false }
 
     public func play(_ source: PlaybackSourceOption, externally: Bool) {
@@ -977,7 +1205,8 @@ public final class RivuneAppModel: ObservableObject {
                         startSeconds: detail.progress?.positionSeconds ?? 0, markers: markers,
                         durationSeconds: detail.progress?.durationSeconds, expectedVersion: detail.progress?.version ?? 0,
                         audioTracks: selected.media?.audioTracks ?? [], subtitles: session.subtitles,
-                        selectedAudioTrack: session.selectedAudioTrack, selectedSubtitleId: session.selectedSubtitleId
+                        selectedAudioTrack: session.selectedAudioTrack, selectedSubtitleId: session.selectedSubtitleId,
+                        coordinatedItem: self.coordinatedItem(for: detail)
                     )
                 }
             } catch {
@@ -1013,7 +1242,7 @@ public final class RivuneAppModel: ObservableObject {
                     startSeconds: position, markers: current.markers, durationSeconds: current.durationSeconds,
                     expectedVersion: current.expectedVersion, audioTracks: selected.media?.audioTracks ?? current.audioTracks,
                     subtitles: session.subtitles, selectedAudioTrack: session.selectedAudioTrack,
-                    selectedSubtitleId: session.selectedSubtitleId
+                    selectedSubtitleId: session.selectedSubtitleId, coordinatedItem: current.coordinatedItem
                 )
                 self.playbackOptionLoading = false
                 try? await client.stopPlayback(sessionId: current.sessionId)
@@ -1055,8 +1284,28 @@ public final class RivuneAppModel: ObservableObject {
 
     public func playbackFinished(position: Int, duration: Int, completed: Bool) {
         guard let presentation = playbackPresentation else { return }
+        coordinationStatus = completed ? "ended" : "idle"
+        coordinationPositionMilliseconds = Int64(max(position, 0) * 1_000)
+        coordinationDurationMilliseconds = Int64(max(duration, 0) * 1_000)
+        if completed { endActivePlaybackRoom(for: presentation) }
         playbackPresentation = nil
         finishPlayback(presentation, position: position, duration: duration, completed: completed)
+        coordinationStatus = "idle"
+        coordinationPositionMilliseconds = 0
+        coordinationDurationMilliseconds = 0
+    }
+
+    private func endActivePlaybackRoom(for presentation: RivunePlaybackPresentation) {
+        guard let client, let room = activePlaybackRoom, room.currentMemberIsHost,
+              coordinationEndedPlaybackID != presentation.id else { return }
+        coordinationEndedPlaybackID = presentation.id
+        let input = PlaybackRoomUpdateInput(
+            state: "ended",
+            positionMilliseconds: coordinationPositionMilliseconds,
+            durationMilliseconds: coordinationDurationMilliseconds,
+            expectedVersion: room.version
+        )
+        Task { _ = try? await client.updatePlaybackRoom(id: room.id, input: input) }
     }
 
     public func minimizedPlaybackFinished(position: Int, duration: Int, completed: Bool) {
@@ -1081,7 +1330,7 @@ public final class RivuneAppModel: ObservableObject {
             markers: presentation.markers, durationSeconds: max(duration, position),
             expectedVersion: presentation.expectedVersion, audioTracks: presentation.audioTracks,
             subtitles: presentation.subtitles, selectedAudioTrack: presentation.selectedAudioTrack,
-            selectedSubtitleId: presentation.selectedSubtitleId
+            selectedSubtitleId: presentation.selectedSubtitleId, coordinatedItem: presentation.coordinatedItem
         )
     }
 
@@ -1093,7 +1342,7 @@ public final class RivuneAppModel: ObservableObject {
             startSeconds: position, markers: presentation.markers, durationSeconds: max(duration, position),
             expectedVersion: presentation.expectedVersion, audioTracks: presentation.audioTracks,
             subtitles: presentation.subtitles, selectedAudioTrack: presentation.selectedAudioTrack,
-            selectedSubtitleId: presentation.selectedSubtitleId
+            selectedSubtitleId: presentation.selectedSubtitleId, coordinatedItem: presentation.coordinatedItem
         )
     }
 
@@ -1137,6 +1386,8 @@ public final class RivuneAppModel: ObservableObject {
             client = candidate
             serverOrigin = Self.origin(of: url)
             serverName = discovery.name
+            playbackCoordinationAvailable = discovery.supports(.playbackCoordination)
+            localRecommendationsAvailable = discovery.supports(.localRecommendations)
             defaults.set(value, forKey: Self.serverKey)
             if try await candidate.restoreSession() {
                 try await routeAuthenticated(candidate, generation: generation)
@@ -1234,6 +1485,7 @@ public final class RivuneAppModel: ObservableObject {
         if let activeID = account.session.activeProfile?.id,
            let active = profiles.first(where: { $0.id == activeID && $0.accessible }) {
             activeProfile = active
+            registerOfflineProfile(active, serverOrigin: serverOrigin, pin: nil)
             destination = .library
             await loadCollections(using: client, generation: generation)
         } else {
@@ -1255,6 +1507,7 @@ public final class RivuneAppModel: ObservableObject {
             }
             await loadFolderArtwork(using: client, collections: collections, generation: generation)
             await loadHomeSupplement(using: client, collections: collections, generation: generation)
+            if playbackCoordinationAvailable { startCoordination(using: client) }
             guard isCurrent(generation) else { return }
             isBusy = false
             failure = nil
@@ -1354,6 +1607,10 @@ public final class RivuneAppModel: ObservableObject {
         generation: UInt64
     ) async {
         async let continuePage = try? client.continueWatching(limit: 24)
+        async let recommendationPage: LocalRecommendationPage? = localRecommendationsAvailable
+            ? (try? await client.localRecommendations(limit: 24))
+            : nil
+        let scope = offlineScope
         let candidates = Array(collections.filter(\.heroEnabled).flatMap { collection in
             collection.folders.compactMap { folder -> (UUID, UUID)? in
                 guard let folderID = folder.id else { return nil }
@@ -1395,12 +1652,130 @@ public final class RivuneAppModel: ObservableObject {
             }
         }
         let watching = await continuePage?.items ?? []
+        let recommendations = await recommendationPage?.items ?? []
+        let stored: [RivuneOfflineMediaItem]
+        if let scope { stored = await RivuneOfflineMediaStore.shared.items(in: scope) }
+        else { stored = [] }
         guard isCurrent(generation), self.collections.map(\.id) == collections.map(\.id) else { return }
         var seen = Set<String>()
         heroItems = heroes.filter { seen.insert($0.id).inserted }
         continueWatchingItems = watching
+        recommendationItems = recommendations.compactMap(Self.recommendationItem)
+        offlineItems = stored
     }
 
+    nonisolated private static func recommendationItem(_ recommendation: LocalRecommendation) -> RivuneRecommendationItem? {
+        let item = recommendation.item
+        guard let title = item.title, !title.isEmpty else { return nil }
+        let target = RivuneMediaTarget(
+            id: item.resourceId ?? item.id.uuidString, resourceId: item.resourceId ?? item.id.uuidString,
+            mediaType: item.mediaType, title: title, titleId: item.id, provider: item.resourceProvider,
+            externalId: nil, externalIds: item.providerIds, sourceAddonId: item.sourceAddonId,
+            sourceCatalogId: nil, sourceName: nil, posterUrl: item.posterUrl, backgroundUrl: item.backgroundUrl,
+            logoUrl: nil, overview: nil, releaseInfo: item.releaseInfo, released: nil,
+            seriesId: nil, seasonId: nil, seasonNumber: nil, episodeNumber: nil, runtimeMinutes: nil
+        )
+        return RivuneRecommendationItem(id: item.id, reason: recommendation.reason, target: target)
+    }
+
+    private func coordinatedItem(for detail: RivuneMediaDetail) -> CoordinatedPlaybackItem {
+        CoordinatedPlaybackItem(titleId: detail.titleId, mediaType: detail.target.mediaType, resourceId: detail.target.resourceId, sourceAddonId: detail.target.playbackAddonId, title: detail.target.title, posterUrl: detail.target.posterUrl)
+    }
+
+    private func startCoordination(using client: RivuneAPIClient) {
+        coordinationOperation?.cancel()
+        coordinationOperation = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let activePresentation = self.playbackPresentation ?? self.minimizedPlaybackPresentation
+                let item = activePresentation?.coordinatedItem
+                let status = item == nil ? "idle" : self.coordinationStatus
+                let input = PlaybackDeviceHeartbeatInput(capabilities: ["remote-control", "watch-room"], state: PlaybackDeviceState(status: status, item: item, positionMilliseconds: item == nil ? 0 : self.coordinationPositionMilliseconds, durationMilliseconds: item == nil ? 0 : self.coordinationDurationMilliseconds))
+                _ = try? await client.updatePlaybackDevice(input)
+                if let devices = try? await client.playbackDevices() { self.playbackDevices = devices.devices.filter { !$0.current } }
+                if let commandID = self.executedPlaybackCommandID {
+                    do {
+                        try await client.acknowledgePlaybackCommand(commandID)
+                        self.lastPlaybackCommandID = max(self.lastPlaybackCommandID, commandID)
+                        self.executedPlaybackCommandID = nil
+                    } catch {
+                        // Retry the acknowledgement without executing the command a second time.
+                    }
+                }
+                if self.executedPlaybackCommandID == nil, pendingPlaybackCommands.isEmpty,
+                   let commands = try? await client.playbackCommands(after: self.lastPlaybackCommandID) {
+                    for command in commands.commands {
+                        if command.command == "load", let item = command.item {
+                            await self.startCoordinatedPlayback(item, positionMilliseconds: command.positionMilliseconds ?? 0, using: client)
+                            guard self.playbackPresentation != nil else { break }
+                            do {
+                                try await client.acknowledgePlaybackCommand(command.id)
+                                self.lastPlaybackCommandID = max(self.lastPlaybackCommandID, command.id)
+                            } catch { break }
+                        } else if self.playbackPresentation != nil || self.minimizedPlaybackPresentation != nil {
+                            self.pendingPlaybackCommands.append(command)
+                            break
+                        } else {
+                            break
+                        }
+                    }
+                }
+                if let room = self.activePlaybackRoom {
+                    do {
+                        let refreshed: PlaybackRoom
+                        if room.currentMemberIsHost, room.state != "ended", item?.titleId == room.item.titleId {
+                            let update = PlaybackRoomUpdateInput(
+                                state: self.coordinationStatus == "playing" ? "playing" : "paused",
+                                positionMilliseconds: self.coordinationPositionMilliseconds,
+                                durationMilliseconds: self.coordinationDurationMilliseconds,
+                                expectedVersion: room.version
+                            )
+                            do {
+                                refreshed = try await client.updatePlaybackRoom(id: room.id, input: update)
+                            } catch {
+                                refreshed = try await client.playbackRoom(id: room.id)
+                            }
+                        } else {
+                            refreshed = try await client.playbackRoom(id: room.id)
+                        }
+                        self.activePlaybackRoom = refreshed.preservingJoinCode(from: room)
+                    } catch let RivuneAPIError.server(status, _, _) where status == 403 || status == 404 {
+                        self.activePlaybackRoom = nil
+                    } catch {
+                        // Keep the last room snapshot across transient network failures.
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
+    }
+
+    private func startCoordinatedPlayback(_ item: CoordinatedPlaybackItem, positionMilliseconds: Int64, using client: RivuneAPIClient) async {
+        let capabilities = Self.playbackCapabilities(for: currentQuality, player: preferredPlayer, embedded: embeddedPlayerPreference)
+        do {
+            let sources = try await client.playbackSources(mediaType: item.mediaType, addonId: item.sourceAddonId, resourceId: item.resourceId, capabilities: capabilities)
+            guard let option = sources.sources.first else { throw RivuneAPIError.invalidResponse }
+            let start = Int(max(positionMilliseconds, 0) / 1_000)
+            let selection = RivunePlaybackEnginePolicy.selection(for: embeddedPlayerPreference, protocol: option.protocol, container: option.container)
+            let preserve = selection.engine == .mpv || selection.fallbackAllowed
+            _ = try await client.preparePlayback(sourceRef: option.sourceRef, startSeconds: start, externalPlayer: preserve)
+            let progress = try? await client.playbackProgress(titleId: item.titleId)
+            let session = try await client.resolvePlayback(sourceRef: option.sourceRef, titleId: item.titleId.uuidString.lowercased(), startSeconds: start, externalPlayer: preserve)
+            guard let selected = session.sources.first(where: { $0.id == session.selectedSourceId }) ?? session.sources.first,
+                  let rawURL = selected.url, let url = resolvedResourceURL(rawURL) else { throw RivuneAPIError.invalidResponse }
+            playbackPresentation = RivunePlaybackPresentation(
+                id: UUID(), sessionId: session.id, sourceRef: option.sourceRef, titleId: item.titleId,
+                title: item.title, url: url, engine: selection.engine, fallbackAllowed: selection.fallbackAllowed,
+                startSeconds: start, markers: [], durationSeconds: nil, expectedVersion: progress?.version ?? 0,
+                audioTracks: selected.media?.audioTracks ?? [], subtitles: session.subtitles,
+                selectedAudioTrack: session.selectedAudioTrack, selectedSubtitleId: session.selectedSubtitleId,
+                coordinatedItem: item
+            )
+        } catch {
+            playbackPresentation = nil
+            mediaFailure = .message("Playback handoff could not be started.")
+        }
+    }
     nonisolated private static func folderArtworkReference(_ resolved: ResolvedCollectionFolder) -> String? {
         if let sourcePosters = resolved.sourcePosterUrls {
             for source in resolved.folder.sources {
@@ -1425,6 +1800,7 @@ public final class RivuneAppModel: ObservableObject {
         try? await client.logout()
         guard isCurrent(generation) else { return true }
         self.generation &+= 1
+        lockOffline()
         let pairingGeneration = self.generation
         operation = nil
         pairingCode = nil
@@ -1573,8 +1949,100 @@ public final class RivuneAppModel: ObservableObject {
         )
     }
 
-    private func beginMediaOperation() { mediaGeneration &+= 1; mediaOperation?.cancel(); mediaOperation = nil }
-    private func isCurrentMedia(_ value: UInt64) -> Bool { !Task.isCancelled && value == mediaGeneration }
+    private func beginMediaOperation() {
+        mediaGeneration &+= 1
+        mediaOperation?.cancel()
+        mediaOperation = nil
+        offlineDownloadActive = false
+        offlineDownloadBytes = 0
+    }
+
+    private func registerOfflineProfile(_ profile: Profile, serverOrigin: URL?, pin: String?) {
+        guard let serverOrigin,
+              let scope = RivuneOfflineMediaScope(serverOrigin: serverOrigin, profileID: profile.id) else {
+            lockOffline()
+            return
+        }
+        if profile.hasPin, pin == nil {
+            currentOfflineAccess = storedOfflineProfiles.first { $0.id == scope.identifier && $0.requiresPIN }
+            guard let access = currentOfflineAccess else { return }
+            Task { [weak self] in
+                let items = await RivuneOfflineMediaStore.shared.items(in: scope)
+                guard let self, self.activeProfile?.id == profile.id, self.offlineScope == nil,
+                      !items.isEmpty else { return }
+                self.pendingOfflineProfile = access
+            }
+            return
+        }
+        guard let access = try? RivuneOfflineProfileAccess(name: profile.name, scope: scope, pin: profile.hasPin ? pin : nil) else {
+            lockOffline()
+            return
+        }
+        currentOfflineAccess = access
+        beginMediaOperation()
+        offlineScope = scope
+        pendingOfflineProfile = nil
+        loadOfflineItems()
+        Task { [weak self] in
+            let items = await RivuneOfflineMediaStore.shared.items(in: scope)
+            guard let self, self.offlineScope == scope, !items.isEmpty else { return }
+            self.persistOfflineAccess(access)
+        }
+    }
+
+    private func persistOfflineAccess(_ access: RivuneOfflineProfileAccess) {
+        storedOfflineProfiles.removeAll { $0.id == access.id }
+        storedOfflineProfiles.append(access)
+        storedOfflineProfiles.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        offlineProfiles.removeAll { $0.id == access.id }
+        offlineProfiles.append(access)
+        offlineProfiles.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        if let data = try? JSONEncoder().encode(storedOfflineProfiles) {
+            defaults.set(data, forKey: Self.offlineProfilesKey)
+        }
+    }
+
+    private func removePersistedOfflineAccess(for scope: RivuneOfflineMediaScope) {
+        storedOfflineProfiles.removeAll { $0.id == scope.identifier }
+        offlineProfiles.removeAll { $0.id == scope.identifier }
+        if let data = try? JSONEncoder().encode(storedOfflineProfiles) {
+            defaults.set(data, forKey: Self.offlineProfilesKey)
+        }
+    }
+
+    private func refreshAvailableOfflineProfiles() {
+        let candidates = storedOfflineProfiles
+        Task { [weak self] in
+            var available: [RivuneOfflineProfileAccess] = []
+            for access in candidates {
+                guard let scope = access.scope else { continue }
+                if !(await RivuneOfflineMediaStore.shared.items(in: scope)).isEmpty { available.append(access) }
+            }
+            guard let self else { return }
+            self.offlineProfiles = available
+        }
+    }
+
+    private func requestActiveOfflineUnlockIfAvailable() {
+        guard let serverOrigin, let profile = activeProfile,
+              let scope = RivuneOfflineMediaScope(serverOrigin: serverOrigin, profileID: profile.id),
+              let access = currentOfflineAccess.flatMap({ $0.id == scope.identifier ? $0 : nil })
+                ?? storedOfflineProfiles.first(where: { $0.id == scope.identifier }) else { return }
+        requestOfflineUnlock(access)
+    }
+
+    private func loadOfflineItems() {
+        guard let scope = offlineScope else {
+            offlineItems = []
+            return
+        }
+        offlineItems = []
+        Task { [weak self] in
+            let items = await RivuneOfflineMediaStore.shared.items(in: scope)
+            guard let self, self.offlineScope == scope else { return }
+            self.offlineItems = items
+        }
+    }
 
 
     private func beginTabOperation() {
@@ -1586,17 +2054,35 @@ public final class RivuneAppModel: ObservableObject {
     private func isCurrentTab(_ value: UInt64) -> Bool {
         !Task.isCancelled && value == tabGeneration
     }
+    private func isCurrentMedia(_ value: UInt64) -> Bool {
+        !Task.isCancelled && value == mediaGeneration
+    }
+
 
     private func resetTabState() {
         tabGeneration &+= 1
         tabOperation?.cancel()
         tabOperation = nil
+        coordinationOperation?.cancel()
+        coordinationOperation = nil
+        playbackCoordinationAvailable = false
+        localRecommendationsAvailable = false
+        playbackDevices = []
+        activePlaybackRoom = nil
+        pendingPlaybackCommands = []
+        lastPlaybackCommandID = 0
+        coordinationStatus = "idle"
+        coordinationPositionMilliseconds = 0
+        coordinationDurationMilliseconds = 0
+        coordinationEndedPlaybackID = nil
+        executedPlaybackCommandID = nil
         selectedTab = startupTab
         searchQuery = ""
         searchItems = []
         libraryItems = []
         calendarEvents = []
         continueWatchingItems = []
+        recommendationItems = []
         heroItems = []
         tabLoading = false
         tabFailure = nil
@@ -1683,6 +2169,7 @@ public final class RivuneAppModel: ObservableObject {
     }
 
     private static let serverKey = "rivune.server.origin"
+    private static let offlineScopeKey = "rivune.offline.scope"
     private static let accentKey = "rivune.appearance.accent"
     private static let playerKey = "rivune.playback.player"
     private static let embeddedPlayerKey = "rivune.playback.embedded-player"
@@ -1691,6 +2178,7 @@ public final class RivuneAppModel: ObservableObject {
     private static let frameRateKey = "rivune.playback.frame-rate"
     private static let videoAspectKey = "rivune.playback.aspect"
     private static let wifiQualityKey = "rivune.playback.wifi-quality"
+    private static let offlineProfilesKey = "rivune.offline.profiles"
     private static let mobileQualityKey = "rivune.playback.mobile-quality"
     private static let showStreamsKey = "rivune.playback.show-streams"
     private static let skipIntroKey = "rivune.playback.skip-intro"

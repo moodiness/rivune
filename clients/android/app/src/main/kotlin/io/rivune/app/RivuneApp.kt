@@ -61,6 +61,7 @@ import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Devices
 import androidx.compose.material.icons.rounded.Dns
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Refresh
@@ -278,6 +279,7 @@ internal fun RivuneRoot(
                         AppDestination.Loading -> LoadingScreen()
                         AppDestination.Server -> ServerScreen(
                             serverInput = state.serverInput,
+                            offlineProfiles = state.offlineProfiles,
                             updateState = updateState,
                             onCheckForUpdates = updates::checkManually,
                             isBusy = state.isBusy,
@@ -287,6 +289,8 @@ internal fun RivuneRoot(
                             discoveryRequested = discoveryRequested,
                             onDiscover = ::discoverServers,
                             onConnect = ::connectToServer,
+                            onOfflineSelect = viewModel::selectOfflineProfile,
+                            onOfflinePin = viewModel::submitPin,
                             onClearFailure = viewModel::clearFailure,
                         )
                         AppDestination.Pairing -> PairingScreen(
@@ -436,6 +440,16 @@ internal fun RivuneRoot(
                     onDismiss = viewModel::dismissPin,
                 )
             }
+            state.pendingOfflineProfile?.takeIf { state.destination == AppDestination.Viewer }?.let { profile ->
+                OfflinePinDialog(
+                    profile = profile,
+                    failure = state.failure,
+                    isTv = state.isTv,
+                    onSubmit = viewModel::submitPin,
+                    onDismiss = viewModel::dismissPin,
+                )
+            }
+
 
             AppUpdateDialog(
                 state = updateState,
@@ -618,6 +632,7 @@ private fun LoadingScreen() {
 @Composable
 internal fun ServerScreen(
     serverInput: String,
+    offlineProfiles: List<OfflineProfileGate> = emptyList(),
     isBusy: Boolean,
     failure: UiFailure?,
     isTv: Boolean,
@@ -625,6 +640,8 @@ internal fun ServerScreen(
     discoveryRequested: Boolean = false,
     updateState: AppUpdateState = AppUpdateState.Idle,
     onConnect: (String) -> Unit,
+    onOfflineSelect: (OfflineProfileGate) -> Unit = {},
+    onOfflinePin: (String) -> Unit = {},
     onClearFailure: () -> Unit,
     onDiscover: () -> Unit = {},
     onCheckForUpdates: () -> Unit = {},
@@ -633,6 +650,8 @@ internal fun ServerScreen(
     var server by remember(serverInput) { mutableStateOf(serverInput) }
     var editingServerOnTv by remember { mutableStateOf(false) }
     var selectedDiscovered by remember { mutableStateOf<DiscoveredRivuneServer?>(null) }
+    var selectedOfflineScope by remember { mutableStateOf<String?>(null) }
+    var offlinePin by remember { mutableStateOf("") }
     val view = LocalView.current
     val failureText = failure?.let { failureMessage(it) }
     val submit = { if (server.isNotBlank() && !isBusy) onConnect(server.trim()) }
@@ -669,6 +688,60 @@ internal fun ServerScreen(
             )
         },
     ) {
+        if (offlineProfiles.isNotEmpty()) {
+            Text(
+                text = stringResource(R.string.offline_profiles_title),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelMedium,
+            )
+            Spacer(Modifier.height(RivuneSpacing.xs))
+            offlineProfiles.forEach { profile ->
+                RivuneSecondaryButton(
+                    label = if (profile.hasPin) "${profile.name} · ${stringResource(R.string.profile_pin_required)}" else profile.name,
+                    onClick = {
+                        if (profile.hasPin) {
+                            selectedOfflineScope = profile.scope
+                            offlinePin = ""
+                        } else {
+                            onOfflineSelect(profile)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isBusy,
+                    isTv = isTv,
+                    icon = Icons.Rounded.Download,
+                )
+                if (selectedOfflineScope == profile.scope) {
+                    RivuneTextField(
+                        value = offlinePin,
+                        onValueChange = { offlinePin = it.filter(Char::isDigit).take(8) },
+                        label = stringResource(R.string.offline_pin_label),
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isBusy,
+                        isTv = isTv,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = {
+                            if (offlinePin.length in 4..8) {
+                                onOfflineSelect(profile)
+                                onOfflinePin(offlinePin)
+                            }
+                        }),
+                    )
+                    RivunePrimaryButton(
+                        label = stringResource(R.string.offline_open),
+                        onClick = {
+                            onOfflineSelect(profile)
+                            onOfflinePin(offlinePin)
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isBusy && offlinePin.length in 4..8,
+                        isTv = isTv,
+                    )
+                }
+                Spacer(Modifier.height(RivuneSpacing.xs))
+            }
+            Spacer(Modifier.height(RivuneSpacing.sm))
+        }
         RivuneTextField(
             value = server,
             onValueChange = {
@@ -2212,6 +2285,54 @@ private fun PinDialog(
                 enabled = !isBusy,
                 isTv = isTv,
             )
+        },
+        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        shape = RivuneShapes.extraLarge,
+    )
+}
+
+@Composable
+private fun OfflinePinDialog(
+    profile: OfflineProfileGate,
+    failure: UiFailure?,
+    isTv: Boolean,
+    onSubmit: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var pin by remember(profile.scope) { mutableStateOf("") }
+    val invalid = failure == UiFailure.PROFILE_PIN_INVALID
+    val submit = { if (pin.length in 4..8) onSubmit(pin) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.offline_profiles_title)) },
+        text = {
+            Column {
+                Text(profile.name, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(RivuneSpacing.md))
+                RivuneTextField(
+                    value = pin,
+                    onValueChange = { pin = it.filter(Char::isDigit).take(8) },
+                    label = stringResource(R.string.offline_pin_label),
+                    isError = invalid,
+                    supportingText = if (invalid) failureMessage(UiFailure.PROFILE_PIN_INVALID) else null,
+                    isTv = isTv,
+                    leadingIcon = Icons.Rounded.Lock,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { submit() }),
+                )
+            }
+        },
+        confirmButton = {
+            RivunePrimaryButton(
+                label = stringResource(R.string.offline_open),
+                onClick = submit,
+                enabled = pin.length in 4..8,
+                isTv = isTv,
+            )
+        },
+        dismissButton = {
+            RivuneTextButton(label = stringResource(R.string.pin_cancel), onClick = onDismiss, isTv = isTv)
         },
         containerColor = MaterialTheme.colorScheme.surfaceContainer,
         shape = RivuneShapes.extraLarge,

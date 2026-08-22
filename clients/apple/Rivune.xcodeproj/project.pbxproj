@@ -470,6 +470,7 @@
 			);
 			inputPaths = (
 				"$(SRCROOT)/Scripts/prune-unused-package-frameworks.sh",
+				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
 			);
 			name = "Prune unused package frameworks";
 			outputFileListPaths = (
@@ -523,6 +524,7 @@
 			);
 			inputPaths = (
 				"$(SRCROOT)/Scripts/prune-unused-package-frameworks.sh",
+				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
 			);
 			name = "Prune unused package frameworks";
 			outputFileListPaths = (
@@ -543,6 +545,7 @@
 			);
 			inputPaths = (
 				"$(SRCROOT)/Scripts/prune-unused-package-frameworks.sh",
+				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
 			);
 			name = "Prune unused package frameworks";
 			outputFileListPaths = (
@@ -563,6 +566,7 @@
 			);
 			inputPaths = (
 				"$(SRCROOT)/Scripts/prune-unused-package-frameworks.sh",
+				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
 			);
 			name = "Prune unused package frameworks";
 			outputFileListPaths = (
@@ -716,7 +720,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				MARKETING_VERSION = 1.10.0;
+				MARKETING_VERSION = 1.11.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -787,7 +791,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				MARKETING_VERSION = 1.10.0;
+				MARKETING_VERSION = 1.11.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

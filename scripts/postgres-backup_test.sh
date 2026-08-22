@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TEST_DIR="$(mktemp -d)"
+TEST_DIR="$(realpath -e -- "$(mktemp -d)")"
 cleanup() {
   rm -rf -- "${TEST_DIR}"
 }
@@ -18,6 +18,8 @@ DD_LOG="${TEST_DIR}/dd.log"
 DD_METADATA_LOG="${TEST_DIR}/dd-metadata.log"
 FALLOCATE_LOG="${TEST_DIR}/fallocate.log"
 export OBSERVATION_FILE DOCKER_LOG DD_LOG DD_METADATA_LOG FALLOCATE_LOG
+REAL_DD="$(command -v dd)"
+export REAL_DD
 export RIVUNE_BACKUP_STAGING_DIR="${TEST_DIR}/staging"
 cat > "${TEST_DIR}/bin/docker" <<'FAKE_DOCKER'
 #!/usr/bin/env bash
@@ -25,7 +27,14 @@ set -euo pipefail
 printf '%s\n' "$*" >> "${DOCKER_LOG}"
 invocation="$*"
 if [[ " $* " == *" pg_dump "* ]]; then
-  target="$(readlink "/proc/$$/fd/1")"
+  if [[ -e "/proc/$$/fd/1" ]]; then
+    target="$(readlink "/proc/$$/fd/1")"
+  elif command -v lsof >/dev/null 2>&1; then
+    target="$(lsof -a -p "$$" -d 1 -Fn | sed -n 's/^n//p')"
+  else
+    echo 'Cannot resolve stdout descriptor target' >&2
+    exit 1
+  fi
   printf '%s\n%s\n%s\n' "${target}" "$(stat -c '%a' -- "${target}")" \
     "$(stat -c '%F' -- "${target}")" > "${OBSERVATION_FILE}"
   sleep "${FAKE_DUMP_DELAY:-0.05}"
@@ -103,7 +112,7 @@ done
 if [[ -n "${FAKE_DD_TARGET:-}" && "${source_path}" == "${FAKE_DD_TARGET}" ]]; then
   mv -f -- "${FAKE_DD_REPLACEMENT}" "${source_path}"
 fi
-/usr/bin/dd "$@"
+"${REAL_DD}" "$@"
 if [[ "${destination_path}" == *rivune-authenticated-backup.* ]]; then
   printf 'source=%s destination=%s size=%s\n' "${source_path}" "${destination_path}" \
     "$(stat -c '%s' -- "${destination_path}")" >> "${DD_LOG}"
@@ -119,10 +128,13 @@ cat > "${TEST_DIR}/bin/fallocate" <<'FAKE_FALLOCATE'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${FALLOCATE_LOG}"
+if [[ "${FAKE_FALLOCATE_UNAVAILABLE:-0}" == 1 ]]; then
+  exit 127
+fi
 if [[ "${FAKE_FALLOCATE_FAIL:-0}" == 1 ]]; then
   exit 1
 fi
-exec /usr/bin/fallocate "$@"
+exit 0
 FAKE_FALLOCATE
 chmod 700 "${TEST_DIR}/bin/fallocate"
 
@@ -280,7 +292,8 @@ fi
 # A forged signed-size field fails manifest authentication before archive dd.
 cp -- "${BACKUP_TWO}.manifest" "${TAMPERED}.manifest"
 : > "${DD_LOG}"
-sed -i 's/^archive_size=.*/archive_size=1/' "${TAMPERED}.manifest"
+sed 's/^archive_size=.*/archive_size=1/' "${TAMPERED}.manifest" > "${TAMPERED}.manifest.new"
+mv -f -- "${TAMPERED}.manifest.new" "${TAMPERED}.manifest"
 assert_rejected_before_docker --expect-backup-id "${ID_TWO}" "${TAMPERED}"
 [[ ! -s "${DD_LOG}" ]]
 cp -- "${BACKUP_TWO}.manifest" "${TAMPERED}.manifest"
@@ -303,7 +316,7 @@ assert_rejected_before_docker --expect-backup-id "${ID_TWO}" "${TAMPERED}"
 cp -- "${BACKUP_TWO}" "${TAMPERED}"
 cp -- "${BACKUP_TWO}.manifest" "${TAMPERED}.manifest"
 cp -- "${BACKUP_TWO}.sig" "${TAMPERED}.sig"
-printf X | /usr/bin/dd of="${TAMPERED}" bs=1 seek=0 conv=notrunc status=none
+printf X | "${REAL_DD}" of="${TAMPERED}" bs=1 seek=0 conv=notrunc status=none
 : > "${DD_LOG}"
 assert_rejected_before_docker --expect-backup-id "${ID_TWO}" "${TAMPERED}"
 if [[ "$(cut -d= -f4 "${DD_LOG}")" != "$(stat -c '%s' -- "${BACKUP_TWO}")" ]]; then
@@ -345,6 +358,19 @@ FAKE_DD_TARGET="${RACE}" FAKE_DD_REPLACEMENT="${RACE}.sparse" \
 if [[ "$(cut -d= -f4 "${DD_LOG}")" != "$(( EXPECTED_SIZE + 1 ))" ]]; then
   echo "sparse TOCTOU source escaped the authenticated-size+1 bound" >&2
   exit 1
+fi
+
+if command -v mkfile >/dev/null 2>&1; then
+  : > "${DD_LOG}"
+  PATH="${TEST_DIR}/bin:${PATH}" \
+    FAKE_FALLOCATE_UNAVAILABLE=1 \
+    RIVUNE_BACKUP_VERIFY_KEY_FILE="${PUBLIC_KEY}" \
+    "${ROOT_DIR}/scripts/postgres-verify-backup.sh" \
+    --expect-backup-id "${ID_TWO}" "${BACKUP_TWO}" >/dev/null
+  if [[ "$(cut -d= -f4 "${DD_LOG}")" != "$(( EXPECTED_SIZE + 1 ))" ]]; then
+    echo "macOS mkfile fallback did not stage the authenticated archive" >&2
+    exit 1
+  fi
 fi
 
 # Physical reservation is fail-closed and happens before archive dd or Docker.
@@ -519,8 +545,8 @@ printf x >> "${LEGACY}"
 : > "${DD_LOG}"
 RIVUNE_BACKUP_LEGACY_MAX_BYTES="${LEGACY_SIZE}" \
   assert_rejected_before_docker --allow-legacy "${LEGACY_DIGEST}" "${LEGACY}"
-if [[ "$(cut -d= -f4 "${DD_LOG}")" != "$(( LEGACY_SIZE + 1 ))" ]]; then
-  echo "legacy oversize staging exceeded its explicit cap+1 reservation" >&2
+if [[ -s "${DD_LOG}" ]]; then
+  echo "legacy oversize archive was opened after its explicit cap was exceeded" >&2
   exit 1
 fi
 truncate -s "${LEGACY_SIZE}" "${LEGACY}"
@@ -538,10 +564,11 @@ fi
 V1="${TEST_DIR}/secure/v1.dump"
 cp -- "${BACKUP_TWO}" "${V1}"
 cp -- "${BACKUP_TWO}.manifest" "${V1}.manifest"
-sed -i \
+sed \
   -e 's/^format=rivune-backup-manifest-v2$/format=rivune-backup-manifest-v1/' \
   -e "s/^archive_name=.*/archive_name=$(basename "${V1}")/" \
-  -e '/^archive_size=/d' "${V1}.manifest"
+  -e '/^archive_size=/d' "${V1}.manifest" > "${V1}.manifest.new"
+mv -f -- "${V1}.manifest.new" "${V1}.manifest"
 openssl dgst -sha256 -sign "${PRIVATE_KEY}" -out "${V1}.sig" "${V1}.manifest"
 chmod 600 "${V1}" "${V1}.manifest" "${V1}.sig"
 : > "${DOCKER_LOG}"

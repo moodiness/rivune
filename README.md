@@ -10,17 +10,17 @@ Rivune is an open-source media backend and responsive web app with no predefined
 
 ## Install with Docker Compose
 
-Requirements: Docker Engine with Compose v2, Bash, and OpenSSL. On a Linux host, use the root operator command; it creates a mode-0600 `.env` with five independent secrets and refuses to overwrite an existing path:
+Requirements: Docker Engine with Compose v2, Bash, and OpenSSL. macOS additionally requires Homebrew Bash and GNU coreutils (`brew install bash coreutils`); `./rivune` selects them automatically. On a Linux host, use the root operator command; it creates a mode-0600 `.env` with five independent secrets and refuses to overwrite an existing path:
 
 ```sh
 git clone https://github.com/moodiness/rivune.git
 cd rivune
-./rivune setup --public-url https://media.example.com --version 1.10.0
+./rivune setup --public-url https://media.example.com --version 1.11.0
 ./rivune up
 ./rivune doctor
 ```
 
-Omit `--public-url` for a loopback-only installation. `--version` is required and accepts only an exact stable numeric release such as `1.10.0`; mutable image tags such as `latest` are rejected so a fresh install is reproducible. `./rivune help` lists explicit wrappers for lifecycle, logs, diagnostics, authenticated backup verification, and restore. The command always resolves the repository Compose file and never prints generated secrets.
+Omit `--public-url` for a loopback-only installation. `--version` is required and accepts only an exact stable numeric release such as `1.11.0`; mutable image tags such as `latest` are rejected so a fresh install is reproducible. `./rivune help` lists explicit wrappers for lifecycle, logs, diagnostics, authenticated backup verification and restore, plus a host-supervised backup scheduler that verifies every archive through a disposable restore before retention pruning. The command always resolves the repository Compose file and never prints generated secrets.
 
 On Windows PowerShell, run `.\scripts\create-env.ps1`, fill the generated private `.env`, then use `docker compose pull` and `docker compose up -d`. The lower-level `./scripts/create-env.sh` path remains available on Unix hosts that need to customize `.env` before startup.
 
@@ -29,6 +29,12 @@ On Windows PowerShell, run `.\scripts\create-env.ps1`, fill the generated privat
 Open [http://localhost:8080](http://localhost:8080) for a loopback deployment. For a normal HTTPS installation, keep using `compose.yaml`, set `RIVUNE_PUBLIC_URL` to the public HTTPS origin, and put Rivune behind Pangolin/Newt or an operator-managed reverse proxy. The proxy must terminate TLS and target Rivune over HTTP on port `8080`; then open `RIVUNE_PUBLIC_URL`. Enter `RIVUNE_SETUP_TOKEN` to claim the instance and create the first administrator.
 
 On a physical phone, tablet, or TV, `localhost` means that device, not the machine running Rivune. For trusted-LAN HTTP access without a reverse proxy, set `RIVUNE_BIND_ADDRESS=0.0.0.0` and `RIVUNE_PUBLIC_URL=http://<server-private-IP>:8080`, restart the stack, then enter that same private-IP URL in the app. Rivune accepts cleartext origins only for loopback and literal private-network addresses; never expose this direct port to the public Internet because credentials and sessions are not encrypted.
+
+Automatic discovery requires a non-loopback `RIVUNE_DISCOVERY_URL`. On Linux,
+`./rivune` enables the host-network mDNS sidecar. On macOS, it manages a
+per-user Bonjour LaunchAgent because Docker Desktop's Linux VM cannot reliably
+publish multicast onto the host LAN. Use `./rivune up`/`down` rather than raw
+Compose when discovery is enabled.
 
 Global administrators can export and atomically merge a versioned profile archive through the documented API. It includes profile settings, explicitly assigned add-ons and collections, stable title identities, library/progress/favorite/user-data state, and tracking preferences, but never passwords, PINs, sessions, provider credentials, or assignment policy. Add-on transport URLs are intentionally portable and can contain tokens: store the downloaded JSON with credential-file permissions.
 
@@ -60,11 +66,11 @@ See [Production operations](docs/operations.md) for the complete Pangolin networ
 
 Backend requirements are Go 1.26.6 or newer in the 1.26 line and PostgreSQL 18. Frontend requirements are Node.js 22 and npm. Typed clients live under [`clients/`](clients/); the public contract is [`protocol/openapi.yaml`](protocol/openapi.yaml).
 
-The Android project includes the native Rivune application for phones, tablets, and Android TV plus the reusable `rivune-api` SDK. It supports HTTPS or trusted-local HTTP discovery, restored sessions, passwordless device pairing, category-scoped profiles and PINs, and paginated collection browsing.
+The Android project includes the native Rivune application for phones, tablets, and Android TV plus the reusable `rivune-api` SDK. It supports HTTPS or trusted-local HTTP discovery, restored sessions, passwordless device pairing, category-scoped profiles and PINs, paginated collection browsing, encrypted local offline files for single-file HTTP sources, profile-local recommendations computed only from server-held metadata, Rivune-to-Rivune handoff and remote play/pause/position controls, and synchronized rooms with expiring join codes. HLS/DASH sources remain streaming-only; offline media is AES-256-GCM chunk-encrypted under a non-exportable Android Keystore key and excluded from Android backup and device transfer.
 
-The Apple project provides native SwiftUI applications for iPhone, iPad, Apple TV, Apple Vision Pro, and macOS plus the reusable `RivuneAPI` SDK. It supports HTTPS or trusted-local HTTP discovery, Keychain-protected issuer-scoped sessions, passwordless device pairing, profile selection and PINs, collection browsing, and adaptive remote, touch, gaze, and pointer layouts. Open `clients/apple/Rivune.xcodeproj`; regenerate it from `clients/apple/project.yml` with XcodeGen after changing target configuration.
+The Apple project provides native SwiftUI applications for iPhone, iPad, Apple TV, Apple Vision Pro, and macOS plus the reusable `RivuneAPI` SDK. It supports HTTPS or trusted-local HTTP discovery, Keychain-protected issuer-scoped sessions, passwordless device pairing, profile selection and PINs, collection browsing, adaptive remote, touch, gaze, and pointer layouts, encrypted offline playback, local recommendations, cross-device handoff/control, and synchronized rooms. Offline media uses per-device Keychain key material with AES-256-GCM chunk authentication; the key is non-migrating and the encrypted archive is intentionally not a portable media copy.
 
-The Windows project includes a native responsive WinUI 3 application plus the reusable `Rivune.Windows` protocol-v20 client. It supports HTTPS or trusted-local HTTP discovery, passwordless device pairing, DPAPI-protected issuer-scoped sessions, profile avatars and PINs, Home/Search/Library/Calendar browsing, collection and title details, profile settings with provenance, source filtering, and same-origin guarded native HTTP/HLS playback. The player includes resume/completion synchronization, track selection, chapter markers, configurable intro/recap/outro skipping, next-episode playback, retry recovery, keyboard/gamepad navigation, and compact, desktop, TV, reduced-motion, and high-contrast layouts. Official Windows releases provide self-contained `Rivune-x64.exe` and `Rivune-arm64.exe` executables through GitHub Releases.
+The Windows project includes a native responsive WinUI 3 application plus the reusable `Rivune.Windows` protocol-v20 client. It supports HTTPS or trusted-local HTTP discovery, passwordless device pairing, DPAPI-protected issuer-scoped sessions, profile avatars and PINs, Home/Search/Library/Calendar browsing, profile-local recommendations, collection and title details, profile settings with provenance, source filtering, and same-origin guarded native HTTP/HLS playback. The reusable client also exposes the cross-device coordination contract for native Windows integrations. The player includes resume/completion synchronization, track selection, chapter markers, configurable intro/recap/outro skipping, next-episode playback, retry recovery, keyboard/gamepad navigation, and compact, desktop, TV, reduced-motion, and high-contrast layouts. Official Windows releases provide self-contained `Rivune-x64.exe` and `Rivune-arm64.exe` executables through GitHub Releases.
 
 The Windows executables are portable, but local state is not stored beside them. The last server address and device-only preferences are kept under `%LOCALAPPDATA%\Rivune\` and may be backed up while Rivune is closed. Session files under `%LOCALAPPDATA%\Rivune\credentials\` are encrypted with Windows DPAPI for the current Windows user; they are not a portable backup and normally cannot be restored under another account or Windows installation. After a migration, pair or sign in again. Profiles, library, progress, and other account data remain on the self-hosted Rivune server. The Windows client has no installer or Store package. Official Windows executables are unsigned. Automatic replacement accepts only the exact GitHub asset URL recorded by the release manifest and verifies the manifest `ProductVersion`, size, and SHA-256 before starting and again after staging; it cannot authenticate a publisher independently of GitHub. SmartScreen may warn. Keep the executable in a writable local folder because automatic replacement cannot update a read-only location such as a protected `Program Files` directory.
 

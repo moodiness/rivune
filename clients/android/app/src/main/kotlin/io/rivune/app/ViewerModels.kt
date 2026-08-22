@@ -13,6 +13,11 @@ import io.rivune.api.SettingsValues
 import io.rivune.api.Season
 import io.rivune.api.Trailer
 import java.util.UUID
+import io.rivune.api.LocalRecommendation
+import io.rivune.api.PlaybackCommand
+import io.rivune.api.PlaybackDevice
+import io.rivune.api.PlaybackRoom
+import io.rivune.api.CoordinatedPlaybackItem
 
 enum class ViewerTab {
     HOME,
@@ -83,6 +88,18 @@ data class MediaDetailState(
     val seasonTrailers: List<Trailer> = emptyList(),
     val inLibrary: Boolean = false,
 )
+
+internal fun MediaDetailState.coordinatedItem(): CoordinatedPlaybackItem = CoordinatedPlaybackItem(
+    titleId = titleId,
+    mediaType = target.mediaType,
+    resourceId = target.resourceId,
+    sourceAddonId = target.sourceAddonId,
+    title = target.title,
+    posterUrl = target.posterUrl,
+)
+
+internal fun PlaybackRoom.preservingJoinCode(previous: PlaybackRoom): PlaybackRoom =
+    if (id == previous.id && joinCode == null && previous.joinCode != null) copy(joinCode = previous.joinCode) else this
 
 data class SearchState(
     val query: String = "",
@@ -163,6 +180,10 @@ data class PlayerPresentation(
     val titleId: UUID,
     val title: String,
     val mediaUrl: String,
+    val mediaType: String,
+    val resourceId: String,
+    val sourceAddonId: UUID? = null,
+    val posterUrl: String? = null,
     val protocol: String,
     val container: String?,
     val mediaTimeline: io.rivune.api.PlaybackMediaTimeline?,
@@ -176,6 +197,14 @@ data class PlayerPresentation(
     val externalPlayer: ExternalPlayerApp? = null,
     val nextEpisode: MediaTarget? = null,
     val markers: List<io.rivune.api.PlaybackMarker> = emptyList(),
+)
+internal fun PlayerPresentation.coordinatedItem(): CoordinatedPlaybackItem = CoordinatedPlaybackItem(
+    titleId = titleId,
+    mediaType = mediaType,
+    resourceId = resourceId,
+    sourceAddonId = sourceAddonId,
+    title = title,
+    posterUrl = posterUrl,
 )
 
 internal fun shouldAutomaticallyFallbackToMpv(
@@ -230,6 +259,14 @@ data class ViewerState(
     val selectedTab: ViewerTab = ViewerTab.HOME,
     val continueWatching: List<MediaTarget> = emptyList(),
     val heroSlides: List<HomeHeroSlide> = emptyList(),
+    val recommendations: List<LocalRecommendation> = emptyList(),
+    val pendingPlaybackCommands: List<PlaybackCommand> = emptyList(),
+    val playbackCoordinationAvailable: Boolean = false,
+    val offlineItems: List<OfflineMediaItem> = emptyList(),
+    val offlineDownloadActive: Boolean = false,
+    val offlineDownloadBytes: Long = 0,
+    val playbackDevices: List<PlaybackDevice> = emptyList(),
+    val activePlaybackRoom: PlaybackRoom? = null,
     val search: SearchState = SearchState(),
     val library: LibraryState = LibraryState(),
     val detail: MediaDetailState? = null,

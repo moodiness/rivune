@@ -7,7 +7,7 @@ The supported container deployment is the root [`compose.yaml`](../compose.yaml)
 For the standard Linux Compose deployment, use the repository-root command instead of reconstructing Docker arguments:
 
 ```sh
-./rivune setup --public-url https://media.example.com --version 1.10.0
+./rivune setup --public-url https://media.example.com --version 1.11.0
 ./rivune up
 ./rivune status
 ./rivune logs rivune
@@ -52,7 +52,7 @@ login used only by the restore scripts.
 
 ```dotenv
 RIVUNE_PUBLIC_URL=https://media.example.com
-RIVUNE_VERSION=1.10.0
+RIVUNE_VERSION=1.11.0
 RIVUNE_POSTGRES_SUPERUSER_PASSWORD=<output of: openssl rand -hex 32>
 RIVUNE_DATABASE_PASSWORD=<different output of: openssl rand -hex 32>
 RIVUNE_RESTORE_PASSWORD=<different output of: openssl rand -hex 32>
@@ -182,8 +182,14 @@ docker compose --profile discovery up -d
 ```
 
 Linux host networking is required because Docker bridge multicast does not
-provide reliable host-LAN mDNS. Keep the sidecar disabled on Docker Desktop;
-manual server entry remains available on every client.
+provide reliable host-LAN mDNS. On macOS, `./rivune up` instead installs a
+per-user LaunchAgent backed by the system `dns-sd` tool, and `./rivune down`
+removes it; this publishes Bonjour from the real macOS network namespace rather
+than Docker Desktop's Linux VM. A direct trusted-LAN origin also requires
+`RIVUNE_BIND_ADDRESS=0.0.0.0` so the advertised private-IP port is reachable.
+Raw `docker compose` on Docker Desktop does not manage this host publisher;
+use `./rivune` or enter the server address manually. Docker Desktop on Windows
+cannot use the macOS publisher, so manual server entry remains available.
 
 The Unraid XML template targets the same topology but expects an existing
 PostgreSQL 18 container. Standard PostgreSQL on a database-only custom network
@@ -378,9 +384,9 @@ The subshell and its `EXIT` trap discard the exported secrets even when migratio
 After exporting the signing and verification key paths, lineage, and trusted state path described below, update to a stable release by changing `RIVUNE_VERSION` to an exact released version, backing up first, recording the printed backup ID outside the repository, and recreating only the application:
 
 ```sh
-COMPOSE_FILE=compose.yaml ./scripts/postgres-backup.sh backups/rivune-before-1.10.0.dump
-./scripts/postgres-verify-backup.sh --expect-backup-id '<recorded ID>' backups/rivune-before-1.10.0.dump
-# edit RIVUNE_VERSION=1.10.0 in .env
+COMPOSE_FILE=compose.yaml ./scripts/postgres-backup.sh backups/rivune-before-1.11.0.dump
+./scripts/postgres-verify-backup.sh --expect-backup-id '<recorded ID>' backups/rivune-before-1.11.0.dump
+# edit RIVUNE_VERSION=1.11.0 in .env
 docker compose --env-file .env -f compose.yaml pull rivune
 docker compose --env-file .env -f compose.yaml up -d rivune
 curl --fail --show-error https://media.example.com/ready
@@ -900,6 +906,37 @@ by the new CA, verify all Rivune sessions, and finally remove the old CA from
 the bundle. Reapply ownership and permissions after every rotation. Retain the
 old CA private key only according to the deployment's revocation and recovery
 policy; it never belongs on an application host.
+
+## Scheduled backups and restore drills
+
+`./rivune backup-scheduler BACKUP_DIRECTORY` runs the existing authenticated
+PostgreSQL backup and disposable restore verification immediately, then repeats
+every 24 hours. It keeps 30 complete archive/manifest/signature sets by default.
+The process exits on any backup or verification failure and prunes only after a
+new backup has passed the real disposable-PostgreSQL restore check. A private
+lock directory prevents two schedulers from writing the same repository.
+
+The scheduler intentionally runs on the host rather than in a privileged
+sidecar: it reuses the operator's protected signing/verification keys and Docker
+Compose access without mounting the Docker socket or secrets into another
+container. Export the same `RIVUNE_BACKUP_SIGNING_KEY_FILE`,
+`RIVUNE_BACKUP_VERIFY_KEY_FILE`, `RIVUNE_BACKUP_LINEAGE`, and
+`RIVUNE_BACKUP_STATE_FILE` required below, then supervise it with systemd,
+launchd, or the host scheduler. Example foreground smoke run:
+
+```sh
+RIVUNE_BACKUP_RETENTION=30 \
+  ./rivune backup-scheduler --once /srv/rivune-backups
+```
+
+For a supervised persistent process, omit `--once`. The optional
+`RIVUNE_BACKUP_INTERVAL_SECONDS` accepts `3600..604800`; retention accepts
+`1..365`. Keep the repository on storage independent from the database volume,
+and copy the encryption keyring separately. Each successful cycle prints the
+backup ID needed by the explicit restore command. Periodically restore a selected
+set with `./rivune restore --expect-backup-id ID BACKUP_FILE`; the restore script
+stages into an isolated database, validates readiness after the atomic swap, and
+automatically restores the prior live database if activation fails.
 
 ## PostgreSQL backup authentication
 

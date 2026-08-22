@@ -39,6 +39,9 @@ public sealed class MainPageViewModel : IDisposable
     public PlaybackSourceOption? SelectedSource { get; set; }
     public PlaybackPreparation? Preparation { get; set; }
     public PlaybackSession? PlaybackSession { get; set; }
+    public CoordinatedPlaybackItem? CoordinatedItem { get; set; }
+    public IReadOnlyList<PlaybackDevice> PlaybackDevices { get; set; } = [];
+    public PlaybackRoom? ActivePlaybackRoom { get; set; }
 
     public long Transition(AppPhase phase)
     {
@@ -60,6 +63,7 @@ public sealed class MainPageViewModel : IDisposable
         Discovery = null;
         Account = null;
         Profile = null;
+        ClearCoordination();
         ClearPlayback();
     }
 
@@ -70,6 +74,13 @@ public sealed class MainPageViewModel : IDisposable
         SelectedSource = null;
         Preparation = null;
         PlaybackSession = null;
+        CoordinatedItem = null;
+    }
+    public void ClearCoordination()
+    {
+        PlaybackDevices = [];
+        ActivePlaybackRoom = null;
+        CoordinatedItem = null;
     }
 
     public void Dispose()

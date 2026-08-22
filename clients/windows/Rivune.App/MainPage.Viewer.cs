@@ -40,6 +40,7 @@ public sealed partial class MainPage
     private MediaTarget? _heroTarget;
     private IReadOnlyList<MediaTarget> _heroTargets = [];
     private IReadOnlyList<MediaTarget> _continueWatchingTargets = [];
+    private IReadOnlyList<MediaTarget> _recommendationTargets = [];
     private int _heroIndex;
     private readonly DispatcherTimer _heroTimer = new() { Interval = TimeSpan.FromSeconds(8) };
     private bool _heroRotationPaused;
@@ -57,6 +58,7 @@ public sealed partial class MainPage
     private bool _detailInLibrary;
     private Func<Task>? _detailBackAction;
     private Func<Task>? _detailRetryAction;
+    private string? _coordinationActionsFingerprint;
     private int _folderPage;
     private bool _folderHasMore;
     private const int FolderArtworkConcurrency = 4;
@@ -472,6 +474,7 @@ public sealed partial class MainPage
         var cancellationToken = _state.Token;
         var collectionsTask = client.GetCollectionsAsync(cancellationToken);
         var continueWatchingTask = GetHomeContinueWatchingAsync(client, cancellationToken);
+        var recommendationsTask = GetHomeRecommendationsAsync(client, cancellationToken);
         try
         {
             var collections = (await collectionsTask)
@@ -490,18 +493,35 @@ public sealed partial class MainPage
             IReadOnlyList<MediaTarget> continueTargets = continueWatching.Failed
                 ? _continueWatchingTargets
                 : continueWatching.Page?.Items.Select(item => item.ToMediaTarget()).ToArray() ?? [];
+            var recommendations = await recommendationsTask;
+            if (!HomeRequestCurrent(client, generation)) return;
+            IReadOnlyList<MediaTarget> recommendationTargets = recommendations.Failed
+                ? []
+                : recommendations.Page?.Items.Select(item => item.ToMediaTarget()).ToArray() ?? [];
+
 
             _viewerCollections = collections;
             _continueWatchingTargets = continueTargets;
-            RebuildHomeSections(collections, continueTargets);
+            _recommendationTargets = recommendationTargets;
+            RebuildHomeSections(collections, continueTargets, recommendationTargets);
 
-            if (continueWatching.Failed)
+            if (continueWatching.Failed || recommendations.Failed)
             {
                 DashboardBanner.Severity = InfoBarSeverity.Warning;
-                DashboardBanner.Message = UiText(
-                    "Continue watching could not be loaded. Your collections are still available.",
-                    "La section Continuer à regarder n’a pas pu être chargée. Vos collections restent disponibles.");
+                DashboardBanner.Message = (continueWatching.Failed, recommendations.Failed) switch
+                {
+                    (true, true) => UiText(
+                        "Continue watching and recommendations could not be loaded. Your collections are still available.",
+                        "Les sections Continuer à regarder et Recommandations n’ont pas pu être chargées. Vos collections restent disponibles."),
+                    (true, false) => UiText(
+                        "Continue watching could not be loaded. Your collections are still available.",
+                        "La section Continuer à regarder n’a pas pu être chargée. Vos collections restent disponibles."),
+                    _ => UiText(
+                        "Recommendations could not be loaded. Continue watching and your collections are still available.",
+                        "Les recommandations n’ont pas pu être chargées. Continuer à regarder et vos collections restent disponibles."),
+                };
                 DashboardBanner.IsOpen = true;
+                DashboardRetryButton.Visibility = Visibility.Visible;
             }
 
             var heroTargets = await heroTargetsTask;
@@ -530,14 +550,17 @@ public sealed partial class MainPage
 
     private void RebuildHomeSections(
         IReadOnlyList<Collection> collections,
-        IReadOnlyList<MediaTarget> continueTargets)
+        IReadOnlyList<MediaTarget> continueTargets,
+        IReadOnlyList<MediaTarget> recommendationTargets)
     {
         DashboardSections.Children.Clear();
         if (continueTargets.Count > 0)
             DashboardSections.Children.Add(CreateMediaRow(UiText("Continue watching", "Continuer à regarder"), continueTargets, landscape: true));
+        if (recommendationTargets.Count > 0)
+            DashboardSections.Children.Add(CreateMediaRow(UiText("Recommended for you", "Recommandé pour vous"), recommendationTargets, landscape: false));
         foreach (var collection in collections)
             DashboardSections.Children.Add(CreateCollectionRow(collection));
-        DashboardEmpty.Visibility = collections.Count == 0 && continueTargets.Count == 0
+        DashboardEmpty.Visibility = collections.Count == 0 && continueTargets.Count == 0 && recommendationTargets.Count == 0
             ? Visibility.Visible
             : Visibility.Collapsed;
     }
@@ -555,6 +578,19 @@ public sealed partial class MainPage
         }
         catch (OperationCanceledException) { return new HomeContinueWatchingResult(null, Failed: false); }
         catch { return new HomeContinueWatchingResult(null, Failed: true); }
+    }
+
+    private async Task<HomeRecommendationResult> GetHomeRecommendationsAsync(RivuneApiClient client, CancellationToken cancellationToken)
+    {
+        if (!LocalRecommendationsAvailable) return new HomeRecommendationResult(null, Failed: false);
+        try
+        {
+            return new HomeRecommendationResult(
+                await client.GetLocalRecommendationsAsync(limit: 24, cancellationToken),
+                Failed: false);
+        }
+        catch (OperationCanceledException) { return new HomeRecommendationResult(null, Failed: false); }
+        catch { return new HomeRecommendationResult(null, Failed: true); }
     }
 
     private async Task PresentHomeHeroAsync(
@@ -2361,6 +2397,7 @@ public sealed partial class MainPage
         }
         if (actionVisibility.Library)
             DetailActions.Items.Add(ActionToggleButton(_detailInLibrary ? "Remove from library" : "Add to library", _detailInLibrary ? "\uE73E" : "\uE8F1", _detailInLibrary, ToggleLibraryAsync));
+        RenderPlaybackCoordinationActions();
         DetailSections.Children.Clear();
         if (_detailSeries is not null && _detailSeason is null)
         {
@@ -2422,6 +2459,153 @@ public sealed partial class MainPage
     {
         if (sender is Button { Tag: MediaTarget target })
             await OpenEpisodeTargetAsync(target, _devicePreferences.AutomaticallyShowSources, reuseSeasonContext: true);
+    }
+
+    private void RenderPlaybackCoordinationActions()
+    {
+        var deviceFingerprint = string.Join(',', _state.PlaybackDevices
+            .OrderBy(device => device.SessionId)
+            .Select(device => $"{device.SessionId}:{device.Name}:{string.Join('.', device.Capabilities.Order())}:{device.State.Status}:{device.State.Item?.TitleId}"));
+        var room = _state.ActivePlaybackRoom;
+        var memberFingerprint = room is null
+            ? string.Empty
+            : string.Join(',', room.Members.Select(member => member.MemberId).Order(StringComparer.Ordinal));
+        var fingerprint = $"{PlaybackCoordinationAvailable}|{_detailTarget?.ResourceId}|{room?.Id}|{room?.Version}|{room?.JoinCode}|{room?.Members.Count}|{memberFingerprint}|{deviceFingerprint}";
+        if (fingerprint == _coordinationActionsFingerprint) return;
+        _coordinationActionsFingerprint = fingerprint;
+        foreach (var button in CoordinationActions.Items.OfType<ButtonBase>()) ForgetZoomButton(button);
+        CoordinationActions.Items.Clear();
+        if (!PlaybackCoordinationAvailable || _detailTarget is not { MediaType: "movie" or "episode" or "tv" } || _progressTitleId == Guid.Empty)
+        {
+            CoordinationActionsScroller.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        if (room is not null)
+        {
+            var roomLabel = room.JoinCode is { Length: > 0 } ? $"Room {room.JoinCode}" : "Watch room";
+            var status = new Button
+            {
+                Content = LabeledActionContent($"{roomLabel} · {room.Members.Count} watching", "\uE716"),
+                Style = (Style)Application.Current.Resources["RivuneLabeledActionButton"],
+                Margin = new Thickness(0, 0, 8, 8),
+                IsEnabled = false,
+            };
+            ApplyLabeledActionPresentation(status, roomLabel);
+            CoordinationActions.Items.Add(status);
+            CoordinationActions.Items.Add(ActionButton("Leave room", "\uE8BB", LeavePlaybackRoomAsync));
+        }
+        else
+        {
+            CoordinationActions.Items.Add(ActionButton("Start watch room", "\uE716", CreatePlaybackRoomAsync));
+            CoordinationActions.Items.Add(ActionButton("Join room", "\uE8D4", JoinPlaybackRoomAsync));
+        }
+
+        var devices = _state.PlaybackDevices.Where(device => device.Capabilities.Contains("remote-control", StringComparer.Ordinal)).ToArray();
+        if (devices.Length > 0)
+            CoordinationActions.Items.Add(ActionButton("Send to device", "\uE7F4", ChooseHandoffDeviceAsync));
+        foreach (var device in devices.Where(device => device.State.Item is not null))
+            CoordinationActions.Items.Add(ActionButton($"Control {device.Name}", "\uE768", () => ShowRemoteControlsAsync(device)));
+        CoordinationActionsScroller.Visibility = Visibility.Visible;
+    }
+
+    private CoordinatedPlaybackItem CurrentCoordinatedItem()
+    {
+        var target = _detailTarget ?? throw new InvalidOperationException("No title is selected.");
+        return target.CoordinatedItem(_progressTitleId, _detailTitleForPlayback());
+    }
+
+    private async Task ChooseHandoffDeviceAsync()
+    {
+        var devices = _state.PlaybackDevices.Where(device => device.Capabilities.Contains("remote-control", StringComparer.Ordinal)).ToArray();
+        var device = await ChooseAsync("Send to device", devices, value => $"{value.Name} · {value.Platform}");
+        if (device is null) return;
+        await _state.Client!.SendPlaybackCommandAsync(device.SessionId, new PlaybackCommandInput
+        {
+            Command = "load",
+            Item = CurrentCoordinatedItem(),
+            PositionMilliseconds = (_detailProgress?.PositionSeconds ?? 0) * 1_000L,
+        }, _state.Token);
+    }
+
+    private async Task ShowRemoteControlsAsync(PlaybackDevice device)
+    {
+        var panel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        var play = new Button { Content = "Play", MinHeight = 48 };
+        var pause = new Button { Content = "Pause", MinHeight = 48 };
+        var seekBack = new Button { Content = "−10s", MinHeight = 48 };
+        var seekForward = new Button { Content = "+10s", MinHeight = 48 };
+        var stop = new Button { Content = "Stop", MinHeight = 48 };
+        panel.Children.Add(play);
+        panel.Children.Add(pause);
+        panel.Children.Add(seekBack);
+        panel.Children.Add(seekForward);
+        panel.Children.Add(stop);
+        var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = device.Name, Content = panel, CloseButtonText = "Done" };
+        async Task SendAsync(string command, long? position = null)
+        {
+            try
+            {
+                await _state.Client!.SendPlaybackCommandAsync(device.SessionId, new PlaybackCommandInput { Command = command, PositionMilliseconds = position }, CancellationToken.None);
+                var nextPosition = position ?? device.State.PositionMilliseconds;
+                device = device with { State = device.State with { Status = command == "play" ? "playing" : command == "pause" ? "paused" : device.State.Status, PositionMilliseconds = nextPosition } };
+            }
+            catch (Exception exception)
+            {
+                dialog.Hide();
+                DetailBanner.Severity = InfoBarSeverity.Error;
+                DetailBanner.Message = FriendlyError(exception);
+                DetailBanner.IsOpen = true;
+            }
+        }
+        play.Click += async (_, _) => await SendAsync("play");
+        pause.Click += async (_, _) => await SendAsync("pause");
+        seekBack.Click += async (_, _) => await SendAsync("seek", Math.Max(0, device.State.PositionMilliseconds - 10_000));
+        seekForward.Click += async (_, _) => await SendAsync("seek", Math.Min(device.State.DurationMilliseconds, device.State.PositionMilliseconds + 10_000));
+        stop.Click += async (_, _) => await SendAsync("stop");
+        await ShowDialogAsync(dialog);
+    }
+
+    private async Task CreatePlaybackRoomAsync()
+    {
+        var room = await _state.Client!.CreatePlaybackRoomAsync(new PlaybackRoomCreateInput
+        {
+            Item = CurrentCoordinatedItem(),
+            State = "paused",
+            PositionMilliseconds = (_detailProgress?.PositionSeconds ?? 0) * 1_000L,
+            DurationMilliseconds = (_detailProgress?.DurationSeconds ?? 0) * 1_000L,
+        }, _state.Token);
+        _state.ActivePlaybackRoom = room;
+        RenderPlaybackCoordinationActions();
+    }
+
+    private async Task JoinPlaybackRoomAsync()
+    {
+        var code = new TextBox
+        {
+            Header = "Room code",
+            MaxLength = 10,
+            CharacterCasing = CharacterCasing.Upper,
+            PlaceholderText = "23456789AB",
+            Style = (Style)Application.Current.Resources["RivuneTextField"],
+        };
+        var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = "Join watch room", Content = code, PrimaryButtonText = "Join", CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Primary };
+        if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary) return;
+        var normalized = code.Text.Trim().ToUpperInvariant();
+        if (normalized.Length == 0) return;
+        var room = await _state.Client!.JoinPlaybackRoomAsync(normalized, _state.Token);
+        _state.ActivePlaybackRoom = room;
+        RenderPlaybackCoordinationActions();
+        await StartCoordinatedPlaybackAsync(room.Item, room.PositionMilliseconds, _state.Client!, _coordinationCancellation?.Token ?? _state.Token);
+    }
+
+    private async Task LeavePlaybackRoomAsync()
+    {
+        var room = _state.ActivePlaybackRoom;
+        if (room is null) return;
+        _state.ActivePlaybackRoom = null;
+        try { await _state.Client!.LeavePlaybackRoomAsync(room.Id, _state.Token); }
+        finally { RenderPlaybackCoordinationActions(); }
     }
 
     private Button ActionButton(string label, string glyph, Func<Task> action)
@@ -2607,6 +2791,7 @@ public sealed partial class MainPage
         _selectedItem = null;
         _playbackTitle = _detailTitleForPlayback();
         var target = _detailTarget;
+        _state.CoordinatedItem = target.CoordinatedItem(_progressTitleId, _playbackTitle);
         if (automatic)
         {
             DetailBanner.IsOpen = false;
@@ -2676,6 +2861,7 @@ public sealed partial class MainPage
         _searchPage = 0;
         _searchHasMore = false;
         _folderPage = 0;
+        _coordinationActionsFingerprint = null;
         _folderHasMore = false;
         _folderItems.Clear();
         _resolvedFolder = null;
@@ -2752,6 +2938,7 @@ public sealed partial class MainPage
 
     private sealed record FolderArtworkRequest(long Generation, Task<string?> Task);
     private sealed record HomeContinueWatchingResult(ContinueWatchingPage? Page, bool Failed);
+    private sealed record HomeRecommendationResult(LocalRecommendationPage? Page, bool Failed);
 
     private sealed record HomeFolderRequest(long Generation, Task<ResolvedCollectionFolder?> Task);
 

@@ -1,5 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${OSTYPE:-}" == darwin* ]]; then
+  coreutils_found=false
+  for gnubin in /opt/homebrew/opt/coreutils/libexec/gnubin /usr/local/opt/coreutils/libexec/gnubin; do
+    if [[ -d "${gnubin}" ]]; then
+      PATH="${gnubin}:${PATH}"
+      coreutils_found=true
+      break
+    fi
+  done
+  if [[ "${coreutils_found}" == false ]] &&
+     stat -c '%a' -- "$0" >/dev/null 2>&1 &&
+     chmod --version >/dev/null 2>&1 &&
+     ln --version >/dev/null 2>&1 &&
+     mktemp --version >/dev/null 2>&1; then
+    coreutils_found=true
+  fi
+  if [[ "${coreutils_found}" == false ]]; then
+    printf 'Rivune requires GNU coreutils on macOS; install it with: brew install coreutils\n' >&2
+    exit 1
+  fi
+  if (( BASH_VERSINFO[0] < 4 )); then
+    for modern_bash in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+      if [[ -x "${modern_bash}" ]]; then
+        exec "${modern_bash}" "$0" "$@"
+      fi
+    done
+    printf 'Rivune requires Bash 4 or newer on macOS; install it with: brew install bash\n' >&2
+    exit 1
+  fi
+fi
+
 
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 case "${SCRIPT_PATH}" in
@@ -23,6 +54,7 @@ Commands:
   logs [service]
   doctor
   backup BACKUP_FILE
+  backup-scheduler [--once] BACKUP_DIRECTORY
   verify-backup --expect-backup-id ID BACKUP_FILE
   verify-backup --allow-legacy SHA256 BACKUP_FILE
   restore --expect-backup-id ID BACKUP_FILE
@@ -71,11 +103,36 @@ configure_compose_profiles() {
 			discovery_url="${discovery_url:1:${#discovery_url}-2}"
 		fi
 	fi
-	if [[ -n "${discovery_url}" ]]; then
+	if [[ -n "${discovery_url}" && "${OSTYPE:-}" != darwin* ]]; then
 		export COMPOSE_PROFILES=discovery
 	else
 		unset COMPOSE_PROFILES
 	fi
+}
+
+macos_discovery_start() {
+  [[ "${OSTYPE:-}" == darwin* ]] || return 0
+  local discovery_url="" discovery_name="Rivune" version="" line
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    case "${line%$'\r'}" in
+      RIVUNE_DISCOVERY_URL=*) discovery_url="${line#*=}" ;;
+      RIVUNE_DISCOVERY_NAME=*) discovery_name="${line#*=}" ;;
+      RIVUNE_VERSION=*) version="${line#*=}" ;;
+    esac
+  done < "${ROOT_DIR}/.env"
+  if [[ -z "${discovery_url}" ]]; then
+    "${ROOT_DIR}/scripts/macos-discovery.sh" stop
+    return
+  fi
+  if ! validate_public_url "${discovery_url}" || ! is_discoverable_url "${discovery_url}"; then
+    doctor_fail 'RIVUNE_DISCOVERY_URL is not a safe LAN-reachable origin'
+  fi
+  "${ROOT_DIR}/scripts/macos-discovery.sh" start "${discovery_url}" "${discovery_name}" "${version}"
+}
+
+macos_discovery_stop() {
+  [[ "${OSTYPE:-}" == darwin* ]] || return 0
+  "${ROOT_DIR}/scripts/macos-discovery.sh" stop
 }
 validate_public_url() {
   local value="$1"
@@ -298,6 +355,11 @@ setup_environment() {
   printf 'Created private .env configuration.\n'
 }
 
+compose_run() {
+	configure_compose_profiles
+	docker compose --env-file .env -f compose.yaml "$@"
+}
+
 compose_exec() {
 	configure_compose_profiles
 	exec docker compose --env-file .env -f compose.yaml "$@"
@@ -314,7 +376,7 @@ doctor_fail() {
 
 run_doctor() {
   local tool mode owner line key raw_value value
-  local service container_id state bind_address port public_url
+  local service container_id state bind_address port public_url discovery_url
   local -a services=(postgres rivune)
   local -A environment=()
   local -a required_variables=(
@@ -362,10 +424,13 @@ run_doctor() {
     doctor_fail 'PostgreSQL passwords must be distinct'
   doctor_ok 'Required variables are present and database passwords are distinct'
 
-  if [[ -n "${environment[RIVUNE_DISCOVERY_URL]:-}" ]]; then
-    validate_public_url "${environment[RIVUNE_DISCOVERY_URL]}" || doctor_fail 'RIVUNE_DISCOVERY_URL is not a safe HTTPS or private-IP HTTP origin'
-    is_discoverable_url "${environment[RIVUNE_DISCOVERY_URL]}" || doctor_fail 'RIVUNE_DISCOVERY_URL must not target loopback'
-    services+=(discovery)
+  discovery_url="${environment[RIVUNE_DISCOVERY_URL]:-}"
+  if [[ -n "${discovery_url}" ]]; then
+    validate_public_url "${discovery_url}" || doctor_fail 'RIVUNE_DISCOVERY_URL is not a safe HTTPS or private-IP HTTP origin'
+    is_discoverable_url "${discovery_url}" || doctor_fail 'RIVUNE_DISCOVERY_URL must not target loopback'
+    if [[ "${OSTYPE:-}" != darwin* ]]; then
+      services+=(discovery)
+    fi
   fi
 
   docker compose --env-file .env -f compose.yaml config --quiet >/dev/null 2>&1 || doctor_fail 'Compose configuration is invalid'
@@ -384,6 +449,12 @@ run_doctor() {
     fi
     doctor_ok "Service is running: ${service}"
   done
+
+  if [[ -n "${discovery_url}" && "${OSTYPE:-}" == darwin* ]]; then
+    "${ROOT_DIR}/scripts/macos-discovery.sh" status >/dev/null 2>&1 ||
+      doctor_fail 'macOS LAN discovery publisher is not running'
+    doctor_ok 'macOS LAN discovery publisher is running'
+  fi
 
   docker compose --env-file .env -f compose.yaml exec -T postgres \
     pg_isready --username rivune --dbname rivune >/dev/null 2>&1 || doctor_fail 'PostgreSQL is not ready'
@@ -422,17 +493,20 @@ case "${command_name}" in
   up)
     require_no_arguments up "$@"
     require_environment_file
-    compose_exec up -d
+    compose_run up -d
+    macos_discovery_start
     ;;
   down)
     require_no_arguments down "$@"
     require_environment_file
-    compose_exec down
+    compose_run down
+    macos_discovery_stop
     ;;
   restart)
     require_no_arguments restart "$@"
     require_environment_file
-    compose_exec restart
+    compose_run restart
+    macos_discovery_start
     ;;
   pull)
     require_no_arguments pull "$@"
@@ -442,7 +516,10 @@ case "${command_name}" in
   status)
     require_no_arguments status "$@"
     require_environment_file
-    compose_exec ps
+    compose_run ps
+    if [[ "${OSTYPE:-}" == darwin* ]]; then
+      "${ROOT_DIR}/scripts/macos-discovery.sh" status 2>/dev/null || true
+    fi
     ;;
   logs)
     (( $# <= 1 )) || fail_usage 'logs accepts at most one service'
@@ -450,6 +527,9 @@ case "${command_name}" in
       fail_usage 'logs service must be rivune, postgres, or discovery'
     fi
     require_environment_file
+    if [[ "${OSTYPE:-}" == darwin* && "${1:-}" == discovery ]]; then
+      exec "${ROOT_DIR}/scripts/macos-discovery.sh" logs
+    fi
     compose_exec logs "$@"
     ;;
   doctor)
@@ -461,6 +541,13 @@ case "${command_name}" in
     require_environment_file
     pin_compose_environment
     exec "${ROOT_DIR}/scripts/postgres-backup.sh" "$@"
+    ;;
+  backup-scheduler)
+    { (( $# == 1 )) || { (( $# == 2 )) && [[ "$1" == --once ]]; }; } ||
+      fail_usage 'backup-scheduler accepts [--once] BACKUP_DIRECTORY'
+    require_environment_file
+    pin_compose_environment
+    exec "${ROOT_DIR}/scripts/postgres-backup-scheduler.sh" "$@"
     ;;
   verify-backup)
     pin_compose_environment

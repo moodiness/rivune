@@ -544,6 +544,9 @@
                         <ScrollViewer HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Auto" VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Disabled" BringIntoViewOnFocusChange="True">
                             <ItemsControl x:Name="DetailActions"><ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal" /></ItemsPanelTemplate></ItemsControl.ItemsPanel></ItemsControl>
                         </ScrollViewer>
+                        <ScrollViewer x:Name="CoordinationActionsScroller" Visibility="Collapsed" HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Auto" VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Disabled" BringIntoViewOnFocusChange="True">
+                            <ItemsControl x:Name="CoordinationActions"><ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal" /></ItemsPanelTemplate></ItemsControl.ItemsPanel></ItemsControl>
+                        </ScrollViewer>
                         <ScrollViewer x:Name="DetailOverviewScroller" MaxWidth="560" MaxHeight="96" HorizontalAlignment="Stretch" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" VerticalScrollMode="Auto" VerticalScrollBarVisibility="Auto" IsTabStop="True" UseSystemFocusVisuals="True" AutomationProperties.Name="Description, scrollable" AutomationProperties.HelpText="Use the arrow keys to read the full description.">
                             <TextBlock x:Name="DetailOverview" Style="{StaticResource RivuneBodyLargeTextStyle}" />
                         </ScrollViewer>

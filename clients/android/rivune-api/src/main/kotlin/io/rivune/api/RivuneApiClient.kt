@@ -757,6 +757,44 @@ class RivuneApiClient(
     )
 
     suspend fun stopPlayback(sessionId: UUID) = requestUnit("playback/sessions/$sessionId", "DELETE", authenticated = true)
+    suspend fun updatePlaybackDevice(input: PlaybackDeviceHeartbeatInput): PlaybackDevice = request(
+        path = "playback/device", method = "PUT", body = requestJson.encodeToString(input), authenticated = true,
+    )
+
+    suspend fun playbackDevices(): PlaybackDeviceList = request("playback/devices", authenticated = true)
+
+    suspend fun sendPlaybackCommand(sessionId: UUID, input: PlaybackCommandInput): PlaybackCommand = request(
+        path = "playback/devices/$sessionId/commands", method = "POST", body = requestJson.encodeToString(input), authenticated = true,
+    )
+
+    suspend fun playbackCommands(after: Long = 0): PlaybackCommandList = request(
+        path = "playback/commands", query = mapOf("after" to after.toString()), authenticated = true,
+    )
+
+    suspend fun acknowledgePlaybackCommand(id: Long) = requestUnit(
+        path = "playback/commands/$id/ack", method = "POST", authenticated = true,
+    )
+
+    suspend fun createPlaybackRoom(input: PlaybackRoomCreateInput): PlaybackRoom = request(
+        path = "playback/rooms", method = "POST", body = requestJson.encodeToString(input), authenticated = true,
+    )
+
+    suspend fun joinPlaybackRoom(code: String): PlaybackRoom = request(
+        path = "playback/rooms/join", method = "POST", body = requestJson.encodeToString(PlaybackRoomJoinInput(code)), authenticated = true,
+    )
+
+    suspend fun playbackRoom(id: UUID): PlaybackRoom = request("playback/rooms/$id", authenticated = true)
+
+    suspend fun updatePlaybackRoom(id: UUID, input: PlaybackRoomUpdateInput): PlaybackRoom = request(
+        path = "playback/rooms/$id", method = "PUT", body = requestJson.encodeToString(input), authenticated = true,
+    )
+
+    suspend fun leavePlaybackRoom(id: UUID) = requestUnit("playback/rooms/$id", "DELETE", authenticated = true)
+
+    suspend fun localRecommendations(limit: Int = 20): LocalRecommendationPage = request(
+        path = "recommendations", query = mapOf("limit" to limit.toString()), authenticated = true,
+    )
+
 
     suspend fun playbackActivity(): PlaybackActivity = request("playback/activity", authenticated = true)
 

@@ -82,6 +82,11 @@ class MainActivity : ComponentActivity() {
         super.onPause()
     }
 
+    override fun onStop() {
+        if (!showPlayerRecoveryPreview) viewModel.lockOfflineAccessOnBackground()
+        super.onStop()
+    }
+
     override fun onDestroy() {
         val terminal = isFinishing
         if (terminal && !showPlayerRecoveryPreview) {

@@ -11,6 +11,8 @@ struct RivuneMediaDetailView: View {
     @ObservedObject var model: RivuneAppModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
+    @State private var showJoinRoom = false
+    @State private var roomCode = ""
 
     var body: some View {
         NavigationView {
@@ -66,6 +68,7 @@ struct RivuneMediaDetailView: View {
             VStack(alignment: .leading, spacing: 22) {
                 hero(detail)
                 actionRow(detail)
+                if model.playbackCoordinationAvailable { coordinationControls }
                 if let tagline = tagline(detail)?.nilIfEmpty {
                     Text(tagline).font(.headline).foregroundStyle(Color.white.opacity(0.72))
                 }
@@ -86,6 +89,56 @@ struct RivuneMediaDetailView: View {
             .padding(.vertical, 16)
             .frame(maxWidth: 1100, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
+        }
+    }
+
+    @ViewBuilder private var coordinationControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !model.playbackDevices.isEmpty {
+#if os(tvOS)
+                ForEach(model.playbackDevices) { device in
+                    HStack {
+                        Button("Play on \(device.name)") { model.handoffPlayback(to: device) }
+                        Button("Play") { model.controlPlayback(on: device, command: "play") }
+                        Button("Pause") { model.controlPlayback(on: device, command: "pause") }
+                        Button("Match position") { model.controlPlayback(on: device, command: "seek") }
+                        Button("Stop", role: .destructive) { model.controlPlayback(on: device, command: "stop") }
+                    }
+                }
+#else
+                Menu {
+                    ForEach(model.playbackDevices) { device in
+                        Button("Play on \(device.name)") { model.handoffPlayback(to: device) }
+                        Button("Play \(device.name)") { model.controlPlayback(on: device, command: "play") }
+                        Button("Pause \(device.name)") { model.controlPlayback(on: device, command: "pause") }
+                        Button("Match position on \(device.name)") { model.controlPlayback(on: device, command: "seek") }
+                        Button("Stop \(device.name)", role: .destructive) { model.controlPlayback(on: device, command: "stop") }
+                    }
+                } label: { Label("Play on another device", systemImage: "airplayvideo") }
+                .buttonStyle(.bordered)
+#endif
+            }
+            HStack {
+                if let room = model.activePlaybackRoom {
+#if os(tvOS)
+                    Text(room.joinCode.map { "Room \($0)" } ?? "Watch room")
+                        .font(.subheadline.monospaced())
+#else
+                    Text(room.joinCode.map { "Room \($0)" } ?? "Watch room")
+                        .font(.subheadline.monospaced()).textSelection(.enabled)
+#endif
+                    Text("\(room.members.count) watching").foregroundStyle(.secondary)
+                    Button("Leave", action: model.leavePlaybackRoom).buttonStyle(.bordered)
+                } else {
+                    Button { model.createPlaybackRoom() } label: { Label("Start watch room", systemImage: "person.2.wave.2") }.buttonStyle(.bordered)
+                    Button("Join room") { showJoinRoom = true }.buttonStyle(.bordered)
+                }
+            }
+        }
+        .alert("Join watch room", isPresented: $showJoinRoom) {
+            TextField("Room code", text: $roomCode)
+            Button("Join") { model.joinPlaybackRoom(code: roomCode); roomCode = "" }
+            Button("Cancel", role: .cancel) {}
         }
     }
 
@@ -314,6 +367,13 @@ struct RivunePlaybackSourcesView: View {
                                 Button { model.play(source, externally: true); dismiss() } label: { Label("Open in app", systemImage: "square.and.arrow.up") }.buttonStyle(.bordered)
                             }
 #endif
+                            if !["hls", "dash"].contains(source.protocol.lowercased()) {
+                                Button { model.download(source) } label: {
+                                    Label(model.offlineDownloadActive ? "Downloading…" : "Download", systemImage: "arrow.down.circle")
+                                }
+                                .disabled(model.offlineDownloadActive)
+                                .buttonStyle(.bordered)
+                            }
                         }
                     }.padding(.vertical, 8)
                 }
@@ -560,6 +620,7 @@ private struct RivuneNativeInternalPlayerView: View {
             duration = Double(current.durationSeconds ?? 0)
             if wasPlaying { player.playImmediately(atRate: Float(playbackSpeed)) }
             playing = wasPlaying
+            applyRoomState()
             scheduleControlsHide()
             let loadedAudioGroup = try? await item.asset.loadMediaSelectionGroup(for: .audible)
             let loadedSubtitleGroup = try? await item.asset.loadMediaSelectionGroup(for: .legible)
@@ -570,6 +631,9 @@ private struct RivuneNativeInternalPlayerView: View {
             subtitleOptions = loadedSubtitleGroup?.options ?? []
         }
         .onReceive(playerTimer) { _ in updatePlaybackState() }
+        .onChange(of: playing) { _ in model.updateCoordinationPlayback(position: position, duration: duration, playing: playing) }
+        .onChange(of: model.pendingPlaybackCommands.first?.id) { _ in applyRemoteCommand() }
+        .onChange(of: model.activePlaybackRoom?.version) { _ in applyRoomState() }
         .onDisappear { controlsTask?.cancel(); if !finished && !handoffToMPV { finish(completed: false) } }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
             guard notification.object as? AVPlayerItem === player.currentItem else { return }
@@ -597,6 +661,7 @@ private struct RivuneNativeInternalPlayerView: View {
         let itemDuration = observedDuration.isFinite && observedDuration > 0 ? observedDuration : Double(activePresentation.durationSeconds ?? 0)
         if itemDuration > 0 { duration = itemDuration }
         playing = player.timeControlStatus == .playing
+        model.updateCoordinationPlayback(position: position, duration: duration, playing: playing)
         updateMarker(at: seconds)
     }
     private func handlePlaybackFailure(_ error: Error?) {
@@ -713,6 +778,31 @@ private struct RivuneNativeInternalPlayerView: View {
         if playing { player.pause() } else { player.playImmediately(atRate: Float(playbackSpeed)) }
         playing.toggle()
         scheduleControlsHide()
+    }
+
+    private func applyRemoteCommand() {
+        guard let command = model.pendingPlaybackCommands.first else { return }
+        switch command.command {
+        case "play": player.playImmediately(atRate: Float(playbackSpeed))
+        case "pause": player.pause()
+        case "seek": if let milliseconds = command.positionMilliseconds { player.seek(to: CMTime(seconds: Double(milliseconds) / 1_000, preferredTimescale: 600)) }
+        case "stop": finish(completed: false)
+        default: break
+        }
+        model.consumePlaybackCommand()
+    }
+
+    private func applyRoomState() {
+        guard let room = model.activePlaybackRoom,
+              !room.currentMemberIsHost else { return }
+        let target = Double(room.positionMilliseconds) / 1_000
+        if abs(position - target) > 1.5 { player.seek(to: CMTime(seconds: target, preferredTimescale: 600)) }
+        switch room.state {
+        case "playing": player.playImmediately(atRate: Float(playbackSpeed)); playing = true
+        case "paused": player.pause(); playing = false
+        case "ended": finish(completed: true)
+        default: break
+        }
     }
 
     private func seek(by offset: Double) {
@@ -957,10 +1047,17 @@ private struct RivuneMPVInternalPlayerView: View {
             )
             player.setSpeed(playbackSpeed)
             player.setAspect(sessionAspect)
+            applyRoomState()
             scheduleControlsHide()
         }
-        .onReceive(player.$position) { updateMarker(at: $0) }
+        .onReceive(player.$position) { value in
+            updateMarker(at: value)
+            model.updateCoordinationPlayback(position: value, duration: player.duration, playing: player.playing)
+        }
+        .onReceive(player.$playing) { active in model.updateCoordinationPlayback(position: player.position, duration: player.duration, playing: active) }
         .onReceive(player.$failureMessage.compactMap { $0 }) { failureMessage = $0; controlsVisible = true }
+        .onChange(of: model.pendingPlaybackCommands.first?.id) { _ in applyRemoteCommand() }
+        .onChange(of: model.activePlaybackRoom?.version) { _ in applyRoomState() }
         .onReceive(player.$ended.filter { $0 }) { _ in finish(completed: true) }
         .onDisappear {
             controlsTask?.cancel()
@@ -1025,6 +1122,31 @@ private struct RivuneMPVInternalPlayerView: View {
         let values = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
         let index = values.firstIndex(of: playbackSpeed) ?? 1
         setSpeed(values[(index + 1) % values.count])
+    }
+
+    private func applyRemoteCommand() {
+        guard let command = model.pendingPlaybackCommands.first else { return }
+        switch command.command {
+        case "play": player.play()
+        case "pause": player.pause()
+        case "seek": if let milliseconds = command.positionMilliseconds { player.seek(to: Double(milliseconds) / 1_000) }
+        case "stop": finish(completed: false)
+        default: break
+        }
+        model.consumePlaybackCommand()
+    }
+
+    private func applyRoomState() {
+        guard let room = model.activePlaybackRoom,
+              !room.currentMemberIsHost else { return }
+        let target = Double(room.positionMilliseconds) / 1_000
+        if abs(player.position - target) > 1.5 { player.seek(to: target) }
+        switch room.state {
+        case "playing": player.play()
+        case "paused": player.pause()
+        case "ended": finish(completed: true)
+        default: break
+        }
     }
 
     private func cycleAspect() {
@@ -1208,6 +1330,9 @@ private struct RivuneNativeMiniPlayerView: View {
             duration = Double(presentation.durationSeconds ?? 0)
             player.play()
             playing = true
+            model.updateCoordinationPlayback(position: position, duration: duration, playing: playing)
+            applyRoomState()
+            applyRemoteCommand()
         }
         .onReceive(timer) { _ in
             if let item = player.currentItem, item.status == .failed {
@@ -1219,7 +1344,10 @@ private struct RivuneNativeMiniPlayerView: View {
             let observed = player.currentItem?.duration.seconds ?? .nan
             if observed.isFinite && observed > 0 { duration = observed }
             playing = player.timeControlStatus == .playing
+            model.updateCoordinationPlayback(position: position, duration: duration, playing: playing)
         }
+        .onChange(of: model.pendingPlaybackCommands.first?.id) { _ in applyRemoteCommand() }
+        .onChange(of: model.activePlaybackRoom?.version) { _ in applyRoomState() }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
             guard notification.object as? AVPlayerItem === player.currentItem else { return }
             finish(completed: true)
@@ -1247,6 +1375,40 @@ private struct RivuneNativeMiniPlayerView: View {
     private func togglePlayback() {
         if playing { player.pause() } else { player.play() }
         playing.toggle()
+    }
+
+    private func applyRemoteCommand() {
+        guard let command = model.pendingPlaybackCommands.first else { return }
+        switch command.command {
+        case "play": player.play(); playing = true
+        case "pause": player.pause(); playing = false
+        case "seek":
+            if let milliseconds = command.positionMilliseconds {
+                let target = Double(milliseconds) / 1_000
+                player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
+                position = target
+            }
+        case "stop": finish(completed: false)
+        default: return
+        }
+        model.updateCoordinationPlayback(position: position, duration: duration, playing: playing)
+        model.consumePlaybackCommand()
+    }
+
+    private func applyRoomState() {
+        guard let room = model.activePlaybackRoom, !room.currentMemberIsHost else { return }
+        let target = Double(room.positionMilliseconds) / 1_000
+        if abs(position - target) > 1.5 {
+            player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
+            position = target
+        }
+        switch room.state {
+        case "playing": player.play(); playing = true
+        case "paused": player.pause(); playing = false
+        case "ended": finish(completed: true)
+        default: break
+        }
+        model.updateCoordinationPlayback(position: position, duration: duration, playing: playing)
     }
 
     private func restore() {
@@ -1317,13 +1479,49 @@ private struct RivuneMPVMiniPlayerView: View {
                 selectedSubtitleURL: selectedSubtitle?.url.flatMap(model.resolvedResourceURL)
             )
             player.setAspect(model.videoAspect)
+            applyRoomState()
+            applyRemoteCommand()
         }
+        .onReceive(player.$position) { value in
+            model.updateCoordinationPlayback(position: value, duration: player.duration, playing: player.playing)
+        }
+        .onReceive(player.$playing) { active in
+            model.updateCoordinationPlayback(position: player.position, duration: player.duration, playing: active)
+        }
+        .onChange(of: model.pendingPlaybackCommands.first?.id) { _ in applyRemoteCommand() }
+        .onChange(of: model.activePlaybackRoom?.version) { _ in applyRoomState() }
         .onReceive(player.$failureMessage.compactMap { $0 }) { failureMessage = $0 }
         .onReceive(player.$ended.filter { $0 }) { _ in finish(completed: true) }
         .onDisappear {
             player.shutdown()
             if !handoff && !finished { finish(completed: false) }
         }
+    }
+
+    private func applyRemoteCommand() {
+        guard let command = model.pendingPlaybackCommands.first else { return }
+        switch command.command {
+        case "play": player.play()
+        case "pause": player.pause()
+        case "seek": if let milliseconds = command.positionMilliseconds { player.seek(to: Double(milliseconds) / 1_000) }
+        case "stop": finish(completed: false)
+        default: return
+        }
+        model.updateCoordinationPlayback(position: player.position, duration: player.duration, playing: player.playing)
+        model.consumePlaybackCommand()
+    }
+
+    private func applyRoomState() {
+        guard let room = model.activePlaybackRoom, !room.currentMemberIsHost else { return }
+        let target = Double(room.positionMilliseconds) / 1_000
+        if abs(player.position - target) > 1.5 { player.seek(to: target) }
+        switch room.state {
+        case "playing": player.play()
+        case "paused": player.pause()
+        case "ended": finish(completed: true)
+        default: break
+        }
+        model.updateCoordinationPlayback(position: target, duration: player.duration, playing: room.state == "playing")
     }
 
     private func restore() {

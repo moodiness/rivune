@@ -1,13 +1,14 @@
-# Rivune v1.10.0
+# Rivune v1.11.0
 
 ## Highlights
 
-- Android, Apple, and Windows clients can now discover nearby self-hosted Rivune servers through the opt-in `_rivune._tcp` DNS-SD service. Each client shows the announced origin and transport security before an explicit connection; manual address entry remains available.
-- The public Rivune applications page is now available in English and French with platform detection, immutable GitHub release links, QR codes, complete SHA-256 fingerprints, and platform-specific installation warnings.
-- Apple users can generate a local command for iOS, tvOS, or visionOS that checks out this exact release, builds with their selected team and bundle identifier, verifies the signature and provisioning profile, and installs on the connected device. Apple credentials and signing material never leave Xcode and the local Keychain.
-- The schema-v2 update manifest and release pipeline now describe, fingerprint, and validate all seven application packages while preserving the exact eight-asset release contract.
-- Horizontal web carousels retain momentum when Chromium rounds subpixel scroll positions, eliminating premature drag stops.
-- The complete backend, browser, Android, Apple, Windows, migration, proxy, and multi-architecture container gates run before publication.
+- Android and Apple clients can now download encrypted offline media for a specific server and profile. Downloads support progress, cancellation, quota enforcement, crash-safe reconciliation, offline playback, and PIN-gated access without exposing plaintext media at rest.
+- Native clients add Rivune playback coordination: authenticated devices can hand off playback, remotely control another screen, and host or join private synchronized viewing rooms while preserving profile boundaries.
+- Per-profile local recommendations now derive from the viewer's own library and watch state without sending recommendation history to an external service.
+- Operators can install a host-supervised PostgreSQL backup schedule that signs every archive, verifies it through a disposable restore, retains only proven backups, and supports explicit authenticated recovery.
+- Docker Desktop installations on macOS now publish `_rivune._tcp` through a host Bonjour LaunchAgent, while Linux continues to use the isolated host-network discovery sidecar.
+- Android, Apple, and Windows playback surfaces incorporate the new coordination capabilities and related lifecycle, background, focus, and error-state hardening.
+- The complete backend, browser, Android, Apple, Windows, migration, proxy, backup, and multi-architecture container gates run before publication.
 
 ## Apple installation
 
@@ -30,18 +31,19 @@
 
 ## Upgrade notes
 
-- This release adds no database migration or required server environment variable. Back up PostgreSQL and the complete encryption keyring before every upgrade.
-- Automatic LAN discovery is optional and requires Linux host networking. Existing operators can set `RIVUNE_DISCOVERY_URL` to their reachable HTTPS or literal private-IP HTTP origin and optionally set `RIVUNE_DISCOVERY_NAME`; leave the URL empty to keep discovery disabled and use manual server entry.
-- Existing operators can set `RIVUNE_VERSION=1.10.0`, pull, and recreate only the Rivune service. Fresh Compose deployments now default to the immutable `1.10.0` image tag.
+- This release adds database migrations 76 and 77 for playback coordination and private synchronized-room membership. Back up PostgreSQL and the complete encryption keyring before upgrading; Rivune applies both migrations automatically during startup.
+- Existing operators can set `RIVUNE_VERSION=1.11.0`, pull, and recreate Rivune. Fresh Compose deployments now default to the immutable `1.11.0` image tag.
+- When LAN discovery is enabled, use `./rivune up` and `./rivune down`; on macOS these commands manage the per-user Bonjour LaunchAgent outside Docker Desktop.
+- Scheduled backups are opt-in and run on the host so Docker cannot retain the signing and restore credentials. Configure and inspect the schedule with the documented `./rivune backup-scheduler` command.
 - GitHub publishes exactly eight release assets: `Rivune-Android.apk`, the three unsigned IPA files, `Rivune-macOS.dmg`, `rivune-update.json`, `Rivune-x64.exe`, and `Rivune-arm64.exe`.
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.10.0`
-- `ghcr.io/moodiness/rivune:1.10`
+- `ghcr.io/moodiness/rivune:1.11.0`
+- `ghcr.io/moodiness/rivune:1.11`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 - Provenance and SBOM attestations are published for both runnable platforms.
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.9.1...v1.10.0
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.10.0...v1.11.0
