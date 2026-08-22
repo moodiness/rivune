@@ -48,19 +48,19 @@ function Assert-EnvironmentFile {
 
 function Get-LiteralEnvironmentValue([string] $Key, [string] $Default = '') {
     $prefix = "$Key="
-    $matches = @()
+    $values = [Collections.Generic.List[string]]::new()
     foreach ($line in [IO.File]::ReadLines($environmentFile)) {
         if ($line.StartsWith($prefix, [StringComparison]::Ordinal)) {
-            $matches += $line.Substring($prefix.Length).TrimEnd("`r")
+            $null = $values.Add($line.Substring($prefix.Length).TrimEnd("`r"))
         }
     }
-    if ($matches.Count -gt 1) {
+    if ($values.Count -gt 1) {
         throw "The .env file defines $Key more than once."
     }
-    if ($matches.Count -eq 0) {
+    if ($values.Count -eq 0) {
         return $Default
     }
-    $value = [string] $matches[0]
+    $value = $values[0]
     if ($value.Length -ge 2 -and
         (($value[0] -eq '"' -and $value[$value.Length - 1] -eq '"') -or
          ($value[0] -eq "'" -and $value[$value.Length - 1] -eq "'"))) {
