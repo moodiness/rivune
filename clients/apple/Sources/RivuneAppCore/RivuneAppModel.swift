@@ -290,6 +290,8 @@ public final class RivuneAppModel: ObservableObject {
     @Published public private(set) var destination: RivuneDestination = .server
     @Published public var serverAddress: String
     @Published public private(set) var serverName = "Rivune"
+    @Published public private(set) var serverVersion: String?
+    @Published public private(set) var serverProtocolVersion: Int?
     @Published public private(set) var pairingCode: String?
     @Published public private(set) var verificationURL: URL?
     @Published public private(set) var pairingAccepted = false
@@ -352,6 +354,7 @@ public final class RivuneAppModel: ObservableObject {
     @Published public private(set) var profileSettingsSources: EffectiveSettingsSources?
     @Published public private(set) var settingsLoading = false
     @Published public private(set) var settingsFailure: RivuneAppFailure?
+    private let diagnostics = RivuneDiagnosticsBuffer()
     private let defaults: UserDefaults
     private var serverOrigin: URL?
     private var client: RivuneAPIClient?
@@ -408,6 +411,7 @@ public final class RivuneAppModel: ObservableObject {
             storedOfflineProfiles = profiles
         }
         defaults.removeObject(forKey: Self.offlineScopeKey)
+        diagnostics.record(.appStarted)
     }
 
     deinit {
@@ -428,6 +432,7 @@ public final class RivuneAppModel: ObservableObject {
 
 
     public func connect(to address: String) {
+        diagnostics.record(.serverConnectionStarted)
         lockOffline()
         beginOperation()
         let currentGeneration = generation
@@ -777,6 +782,42 @@ public final class RivuneAppModel: ObservableObject {
     }
 
     public func clearFailure() { failure = nil }
+    func diagnosticReport(
+        metadata: RivuneAppleDiagnosticMetadata = .current(),
+        generatedAtMilliseconds: Int64 = Int64(Date().timeIntervalSince1970 * 1_000)
+    ) -> String {
+        RivuneDiagnosticsReport.build(RivuneDiagnosticReportInput(
+            generatedAtMilliseconds: generatedAtMilliseconds,
+            appVersion: metadata.appVersion,
+            appBuild: metadata.appBuild,
+            platform: metadata.platform,
+            operatingSystemVersion: metadata.operatingSystemVersion,
+            deviceModel: metadata.deviceModel,
+            isTelevision: metadata.isTelevision,
+            serverAddress: serverAddress,
+            serverDisplayName: serverName,
+            serverVersion: serverVersion,
+            serverProtocolVersion: serverProtocolVersion,
+            startupTab: startupTab.rawValue,
+            preferredPlayer: preferredPlayer.rawValue,
+            embeddedPlayer: embeddedPlayerPreference.rawValue,
+            animationPreference: animationPreference.rawValue,
+            accentColor: accent.rawValue,
+            frameRateMatching: frameRateMatching.rawValue,
+            videoAspect: videoAspect.rawValue,
+            wifiQuality: wifiQuality.rawValue,
+            mobileQuality: mobileQuality.rawValue,
+            events: diagnostics.snapshot()
+        ))
+    }
+
+    func recordDiagnosticExport(succeeded: Bool) {
+        diagnostics.record(succeeded ? .diagnosticExportSucceeded : .diagnosticExportFailed)
+    }
+
+    func recordPlaybackFailure() {
+        diagnostics.record(.playbackFailed)
+    }
 
     public func setAccent(_ accent: RivuneAccent) {
         self.accent = accent
@@ -1094,7 +1135,11 @@ public final class RivuneAppModel: ObservableObject {
                     markers: [], durationSeconds: nil, expectedVersion: 0, audioTracks: [], subtitles: [],
                     selectedAudioTrack: nil, selectedSubtitleId: nil, coordinatedItem: nil
                 )
-            } catch { self?.mediaFailure = .message(error.localizedDescription) }
+                self.diagnostics.record(.playbackStarted)
+            } catch {
+                self?.diagnostics.record(.playbackFailed)
+                self?.mediaFailure = .message(error.localizedDescription)
+            }
         }
     }
 
@@ -1209,8 +1254,10 @@ public final class RivuneAppModel: ObservableObject {
                         coordinatedItem: self.coordinatedItem(for: detail)
                     )
                 }
+                self.diagnostics.record(.playbackStarted)
             } catch {
                 guard let self, self.isCurrentMedia(current) else { return }
+                self.diagnostics.record(.playbackFailed)
                 self.mediaLoading = false
                 self.mediaFailure = self.map(error, fallback: .message("Playback could not be started."))
             }
@@ -1284,6 +1331,7 @@ public final class RivuneAppModel: ObservableObject {
 
     public func playbackFinished(position: Int, duration: Int, completed: Bool) {
         guard let presentation = playbackPresentation else { return }
+        diagnostics.record(.playbackStopped)
         coordinationStatus = completed ? "ended" : "idle"
         coordinationPositionMilliseconds = Int64(max(position, 0) * 1_000)
         coordinationDurationMilliseconds = Int64(max(duration, 0) * 1_000)
@@ -1310,6 +1358,7 @@ public final class RivuneAppModel: ObservableObject {
 
     public func minimizedPlaybackFinished(position: Int, duration: Int, completed: Bool) {
         guard let presentation = minimizedPlaybackPresentation else { return }
+        diagnostics.record(.playbackStopped)
         minimizedPlaybackPresentation = nil
         finishPlayback(presentation, position: position, duration: duration, completed: completed)
     }
@@ -1372,6 +1421,7 @@ public final class RivuneAppModel: ObservableObject {
 
     private func connectNow(_ value: String, generation: UInt64) async {
         guard let url = URL(string: value), url.scheme != nil, url.host != nil else {
+            diagnostics.record(.serverConnectionFailed)
             finishFailure(.invalidServer, generation: generation)
             return
         }
@@ -1380,12 +1430,16 @@ public final class RivuneAppModel: ObservableObject {
             let discovery = try await candidate.discover()
             guard isCurrent(generation) else { return }
             guard !discovery.setupRequired else {
+                diagnostics.record(.serverConnectionFailed)
                 finishFailure(.setupRequired, generation: generation)
                 return
             }
             client = candidate
             serverOrigin = Self.origin(of: url)
             serverName = discovery.name
+            serverVersion = discovery.serverVersion
+            serverProtocolVersion = discovery.protocolVersion
+            diagnostics.record(.serverConnectionSucceeded)
             playbackCoordinationAvailable = discovery.supports(.playbackCoordination)
             localRecommendationsAvailable = discovery.supports(.localRecommendations)
             defaults.set(value, forKey: Self.serverKey)
@@ -1396,6 +1450,7 @@ public final class RivuneAppModel: ObservableObject {
                 await beginPairing(generation: generation)
             }
         } catch {
+            diagnostics.record(.serverConnectionFailed)
             if let client, await recoverSessionIfNeeded(error, using: client, generation: generation) { return }
             finishFailure(map(error, fallback: .serverUnreachable), generation: generation)
         }
@@ -1498,6 +1553,7 @@ public final class RivuneAppModel: ObservableObject {
     }
 
     private func loadCollections(using client: RivuneAPIClient, generation: UInt64) async {
+        diagnostics.record(.catalogRefreshStarted)
         do {
             let loaded = try await client.collections()
             guard isCurrent(generation) else { return }
@@ -1511,9 +1567,11 @@ public final class RivuneAppModel: ObservableObject {
             guard isCurrent(generation) else { return }
             isBusy = false
             failure = nil
+            diagnostics.record(.catalogRefreshSucceeded)
         } catch is CancellationError {
         } catch {
             guard isCurrent(generation) else { return }
+            diagnostics.record(.catalogRefreshFailed)
             if await recoverSessionIfNeeded(error, using: client, generation: generation) { return }
             isBusy = false
             failure = map(error, fallback: .contentLoad)
@@ -1771,7 +1829,9 @@ public final class RivuneAppModel: ObservableObject {
                 selectedAudioTrack: session.selectedAudioTrack, selectedSubtitleId: session.selectedSubtitleId,
                 coordinatedItem: item
             )
+            diagnostics.record(.playbackStarted)
         } catch {
+            diagnostics.record(.playbackFailed)
             playbackPresentation = nil
             mediaFailure = .message("Playback handoff could not be started.")
         }
@@ -2144,6 +2204,8 @@ public final class RivuneAppModel: ObservableObject {
     private func resetSessionState() {
         serverOrigin = nil
         serverName = "Rivune"
+        serverVersion = nil
+        serverProtocolVersion = nil
         pairingCode = nil
         verificationURL = nil
         pairingAccepted = false

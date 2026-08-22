@@ -4,11 +4,9 @@ import android.content.ActivityNotFoundException
 import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
-import android.content.ClipDescription
 import android.content.Intent
 import android.os.Build
 import android.net.Uri
-import android.os.PersistableBundle
 import android.widget.Toast
 import android.view.HapticFeedbackConstants
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -19,7 +17,10 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
@@ -88,6 +89,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -151,7 +153,7 @@ import kotlinx.coroutines.launch
 internal fun RivuneRoot(
     viewModel: RivuneViewModel,
     updates: AppUpdateCoordinator,
-    activity: Activity,
+    activity: MainActivity,
     systemAnimationsEnabled: Boolean,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -168,6 +170,7 @@ internal fun RivuneRoot(
     var diagnosticExportRequested by rememberSaveable { mutableStateOf(false) }
     var pendingLocalNetworkServer by rememberSaveable { mutableStateOf<String?>(null) }
     var automaticallyRequestedLocalNetworkServer by rememberSaveable { mutableStateOf<String?>(null) }
+    var diagnosticPreview by remember { mutableStateOf<String?>(null) }
     var discoveryRequested by rememberSaveable { mutableStateOf(false) }
     var discoveredServers by remember { mutableStateOf(emptyList<DiscoveredRivuneServer>()) }
     val lanDiscovery = remember(activity) { LanServerDiscovery(activity) }
@@ -349,34 +352,20 @@ internal fun RivuneRoot(
                             },
                             onCopyDiagnostics = {
                                 val report = buildDiagnosticReport(currentDiagnosticReport())
-                                try {
-                                    val clipboard = activity.getSystemService(ClipboardManager::class.java)
-                                    val clip = ClipData.newPlainText("Rivune diagnostics", report)
-                                    clip.description.extras = PersistableBundle().apply {
-                                        val sensitiveKey = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                            ClipDescription.EXTRA_IS_SENSITIVE
-                                        } else {
-                                            CLIPBOARD_SENSITIVE_COMPAT_KEY
-                                        }
-                                        putBoolean(sensitiveKey, true)
-                                    }
-                                    clipboard.setPrimaryClip(clip)
-                                    Toast.makeText(activity, diagnosticsCopied, Toast.LENGTH_SHORT).show()
-                                    application.applicationScope.launch {
-                                        delay(DIAGNOSTIC_CLIPBOARD_LIFETIME_MS)
-                                        runCatching {
-                                            val current = clipboard.primaryClip
-                                            if (current?.itemCount == 1 && current.getItemAt(0).text?.toString() == report) {
-                                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                                                    clipboard.clearPrimaryClip()
-                                                } else {
-                                                    clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
-                                                }
-                                            }
-                                        }
-                                    }
-                                } catch (_: SecurityException) {
-                                    Toast.makeText(activity, diagnosticsCopyFailed, Toast.LENGTH_SHORT).show()
+                                if (state.isTv) {
+                                    diagnosticPreview = report
+                                    application.diagnostics.record(DiagnosticEventCode.DIAGNOSTIC_EXPORT_SUCCEEDED)
+                                } else {
+                                    val copied = activity.copyDiagnosticReport(report)
+                                    application.diagnostics.record(
+                                        if (copied) DiagnosticEventCode.DIAGNOSTIC_EXPORT_SUCCEEDED
+                                        else DiagnosticEventCode.DIAGNOSTIC_EXPORT_FAILED,
+                                    )
+                                    Toast.makeText(
+                                        activity,
+                                        if (copied) diagnosticsCopied else diagnosticsCopyFailed,
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
                                 }
                             },
                             onExportLogs = {
@@ -451,6 +440,10 @@ internal fun RivuneRoot(
             }
 
 
+            diagnosticPreview?.let { report ->
+                DiagnosticReportDialog(report = report, onDismiss = { diagnosticPreview = null })
+            }
+
             AppUpdateDialog(
                 state = updateState,
                 isTv = state.isTv,
@@ -462,8 +455,6 @@ internal fun RivuneRoot(
     }
 }
 
-private const val DIAGNOSTIC_CLIPBOARD_LIFETIME_MS = 60_000L
-private const val CLIPBOARD_SENSITIVE_COMPAT_KEY = "android.content.extra.IS_SENSITIVE"
 
 private fun diagnosticReportInput(
     activity: Activity,
@@ -507,6 +498,79 @@ private fun diagnosticReportInput(
         mobileQuality = preferences.mobileQuality.preferenceValue,
         events = events,
     )
+}
+
+@Composable
+private fun DiagnosticReportDialog(report: String, onDismiss: () -> Unit) {
+    val reportFocus = remember { FocusRequester() }
+    val reportScroll = rememberScrollState()
+    val scope = rememberCoroutineScope()
+    val scrollStep = with(LocalDensity.current) { RivuneSpacing.display.toPx() }
+    var reportFocused by remember { mutableStateOf(false) }
+    LaunchedEffect(report) { reportFocus.requestFocus() }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize().padding(RivuneSpacing.xl),
+            shape = RivuneShapes.large,
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Column(
+                modifier = Modifier.fillMaxSize().padding(RivuneSpacing.xl),
+                verticalArrangement = Arrangement.spacedBy(RivuneSpacing.lg),
+            ) {
+                RivuneScreenHeading(
+                    eyebrow = stringResource(R.string.preferences_diagnostics),
+                    title = stringResource(R.string.diagnostics_private_title),
+                    body = stringResource(R.string.diagnostics_private_body),
+                    isTv = true,
+                )
+                Text(
+                    text = report,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .focusRequester(reportFocus)
+                        .onFocusChanged { reportFocused = it.isFocused }
+                        .onPreviewKeyEvent { event ->
+                            if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                            when (event.key) {
+                                Key.DirectionUp -> if (reportScroll.canScrollBackward) {
+                                    scope.launch { reportScroll.scrollBy(-scrollStep) }
+                                    true
+                                } else false
+                                Key.DirectionDown -> if (reportScroll.canScrollForward) {
+                                    scope.launch { reportScroll.scrollBy(scrollStep) }
+                                    true
+                                } else false
+                                else -> false
+                            }
+                        }
+                        .focusable()
+                        .then(
+                            if (reportFocused) Modifier.border(
+                                RivuneDimensions.focusRing,
+                                MaterialTheme.colorScheme.primary,
+                                RivuneShapes.small,
+                            ) else Modifier,
+                        )
+                        .padding(RivuneSpacing.sm)
+                        .verticalScroll(reportScroll),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                RivunePrimaryButton(
+                    label = stringResource(R.string.diagnostics_done),
+                    onClick = onDismiss,
+                    isTv = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
 }
 
 @Composable

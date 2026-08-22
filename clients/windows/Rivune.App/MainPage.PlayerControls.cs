@@ -429,6 +429,7 @@ public sealed partial class MainPage
         catch (Exception exception) when (restartCancellation.IsCancellationRequested) { restartFailure = exception; }
         catch (Exception exception)
         {
+            _diagnostics.Record(DiagnosticEventCode.PlaybackFailed);
             restartFailure = exception;
             SetPlayerStatus(FriendlyError(exception), liveSetting: AutomationLiveSetting.Assertive);
             if (oldSessionStopped && showRecovery) recoveryMessage = FriendlyError(exception);

@@ -28,6 +28,8 @@ class DiagnosticsTest {
         assertNull(sanitizeServerOrigin("/api/v1"))
         assertNull(sanitizeServerOrigin("file://media.example/private"))
         assertNull(sanitizeServerOrigin("https://media.example\nAuthorization: Bearer secret"))
+        assertNull(sanitizeServerOrigin("https://[fe80::1%25en0]/private"))
+        assertNull(sanitizeServerOrigin("https://e${"\u0301".repeat(4_096)}.example"))
         assertNull(sanitizeServerOrigin("https://"))
     }
 

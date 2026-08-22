@@ -30,6 +30,9 @@ public sealed partial class MainPage : Page
     private static readonly TimeSpan RestoreTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(3);
     private readonly MainPageViewModel _state = new();
+    private readonly DiagnosticsBuffer _diagnostics = new();
+    private long _diagnosticClipboardGeneration;
+    private string? _diagnosticClipboardReport;
     private readonly ServerAddressStore _serverAddressStore = new();
     private readonly LanServerDiscovery _lanDiscovery = new();
     private WindowsDevicePreferencesStore? _devicePreferencesStore;
@@ -53,6 +56,7 @@ public sealed partial class MainPage : Page
     private long _progressVersion;
     private int _lastQueuedPosition = -10;
     private bool _playbackCompleted;
+    private bool _diagnosticPlaybackActive;
     private readonly PlaybackTimeline _timeline = new();
     private AdaptiveMediaSource? _adaptiveMediaSource;
     private MediaSource? _mediaSource;
@@ -105,6 +109,7 @@ public sealed partial class MainPage : Page
     public MainPage()
     {
         InitializeComponent();
+        _diagnostics.Record(DiagnosticEventCode.AppStarted);
         Root.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler(Root_PointerMoved), handledEventsToo: true);
         ConfigureZoomButton(ConnectButton);
         ConfigureZoomButton(CheckUpdatesButton);
@@ -303,6 +308,7 @@ public sealed partial class MainPage : Page
                 return;
             }
 
+            _diagnostics.Record(DiagnosticEventCode.ServerConnectionStarted);
             if (!Uri.TryCreate(saved, UriKind.Absolute, out var server))
                 throw new InvalidServerUrlException(saved);
             var client = new RivuneApiClient(server);
@@ -312,6 +318,7 @@ public sealed partial class MainPage : Page
             if (!_state.IsCurrent(generation)) return;
             if (_state.Discovery.SetupRequired)
             {
+                _diagnostics.Record(DiagnosticEventCode.ServerConnectionFailed);
                 var addressCleared = await ClearSavedServerAsync();
                 if (!_state.IsCurrent(generation)) return;
                 _state.ResetServer();
@@ -320,6 +327,7 @@ public sealed partial class MainPage : Page
                     : "This Rivune server must finish setup before you can connect. The saved address could not be removed; fix local file access before restarting Rivune.");
                 return;
             }
+            _diagnostics.Record(DiagnosticEventCode.ServerConnectionSucceeded);
             var restored = await client.RestoreSessionAsync(deadline.Token);
             if (!_state.IsCurrent(generation)) return;
             if (!restored)
@@ -358,17 +366,20 @@ public sealed partial class MainPage : Page
         }
         catch (OperationCanceledException) when (_state.IsCurrent(generation) && deadline.IsCancellationRequested)
         {
+            _diagnostics.Record(DiagnosticEventCode.ServerConnectionFailed);
             _state.ResetServer();
             ShowServer("Restoring the saved session timed out. Check the server address and try again.");
         }
         catch (OperationCanceledException) when (_state.IsCurrent(generation))
         {
+            _diagnostics.Record(DiagnosticEventCode.ServerConnectionFailed);
             _state.ResetServer();
             ShowServer("Session restore was cancelled. Try connecting again.");
         }
         catch (OperationCanceledException) { }
         catch (InvalidServerUrlException exception)
         {
+            _diagnostics.Record(DiagnosticEventCode.ServerConnectionFailed);
             if (!_state.IsCurrent(generation)) return;
             var addressCleared = await ClearSavedServerAsync();
             _state.ResetServer();
@@ -379,6 +390,7 @@ public sealed partial class MainPage : Page
         }
         catch (Exception exception)
         {
+            _diagnostics.Record(DiagnosticEventCode.ServerConnectionFailed);
             if (!_state.IsCurrent(generation)) return;
             _state.ResetServer();
             ShowServer(FriendlyError(exception));
@@ -441,6 +453,7 @@ public sealed partial class MainPage : Page
             return;
         }
 
+        _diagnostics.Record(DiagnosticEventCode.ServerConnectionStarted);
         ConnectButton.IsEnabled = false;
         ConnectButtonLabel.Text = "Connecting…";
         try
@@ -453,6 +466,7 @@ public sealed partial class MainPage : Page
             if (!_state.IsCurrent(generation)) return;
             if (_state.Discovery.SetupRequired)
             {
+                _diagnostics.Record(DiagnosticEventCode.ServerConnectionFailed);
                 var addressCleared = await ClearSavedServerAsync();
                 if (!_state.IsCurrent(generation)) return;
                 _state.ResetServer();
@@ -461,13 +475,18 @@ public sealed partial class MainPage : Page
                     : "This Rivune server must finish setup before you can connect. The previously saved address could not be removed.");
                 return;
             }
+            _diagnostics.Record(DiagnosticEventCode.ServerConnectionSucceeded);
             _serverAddressOperation = _serverAddressStore.SaveAsync(server.GetLeftPart(UriPartial.Authority), _state.Token);
             await _serverAddressOperation;
             await StartPairingAsync();
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException)
+        {
+            if (!_closed) _diagnostics.Record(DiagnosticEventCode.ServerConnectionFailed);
+        }
         catch (Exception exception)
         {
+            _diagnostics.Record(DiagnosticEventCode.ServerConnectionFailed);
             ShowServer(FriendlyError(exception));
         }
         finally
@@ -1264,6 +1283,13 @@ public sealed partial class MainPage : Page
         PlaySourceButton.IsEnabled = false;
         SourceProgress.IsActive = true;
         SourceStatus.Text = "Resolving secure playback…";
+        var playbackFailureRecorded = false;
+        void RecordPlaybackFailure()
+        {
+            if (playbackFailureRecorded) return;
+            playbackFailureRecorded = true;
+            _diagnostics.Record(DiagnosticEventCode.PlaybackFailed);
+        }
         try
         {
             var current = _tracksProgress ? await client.GetPlaybackProgressAsync(_progressTitleId, _state.Token) : null;
@@ -1294,6 +1320,7 @@ public sealed partial class MainPage : Page
             {
                 _endingTask = null;
                 _playerReturnTask = null;
+                _diagnosticPlaybackActive = false;
             }
             _playbackCompleted = false;
             _preferredAudioTrack = session.SelectedAudioTrack;
@@ -1310,6 +1337,7 @@ public sealed partial class MainPage : Page
             }
             catch (Exception exception)
             {
+                RecordPlaybackFailure();
                 await EndPlaybackAsync(completed: false, returnToDashboard: false);
                 _state.PlaybackSession = null;
                 if (throwOnFailure) throw;
@@ -1319,13 +1347,15 @@ public sealed partial class MainPage : Page
                 return;
             }
         }
-        catch (OperationCanceledException) when (!throwOnFailure) { }
+        catch (OperationCanceledException) { if (throwOnFailure) throw; }
         catch (RivuneServerException exception) when (exception.Code == "playback_source_expired" && _state.IsCurrent(generation) && !throwOnFailure)
         {
             await RefreshExpiredSourcesAsync();
         }
-        catch (Exception exception) when (!throwOnFailure)
+        catch (Exception exception)
         {
+            if (_state.IsCurrent(generation)) RecordPlaybackFailure();
+            if (throwOnFailure) throw;
             if (_state.IsCurrent(generation)) SetSourceFailure(exception);
         }
         finally
@@ -1403,6 +1433,8 @@ public sealed partial class MainPage : Page
                     throw new OperationCanceledException(cancellationToken);
                 _mediaPlayer.Play();
                 _positionTimer.Start();
+                _diagnosticPlaybackActive = true;
+                _diagnostics.Record(DiagnosticEventCode.PlaybackStarted);
             }
             StartPlayerStartupWatchdog(generation);
             _ = LoadPlayerContextAsync(generation);
@@ -1445,6 +1477,7 @@ public sealed partial class MainPage : Page
             await DispatcherQueue.EnqueueAsync(async () =>
             {
                 if (!_state.IsCurrent(generation) || _state.PlaybackSession is null && _activeOfflineItem is null) return;
+                _diagnostics.Record(DiagnosticEventCode.PlaybackFailed);
                 SetPlayerStatus("Playback did not start within 45 seconds.", liveSetting: AutomationLiveSetting.Assertive);
                 await EndPlaybackAsync(completed: false, returnToDashboard: false);
                 await ShowPlaybackRecoveryAsync("Playback did not start within 45 seconds.", failedPosition);
@@ -1558,7 +1591,16 @@ public sealed partial class MainPage : Page
         CancellationTokenSource? trackRestartCancellation = null;
         lock (_endingSync)
         {
-            ending = _endingTask ??= EndPlaybackCoreAsync(_state.PlaybackSession, _state.Client, _mediaPlayer);
+            if (_endingTask is null)
+            {
+                if (_diagnosticPlaybackActive)
+                {
+                    _diagnosticPlaybackActive = false;
+                    _diagnostics.Record(DiagnosticEventCode.PlaybackStopped);
+                }
+                _endingTask = EndPlaybackCoreAsync(_state.PlaybackSession, _state.Client, _mediaPlayer);
+            }
+            ending = _endingTask;
             if (returnToDashboard)
             {
                 returning = _playerReturnTask ??= ReturnFromPlayerAsync(ending);
@@ -1680,6 +1722,7 @@ public sealed partial class MainPage : Page
         {
             if (!ReferenceEquals(sender, _mediaPlayer) || PlayerView.Visibility != Visibility.Visible ||
                 _state.PlaybackSession is null && _activeOfflineItem is null) return;
+            _diagnostics.Record(DiagnosticEventCode.PlaybackFailed);
             SetPlayerStatus($"Playback failed: {args.ErrorMessage}", liveSetting: AutomationLiveSetting.Assertive);
             await EndPlaybackAsync(completed: false, returnToDashboard: false);
             if (!ReferenceEquals(sender, _mediaPlayer)) return;
@@ -2534,6 +2577,12 @@ public sealed partial class MainPage : Page
     private Task ShutdownAsync() => ShutdownDeadline.RunAsync(
         async cancellationToken =>
         {
+            var diagnosticReport = _diagnosticClipboardReport;
+            if (diagnosticReport is not null)
+                await ClearDiagnosticClipboardAsync(
+                    diagnosticReport,
+                    Volatile.Read(ref _diagnosticClipboardGeneration),
+                    waitForExpiry: false).WaitAsync(cancellationToken);
             if (_restoreTask is not null) await _restoreTask.WaitAsync(cancellationToken);
             if (_updateOperationTask is { } updateOperation)
                 await updateOperation.WaitAsync(cancellationToken);

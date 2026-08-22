@@ -164,7 +164,12 @@
     <string name="preferences_diagnostics_body">Copy a private, token-free system summary or export recent app logs for support.</string>
     <string name="preferences_copy_diagnostics">Copy diagnostics</string>
     <string name="preferences_export_logs">Export logs</string>
-    <string name="diagnostics_copied">Diagnostics copied. Android will hide the clipboard preview.</string>
+    <string name="preferences_view_diagnostics">View diagnostics</string>
+    <string name="preferences_diagnostics_body_tv">View the bounded token-free report locally or export it to a user-selected destination. Rivune never uploads it.</string>
+    <string name="diagnostics_private_title">Private diagnostics</string>
+    <string name="diagnostics_private_body">Nothing is uploaded. Photograph the allowlisted report if this TV has no document provider.</string>
+    <string name="diagnostics_done">Done</string>
+    <string name="diagnostics_copied">Diagnostics copied with a hidden preview. Rivune clears it in 60 seconds or when you leave the app.</string>
     <string name="diagnostics_copy_failed">Diagnostics could not be copied.</string>
     <string name="diagnostics_exported">Diagnostic log exported.</string>
     <string name="diagnostics_export_failed">Diagnostic log could not be exported.</string>
