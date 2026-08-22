@@ -144,7 +144,7 @@ final class OfflineMediaStoreTests: XCTestCase {
         try await RivuneOfflineMediaStore.shared.saveManifest([item], in: scope)
         try Data(repeating: 7, count: 12).write(to: directory.appendingPathComponent(item.fileName))
 
-        let model = RivuneAppModel(defaults: defaults)
+        let model = offlineTestModel(defaults: defaults)
         model.start()
         for _ in 0..<100 where model.offlineProfiles.isEmpty {
             try await Task.sleep(nanoseconds: 1_000_000)
@@ -199,7 +199,7 @@ final class OfflineMediaStoreTests: XCTestCase {
         try Data([1, 2, 3, 4]).write(to: directory.appendingPathComponent(item.fileName))
         try await RivuneOfflineMediaStore.shared.saveManifest([item], in: scope)
 
-        let model = RivuneAppModel(defaults: defaults)
+        let model = offlineTestModel(defaults: defaults)
         model.unlockOfflineProfile(access)
         for _ in 0..<100 where model.offlineItems.isEmpty { try await Task.sleep(nanoseconds: 1_000_000) }
         model.handleSceneBackground()
@@ -216,7 +216,7 @@ final class OfflineMediaStoreTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let scope = try XCTUnwrap(RivuneOfflineMediaScope(serverOrigin: URL(string: "https://transient.example")!, profileID: UUID()))
         let access = try RivuneOfflineProfileAccess(name: "Transient", scope: scope, pin: "2468")
-        let model = RivuneAppModel(defaults: defaults)
+        let model = offlineTestModel(defaults: defaults)
 
         model.unlockOfflineProfile(access, pin: "2468")
         XCTAssertTrue(model.offlineAccessUnlocked)
@@ -243,7 +243,7 @@ final class OfflineMediaStoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         try await RivuneOfflineMediaStore.shared.saveManifest([item], in: scope)
 
-        let model = RivuneAppModel(defaults: defaults)
+        let model = offlineTestModel(defaults: defaults)
         model.start()
         for _ in 0..<20 { await Task.yield() }
 
@@ -325,6 +325,21 @@ final class OfflineMediaStoreTests: XCTestCase {
             progress: { _ in }
         )
         XCTAssertEqual(try secondWriter.finish(), 4)
+    }
+}
+
+@MainActor
+private func offlineTestModel(defaults: UserDefaults) -> RivuneAppModel {
+    RivuneAppModel(
+        defaults: defaults,
+        updateChecker: OfflineTestUpdateChecker(),
+        applicationVersion: "1.11.4"
+    )
+}
+
+private struct OfflineTestUpdateChecker: RivuneAppleUpdateChecking {
+    func check(currentVersion: String) async throws -> RivuneAppleUpdateCheckResult {
+        .upToDate(currentVersion: currentVersion, latestVersion: currentVersion)
     }
 }
 

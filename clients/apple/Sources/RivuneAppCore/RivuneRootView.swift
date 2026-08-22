@@ -10,7 +10,11 @@ import AppKit
 public struct RivuneRootView: View {
     @StateObject private var model: RivuneAppModel
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
     @State private var offlinePIN = ""
+#if os(tvOS)
+    @State private var televisionUpdate: RivuneAppleUpdate?
+#endif
 
     public init(model: RivuneAppModel) {
         _model = StateObject(wrappedValue: model)
@@ -49,6 +53,33 @@ public struct RivuneRootView: View {
         .onChange(of: scenePhase) { phase in
             if phase != .active { model.handleSceneBackground() }
         }
+        .alert(
+            "Rivune \(model.updateNotice?.latestVersion ?? "") is available",
+            isPresented: Binding(
+                get: { model.updateNotice != nil },
+                set: { if !$0 { model.dismissUpdateNotice() } }
+            ),
+            presenting: model.updateNotice
+        ) { update in
+#if os(tvOS)
+            Button("View release QR code") {
+                model.dismissUpdateNotice()
+                televisionUpdate = update
+            }
+#else
+            Button("Open release") {
+                model.dismissUpdateNotice()
+                openURL(update.releaseURL)
+            }
+#endif
+            Button("Later", role: .cancel, action: model.dismissUpdateNotice)
+        } message: { _ in
+#if os(tvOS)
+            Text("Rivune does not install Apple updates automatically. Scan the release QR code on another device to download and prepare the unsigned package.")
+#else
+            Text("Rivune does not install Apple updates automatically. Open the verified GitHub release to download the unsigned package and follow its installation instructions.")
+#endif
+        }
         .animation(.easeInOut(duration: 0.22), value: model.destination)
         .mediaPlayerPresentation(item: Binding(
             get: { model.mediaDetail == nil ? model.playbackPresentation : nil },
@@ -62,6 +93,11 @@ public struct RivuneRootView: View {
         )) { profile in
             OfflineUnlockView(profile: profile, pin: $offlinePIN, model: model)
         }
+#if os(tvOS)
+        .sheet(item: $televisionUpdate) { update in
+            RivuneTelevisionUpdateView(update: update)
+        }
+#endif
     }
 }
 
@@ -294,6 +330,7 @@ private struct ServerView: View {
             )
             serverSections
             offlineProfilesSection
+            UpdateStatusCard(model: model)
         }
         .onAppear {
             address = model.serverAddress
@@ -444,6 +481,62 @@ private struct ServerView: View {
         model.connect(to: value)
     }
 }
+
+private struct UpdateStatusCard: View {
+    @ObservedObject var model: RivuneAppModel
+    @Environment(\.openURL) private var openURL
+#if os(tvOS)
+    @State private var televisionUpdate: RivuneAppleUpdate?
+#endif
+
+    var body: some View {
+        Group {
+            switch model.updateState {
+            case .available(let update):
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("Rivune \(update.latestVersion) is available", systemImage: "arrow.down.circle.fill")
+                        .font(.headline)
+                    Group {
+#if os(tvOS)
+                        Text("Scan the release QR code on another device to download and prepare the unsigned Apple package.")
+#else
+                        Text("Open the verified GitHub release to download the unsigned Apple package and follow its installation instructions.")
+#endif
+                    }
+                    .font(.footnote)
+                    .foregroundStyle(RivunePalette.secondary)
+#if os(tvOS)
+                    Button("View release QR code") { televisionUpdate = update }
+                        .buttonStyle(.borderedProminent)
+#else
+                    Button("Open release") { openURL(update.releaseURL) }
+                        .buttonStyle(.borderedProminent)
+#endif
+                }
+                .padding(18)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RivunePalette.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            case .failed:
+                HStack(spacing: 12) {
+                    Label("The update check failed.", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.yellow)
+                    Spacer()
+                    Button("Try again") { model.checkForUpdates() }.buttonStyle(.bordered)
+                }
+                .padding(18)
+                .background(RivunePalette.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            default:
+                EmptyView()
+            }
+        }
+#if os(tvOS)
+        .sheet(item: $televisionUpdate) { update in
+            RivuneTelevisionUpdateView(update: update)
+        }
+#endif
+    }
+}
+
 
 private struct LANDiscoveryCard: View {
     let servers: [DiscoveredRivuneServer]
@@ -1589,8 +1682,12 @@ private struct LibraryHeader: View {
 private struct AppearanceSettingsView: View {
     @ObservedObject var model: RivuneAppModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
     @State private var diagnosticStatus: String?
     @State private var diagnosticPreview = ""
+#if os(tvOS)
+    @State private var televisionUpdate: RivuneAppleUpdate?
+#endif
     @State private var diagnosticPreviewPresented = false
 #if !os(tvOS)
     @State private var diagnosticDocument: RivuneDiagnosticTextDocument?
@@ -1734,6 +1831,22 @@ private struct AppearanceSettingsView: View {
                         settingsValue("Profile", value: model.activeProfile?.name ?? "None")
                     }
 
+                    settingsSection("APPLICATION UPDATE") {
+                        settingsValue("Installed version", value: model.applicationVersion)
+                        updateStatus(model.updateState)
+                        Button {
+                            model.checkForUpdates()
+                        } label: {
+                            if case .checking = model.updateState {
+                                Label("Checking…", systemImage: "arrow.triangle.2.circlepath")
+                            } else {
+                                Label("Check now", systemImage: "arrow.triangle.2.circlepath")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(model.updateState == .checking)
+                    }
+
                     settingsSection("DIAGNOSTICS") {
                         Text("The report is generated only from allowlisted system fields and recent in-memory event codes. It contains no token, media title, profile identifier, request payload, or error detail, and Rivune never uploads it.")
                             .foregroundStyle(RivunePalette.secondary)
@@ -1777,6 +1890,9 @@ private struct AppearanceSettingsView: View {
         .sheet(isPresented: $diagnosticPreviewPresented) {
             RivuneTelevisionDiagnosticView(report: diagnosticPreview)
         }
+        .sheet(item: $televisionUpdate) { update in
+            RivuneTelevisionUpdateView(update: update)
+        }
 #else
         .fileExporter(
             isPresented: $diagnosticExporterPresented,
@@ -1806,6 +1922,41 @@ private struct AppearanceSettingsView: View {
         }
         .padding(18)
         .background(RivunePalette.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    @ViewBuilder private func updateStatus(_ state: RivuneAppleUpdateState) -> some View {
+        switch state {
+        case .idle:
+            Text("Rivune checks GitHub automatically when the app launches, then waits 24 hours after a successful check.")
+                .foregroundStyle(RivunePalette.secondary)
+        case .checking:
+            HStack(spacing: 10) {
+                ProgressView()
+                Text("Checking the verified Rivune release manifest…")
+            }
+            .foregroundStyle(RivunePalette.secondary)
+        case .upToDate(_, let latestVersion):
+            Label("Up to date · \(latestVersion)", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+        case .available(let update):
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Version \(update.latestVersion) is available", systemImage: "arrow.down.circle.fill")
+                    .foregroundStyle(RivunePalette.accent)
+                Text("Automatic installation is unavailable. The public Apple package is unsigned and must be downloaded from the verified GitHub release, then signed or approved as required by the platform.")
+                    .font(.footnote)
+                    .foregroundStyle(RivunePalette.secondary)
+#if os(tvOS)
+                Button("View release QR code") { televisionUpdate = update }
+                    .buttonStyle(.borderedProminent)
+#else
+                Button("Open release") { openURL(update.releaseURL) }
+                    .buttonStyle(.borderedProminent)
+#endif
+            }
+        case .failed:
+            Label("The update check failed. No package was downloaded.", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.yellow)
+        }
     }
 
     private func settingsPicker<Value>(_ title: String, selection: Binding<Value>, options: [Value]) -> some View where Value: Hashable, Value: RawRepresentable, Value.RawValue == String {

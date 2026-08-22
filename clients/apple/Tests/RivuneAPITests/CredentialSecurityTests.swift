@@ -325,6 +325,31 @@ final class CredentialSecurityTests: XCTestCase {
         session.invalidateAndCancel()
     }
 
+    func testDeclaredResponseHonorsConfiguredTransportLimit() {
+        let limit = 256 * 1_024
+        let session = URLSession(configuration: .ephemeral)
+        let transport = URLSessionTransport(session: session, maximumResponseBodyBytes: limit)
+        let task = session.dataTask(with: URL(string: "https://update-limit.test")!)
+        let response = HTTPURLResponse(
+            url: task.originalRequest!.url!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Length": String(limit + 1)]
+        )!
+        var receivedDisposition: URLSession.ResponseDisposition?
+
+        transport.loader.urlSession(
+            session,
+            dataTask: task,
+            didReceive: response
+        ) { disposition in
+            receivedDisposition = disposition
+        }
+
+        XCTAssertEqual(receivedDisposition, .cancel)
+        session.invalidateAndCancel()
+    }
+
     func testChunkedDiscoveryAcceptsLimitAndCancelsAtLimitPlusOne() async throws {
         let exactBody = paddedBody(discoveryBody(), count: URLSessionTransport.maximumResponseBodyBytes)
         ChunkedURLProtocol.configure(
