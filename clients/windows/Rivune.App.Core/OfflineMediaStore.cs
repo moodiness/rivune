@@ -84,6 +84,7 @@ internal sealed class OfflineMediaStore : IDisposable
     private readonly object _sync = new();
     private readonly SemaphoreSlim _downloadSlot = new(1, 1);
     private readonly HashSet<string> _activePartialPaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly FileStream _rootLease;
     private string? _authorizedScope;
     private bool _disposed;
     public OfflineMediaStore(
@@ -101,6 +102,7 @@ internal sealed class OfflineMediaStore : IDisposable
         _keyProtector = keyProtector ?? new DpapiOfflineKeyProtector();
         _maximumStoredBytes = maximumStoredBytes;
         Directory.CreateDirectory(_root);
+        _rootLease = new FileStream(Path.Combine(_root, ".store.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
     }
 
     public static string ScopeFor(Uri serverOrigin, Guid profileId)
@@ -577,6 +579,7 @@ internal sealed class OfflineMediaStore : IDisposable
 
     private string ManifestPath(string scope) => Path.Combine(ScopeDirectory(scope), "manifest.v1.json");
 
+
     private void RequireOpen(string scope)
     {
         ValidateScope(scope);
@@ -649,6 +652,7 @@ internal sealed class OfflineMediaStore : IDisposable
             _disposed = true;
             _authorizedScope = null;
         }
+        _rootLease.Dispose();
     }
 
     private sealed record StoredGate

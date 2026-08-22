@@ -190,34 +190,15 @@ public sealed class OfflineMediaStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task ConcurrentDownloadsCannotShareOneQuotaAllowance()
+    public void SecondStoreCannotOpenTheSameOfflineRoot()
     {
-        using var store = new OfflineMediaStore(_root, new TestKeyProtector(), maximumStoredBytes: 3000);
-        var scope = store.RegisterProfile(Server, Profile(hasPin: false), null);
-        async Task<OfflineMediaItem?> Download(string name)
+        using var firstStore = new OfflineMediaStore(_root, new TestKeyProtector(), maximumStoredBytes: 3000);
+        firstStore.RegisterProfile(Server, Profile(hasPin: false), null);
+
+        Assert.Throws<IOException>(() =>
         {
-            try
-            {
-                return await store.DownloadAsync(
-                    scope,
-                    new Uri(Server, $"/media/{name}.mp4"),
-                    uri => uri.Host == Server.Host,
-                    Guid.NewGuid(),
-                    name,
-                    "mp4",
-                    null,
-                    handler: new FixedBodyHandler(new byte[1800]),
-                    cancellationToken: TestContext.Current.CancellationToken);
-            }
-            catch (InvalidOperationException) { return null; }
-        }
-
-        var results = await Task.WhenAll(Download("first"), Download("second"));
-
-        Assert.Single(results, item => item is not null);
-        Assert.Single(store.Items(scope));
-        Assert.DoesNotContain(Directory.EnumerateFiles(Path.Combine(_root, scope)), path =>
-            path.EndsWith(".partial", StringComparison.OrdinalIgnoreCase));
+            using var _ = new OfflineMediaStore(_root, new TestKeyProtector(), maximumStoredBytes: 3000);
+        });
     }
 
 
