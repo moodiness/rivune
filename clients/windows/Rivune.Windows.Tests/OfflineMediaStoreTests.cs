@@ -82,6 +82,32 @@ public sealed class OfflineMediaStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task SelectingProfileWithoutPinRemovesStaleOfflinePin()
+    {
+        using var store = new OfflineMediaStore(_root, new TestKeyProtector());
+        var scope = store.RegisterProfile(Server, Profile(hasPin: true), "2468");
+        await store.DownloadAsync(
+            scope,
+            new Uri(Server, "/media/video.mp4"),
+            uri => uri.Host == Server.Host,
+            TitleId,
+            "Movie",
+            "mp4",
+            null,
+            handler: new FixedBodyHandler(new byte[1024]),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        store.RegisterProfile(Server, Profile(hasPin: false), null);
+        store.Lock();
+
+        var gate = Assert.Single(store.Profiles());
+        Assert.False(gate.RequiresPin);
+        Assert.True(store.Unlock(scope, null));
+        Assert.Single(store.Items(scope));
+    }
+
+
+    [Fact]
     public async Task RejectedRedirectLeavesNoPartialOrManifestEntry()
     {
         using var store = new OfflineMediaStore(_root, new TestKeyProtector());

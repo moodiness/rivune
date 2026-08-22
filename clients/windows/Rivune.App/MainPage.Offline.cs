@@ -134,7 +134,7 @@ public sealed partial class MainPage
         if (_offlineScope is not null || _state.Profile is not { } profile || _offlineMediaStore is null ||
             !CurrentServerOrigin(out var origin)) return;
         var scope = OfflineMediaStore.ScopeFor(origin, profile.Id);
-        var gate = _offlineMediaStore.Profile(scope);
+        var gate = _offlineMediaStore.Profiles().FirstOrDefault(value => StringComparer.Ordinal.Equals(value.Scope, scope));
         if (gate is null) return;
         var pin = gate.RequiresPin ? await PromptOfflinePinAsync(profile.Name) : null;
         if (gate.RequiresPin && pin is null) return;

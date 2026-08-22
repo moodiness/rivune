@@ -131,11 +131,10 @@ internal sealed class OfflineMediaStore : IDisposable
             ThrowIfDisposed();
             var scope = ScopeFor(serverOrigin, profile.Id);
             var gates = ReadGates().ToList();
-            var existing = gates.FirstOrDefault(value => StringComparer.Ordinal.Equals(value.Scope, scope));
-            byte[]? salt = existing?.PinSalt;
-            byte[]? verifier = existing?.PinVerifier;
-            var requiresPin = profile.HasPin || existing?.RequiresPin == true;
-            if (profile.HasPin)
+            byte[]? salt = null;
+            byte[]? verifier = null;
+            var requiresPin = profile.HasPin;
+            if (requiresPin)
             {
                 if (!ValidPin(pin)) throw new InvalidOperationException("Offline PIN must contain 4 to 8 digits.");
                 salt = RandomNumberGenerator.GetBytes(16);
