@@ -1,20 +1,20 @@
 # Production operations
 
-The supported container deployment is the root [`compose.yaml`](../compose.yaml), which runs Rivune with PostgreSQL 18. Put it behind Pangolin/Newt or an operator-managed reverse proxy for public HTTPS. Run the commands in this document from the repository root. The supplied shell scripts explicitly target Linux with Bash, OpenSSL, Docker Engine, Docker Compose v2, and `set -euo pipefail`; CI runs the same scripts on Linux.
+The supported container deployment is the root [`compose.yaml`](../compose.yaml), which runs Rivune with PostgreSQL 18. Put it behind Pangolin/Newt or an operator-managed reverse proxy for public HTTPS. Run commands from the repository root. Linux and macOS use the supplied Bash operator; Windows uses `rivune.ps1` for lifecycle and host discovery plus `scripts/create-env.ps1` for the private environment file.
 
 ## Root operator command
 
 For the standard Linux Compose deployment, use the repository-root command instead of reconstructing Docker arguments:
 
 ```sh
-./rivune setup --public-url https://media.example.com --version 1.11.1
+./rivune setup --public-url https://media.example.com --version 1.11.2
 ./rivune up
 ./rivune status
 ./rivune logs rivune
 ./rivune doctor
 ```
 
-`setup` requires OpenSSL, validates a complete HTTPS or loopback/private-IP HTTP origin and stable numeric image version, generates the three database passwords, setup token, and encryption key independently, and atomically creates a mode-0600 `.env`. It refuses every existing file or symlink. Lifecycle commands explicitly select `.env` and `compose.yaml`; backup, verification, and restore preserve their existing positional and trust arguments. Run `./rivune help` for the complete command surface.
+`setup` requires OpenSSL, validates a complete HTTPS or loopback/private-IP HTTP origin and stable numeric image version, generates the three database passwords, setup token, and encryption key independently, and atomically creates a mode-0600 `.env`. It refuses every existing file or symlink. Lifecycle commands explicitly select `.env` and `compose.yaml`; backup, verification, and restore preserve their existing positional and trust arguments. On Windows, create `.env` with `.\scripts\create-env.ps1`, fill it, then use `.\rivune.ps1 up|down|restart|pull|status|logs`. Run the platform wrapper's help command for its complete surface.
 
 `doctor` fails on the first broken invariant: required tools and Compose plugin, private `.env` ownership/mode, required and distinct database secrets, explicit host binding, Compose rendering, both healthy containers, PostgreSQL readiness, loopback `/ready`, then the configured external HTTPS or local HTTP `/ready`. It never prints secret values.
 
@@ -52,7 +52,7 @@ login used only by the restore scripts.
 
 ```dotenv
 RIVUNE_PUBLIC_URL=https://media.example.com
-RIVUNE_VERSION=1.11.1
+RIVUNE_VERSION=1.11.2
 RIVUNE_POSTGRES_SUPERUSER_PASSWORD=<output of: openssl rand -hex 32>
 RIVUNE_DATABASE_PASSWORD=<different output of: openssl rand -hex 32>
 RIVUNE_RESTORE_PASSWORD=<different output of: openssl rand -hex 32>
@@ -163,12 +163,14 @@ origins remain rejected.
 ### Automatic LAN discovery
 
 `./rivune setup --public-url ...` copies the reachable origin to
-`RIVUNE_DISCOVERY_URL`. The root operator command then activates the optional
-`discovery` profile automatically. Its minimal sidecar joins the Linux host
-network only to publish `_rivune._tcp` through mDNS; the API and PostgreSQL
-containers retain their existing isolated networks. Set
-`RIVUNE_DISCOVERY_NAME` to the 1–63 byte label shown on phones, tablets, TVs,
-and Windows clients.
+`RIVUNE_DISCOVERY_URL`. On Linux, the root operator activates the optional
+host-network `discovery` sidecar automatically. On macOS, `./rivune` installs a
+per-user Bonjour LaunchAgent. On Windows, `.\rivune.ps1` installs a limited
+per-user scheduled PowerShell publisher backed by `DnsServiceRegister`; its
+private configuration, bounded log, and active PID status live under
+`%LOCALAPPDATA%\Rivune\discovery`. All three publish `_rivune._tcp` with the
+same URL, protocol 20, and version TXT fields. Set `RIVUNE_DISCOVERY_NAME` to
+the 1–63 UTF-8 byte label shown by the native clients.
 
 The announced URL is connection metadata visible to every device on the LAN.
 It never contains credentials. Rivune accepts only HTTPS origins or HTTP with a
@@ -182,14 +184,15 @@ docker compose --profile discovery up -d
 ```
 
 Linux host networking is required because Docker bridge multicast does not
-provide reliable host-LAN mDNS. On macOS, `./rivune up` instead installs a
-per-user LaunchAgent backed by the system `dns-sd` tool, and `./rivune down`
-removes it; this publishes Bonjour from the real macOS network namespace rather
-than Docker Desktop's Linux VM. A direct trusted-LAN origin also requires
-`RIVUNE_BIND_ADDRESS=0.0.0.0` so the advertised private-IP port is reachable.
-Raw `docker compose` on Docker Desktop does not manage this host publisher;
-use `./rivune` or enter the server address manually. Docker Desktop on Windows
-cannot use the macOS publisher, so manual server entry remains available.
+provide reliable host-LAN mDNS. Docker Desktop's VM has the same boundary, so
+macOS and Windows publish from the real host network namespace. The Windows
+task runs only while its installing user is logged on, without elevation,
+restarts after bounded failures, and is removed by `.\rivune.ps1 down`.
+`.\rivune.ps1 status` reports both Compose and publisher state; `logs discovery`
+reads the private bounded host log. A direct trusted-LAN origin also requires
+`RIVUNE_BIND_ADDRESS=0.0.0.0` so its advertised private-IP port is reachable.
+Raw Docker Compose does not manage a macOS or Windows host publisher; use the
+platform wrapper or enter the server address manually.
 
 The Unraid XML template targets the same topology but expects an existing
 PostgreSQL 18 container. Standard PostgreSQL on a database-only custom network
@@ -384,9 +387,9 @@ The subshell and its `EXIT` trap discard the exported secrets even when migratio
 After exporting the signing and verification key paths, lineage, and trusted state path described below, update to a stable release by changing `RIVUNE_VERSION` to an exact released version, backing up first, recording the printed backup ID outside the repository, and recreating only the application:
 
 ```sh
-COMPOSE_FILE=compose.yaml ./scripts/postgres-backup.sh backups/rivune-before-1.11.1.dump
-./scripts/postgres-verify-backup.sh --expect-backup-id '<recorded ID>' backups/rivune-before-1.11.1.dump
-# edit RIVUNE_VERSION=1.11.1 in .env
+COMPOSE_FILE=compose.yaml ./scripts/postgres-backup.sh backups/rivune-before-1.11.2.dump
+./scripts/postgres-verify-backup.sh --expect-backup-id '<recorded ID>' backups/rivune-before-1.11.2.dump
+# edit RIVUNE_VERSION=1.11.2 in .env
 docker compose --env-file .env -f compose.yaml pull rivune
 docker compose --env-file .env -f compose.yaml up -d rivune
 curl --fail --show-error https://media.example.com/ready

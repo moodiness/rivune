@@ -14,5 +14,6 @@
     <InternalsVisibleTo Include="Rivune" />
     <InternalsVisibleTo Include="Rivune-x64" />
     <InternalsVisibleTo Include="Rivune-arm64" />
+    <InternalsVisibleTo Include="Rivune.DiscoveryProbe" />
   </ItemGroup>
 </Project>

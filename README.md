@@ -15,14 +15,14 @@ Requirements: Docker Engine with Compose v2, Bash, and OpenSSL. macOS additional
 ```sh
 git clone https://github.com/moodiness/rivune.git
 cd rivune
-./rivune setup --public-url https://media.example.com --version 1.11.1
+./rivune setup --public-url https://media.example.com --version 1.11.2
 ./rivune up
 ./rivune doctor
 ```
 
-Omit `--public-url` for a loopback-only installation. `--version` is required and accepts only an exact stable numeric release such as `1.11.1`; mutable image tags such as `latest` are rejected so a fresh install is reproducible. `./rivune help` lists explicit wrappers for lifecycle, logs, diagnostics, authenticated backup verification and restore, plus a host-supervised backup scheduler that verifies every archive through a disposable restore before retention pruning. The command always resolves the repository Compose file and never prints generated secrets.
+Omit `--public-url` for a loopback-only installation. `--version` is required and accepts only an exact stable numeric release such as `1.11.2`; mutable image tags such as `latest` are rejected so a fresh install is reproducible. `./rivune help` lists explicit wrappers for lifecycle, logs, diagnostics, authenticated backup verification and restore, plus a host-supervised backup scheduler that verifies every archive through a disposable restore before retention pruning. The command always resolves the repository Compose file and never prints generated secrets.
 
-On Windows PowerShell, run `.\scripts\create-env.ps1`, fill the generated private `.env`, then use `docker compose pull` and `docker compose up -d`. The lower-level `./scripts/create-env.sh` path remains available on Unix hosts that need to customize `.env` before startup.
+On Windows PowerShell, run `.\scripts\create-env.ps1`, fill the generated private `.env`, then use `.\rivune.ps1 up`, `status`, `logs`, and `down`. The Windows wrapper pins the repository Compose inputs and, when `RIVUNE_DISCOVERY_URL` is non-empty, installs a limited per-user scheduled publisher backed by Windows DNS-SD; it stores only the public discovery metadata under `%LOCALAPPDATA%\Rivune\discovery`. The lower-level `./scripts/create-env.sh` path remains available on Unix hosts that need to customize `.env` before startup.
 
 `RIVUNE_ENCRYPTION_KEYS` uses active-first `version:64-lowercase-hex` pairs with unique positive versions and unique, non-zero keys. Back up the generated keyring separately and securely. A database backup cannot recover encrypted integration credentials or profile tracking tokens without every matching key version.
 
@@ -32,9 +32,10 @@ On a physical phone, tablet, or TV, `localhost` means that device, not the machi
 
 Automatic discovery requires a non-loopback `RIVUNE_DISCOVERY_URL`. On Linux,
 `./rivune` enables the host-network mDNS sidecar. On macOS, it manages a
-per-user Bonjour LaunchAgent because Docker Desktop's Linux VM cannot reliably
-publish multicast onto the host LAN. Use `./rivune up`/`down` rather than raw
-Compose when discovery is enabled.
+per-user Bonjour LaunchAgent; on Windows, `.\rivune.ps1` manages a limited
+per-user Task Scheduler publisher using the built-in DNS-SD API. These host
+publishers avoid Docker Desktop multicast isolation. Use the platform wrapper's
+`up`/`down` commands rather than raw Compose when discovery is enabled.
 
 Global administrators can export and atomically merge a versioned profile archive through the documented API. It includes profile settings, explicitly assigned add-ons and collections, stable title identities, library/progress/favorite/user-data state, and tracking preferences, but never passwords, PINs, sessions, provider credentials, or assignment policy. Add-on transport URLs are intentionally portable and can contain tokens: store the downloaded JSON with credential-file permissions.
 

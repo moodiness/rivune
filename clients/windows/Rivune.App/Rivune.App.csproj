@@ -6,9 +6,9 @@
     <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
     <RootNamespace>Rivune.App</RootNamespace>
-    <Version>1.11.1</Version>
-    <AssemblyVersion>1.11.1.0</AssemblyVersion>
-    <FileVersion>1.11.1.0</FileVersion>
+    <Version>1.11.2</Version>
+    <AssemblyVersion>1.11.2.0</AssemblyVersion>
+    <FileVersion>1.11.2.0</FileVersion>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>Rivune</AssemblyName>
     <Platforms>x64;ARM64</Platforms>
