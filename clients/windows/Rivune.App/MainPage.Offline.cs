@@ -107,20 +107,42 @@ public sealed partial class MainPage
     {
         var store = _offlineMediaStore;
         if (store is null || !CurrentServerOrigin(out var origin)) return;
-        _offlineScope = store.RegisterProfile(origin, profile, pin);
-        _offlineOnlySession = false;
-        LoadOfflineItems();
-        RefreshOfflineProfiles();
+        try
+        {
+            _offlineScope = store.RegisterProfile(origin, profile, pin);
+            _offlineOnlySession = false;
+            LoadOfflineItems();
+            RefreshOfflineProfiles();
+        }
+        catch (Exception exception) { DisableOfflineStorage(exception); }
     }
 
     private void RestoreOfflineProfile(Profile profile)
     {
         var store = _offlineMediaStore;
         if (store is null || !CurrentServerOrigin(out var origin)) return;
-        _offlineScope = store.OpenRestoredProfile(origin, profile);
+        try
+        {
+            _offlineScope = store.OpenRestoredProfile(origin, profile);
+            _offlineOnlySession = false;
+            LoadOfflineItems();
+            RefreshOfflineProfiles();
+        }
+        catch (Exception exception) { DisableOfflineStorage(exception); }
+    }
+
+    private void DisableOfflineStorage(Exception exception)
+    {
+        _offlineMediaStore?.Dispose();
+        _offlineMediaStore = null;
+        _offlineScope = null;
+        _offlineItems = [];
         _offlineOnlySession = false;
-        LoadOfflineItems();
-        RefreshOfflineProfiles();
+        _devicePreferencesFailure = string.Join(" ", new[]
+        {
+            _devicePreferencesFailure,
+            $"Offline storage: {FriendlyError(exception)}",
+        }.Where(value => !string.IsNullOrWhiteSpace(value)));
     }
 
     private bool CurrentServerOrigin(out Uri origin)
@@ -240,7 +262,16 @@ public sealed partial class MainPage
 
     private async void OfflineMedia_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is Button { Tag: OfflineMediaItem item }) await PlayOfflineAsync(item);
+        if (sender is not Button { Tag: OfflineMediaItem item }) return;
+        try { await PlayOfflineAsync(item); }
+        catch (Exception exception)
+        {
+            DashboardBanner.Severity = InfoBarSeverity.Error;
+            DashboardBanner.Message = $"Downloaded media could not be opened: {FriendlyError(exception)}";
+            DashboardBanner.IsOpen = true;
+            LoadOfflineItems();
+            RebuildHomeSections(_viewerCollections, _continueWatchingTargets, _recommendationTargets);
+        }
     }
 
     private async void RemoveOfflineMedia_Click(object sender, RoutedEventArgs e)
@@ -278,6 +309,11 @@ public sealed partial class MainPage
         _state.PlaybackSession = null;
         _state.SelectedSource = null;
         _state.Preparation = null;
+        lock (_endingSync)
+        {
+            _endingTask = null;
+            _playerReturnTask = null;
+        }
         var startSeconds = requestedPositionSeconds ?? (item.Completed ? 0 : (int)Math.Clamp(item.PositionMilliseconds / 1_000, 0, int.MaxValue));
         var source = new PlaybackSource
         {

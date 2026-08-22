@@ -134,7 +134,7 @@ public sealed partial class MainPage : Page
         }
         catch (Exception exception)
         {
-            _devicePreferencesFailure = string.Join(" ", new[] { _devicePreferencesFailure, $"Offline storage: {FriendlyError(exception)}" }.Where(value => !string.IsNullOrWhiteSpace(value)));
+            DisableOfflineStorage(exception);
         }
         InitializeAccentPalette();
         InitializeViewerSurface();
@@ -1046,9 +1046,10 @@ public sealed partial class MainPage : Page
             var downloadable = !preparation.Protocol.Equals("hls", StringComparison.OrdinalIgnoreCase) &&
                 !preparation.Protocol.Equals("dash", StringComparison.OrdinalIgnoreCase) &&
                 _offlineMediaStore is not null && _offlineScope is not null;
-            DownloadSourceButton.IsEnabled = downloadable && _offlineDownloadTask is not { IsCompleted: false };
-            DownloadSourceButton.Visibility = downloadable ? Visibility.Visible : Visibility.Collapsed;
-            DownloadSourceLabel.Text = "Download";
+            var downloading = _offlineDownloadTask is { IsCompleted: false };
+            DownloadSourceButton.IsEnabled = downloading || downloadable;
+            DownloadSourceButton.Visibility = downloading || downloadable ? Visibility.Visible : Visibility.Collapsed;
+            if (!downloading) DownloadSourceLabel.Text = "Download";
             if (_autoStartNextEpisode)
             {
                 _autoStartNextEpisode = false;
@@ -1067,8 +1068,9 @@ public sealed partial class MainPage : Page
             SourceBanner.Message = FriendlyError(exception);
             SourceBanner.IsOpen = true;
             SourceStatus.Text = "Preparation failed. Choose another source or select this one to retry.";
-            DownloadSourceButton.IsEnabled = false;
-            DownloadSourceButton.Visibility = Visibility.Collapsed;
+            var downloading = _offlineDownloadTask is { IsCompleted: false };
+            DownloadSourceButton.IsEnabled = downloading;
+            DownloadSourceButton.Visibility = downloading ? Visibility.Visible : Visibility.Collapsed;
         }
         finally
         {
@@ -1093,8 +1095,9 @@ public sealed partial class MainPage : Page
         PlaySourceButton.IsEnabled = false;
         SourceBanner.IsOpen = false;
         SourceProgress.IsActive = true;
-        DownloadSourceButton.IsEnabled = false;
-        DownloadSourceButton.Visibility = Visibility.Collapsed;
+        var downloading = _offlineDownloadTask is { IsCompleted: false };
+        DownloadSourceButton.IsEnabled = downloading;
+        DownloadSourceButton.Visibility = downloading ? Visibility.Visible : Visibility.Collapsed;
         SourceStatus.Text = "Refreshing expired sources…";
         try
         {
@@ -1527,6 +1530,7 @@ public sealed partial class MainPage : Page
 
     private void CloseSourcePicker()
     {
+        if (_offlineDownloadTask is { IsCompleted: false }) _offlineDownloadCancellation?.Cancel();
         SourceOverlay.Visibility = Visibility.Collapsed;
         DetailBackButton.Visibility = Visibility.Visible;
         ShowOnly(_sourceReturnView ?? DashboardView);

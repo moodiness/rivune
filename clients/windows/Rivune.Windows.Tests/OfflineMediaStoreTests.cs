@@ -82,7 +82,7 @@ public sealed class OfflineMediaStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task SelectingProfileWithoutPinRemovesStaleOfflinePin()
+    public async Task RestoringProfileWithoutPinRemovesStaleOfflinePin()
     {
         using var store = new OfflineMediaStore(_root, new TestKeyProtector());
         var scope = store.RegisterProfile(Server, Profile(hasPin: true), "2468");
@@ -96,8 +96,7 @@ public sealed class OfflineMediaStoreTests : IDisposable
             null,
             handler: new FixedBodyHandler(new byte[1024]),
             cancellationToken: TestContext.Current.CancellationToken);
-
-        store.RegisterProfile(Server, Profile(hasPin: false), null);
+        Assert.Equal(scope, store.OpenRestoredProfile(Server, Profile(hasPin: false)));
         store.Lock();
 
         var gate = Assert.Single(store.Profiles());
@@ -128,6 +127,99 @@ public sealed class OfflineMediaStoreTests : IDisposable
         Assert.DoesNotContain(Directory.EnumerateFiles(Path.Combine(_root, scope)), path =>
             path.EndsWith(".partial", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".rvn", StringComparison.OrdinalIgnoreCase));
     }
+
+    [Fact]
+    public async Task InvalidOrMissingManifestNeverDeletesEncryptedArchives()
+    {
+        using var store = new OfflineMediaStore(_root, new TestKeyProtector());
+        var scope = store.RegisterProfile(Server, Profile(hasPin: false), null);
+        var item = await store.DownloadAsync(
+            scope,
+            new Uri(Server, "/media/video.mp4"),
+            uri => uri.Host == Server.Host,
+            TitleId,
+            "Movie",
+            "mp4",
+            null,
+            handler: new FixedBodyHandler(new byte[1024]),
+            cancellationToken: TestContext.Current.CancellationToken);
+        var directory = Path.Combine(_root, scope);
+        var archive = Path.Combine(directory, item.FileName);
+        var manifest = Path.Combine(directory, "manifest.v1.json");
+
+        await File.WriteAllTextAsync(manifest, "{", TestContext.Current.CancellationToken);
+        Assert.Throws<InvalidDataException>(() => store.Items(scope));
+        Assert.True(File.Exists(archive));
+
+        File.Delete(manifest);
+        Assert.Throws<InvalidDataException>(() => store.Items(scope));
+        Assert.True(File.Exists(archive));
+    }
+
+    [Fact]
+    public async Task QuotaUsesArchiveBytesInsteadOfMutableManifestSize()
+    {
+        using var store = new OfflineMediaStore(_root, new TestKeyProtector(), maximumStoredBytes: 2200);
+        var scope = store.RegisterProfile(Server, Profile(hasPin: false), null);
+        await store.DownloadAsync(
+            scope,
+            new Uri(Server, "/media/first.mp4"),
+            uri => uri.Host == Server.Host,
+            TitleId,
+            "First",
+            "mp4",
+            null,
+            handler: new FixedBodyHandler(new byte[1500]),
+            cancellationToken: TestContext.Current.CancellationToken);
+        var manifest = Path.Combine(_root, scope, "manifest.v1.json");
+        var json = await File.ReadAllTextAsync(manifest, TestContext.Current.CancellationToken);
+        Assert.Contains("\"sizeBytes\":1500", json);
+        await File.WriteAllTextAsync(manifest, json.Replace("\"sizeBytes\":1500", "\"sizeBytes\":1", StringComparison.Ordinal), TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.DownloadAsync(
+            scope,
+            new Uri(Server, "/media/second.mp4"),
+            uri => uri.Host == Server.Host,
+            Guid.NewGuid(),
+            "Second",
+            "mp4",
+            null,
+            handler: new FixedBodyHandler(new byte[700]),
+            cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Single(store.Items(scope));
+    }
+
+    [Fact]
+    public async Task ConcurrentDownloadsCannotShareOneQuotaAllowance()
+    {
+        using var store = new OfflineMediaStore(_root, new TestKeyProtector(), maximumStoredBytes: 3000);
+        var scope = store.RegisterProfile(Server, Profile(hasPin: false), null);
+        async Task<OfflineMediaItem?> Download(string name)
+        {
+            try
+            {
+                return await store.DownloadAsync(
+                    scope,
+                    new Uri(Server, $"/media/{name}.mp4"),
+                    uri => uri.Host == Server.Host,
+                    Guid.NewGuid(),
+                    name,
+                    "mp4",
+                    null,
+                    handler: new FixedBodyHandler(new byte[1800]),
+                    cancellationToken: TestContext.Current.CancellationToken);
+            }
+            catch (InvalidOperationException) { return null; }
+        }
+
+        var results = await Task.WhenAll(Download("first"), Download("second"));
+
+        Assert.Single(results, item => item is not null);
+        Assert.Single(store.Items(scope));
+        Assert.DoesNotContain(Directory.EnumerateFiles(Path.Combine(_root, scope)), path =>
+            path.EndsWith(".partial", StringComparison.OrdinalIgnoreCase));
+    }
+
 
     [Fact]
     public async Task PlaybackServerServesAuthenticatedByteRanges()

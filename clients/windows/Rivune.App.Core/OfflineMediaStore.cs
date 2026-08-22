@@ -45,13 +45,17 @@ internal sealed class DpapiOfflineKeyProtector : IOfflineKeyProtector
     public byte[] Protect(ReadOnlySpan<byte> plaintext)
     {
         EnsureWindows();
-        return ProtectedData.Protect(plaintext.ToArray(), OptionalEntropy, DataProtectionScope.CurrentUser);
+        var copy = plaintext.ToArray();
+        try { return ProtectedData.Protect(copy, OptionalEntropy, DataProtectionScope.CurrentUser); }
+        finally { CryptographicOperations.ZeroMemory(copy); }
     }
 
     public byte[] Unprotect(ReadOnlySpan<byte> ciphertext)
     {
         EnsureWindows();
-        return ProtectedData.Unprotect(ciphertext.ToArray(), OptionalEntropy, DataProtectionScope.CurrentUser);
+        var copy = ciphertext.ToArray();
+        try { return ProtectedData.Unprotect(copy, OptionalEntropy, DataProtectionScope.CurrentUser); }
+        finally { CryptographicOperations.ZeroMemory(copy); }
     }
 
     private static void EnsureWindows()
@@ -76,18 +80,26 @@ internal sealed class OfflineMediaStore : IDisposable
     private readonly string _root;
     private readonly string _gatesPath;
     private readonly IOfflineKeyProtector _keyProtector;
+    private readonly long _maximumStoredBytes;
     private readonly object _sync = new();
+    private readonly SemaphoreSlim _downloadSlot = new(1, 1);
+    private readonly HashSet<string> _activePartialPaths = new(StringComparer.OrdinalIgnoreCase);
     private string? _authorizedScope;
     private bool _disposed;
-
-    public OfflineMediaStore(string? root = null, IOfflineKeyProtector? keyProtector = null)
+    public OfflineMediaStore(
+        string? root = null,
+        IOfflineKeyProtector? keyProtector = null,
+        long maximumStoredBytes = MaximumStoredBytes)
     {
+        if (maximumStoredBytes <= EncryptedMediaFormat.HeaderBytes + EncryptedMediaFormat.TagBytes)
+            throw new ArgumentOutOfRangeException(nameof(maximumStoredBytes));
         _root = Path.GetFullPath(root ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "Rivune",
             "offline-media"));
         _gatesPath = Path.Combine(_root, "profiles.v1.json");
         _keyProtector = keyProtector ?? new DpapiOfflineKeyProtector();
+        _maximumStoredBytes = maximumStoredBytes;
         Directory.CreateDirectory(_root);
     }
 
@@ -165,18 +177,27 @@ internal sealed class OfflineMediaStore : IDisposable
             var scope = ScopeFor(serverOrigin, profile.Id);
             var gates = ReadGates().ToList();
             var existing = gates.FirstOrDefault(value => StringComparer.Ordinal.Equals(value.Scope, scope));
-            if (profile.HasPin || existing?.RequiresPin == true)
+            gates.RemoveAll(value => StringComparer.Ordinal.Equals(value.Scope, scope));
+            if (profile.HasPin)
             {
-                if (existing is null)
+                gates.Add(new StoredGate
                 {
-                    gates.Add(new StoredGate { Name = profile.Name, Scope = scope, RequiresPin = true });
-                    WriteJsonAtomic(_gatesPath, gates, MaximumGateBytes);
-                }
+                    Name = profile.Name.Length <= 120 ? profile.Name : profile.Name[..120],
+                    Scope = scope,
+                    RequiresPin = true,
+                    PinSalt = existing?.RequiresPin == true ? existing.PinSalt : null,
+                    PinVerifier = existing?.RequiresPin == true ? existing.PinVerifier : null,
+                });
+                WriteJsonAtomic(_gatesPath, gates, MaximumGateBytes);
                 _authorizedScope = null;
                 return null;
             }
-            gates.RemoveAll(value => StringComparer.Ordinal.Equals(value.Scope, scope));
-            gates.Add(new StoredGate { Name = profile.Name, Scope = scope, RequiresPin = false });
+            gates.Add(new StoredGate
+            {
+                Name = profile.Name.Length <= 120 ? profile.Name : profile.Name[..120],
+                Scope = scope,
+                RequiresPin = false,
+            });
             WriteJsonAtomic(_gatesPath, gates, MaximumGateBytes);
             _authorizedScope = scope;
             Directory.CreateDirectory(ScopeDirectory(scope));
@@ -240,87 +261,104 @@ internal sealed class OfflineMediaStore : IDisposable
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(isAllowed);
-        string directory;
-        long currentBytes;
-        byte[] key;
-        lock (_sync)
-        {
-            ThrowIfDisposed();
-            RequireOpen(scope);
-            if (!isAllowed(source)) throw new InvalidOperationException("The offline source is outside the Rivune origin.");
-            directory = ScopeDirectory(scope);
-            currentBytes = ReconcileManifest(scope).Sum(item => item.SizeBytes);
-            if (currentBytes >= MaximumStoredBytes) throw new InvalidOperationException("Offline storage quota reached.");
-            key = OfflineKey(scope);
-        }
-
-        var id = Guid.NewGuid();
-        var partial = Path.Combine(directory, $".{id:N}.partial");
-        var destination = Path.Combine(directory, $"{id:N}.rvn");
-        await using var writer = new EncryptedMediaWriter(partial, key, MaximumStoredBytes - currentBytes);
-        CryptographicOperations.ZeroMemory(key);
+        await _downloadSlot.WaitAsync(cancellationToken).ConfigureAwait(false);
+        string? activePartial = null;
         try
         {
-            using var http = new HttpClient(handler ?? new SocketsHttpHandler
-            {
-                AllowAutoRedirect = false,
-                AutomaticDecompression = DecompressionMethods.None,
-                UseCookies = false,
-            }, disposeHandler: true) { Timeout = Timeout.InfiniteTimeSpan };
-            using var request = new HttpRequestMessage(HttpMethod.Get, source);
-            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-            var finalUri = response.RequestMessage?.RequestUri ?? source;
-            if (!isAllowed(finalUri) || (int)response.StatusCode is >= 300 and <= 399 || !response.IsSuccessStatusCode)
-                throw new InvalidOperationException("The offline source could not be downloaded without leaving the Rivune origin.");
-            if (response.Content.Headers.ContentLength is long announced && announced > MaximumStoredBytes - currentBytes)
-                throw new InvalidOperationException("Offline storage quota reached.");
-            await using var input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            var buffer = ArrayPool<byte>.Shared.Rent(256 * 1024);
-            try
-            {
-                long total = 0;
-                while (true)
-                {
-                    var count = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken).ConfigureAwait(false);
-                    if (count == 0) break;
-                    total = checked(total + count);
-                    if (total > MaximumStoredBytes - currentBytes) throw new InvalidOperationException("Offline storage quota reached.");
-                    await writer.AppendAsync(buffer.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
-                    progress?.Report(total);
-                }
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(buffer, clearArray: true);
-            }
-
-            var size = await writer.FinishAsync(cancellationToken).ConfigureAwait(false);
-            File.Move(partial, destination);
-            var item = new OfflineMediaItem
-            {
-                Id = id,
-                TitleId = titleId,
-                Title = title.Length <= 240 ? title : title[..240],
-                FileName = Path.GetFileName(destination),
-                Container = NormalizeContainer(container),
-                SizeBytes = size,
-                CreatedAt = DateTimeOffset.UtcNow,
-                PosterUrl = posterUrl,
-            };
+            string directory;
+            long maximumDownloadBytes;
+            byte[] key;
             lock (_sync)
             {
+                ThrowIfDisposed();
                 RequireOpen(scope);
-                var items = ReadManifest(scope).Where(value => value.Id != item.Id).Append(item).ToArray();
-                WriteJsonAtomic(ManifestPath(scope), items, MaximumManifestBytes);
+                if (!isAllowed(source)) throw new InvalidOperationException("The offline source is outside the Rivune origin.");
+                directory = ScopeDirectory(scope);
+                _ = ReconcileManifest(scope);
+                maximumDownloadBytes = MaximumPlaintextForStoredBudget(_maximumStoredBytes - StoredArchiveBytes(directory));
+                if (maximumDownloadBytes <= 0) throw new InvalidOperationException("Offline storage quota reached.");
+                key = OfflineKey(scope);
             }
-            return item;
+            var id = Guid.NewGuid();
+            var partial = Path.Combine(directory, $".{id:N}.partial");
+            var destination = Path.Combine(directory, $"{id:N}.rvn");
+            activePartial = partial;
+            lock (_sync) _activePartialPaths.Add(partial);
+            await using var writer = new EncryptedMediaWriter(partial, key, maximumDownloadBytes);
+            CryptographicOperations.ZeroMemory(key);
+            try
+            {
+                using var http = new HttpClient(handler ?? new SocketsHttpHandler
+                {
+                    AllowAutoRedirect = false,
+                    AutomaticDecompression = DecompressionMethods.None,
+                    UseCookies = false,
+                }, disposeHandler: true) { Timeout = Timeout.InfiniteTimeSpan };
+                using var request = new HttpRequestMessage(HttpMethod.Get, source);
+                using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+                var finalUri = response.RequestMessage?.RequestUri ?? source;
+                if (!isAllowed(finalUri) || (int)response.StatusCode is >= 300 and <= 399 || !response.IsSuccessStatusCode)
+                    throw new InvalidOperationException("The offline source could not be downloaded without leaving the Rivune origin.");
+                if (response.Content.Headers.ContentLength is long announced && announced > maximumDownloadBytes)
+                    throw new InvalidOperationException("Offline storage quota reached.");
+                await using var input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                var buffer = ArrayPool<byte>.Shared.Rent(256 * 1024);
+                try
+                {
+                    long total = 0;
+                    while (true)
+                    {
+                        var count = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken).ConfigureAwait(false);
+                        if (count == 0) break;
+                        total = checked(total + count);
+                        if (total > maximumDownloadBytes) throw new InvalidOperationException("Offline storage quota reached.");
+                        await writer.AppendAsync(buffer.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
+                        progress?.Report(total);
+                    }
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(buffer, clearArray: true);
+                }
+
+                var size = await writer.FinishAsync(cancellationToken).ConfigureAwait(false);
+                var item = new OfflineMediaItem
+                {
+                    Id = id,
+                    TitleId = titleId,
+                    Title = title.Length <= 240 ? title : title[..240],
+                    FileName = Path.GetFileName(destination),
+                    Container = NormalizeContainer(container),
+                    SizeBytes = size,
+                    CreatedAt = DateTimeOffset.UtcNow,
+                    PosterUrl = posterUrl,
+                };
+                lock (_sync)
+                {
+                    RequireOpen(scope);
+                    var items = ReadManifest(scope).Where(value => value.Id != item.Id).Append(item).ToArray();
+                    File.Move(partial, destination);
+                    try { WriteJsonAtomic(ManifestPath(scope), items, MaximumManifestBytes); }
+                    catch { TryDelete(destination); throw; }
+                }
+                return item;
+            }
+            catch
+            {
+                await writer.CancelAsync().ConfigureAwait(false);
+                TryDelete(partial);
+                TryDelete(destination);
+                throw;
+            }
         }
-        catch
+        finally
         {
-            await writer.CancelAsync().ConfigureAwait(false);
-            TryDelete(partial);
-            TryDelete(destination);
-            throw;
+            if (activePartial is not null)
+            {
+                TryDelete(activePartial);
+                lock (_sync) _activePartialPaths.Remove(activePartial);
+            }
+            _downloadSlot.Release();
         }
     }
 
@@ -380,47 +418,75 @@ internal sealed class OfflineMediaStore : IDisposable
         var directory = ScopeDirectory(scope);
         Directory.CreateDirectory(directory);
         var manifest = ReadManifest(scope);
-        var reconciled = manifest.Where(item => ValidArchiveItem(item, directory)).DistinctBy(item => item.Id).ToArray();
+        if (manifest.Any(item => !ValidArchiveMetadata(item)) ||
+            manifest.Select(item => item.Id).Distinct().Count() != manifest.Count ||
+            manifest.Select(item => item.FileName).Distinct(StringComparer.OrdinalIgnoreCase).Count() != manifest.Count)
+            throw new InvalidDataException("Offline manifest contains invalid or duplicate entries.");
+        var reconciled = manifest.Where(item => ArchiveExists(item, directory)).ToArray();
         if (!manifest.SequenceEqual(reconciled)) WriteJsonAtomic(ManifestPath(scope), reconciled, MaximumManifestBytes);
         var referenced = reconciled.Select(item => item.FileName).ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var path in Directory.EnumerateFiles(directory))
         {
-            var name = Path.GetFileName(path);
-            if ((name.EndsWith(".rvn", StringComparison.OrdinalIgnoreCase) && !referenced.Contains(name)) ||
-                name.EndsWith(".partial", StringComparison.OrdinalIgnoreCase)) TryDelete(path);
+            if (path.EndsWith(".rvn", StringComparison.OrdinalIgnoreCase) && !referenced.Contains(Path.GetFileName(path))) TryDelete(path);
+            else if (path.EndsWith(".partial", StringComparison.OrdinalIgnoreCase) && !_activePartialPaths.Contains(path)) TryDelete(path);
         }
         return reconciled;
     }
 
-    private static bool ValidArchiveItem(OfflineMediaItem item, string directory)
+    private static bool ValidArchiveMetadata(OfflineMediaItem item) =>
+        item.Id != Guid.Empty && item.TitleId != Guid.Empty && !string.IsNullOrWhiteSpace(item.Title) && item.Title.Length <= 240 &&
+        item.SizeBytes > 0 && item.PositionMilliseconds >= 0 && item.DurationMilliseconds >= 0 && SafeFileName(item.FileName) &&
+        StringComparer.OrdinalIgnoreCase.Equals(item.FileName, $"{item.Id:N}.rvn");
+
+    private static bool ArchiveExists(OfflineMediaItem item, string directory)
     {
-        if (item.Id == Guid.Empty || item.TitleId == Guid.Empty || string.IsNullOrWhiteSpace(item.Title) || item.SizeBytes <= 0 ||
-            item.PositionMilliseconds < 0 || item.DurationMilliseconds < 0 || !SafeFileName(item.FileName) ||
-            !item.FileName.EndsWith(".rvn", StringComparison.OrdinalIgnoreCase)) return false;
         var path = Path.Combine(directory, item.FileName);
-        return File.Exists(path) && new FileInfo(path).Length > EncryptedMediaFormat.HeaderBytes;
+        if (!File.Exists(path)) return false;
+        if (new FileInfo(path).Length <= EncryptedMediaFormat.HeaderBytes)
+            throw new InvalidDataException("Encrypted offline media is incomplete.");
+        return true;
     }
 
-    private IReadOnlyList<OfflineMediaItem> ReadManifest(string scope) =>
-        ReadJson<IReadOnlyList<OfflineMediaItem>>(ManifestPath(scope), MaximumManifestBytes) ?? [];
+    private IReadOnlyList<OfflineMediaItem> ReadManifest(string scope)
+    {
+        var directory = ScopeDirectory(scope);
+        var allowMissing = !Directory.EnumerateFiles(directory, "*.rvn").Any();
+        return ReadJsonRequired<IReadOnlyList<OfflineMediaItem>>(
+            ManifestPath(scope), MaximumManifestBytes, [], allowMissing);
+    }
 
-    private IReadOnlyList<StoredGate> ReadGates() =>
-        ReadJson<IReadOnlyList<StoredGate>>(_gatesPath, MaximumGateBytes)?
-            .Where(gate => ValidScope(gate.Scope) && !string.IsNullOrWhiteSpace(gate.Name))
-            .DistinctBy(gate => gate.Scope, StringComparer.Ordinal)
-            .ToArray() ?? [];
+    private IReadOnlyList<StoredGate> ReadGates()
+    {
+        var gates = ReadJsonRequired<IReadOnlyList<StoredGate>>(
+            _gatesPath, MaximumGateBytes, [], allowMissing: !Directory.EnumerateDirectories(_root).Any());
+        if (gates.Any(gate => !ValidScope(gate.Scope) || string.IsNullOrWhiteSpace(gate.Name) || gate.Name.Length > 120 ||
+                gate.RequiresPin && !((gate.PinSalt is null && gate.PinVerifier is null) ||
+                    gate.PinSalt is { Length: 16 } && gate.PinVerifier is { Length: 32 })) ||
+            gates.Select(gate => gate.Scope).Distinct(StringComparer.Ordinal).Count() != gates.Count)
+            throw new InvalidDataException("Offline profile metadata is invalid or duplicated.");
+        return gates;
+    }
 
-    private T? ReadJson<T>(string path, int maximumBytes)
+    private T ReadJsonRequired<T>(string path, int maximumBytes, T missingValue, bool allowMissing)
     {
         try
         {
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
-            if (stream.Length > maximumBytes) return default;
-            return JsonSerializer.Deserialize<T>(stream, JsonOptions);
+            if (stream.Length > maximumBytes) throw new InvalidDataException("Offline metadata is too large.");
+            return JsonSerializer.Deserialize<T>(stream, JsonOptions)
+                ?? throw new InvalidDataException("Offline metadata is invalid.");
         }
-        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException or JsonException or NotSupportedException)
+        catch (Exception exception) when (allowMissing && exception is FileNotFoundException or DirectoryNotFoundException)
         {
-            return default;
+            return missingValue;
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            throw new InvalidDataException("Offline metadata is missing.", exception);
+        }
+        catch (Exception exception) when (exception is JsonException or NotSupportedException)
+        {
+            throw new InvalidDataException("Offline metadata is invalid.", exception);
         }
     }
 
@@ -538,6 +604,32 @@ internal sealed class OfflineMediaStore : IDisposable
     {
         var normalized = value?.Trim().ToLowerInvariant();
         return normalized is "mp4" or "m4v" or "mpegts" or "ts" ? normalized : "mp4";
+    }
+
+    private static long StoredArchiveBytes(string directory)
+    {
+        long total = 0;
+        foreach (var path in Directory.EnumerateFiles(directory))
+        {
+            if (path.EndsWith(".rvn", StringComparison.OrdinalIgnoreCase) ||
+                path.EndsWith(".partial", StringComparison.OrdinalIgnoreCase))
+                total = checked(total + new FileInfo(path).Length);
+        }
+        return total;
+    }
+
+    private static long MaximumPlaintextForStoredBudget(long budget)
+    {
+        if (budget <= EncryptedMediaFormat.HeaderBytes + EncryptedMediaFormat.TagBytes) return 0;
+        var plaintext = budget - EncryptedMediaFormat.HeaderBytes;
+        while (plaintext > 0)
+        {
+            var chunks = (plaintext + EncryptedMediaFormat.ChunkBytes - 1) / EncryptedMediaFormat.ChunkBytes;
+            var adjusted = budget - EncryptedMediaFormat.HeaderBytes - chunks * EncryptedMediaFormat.TagBytes;
+            if (adjusted >= plaintext) return plaintext;
+            plaintext = Math.Max(0, adjusted);
+        }
+        return 0;
     }
 
     private static void TryDelete(string path)
@@ -780,7 +872,6 @@ internal sealed class EncryptedMediaReader : IDisposable
             CryptographicOperations.ZeroMemory(tag);
         }
     }
-
     public void Dispose()
     {
         lock (_sync)
@@ -807,6 +898,7 @@ internal sealed class OfflinePlaybackServer : IDisposable
     private readonly string _contentType;
     private readonly object _lifetimeSync = new();
     private readonly HashSet<Task> _connections = [];
+    private readonly HashSet<System.Net.Sockets.TcpClient> _clients = [];
     private bool _disposed;
 
     public OfflinePlaybackServer(string archivePath, ReadOnlySpan<byte> key, string container)
@@ -814,7 +906,7 @@ internal sealed class OfflinePlaybackServer : IDisposable
         _reader = new EncryptedMediaReader(archivePath, key);
         _path = $"/{Guid.NewGuid():N}/media";
         _listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
-        _listener.Start();
+        _listener.Start(4);
         var endpoint = (IPEndPoint)_listener.LocalEndpoint;
         _expectedHost = $"127.0.0.1:{endpoint.Port}";
         PlaybackUri = new Uri($"http://{_expectedHost}{_path}");
@@ -828,17 +920,33 @@ internal sealed class OfflinePlaybackServer : IDisposable
     {
         while (!_stopping.IsCancellationRequested)
         {
+            try { await _connectionSlots.WaitAsync(_stopping.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
+
             System.Net.Sockets.TcpClient client;
             try { client = await _listener.AcceptTcpClientAsync(_stopping.Token).ConfigureAwait(false); }
-            catch (OperationCanceledException) { return; }
-            catch (ObjectDisposedException) { return; }
-            catch (System.Net.Sockets.SocketException) when (_stopping.IsCancellationRequested) { return; }
-            var handling = HandleLimitedAsync(client);
-            lock (_lifetimeSync) _connections.Add(handling);
+            catch (OperationCanceledException) { _connectionSlots.Release(); return; }
+            catch (ObjectDisposedException) { _connectionSlots.Release(); return; }
+            catch (System.Net.Sockets.SocketException) when (_stopping.IsCancellationRequested)
+            {
+                _connectionSlots.Release();
+                return;
+            }
+
+            var handling = HandleAcceptedAsync(client);
+            lock (_lifetimeSync)
+            {
+                _connections.Add(handling);
+                _clients.Add(client);
+            }
             _ = handling.ContinueWith(
                 completed =>
                 {
-                    lock (_lifetimeSync) _connections.Remove(completed);
+                    lock (_lifetimeSync)
+                    {
+                        _connections.Remove(completed);
+                        _clients.Remove(client);
+                    }
                 },
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,
@@ -846,12 +954,10 @@ internal sealed class OfflinePlaybackServer : IDisposable
         }
     }
 
-    private async Task HandleLimitedAsync(System.Net.Sockets.TcpClient client)
+    private async Task HandleAcceptedAsync(System.Net.Sockets.TcpClient client)
     {
-        try { await _connectionSlots.WaitAsync(_stopping.Token).ConfigureAwait(false); }
-        catch (OperationCanceledException) { client.Dispose(); return; }
         try { await HandleAsync(client, _stopping.Token).ConfigureAwait(false); }
-        catch { }
+        catch (Exception) { }
         finally
         {
             client.Dispose();
@@ -862,7 +968,12 @@ internal sealed class OfflinePlaybackServer : IDisposable
     private async Task HandleAsync(System.Net.Sockets.TcpClient client, CancellationToken cancellationToken)
     {
         using var stream = client.GetStream();
-        var request = await ReadRequestAsync(stream, cancellationToken).ConfigureAwait(false);
+        PlaybackRequest? request;
+        using (var headerDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        {
+            headerDeadline.CancelAfter(TimeSpan.FromSeconds(10));
+            request = await ReadRequestAsync(stream, headerDeadline.Token).ConfigureAwait(false);
+        }
         if (request is null || request.Target != _path ||
             !StringComparer.OrdinalIgnoreCase.Equals(request.Host, _expectedHost) ||
             request.Method is not ("GET" or "HEAD"))
@@ -1005,11 +1116,18 @@ internal sealed class OfflinePlaybackServer : IDisposable
         _disposed = true;
         _stopping.Cancel();
         _listener.Stop();
-        try { _accepting.Wait(TimeSpan.FromSeconds(1)); }
-        catch (AggregateException) { }
+        try { _accepting.GetAwaiter().GetResult(); }
+        catch (OperationCanceledException) { }
+        catch (System.Net.Sockets.SocketException) { }
         Task[] connections;
-        lock (_lifetimeSync) connections = _connections.ToArray();
-        try { Task.WaitAll(connections, TimeSpan.FromSeconds(2)); }
+        System.Net.Sockets.TcpClient[] clients;
+        lock (_lifetimeSync)
+        {
+            connections = _connections.ToArray();
+            clients = _clients.ToArray();
+        }
+        foreach (var client in clients) client.Dispose();
+        try { Task.WaitAll(connections); }
         catch (AggregateException) { }
         _reader.Dispose();
         _connectionSlots.Dispose();
