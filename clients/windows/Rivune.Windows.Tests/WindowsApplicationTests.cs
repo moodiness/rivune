@@ -142,6 +142,34 @@ public sealed class WindowsApplicationTests
         Assert.True(initial.CurrentMemberIsHost);
     }
 
+    [Theory]
+    [InlineData("23456-789AB", "23456789AB")]
+    [InlineData(" 23 456-789ab ", "23456789AB")]
+    public void WatchRoomCodesAcceptFormatting(string value, string expected)
+    {
+        Assert.Equal(expected, PlaybackCoordinationPolicy.NormalizeRoomCode(value));
+    }
+
+    [Theory]
+    [InlineData(30_000, 0, 40_000)]
+    [InlineData(30_000, 35_000, 35_000)]
+    [InlineData(604_799_000, 0, 604_800_000)]
+    [InlineData(40_000, 35_000, 40_000)]
+    public void RemoteForwardSeekHonorsKnownAndUnknownDurations(long position, long duration, long expected)
+    {
+        Assert.Equal(expected, PlaybackCoordinationPolicy.ForwardSeekPosition(position, duration));
+    }
+
+    [Fact]
+    public void RemoteLoadFailuresDistinguishPermanentFromRetryableErrors()
+    {
+        Assert.True(PlaybackCoordinationPolicy.IsTerminalRemoteLoadFailure(new InvalidOperationException()));
+        Assert.True(PlaybackCoordinationPolicy.IsTerminalRemoteLoadFailure(new RivuneServerException(404, "not_found", "Missing")));
+        Assert.False(PlaybackCoordinationPolicy.IsTerminalRemoteLoadFailure(new RivuneServerException(429, "busy", "Busy")));
+        Assert.False(PlaybackCoordinationPolicy.IsTerminalRemoteLoadFailure(new RivuneServerException(503, "unavailable", "Unavailable")));
+        Assert.False(PlaybackCoordinationPolicy.IsTerminalRemoteLoadFailure(new HttpRequestException()));
+    }
+
     private static PlaybackRoom PlaybackRoom(Guid? id = null, string? joinCode = null, long version = 1) => new()
     {
         Id = id ?? Guid.NewGuid(),

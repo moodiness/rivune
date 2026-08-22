@@ -211,12 +211,23 @@ public sealed partial class MainPage
         var generation = _state.GenerationId;
         try
         {
-            await client.ClearProfileSelectionAsync(_state.Token);
-            LockOfflineAccess();
-            if (!_state.IsCurrent(generation) || !ReferenceEquals(client, _state.Client)) return;
-            _state.Profile = null;
-            ResetViewerProfileState();
-            await ShowProfilesAsync();
+            await _profileCoordinationGate.WaitAsync(_state.Token);
+            try
+            {
+                var roomLeaveFailure = await AbandonPlaybackRoomAsync();
+                if (roomLeaveFailure is not null)
+                    throw new InvalidOperationException("The current watch room could not be closed. Try changing profile again when the connection recovers.", roomLeaveFailure);
+                await client.ClearProfileSelectionAsync(_state.Token);
+                LockOfflineAccess();
+                if (!_state.IsCurrent(generation) || !ReferenceEquals(client, _state.Client)) return;
+                _state.Profile = null;
+                ResetViewerProfileState();
+                await ShowProfilesAsync();
+            }
+            finally
+            {
+                _profileCoordinationGate.Release();
+            }
         }
         catch (OperationCanceledException) { }
         catch (Exception exception)

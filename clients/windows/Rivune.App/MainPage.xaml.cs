@@ -64,6 +64,7 @@ public sealed partial class MainPage : Page
     private readonly object _stopSync = new();
     private readonly object _shutdownSync = new();
     private readonly SemaphoreSlim _dialogGate = new(1, 1);
+    private readonly SemaphoreSlim _profileCoordinationGate = new(1, 1);
     private ContentDialog? _activeDialog;
     private ProgressSnapshot? _pendingProgress;
     private Task _progressDrainTask = Task.CompletedTask;
@@ -2189,8 +2190,9 @@ public sealed partial class MainPage : Page
         _coordinationTask = null;
     }
 
-    private void AbandonPlaybackCoordination()
+    private void AbandonPlaybackCoordination(bool preserveActiveRoom = false)
     {
+        var room = preserveActiveRoom ? _state.ActivePlaybackRoom : null;
         StopPlaybackCoordinationPolling();
         _lastPlaybackCommandId = 0;
         _appliedPlaybackCommandIds.Clear();
@@ -2199,25 +2201,29 @@ public sealed partial class MainPage : Page
         _coordinationDurationMilliseconds = 0;
         _coordinationEndedSessionId = null;
         _state.ClearCoordination();
+        if (room is not null) _state.ActivePlaybackRoom = room;
     }
 
     private async Task<Exception?> AbandonPlaybackRoomAsync()
     {
         var room = _state.ActivePlaybackRoom;
         var client = _state.Client;
-        AbandonPlaybackCoordination();
+        AbandonPlaybackCoordination(preserveActiveRoom: room is not null);
         if (room is null || client is null) return null;
         try
         {
             await client.LeavePlaybackRoomAsync(room.Id, CancellationToken.None);
+            if (_state.ActivePlaybackRoom?.Id == room.Id) _state.ActivePlaybackRoom = null;
             return null;
         }
         catch (RivuneServerException exception) when (exception.StatusCode is 403 or 404)
         {
+            if (_state.ActivePlaybackRoom?.Id == room.Id) _state.ActivePlaybackRoom = null;
             return null;
         }
         catch (Exception exception)
         {
+            if (ReferenceEquals(client, _state.Client)) StartPlaybackCoordination();
             return exception;
         }
     }
@@ -2272,22 +2278,86 @@ public sealed partial class MainPage : Page
     {
         if (command.Command == "load" && command.Item is not null)
         {
-            await StartCoordinatedPlaybackAsync(command.Item, command.PositionMilliseconds ?? 0, client, cancellationToken);
+            try
+            {
+                await StartCoordinatedPlaybackAsync(command.Item, command.PositionMilliseconds ?? 0, client, cancellationToken, endCurrentPlayback: true);
+                if (_state.PlaybackSession is null)
+                    throw new InvalidOperationException("Remote playback could not find a compatible source.");
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception exception) when (PlaybackCoordinationPolicy.IsTerminalRemoteLoadFailure(exception))
+            {
+                await DispatcherQueue.EnqueueAsync(() =>
+                {
+                    ShowPlaybackCoordinationError(exception);
+                    return Task.CompletedTask;
+                });
+            }
             return;
         }
+
         if (_state.PlaybackSession is null) return;
         if (command.PositionMilliseconds is long position)
             _mediaPlayer.PlaybackSession.Position = MediaPlaybackPosition(position / 1_000d);
         switch (command.Command)
         {
+            case "play" when _playbackCompleted || _mediaPlayer.Source is null:
+            {
+                var restartFailure = await RestartPlaybackWithTracksAsync(0, showRecovery: false);
+                if (restartFailure is null) break;
+                if (PlaybackCoordinationPolicy.IsTerminalRemoteLoadFailure(restartFailure))
+                {
+                    ShowPlaybackCoordinationError(restartFailure);
+                    break;
+                }
+                throw restartFailure;
+            }
             case "play": _mediaPlayer.Play(); break;
             case "pause": _mediaPlayer.Pause(); break;
             case "stop": await EndPlaybackAsync(completed: false, returnToDashboard: true); break;
         }
     }
 
+    private void ShowPlaybackCoordinationError(Exception exception)
+    {
+        if (_closed) return;
+        var message = $"Remote playback command failed: {FriendlyError(exception)}";
+        DashboardBanner.Severity = InfoBarSeverity.Error;
+        DashboardBanner.Message = message;
+        DashboardBanner.IsOpen = true;
+        DetailBanner.Severity = InfoBarSeverity.Error;
+        DetailBanner.Message = message;
+        DetailBanner.IsOpen = true;
+        DetailStatus.Visibility = Visibility.Visible;
+        SourceBanner.Severity = InfoBarSeverity.Error;
+        SourceBanner.Message = message;
+        SourceBanner.IsOpen = true;
+        if (PlayerView.Visibility == Visibility.Visible)
+            SetPlayerStatus(message, liveSetting: AutomationLiveSetting.Assertive);
+    }
+
+    private async Task<Exception?> LeaveParticipantPlaybackRoomAsync(RivuneApiClient? client)
+    {
+        var room = _state.ActivePlaybackRoom;
+        if (room is null || room.CurrentMemberIsHost || client is null) return null;
+        try
+        {
+            await client.LeavePlaybackRoomAsync(room.Id, CancellationToken.None);
+            if (_state.ActivePlaybackRoom?.Id == room.Id) _state.ActivePlaybackRoom = null;
+            return null;
+        }
+        catch (RivuneServerException exception) when (exception.StatusCode is 403 or 404)
+        {
+            if (_state.ActivePlaybackRoom?.Id == room.Id) _state.ActivePlaybackRoom = null;
+            return null;
+        }
+        catch (Exception exception) { return exception; }
+    }
+
     private async Task<Exception?> EndActivePlaybackRoomAsync(PlaybackSession? session, RivuneApiClient? client)
     {
+        var participantLeaveFailure = await LeaveParticipantPlaybackRoomAsync(client);
+        if (participantLeaveFailure is not null) return participantLeaveFailure;
         var room = _state.ActivePlaybackRoom;
         if (room is null || client is null || !room.CurrentMemberIsHost ||
             session is not null && _coordinationEndedSessionId == session.Id) return null;
@@ -2392,14 +2462,34 @@ public sealed partial class MainPage : Page
         {
             case "playing": _mediaPlayer.Play(); break;
             case "paused": _mediaPlayer.Pause(); break;
-            case "ended": _ = EndPlaybackAsync(completed: true, returnToDashboard: true); break;
+            case "ended":
+                _ = LeaveEndedParticipantRoomAsync(room);
+                break;
         }
     }
 
-    private async Task StartCoordinatedPlaybackAsync(CoordinatedPlaybackItem item, long positionMilliseconds, RivuneApiClient client, CancellationToken cancellationToken)
+    private async Task LeaveEndedParticipantRoomAsync(PlaybackRoom room)
+    {
+        var client = _state.Client;
+        if (client is null || room.CurrentMemberIsHost || _state.ActivePlaybackRoom?.Id != room.Id) return;
+        Exception? failure = null;
+        try { await EndPlaybackAsync(completed: false, returnToDashboard: true); }
+        catch (Exception exception) { failure = exception; }
+        var leaveFailure = await LeaveParticipantPlaybackRoomAsync(client);
+        failure ??= leaveFailure;
+        if (failure is not null) ShowPlaybackCoordinationError(failure);
+        RefreshCoordinationActions();
+    }
+
+    private async Task StartCoordinatedPlaybackAsync(
+        CoordinatedPlaybackItem item,
+        long positionMilliseconds,
+        RivuneApiClient client,
+        CancellationToken cancellationToken,
+        bool endCurrentPlayback)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (_state.PlaybackSession is not null) await EndPlaybackAsync(completed: false, returnToDashboard: true);
+        if (endCurrentPlayback && _state.PlaybackSession is not null) await EndPlaybackAsync(completed: false, returnToDashboard: true);
         var generation = _state.Transition(AppPhase.Sources);
         _sourceReturnView = DashboardView;
         _playerReturnView = DashboardView;

@@ -2532,6 +2532,8 @@ public sealed partial class MainPage
 
     private async Task ShowRemoteControlsAsync(PlaybackDevice device)
     {
+        PlaybackDevice LatestDevice() =>
+            _state.PlaybackDevices.FirstOrDefault(value => value.SessionId == device.SessionId) ?? device;
         var panel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         var play = new Button { Content = "Play", MinHeight = 48 };
         var pause = new Button { Content = "Pause", MinHeight = 48 };
@@ -2548,9 +2550,19 @@ public sealed partial class MainPage
         {
             try
             {
-                await _state.Client!.SendPlaybackCommandAsync(device.SessionId, new PlaybackCommandInput { Command = command, PositionMilliseconds = position }, CancellationToken.None);
-                var nextPosition = position ?? device.State.PositionMilliseconds;
-                device = device with { State = device.State with { Status = command == "play" ? "playing" : command == "pause" ? "paused" : device.State.Status, PositionMilliseconds = nextPosition } };
+                var target = LatestDevice();
+                await _state.Client!.SendPlaybackCommandAsync(target.SessionId, new PlaybackCommandInput { Command = command, PositionMilliseconds = position }, CancellationToken.None);
+                var current = LatestDevice();
+                var nextPosition = position ?? current.State.PositionMilliseconds;
+                device = current with
+                {
+                    State = current.State with
+                    {
+                        Status = command == "play" ? "playing" : command == "pause" ? "paused" : current.State.Status,
+                        PositionMilliseconds = nextPosition,
+                    },
+                };
+                _state.PlaybackDevices = _state.PlaybackDevices.Select(value => value.SessionId == device.SessionId ? device : value).ToArray();
             }
             catch (Exception exception)
             {
@@ -2562,23 +2574,48 @@ public sealed partial class MainPage
         }
         play.Click += async (_, _) => await SendAsync("play");
         pause.Click += async (_, _) => await SendAsync("pause");
-        seekBack.Click += async (_, _) => await SendAsync("seek", Math.Max(0, device.State.PositionMilliseconds - 10_000));
-        seekForward.Click += async (_, _) => await SendAsync("seek", Math.Min(device.State.DurationMilliseconds, device.State.PositionMilliseconds + 10_000));
+        seekBack.Click += async (_, _) => await SendAsync("seek", Math.Max(0, LatestDevice().State.PositionMilliseconds - 10_000));
+        seekForward.Click += async (_, _) =>
+        {
+            var state = LatestDevice().State;
+            await SendAsync("seek", PlaybackCoordinationPolicy.ForwardSeekPosition(
+                state.PositionMilliseconds,
+                state.DurationMilliseconds));
+        };
         stop.Click += async (_, _) => await SendAsync("stop");
         await ShowDialogAsync(dialog);
     }
 
     private async Task CreatePlaybackRoomAsync()
     {
-        var room = await _state.Client!.CreatePlaybackRoomAsync(new PlaybackRoomCreateInput
+        var client = _state.Client!;
+        var generation = _state.GenerationId;
+        var profileId = _state.Profile?.Id;
+        await _profileCoordinationGate.WaitAsync(_state.Token);
+        try
         {
-            Item = CurrentCoordinatedItem(),
-            State = "paused",
-            PositionMilliseconds = (_detailProgress?.PositionSeconds ?? 0) * 1_000L,
-            DurationMilliseconds = (_detailProgress?.DurationSeconds ?? 0) * 1_000L,
-        }, _state.Token);
-        _state.ActivePlaybackRoom = room;
-        RenderPlaybackCoordinationActions();
+            if (_state.ActivePlaybackRoom is not null)
+                throw new InvalidOperationException("Leave the current watch room before creating another room.");
+            var room = await client.CreatePlaybackRoomAsync(new PlaybackRoomCreateInput
+            {
+                Item = CurrentCoordinatedItem(),
+                State = "paused",
+                PositionMilliseconds = (_detailProgress?.PositionSeconds ?? 0) * 1_000L,
+                DurationMilliseconds = (_detailProgress?.DurationSeconds ?? 0) * 1_000L,
+            }, _state.Token);
+            if (!_state.IsCurrent(generation) || !ReferenceEquals(client, _state.Client) || _state.Profile?.Id != profileId)
+            {
+                try { await client.LeavePlaybackRoomAsync(room.Id, CancellationToken.None); }
+                catch { }
+                return;
+            }
+            _state.ActivePlaybackRoom = room;
+            RenderPlaybackCoordinationActions();
+        }
+        finally
+        {
+            _profileCoordinationGate.Release();
+        }
     }
 
     private async Task JoinPlaybackRoomAsync()
@@ -2586,27 +2623,66 @@ public sealed partial class MainPage
         var code = new TextBox
         {
             Header = "Room code",
-            MaxLength = 10,
+            MaxLength = 32,
             CharacterCasing = CharacterCasing.Upper,
             PlaceholderText = "23456789AB",
             Style = (Style)Application.Current.Resources["RivuneTextField"],
         };
         var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = "Join watch room", Content = code, PrimaryButtonText = "Join", CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Primary };
         if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary) return;
-        var normalized = code.Text.Trim().ToUpperInvariant();
+        var normalized = PlaybackCoordinationPolicy.NormalizeRoomCode(code.Text);
         if (normalized.Length == 0) return;
-        var room = await _state.Client!.JoinPlaybackRoomAsync(normalized, _state.Token);
-        _state.ActivePlaybackRoom = room;
-        RenderPlaybackCoordinationActions();
-        await StartCoordinatedPlaybackAsync(room.Item, room.PositionMilliseconds, _state.Client!, _coordinationCancellation?.Token ?? _state.Token);
-    }
 
+        var client = _state.Client!;
+        await _profileCoordinationGate.WaitAsync(_state.Token);
+        try
+        {
+            if (_state.PlaybackSession is not null)
+            {
+                await EndPlaybackAsync(completed: false, returnToDashboard: true);
+                if (_state.ActivePlaybackRoom is not null)
+                    throw new InvalidOperationException("The current watch room could not be closed. Try again before joining another room.");
+            }
+            else if (_state.ActivePlaybackRoom is not null)
+            {
+                throw new InvalidOperationException("Leave the current watch room before joining another room.");
+            }
+
+            var room = await client.JoinPlaybackRoomAsync(normalized, _state.Token);
+            _state.ActivePlaybackRoom = room;
+            RenderPlaybackCoordinationActions();
+            try
+            {
+                await StartCoordinatedPlaybackAsync(room.Item, room.PositionMilliseconds, client, _coordinationCancellation?.Token ?? _state.Token, endCurrentPlayback: false);
+                if (_state.PlaybackSession is null) throw new InvalidOperationException("The watch room media could not be started.");
+            }
+            catch
+            {
+                var leaveFailure = await LeaveParticipantPlaybackRoomAsync(client);
+                RenderPlaybackCoordinationActions();
+                if (leaveFailure is not null)
+                    throw new InvalidOperationException("Playback could not start and the joined room could not be left. Retry Leave room when the connection recovers.", leaveFailure);
+                throw;
+            }
+        }
+        finally
+        {
+            _profileCoordinationGate.Release();
+        }
+    }
     private async Task LeavePlaybackRoomAsync()
     {
         var room = _state.ActivePlaybackRoom;
         if (room is null) return;
-        _state.ActivePlaybackRoom = null;
-        try { await _state.Client!.LeavePlaybackRoomAsync(room.Id, _state.Token); }
+        try
+        {
+            await _state.Client!.LeavePlaybackRoomAsync(room.Id, _state.Token);
+            if (_state.ActivePlaybackRoom?.Id == room.Id) _state.ActivePlaybackRoom = null;
+        }
+        catch (RivuneServerException exception) when (exception.StatusCode is 403 or 404)
+        {
+            if (_state.ActivePlaybackRoom?.Id == room.Id) _state.ActivePlaybackRoom = null;
+        }
         finally { RenderPlaybackCoordinationActions(); }
     }
 
