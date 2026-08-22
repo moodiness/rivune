@@ -70,6 +70,28 @@ internal static class PlaybackCoordinationMapping
     };
 }
 
+internal static class PlaybackCoordinationPolicy
+{
+    private const long MaximumPositionMilliseconds = 7L * 24 * 60 * 60 * 1_000;
+
+    public static string NormalizeRoomCode(string value) =>
+        new string(value.Where(character => character is not (' ' or '-')).ToArray()).ToUpperInvariant();
+
+    public static long ForwardSeekPosition(long positionMilliseconds, long durationMilliseconds)
+    {
+        var current = Math.Clamp(positionMilliseconds, 0, MaximumPositionMilliseconds);
+        var target = Math.Min(MaximumPositionMilliseconds, current + 10_000);
+        return durationMilliseconds > 0 ? Math.Max(current, Math.Min(target, durationMilliseconds)) : target;
+    }
+
+    public static bool IsTerminalRemoteLoadFailure(Exception exception)
+    {
+        if (exception is RivuneServerException serverException)
+            return serverException.StatusCode is >= 400 and < 500 and not 408 and not 409 and not 429;
+        return exception is InvalidOperationException or RivuneApiException;
+    }
+}
+
 internal static class MediaTargetMapping
 {
     private static readonly HashSet<string> GlobalMediaTypes = new(StringComparer.OrdinalIgnoreCase)

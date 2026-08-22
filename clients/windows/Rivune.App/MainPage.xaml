@@ -269,6 +269,11 @@
                                 <TextBlock Text="FIRST CONNECTION" Style="{StaticResource RivuneEyebrowStyle}" />
                                 <TextBlock Text="Where does your Rivune live?" Style="{StaticResource RivuneHeadlineMediumTextStyle}" AutomationProperties.HeadingLevel="Level1" />
                                 <TextBlock Text="Enter the address of your Rivune server. Your library stays on your server." Style="{StaticResource RivuneBodyMediumTextStyle}" Margin="0,0,0,4" />
+                                <StackPanel x:Name="OfflineProfilesPanel" Spacing="8" Visibility="Collapsed">
+                                    <TextBlock Text="DOWNLOADED PROFILES" Style="{StaticResource RivuneEyebrowStyle}" />
+                                    <TextBlock Text="Open encrypted downloads without connecting to the server." Style="{StaticResource RivuneBodySmallTextStyle}" />
+                                    <StackPanel x:Name="OfflineProfileActions" Spacing="8" />
+                                </StackPanel>
                                 <StackPanel x:Name="DiscoveredServersPanel" Spacing="8" Visibility="Collapsed">
                                     <TextBlock Text="NEARBY RIVUNE SERVERS" Style="{StaticResource RivuneEyebrowStyle}" />
                                     <ListView x:Name="DiscoveredServersList" SelectionMode="Single" IsItemClickEnabled="True" ItemClick="DiscoveredServersList_ItemClick" AutomationProperties.Name="Nearby Rivune servers">
@@ -612,7 +617,12 @@
                             </DataTemplate>
                         </ListView.ItemTemplate>
                     </ListView>
-                    <Button Grid.Row="3" x:Name="PlaySourceButton" Content="Play inside Rivune" IsEnabled="False" Click="PlaySource_Click" Style="{StaticResource RivunePrimaryButton}" Visibility="Collapsed" XYFocusUp="{x:Bind SourceList}" />
+                    <StackPanel Grid.Row="3" Spacing="8">
+                        <Button x:Name="PlaySourceButton" Content="Play inside Rivune" IsEnabled="False" Click="PlaySource_Click" Style="{StaticResource RivunePrimaryButton}" Visibility="Collapsed" XYFocusUp="{x:Bind SourceList}" />
+                        <Button x:Name="DownloadSourceButton" IsEnabled="False" Click="DownloadSource_Click" Style="{StaticResource RivuneSecondaryButton}" Visibility="Collapsed" AutomationProperties.Name="Download for offline playback">
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8"><FontIcon Glyph="&#xE896;" FontSize="20" /><TextBlock x:Name="DownloadSourceLabel" Text="Download" /></StackPanel>
+                        </Button>
+                    </StackPanel>
                 </Grid>
             </Border>
         </Grid>

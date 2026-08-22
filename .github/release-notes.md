@@ -1,13 +1,13 @@
-# Rivune v1.11.0
+# Rivune v1.11.1
 
 ## Highlights
 
-- Android and Apple clients can now download encrypted offline media for a specific server and profile. Downloads support progress, cancellation, quota enforcement, crash-safe reconciliation, offline playback, and PIN-gated access without exposing plaintext media at rest.
-- Native clients add Rivune playback coordination: authenticated devices can hand off playback, remotely control another screen, and host or join private synchronized viewing rooms while preserving profile boundaries.
-- Per-profile local recommendations now derive from the viewer's own library and watch state without sending recommendation history to an external service.
-- Operators can install a host-supervised PostgreSQL backup schedule that signs every archive, verifies it through a disposable restore, retains only proven backups, and supports explicit authenticated recovery.
-- Docker Desktop installations on macOS now publish `_rivune._tcp` through a host Bonjour LaunchAgent, while Linux continues to use the isolated host-network discovery sidecar.
-- Android, Apple, and Windows playback surfaces incorporate the new coordination capabilities and related lifecycle, background, focus, and error-state hardening.
+- Rivune for Windows now downloads single-file HTTP media into profile-scoped encrypted offline storage. Media is authenticated in independent AES-256-GCM chunks under a random per-profile key protected by Windows DPAPI for the current Windows user.
+- The Windows source picker exposes download progress and rejects HLS, DASH, redirects, and any resolved URL outside the connected Rivune origin. Interrupted downloads are removed and manifests are committed atomically.
+- Downloaded profiles can be opened without contacting the server. Profile PINs remain required, access locks when Rivune moves to the background, and offline playback resumes from locally persisted position and completion state.
+- The Windows home surface lists downloaded titles, supports deletion, and streams decrypted ranges only through an unguessable loopback endpoint. Plaintext media is never written to disk.
+- Offline storage is isolated by canonical server origin and profile, reconciles incomplete or orphaned archives, and enforces a 20 GiB quota.
+- Windows now provides the same end-user offline, handoff, remote-control, and synchronized-room surface as the Android and Apple clients. HLS/DASH downloads remain intentionally out of scope.
 - The complete backend, browser, Android, Apple, Windows, migration, proxy, backup, and multi-architecture container gates run before publication.
 
 ## Apple installation
@@ -20,7 +20,8 @@
 ## Windows installation
 
 - Download `Rivune-x64.exe` on x64 Windows or `Rivune-arm64.exe` on ARM64 Windows. Windows 10 build 19041 or newer is required.
-- Keep the executable in a user-writable local folder. Rivune is portable and has no installer, but local preferences and DPAPI-protected sessions remain under `%LOCALAPPDATA%\Rivune\`.
+- Keep the executable in a user-writable local folder. Rivune is portable, while preferences, DPAPI-protected sessions, and encrypted offline media remain under `%LOCALAPPDATA%\Rivune\`.
+- Offline keys and archives are bound to the current Windows user and installation; they are not portable backups. Download media again after moving to another account or Windows installation.
 - The Windows executables are not Authenticode-signed and may trigger SmartScreen. Verify that the download URL is the matching `moodiness/rivune` GitHub Release and compare the asset SHA-256 before running it.
 
 ## Android installation
@@ -31,19 +32,18 @@
 
 ## Upgrade notes
 
-- This release adds database migrations 76 and 77 for playback coordination and private synchronized-room membership. Back up PostgreSQL and the complete encryption keyring before upgrading; Rivune applies both migrations automatically during startup.
-- Existing operators can set `RIVUNE_VERSION=1.11.0`, pull, and recreate Rivune. Fresh Compose deployments now default to the immutable `1.11.0` image tag.
-- When LAN discovery is enabled, use `./rivune up` and `./rivune down`; on macOS these commands manage the per-user Bonjour LaunchAgent outside Docker Desktop.
-- Scheduled backups are opt-in and run on the host so Docker cannot retain the signing and restore credentials. Configure and inspect the schedule with the documented `./rivune backup-scheduler` command.
+- This patch release adds no database migration. The current schema remains unchanged from v1.11.0.
+- Existing operators can set `RIVUNE_VERSION=1.11.1`, pull, and recreate Rivune. Fresh Compose deployments now default to the immutable `1.11.1` image tag.
+- Windows offline archives are local client state and are not included in PostgreSQL backups. Server profile, library, and progress data continue to use the normal authenticated backup path.
 - GitHub publishes exactly eight release assets: `Rivune-Android.apk`, the three unsigned IPA files, `Rivune-macOS.dmg`, `rivune-update.json`, `Rivune-x64.exe`, and `Rivune-arm64.exe`.
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.11.0`
+- `ghcr.io/moodiness/rivune:1.11.1`
 - `ghcr.io/moodiness/rivune:1.11`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 - Provenance and SBOM attestations are published for both runnable platforms.
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.10.0...v1.11.0
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.11.0...v1.11.1

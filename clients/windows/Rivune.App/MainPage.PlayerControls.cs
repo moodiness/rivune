@@ -73,9 +73,11 @@ public sealed partial class MainPage
     {
         SourceList.SelectedItem = null;
         _state.SelectedSource = null;
-        _state.Preparation = null;
+        var downloading = _offlineDownloadTask is { IsCompleted: false };
         PlaySourceButton.IsEnabled = false;
         PlaySourceButton.Visibility = Visibility.Collapsed;
+        DownloadSourceButton.IsEnabled = downloading;
+        DownloadSourceButton.Visibility = downloading ? Visibility.Visible : Visibility.Collapsed;
         var filtered = addonId is null ? _sourceOptions : _sourceOptions.Where(value => value.AddonId == addonId).ToArray();
         SourceList.ItemsSource = filtered;
         SourceStatus.Text = filtered.Count == 0
@@ -145,6 +147,9 @@ public sealed partial class MainPage
         SourceBanner.IsOpen = false;
         SourceProgress.IsActive = true;
         PlaySourceButton.IsEnabled = false;
+        var downloading = _offlineDownloadTask is { IsCompleted: false };
+        DownloadSourceButton.IsEnabled = downloading;
+        DownloadSourceButton.Visibility = downloading ? Visibility.Visible : Visibility.Collapsed;
         try
         {
             await LoadSourcesAsync(request.MediaType, request.ResourceId, request.TitleId, generation, request.AddonId, request.TracksProgress);
@@ -334,12 +339,13 @@ public sealed partial class MainPage
     private static string SubtitleLabel(PlaybackSubtitle subtitle) =>
         $"{subtitle.Language ?? "Unknown language"}{(subtitle.Forced == true ? " · Forced" : string.Empty)}";
 
-    private async Task RestartPlaybackWithTracksAsync(int? requestedPosition = null)
+    private async Task<Exception?> RestartPlaybackWithTracksAsync(int? requestedPosition = null, bool showRecovery = true)
     {
         var selectedSource = _state.SelectedSource;
         var currentSession = _state.PlaybackSession;
         var client = _state.Client;
-        if (selectedSource is null || currentSession is null || client is null) return;
+        if (selectedSource is null || currentSession is null || client is null)
+            return new InvalidOperationException("The current source cannot be restarted.");
         var previousAudioTrack = currentSession.SelectedAudioTrack;
         var previousSubtitleId = currentSession.SelectedSubtitleId;
 
@@ -350,7 +356,8 @@ public sealed partial class MainPage
         {
             if (_trackRestarting || _playerReturnTask is not null || _closed ||
                 _endingTask is { IsCompleted: false } ||
-                !ReferenceEquals(_state.PlaybackSession, currentSession)) return;
+                !ReferenceEquals(_state.PlaybackSession, currentSession))
+                return new OperationCanceledException("Playback is already transitioning.");
             _trackRestarting = true;
             restartCancellation = new CancellationTokenSource();
             _trackRestartCancellation = restartCancellation;
@@ -365,6 +372,7 @@ public sealed partial class MainPage
         var adopted = false;
         var oldSessionStopped = false;
         string? recoveryMessage = null;
+        Exception? restartFailure = null;
         try
         {
             SetPlayerStatus("Applying track selection…", busy: true);
@@ -388,7 +396,6 @@ public sealed partial class MainPage
             oldSessionStopped = true;
             restartCancellation.Token.ThrowIfCancellationRequested();
             if (!_state.IsCurrent(restartGeneration)) throw new OperationCanceledException();
-
 
             lock (_endingSync)
             {
@@ -418,12 +425,13 @@ public sealed partial class MainPage
             UpdateTrackButtonLabels();
             adopted = true;
         }
-        catch (OperationCanceledException) { }
-        catch (Exception) when (restartCancellation.IsCancellationRequested) { }
+        catch (OperationCanceledException exception) { restartFailure = exception; }
+        catch (Exception exception) when (restartCancellation.IsCancellationRequested) { restartFailure = exception; }
         catch (Exception exception)
         {
+            restartFailure = exception;
             SetPlayerStatus(FriendlyError(exception), liveSetting: AutomationLiveSetting.Assertive);
-            if (oldSessionStopped) recoveryMessage = FriendlyError(exception);
+            if (oldSessionStopped && showRecovery) recoveryMessage = FriendlyError(exception);
         }
         finally
         {
@@ -460,6 +468,7 @@ public sealed partial class MainPage
             if (recoveryMessage is not null && !restartWasCancelled && !_closed)
                 await ShowPlaybackRecoveryAsync(recoveryMessage, position);
         }
+        return adopted ? null : restartFailure ?? new InvalidOperationException("Playback could not be restarted.");
     }
 
     private async void PlayerNext_Click(object sender, RoutedEventArgs e) => await AdvanceToNextEpisodeAsync();
