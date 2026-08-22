@@ -30,7 +30,7 @@ struct RivuneMediaDetailView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(model.canNavigateBackFromMedia ? "Back" : "Close") {
+                    Button(rivuneLocalized(model.canNavigateBackFromMedia ? "Back" : "Close")) {
                         if model.selectedSeason != nil { model.closeSeason() }
                         else if model.canNavigateBackFromMedia { model.closeMedia() }
                         else { model.closeMedia(); dismiss() }
@@ -82,7 +82,7 @@ struct RivuneMediaDetailView: View {
                 if let series = detail.series { seasons(series) }
                 cast(detail.movie?.cast ?? detail.series?.cast ?? detail.parentSeries?.cast ?? [])
                 if let failure = model.mediaFailure {
-                    Label(failure.localizedDescription, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red)
+                    Label(rivuneLocalized(failure.localizedDescription), systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red)
                 }
             }
             .padding(.horizontal, 20)
@@ -114,20 +114,20 @@ struct RivuneMediaDetailView: View {
                         Button("Match position on \(device.name)") { model.controlPlayback(on: device, command: "seek") }
                         Button("Stop \(device.name)", role: .destructive) { model.controlPlayback(on: device, command: "stop") }
                     }
-                } label: { Label("Play on another device", systemImage: "airplayvideo") }
+                } label: { Label(rivuneLocalized("Play on another device"), systemImage: "airplayvideo") }
                 .buttonStyle(.bordered)
 #endif
             }
             HStack {
                 if let room = model.activePlaybackRoom {
 #if os(tvOS)
-                    Text(room.joinCode.map { "Room \($0)" } ?? "Watch room")
+                    Text(room.joinCode.map { rivuneLocalizedFormat("Room %@", $0) } ?? rivuneLocalized("Watch room"))
                         .font(.subheadline.monospaced())
 #else
-                    Text(room.joinCode.map { "Room \($0)" } ?? "Watch room")
+                    Text(room.joinCode.map { rivuneLocalizedFormat("Room %@", $0) } ?? rivuneLocalized("Watch room"))
                         .font(.subheadline.monospaced()).textSelection(.enabled)
 #endif
-                    Text("\(room.members.count) watching").foregroundStyle(.secondary)
+                    Text(rivuneLocalizedFormat("%d watching", room.members.count)).foregroundStyle(.secondary)
                     Button("Leave", action: model.leavePlaybackRoom).buttonStyle(.bordered)
                 } else {
                     Button { model.createPlaybackRoom() } label: { Label("Start watch room", systemImage: "person.2.wave.2") }.buttonStyle(.bordered)
@@ -177,14 +177,14 @@ struct RivuneMediaDetailView: View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 240), spacing: 10)], alignment: .leading, spacing: 10) {
             if detail.target.mediaType != "series" {
                 Button(action: model.loadPlaybackSources) {
-                    Label(detail.progress?.positionSeconds ?? 0 > 0 ? "Resume" : "Play", systemImage: "play.fill")
+                    Label(rivuneLocalized(detail.progress?.positionSeconds ?? 0 > 0 ? "Resume" : "Play"), systemImage: "play.fill")
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, minHeight: 22, alignment: .center)
                 }.buttonStyle(.borderedProminent)
             }
             if detail.target.mediaType != "episode" {
                 Button(action: model.toggleLibrary) {
-                    Label(detail.inLibrary ? "In library" : "Add to library", systemImage: detail.inLibrary ? "checkmark" : "plus")
+                    Label(rivuneLocalized(detail.inLibrary ? "In library" : "Add to library"), systemImage: detail.inLibrary ? "checkmark" : "plus")
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
                         .frame(maxWidth: .infinity, minHeight: 22, alignment: .center)
@@ -192,7 +192,7 @@ struct RivuneMediaDetailView: View {
             }
             if detail.target.mediaType != "series" {
                 Button(action: model.toggleWatched) {
-                    Label(detail.progress?.completed == true ? "Mark as unwatched" : "Mark as watched", systemImage: detail.progress?.completed == true ? "eye.slash" : "checkmark.circle")
+                    Label(rivuneLocalized(detail.progress?.completed == true ? "Mark as unwatched" : "Mark as watched"), systemImage: detail.progress?.completed == true ? "eye.slash" : "checkmark.circle")
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
                         .frame(maxWidth: .infinity, minHeight: 22, alignment: .center)
@@ -235,7 +235,7 @@ struct RivuneMediaDetailView: View {
                                     .frame(width: 126, height: 189)
                                     .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
                                     Text(season.name).font(.headline).lineLimit(1).frame(width: 126, alignment: .leading)
-                                    Text("\(season.episodeCount) episodes").font(.caption).foregroundStyle(Color.white.opacity(0.64))
+                                    Text(rivuneLocalizedFormat("%d episodes", season.episodeCount)).font(.caption).foregroundStyle(Color.white.opacity(0.64))
                                 }
                             }.buttonStyle(.plain)
                         }
@@ -275,7 +275,7 @@ struct RivuneMediaDetailView: View {
                 HStack(spacing: 10) {
                     Button(action: model.toggleWatched) {
                         let watched = season.episodes.allSatisfy { model.episodeProgress[$0.id]?.completed == true }
-                        Label(watched ? "Mark as unwatched" : "Mark as watched", systemImage: watched ? "eye.slash" : "checkmark.circle")
+                        Label(rivuneLocalized(watched ? "Mark as unwatched" : "Mark as watched"), systemImage: watched ? "eye.slash" : "checkmark.circle")
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
                             .frame(minHeight: 22, alignment: .center)
@@ -296,8 +296,8 @@ struct RivuneMediaDetailView: View {
                                 }
                                 .frame(width: 150, height: 84).clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                                 VStack(alignment: .leading, spacing: 6) {
-                                    Text("\(episode.episodeNumber). \(episode.name)").font(.headline).lineLimit(2)
-                                    if let runtime = episode.runtimeMinutes { Text("\(runtime) min").font(.caption).foregroundStyle(Color.white.opacity(0.64)) }
+                                    Text(rivuneLocalizedFormat("%d. %@", episode.episodeNumber, episode.name)).font(.headline).lineLimit(2)
+                                    if let runtime = episode.runtimeMinutes { Text(rivuneLocalizedFormat("%d min", runtime)).font(.caption).foregroundStyle(Color.white.opacity(0.64)) }
                                     Text(episode.overview).font(.caption).foregroundStyle(Color.white.opacity(0.72)).lineLimit(2)
                                 }
                                 Spacer()
@@ -310,7 +310,7 @@ struct RivuneMediaDetailView: View {
                         .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                     }.buttonStyle(.plain)
                 }
-                if let failure = model.mediaFailure { Text(failure.localizedDescription).foregroundStyle(.red) }
+                if let failure = model.mediaFailure { Text(rivuneLocalized(failure.localizedDescription)).foregroundStyle(.red) }
             }
             .padding(20)
             .frame(maxWidth: 1000, alignment: .leading)
@@ -321,7 +321,7 @@ struct RivuneMediaDetailView: View {
     private var failureContent: some View {
         VStack(spacing: 16) {
             Image(systemName: "exclamationmark.triangle.fill").font(.largeTitle).foregroundStyle(.red)
-            Text(model.mediaFailure?.localizedDescription ?? "This title could not be loaded.").multilineTextAlignment(.center)
+            Text(model.mediaFailure.map { rivuneLocalized($0.localizedDescription) } ?? rivuneLocalized("This title could not be loaded.")).multilineTextAlignment(.center)
         }.padding(30)
     }
 
@@ -332,11 +332,11 @@ struct RivuneMediaDetailView: View {
         let date = detail.movie?.releaseDate ?? detail.series?.firstAirDate ?? detail.episode?.airDate ?? detail.target.releaseInfo
         let runtime = detail.movie?.runtimeMinutes ?? detail.episode?.runtimeMinutes ?? detail.target.runtimeMinutes
         let rating = detail.movie?.voteAverage ?? detail.series?.voteAverage ?? detail.episode?.voteAverage
-        let type = detail.target.mediaType == "series" ? "Series" : detail.target.mediaType.capitalized
+        let type = rivuneLocalized(detail.target.mediaType == "series" ? "Series" : detail.target.mediaType.capitalized)
         let counts = detail.series.flatMap { series in
-            [series.numberOfSeasons.map { "\($0) seasons" }, series.numberOfEpisodes.map { "\($0) episodes" }].compactMap { $0 }.joined(separator: " · ").nilIfEmpty
+            [series.numberOfSeasons.map { rivuneLocalizedFormat("%d seasons", $0) }, series.numberOfEpisodes.map { rivuneLocalizedFormat("%d episodes", $0) }].compactMap { $0 }.joined(separator: " · ").nilIfEmpty
         }
-        return [type, date, runtime.map { "\($0) min" }, rating.flatMap { $0 > 0 ? String(format: "★ %.1f", $0) : nil }, counts, detail.series?.status].compactMap { $0 }.joined(separator: " · ").nilIfEmpty
+        return [type, date, runtime.map { rivuneLocalizedFormat("%d min", $0) }, rating.flatMap { $0 > 0 ? String(format: "★ %.1f", $0) : nil }, counts, detail.series?.status].compactMap { $0 }.joined(separator: " · ").nilIfEmpty
     }
     private func trailerURL(_ trailer: Trailer) -> URL? {
         var components = URLComponents(string: "https://www.youtube.com/watch")
@@ -369,7 +369,7 @@ struct RivunePlaybackSourcesView: View {
 #endif
                             if !["hls", "dash"].contains(source.protocol.lowercased()) {
                                 Button { model.download(source) } label: {
-                                    Label(model.offlineDownloadActive ? "Downloading…" : "Download", systemImage: "arrow.down.circle")
+                                    Label(rivuneLocalized(model.offlineDownloadActive ? "Downloading…" : "Download"), systemImage: "arrow.down.circle")
                                 }
                                 .disabled(model.offlineDownloadActive)
                                 .buttonStyle(.bordered)
@@ -462,13 +462,13 @@ private struct RivuneNativeInternalPlayerView: View {
                     .padding(.horizontal, 22).padding(.top, 14)
                     Spacer()
                     HStack(spacing: 38) {
-                        Button { seek(by: -10) } label: { Image(systemName: "gobackward.10").font(.system(size: 30, weight: .semibold)) }.accessibilityLabel("Back 10 seconds")
+                        Button { seek(by: -10) } label: { Image(systemName: "gobackward.10").font(.system(size: 30, weight: .semibold)) }.accessibilityLabel(rivuneLocalized("Back 10 seconds"))
                         Button { togglePlayback() } label: {
                             Image(systemName: playing ? "pause.fill" : "play.fill")
                                 .font(.system(size: 34, weight: .bold)).frame(width: 68, height: 68).background(.ultraThinMaterial, in: Circle())
                         }
-                        .accessibilityLabel(playing ? "Pause" : "Play")
-                        Button { seek(by: 10) } label: { Image(systemName: "goforward.10").font(.system(size: 30, weight: .semibold)) }.accessibilityLabel("Forward 10 seconds")
+                        .accessibilityLabel(rivuneLocalized(playing ? "Pause" : "Play"))
+                        Button { seek(by: 10) } label: { Image(systemName: "goforward.10").font(.system(size: 30, weight: .semibold)) }.accessibilityLabel(rivuneLocalized("Forward 10 seconds"))
                     }
                     .buttonStyle(.plain)
                     Spacer()
@@ -476,7 +476,7 @@ private struct RivuneNativeInternalPlayerView: View {
 #if os(tvOS)
                         Button { cycleAudio() } label: { Label("Audio", systemImage: "speaker.wave.2") }
                         Button { cycleSubtitle() } label: { Label("Subtitles", systemImage: "captions.bubble") }
-                        Button { cycleAspect() } label: { Label(sessionAspect.displayName, systemImage: "aspectratio") }
+                        Button { cycleAspect() } label: { Label(rivuneLocalized(sessionAspect.displayName), systemImage: "aspectratio") }
                         Button { cycleSpeed() } label: { Label(playbackSpeed == 1 ? "1×" : "\(playbackSpeed.formatted())×", systemImage: "speedometer") }
 #else
                         Menu {
@@ -496,7 +496,7 @@ private struct RivuneNativeInternalPlayerView: View {
                             }
                         } label: {
                             Image(systemName: "speaker.wave.2").frame(minWidth: 24)
-                                .accessibilityLabel("Audio")
+                                .accessibilityLabel(rivuneLocalized("Audio"))
                         }
 
                         Menu {
@@ -520,7 +520,7 @@ private struct RivuneNativeInternalPlayerView: View {
                             }
                         } label: {
                             Image(systemName: "captions.bubble").frame(minWidth: 24)
-                                .accessibilityLabel("Subtitles")
+                                .accessibilityLabel(rivuneLocalized("Subtitles"))
                         }
 
                         Menu {
@@ -529,17 +529,17 @@ private struct RivuneNativeInternalPlayerView: View {
                                     sessionAspect = aspect
                                     scheduleControlsHide()
                                 } label: {
-                                    if sessionAspect == aspect { Label(aspect.displayName, systemImage: "checkmark") }
-                                    else { Text(aspect.displayName) }
+                                    if sessionAspect == aspect { Label(rivuneLocalized(aspect.displayName), systemImage: "checkmark") }
+                                    else { Text(rivuneLocalized(aspect.displayName)) }
                                 }
                             }
                         } label: {
-                            Label(sessionAspect.displayName, systemImage: "aspectratio")
+                            Label(rivuneLocalized(sessionAspect.displayName), systemImage: "aspectratio")
                         }
 
                         Menu {
                             ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { speed in
-                                Button(speed == 1 ? "Normal" : "\(speed.formatted())×") { setSpeed(speed) }
+                                Button(speed == 1 ? rivuneLocalized("Normal") : "\(speed.formatted())×") { setSpeed(speed) }
                             }
                         } label: {
                             Label(playbackSpeed == 1 ? "1×" : "\(playbackSpeed.formatted())×", systemImage: "speedometer")
@@ -676,7 +676,7 @@ private struct RivuneNativeInternalPlayerView: View {
             player.replaceCurrentItem(with: nil)
             model.fallbackPlaybackToMPV(position: Int(position), duration: max(Int(duration), Int(position)))
         } else {
-            failureMessage = "Apple player could not play this stream: \(detail). Choose MPV under Settings > Player for broader format support."
+            failureMessage = rivuneLocalizedFormat("Apple player could not play this stream: %@. Choose MPV under Settings > Player for broader format support.", detail)
             player.pause()
             playing = false
             controlsVisible = true
@@ -696,11 +696,11 @@ private struct RivuneNativeInternalPlayerView: View {
     }
 
     private func trackLabel(_ track: PlaybackMediaTrack) -> String {
-        [track.title, track.language?.uppercased(), track.channels.map { "\($0) ch" }].compactMap { $0 }.joined(separator: " · ").nilIfEmpty ?? "Track \(track.index)"
+        [track.title, track.language?.uppercased(), track.channels.map { rivuneLocalizedFormat("%d ch", $0) }].compactMap { $0 }.joined(separator: " · ").nilIfEmpty ?? rivuneLocalizedFormat("Track %d", track.index)
     }
 
     private func subtitleLabel(_ subtitle: PlaybackSubtitle) -> String {
-        [subtitle.language?.uppercased(), subtitle.forced == true ? "Forced" : nil].compactMap { $0 }.joined(separator: " · ").nilIfEmpty ?? "Subtitle"
+        [subtitle.language?.uppercased(), subtitle.forced == true ? rivuneLocalized("Forced") : nil].compactMap { $0 }.joined(separator: " · ").nilIfEmpty ?? rivuneLocalized("Subtitle")
     }
 
     private func minimize() {
@@ -841,7 +841,7 @@ private struct RivuneNativeInternalPlayerView: View {
     }
 
     private func skipTitle(_ type: PlaybackMarkerType) -> String {
-        switch type { case .intro: return "Skip intro"; case .recap: return "Skip recap"; case .outro: return "Skip outro" }
+        switch type { case .intro: return rivuneLocalized("Skip intro"); case .recap: return rivuneLocalized("Skip recap"); case .outro: return rivuneLocalized("Skip outro") }
     }
 
     private func markerKey(_ marker: PlaybackMarker) -> String { "\(marker.type.rawValue):\(marker.startSeconds):\(marker.endSeconds)" }
@@ -926,13 +926,13 @@ private struct RivuneMPVInternalPlayerView: View {
                     .padding(.horizontal, 22).padding(.top, 14)
                     Spacer()
                     HStack(spacing: 38) {
-                        Button { seek(by: -10) } label: { Image(systemName: "gobackward.10").font(.system(size: 30, weight: .semibold)) }.accessibilityLabel("Back 10 seconds")
+                        Button { seek(by: -10) } label: { Image(systemName: "gobackward.10").font(.system(size: 30, weight: .semibold)) }.accessibilityLabel(rivuneLocalized("Back 10 seconds"))
                         Button { togglePlayback() } label: {
                             Image(systemName: player.playing ? "pause.fill" : "play.fill")
                                 .font(.system(size: 34, weight: .bold)).frame(width: 68, height: 68).background(.ultraThinMaterial, in: Circle())
                         }
-                        .accessibilityLabel(player.playing ? "Pause" : "Play")
-                        Button { seek(by: 10) } label: { Image(systemName: "goforward.10").font(.system(size: 30, weight: .semibold)) }.accessibilityLabel("Forward 10 seconds")
+                        .accessibilityLabel(rivuneLocalized(player.playing ? "Pause" : "Play"))
+                        Button { seek(by: 10) } label: { Image(systemName: "goforward.10").font(.system(size: 30, weight: .semibold)) }.accessibilityLabel(rivuneLocalized("Forward 10 seconds"))
                     }
                     .buttonStyle(.plain)
                     Spacer()
@@ -940,7 +940,7 @@ private struct RivuneMPVInternalPlayerView: View {
 #if os(tvOS)
                         Button { cycleAudio() } label: { Label("Audio", systemImage: "speaker.wave.2") }
                         Button { cycleSubtitle() } label: { Label("Subtitles", systemImage: "captions.bubble") }
-                        Button { cycleAspect() } label: { Label(sessionAspect.displayName, systemImage: "aspectratio") }
+                        Button { cycleAspect() } label: { Label(rivuneLocalized(sessionAspect.displayName), systemImage: "aspectratio") }
                         Button { cycleSpeed() } label: { Label(playbackSpeed == 1 ? "1×" : "\(playbackSpeed.formatted())×", systemImage: "speedometer") }
 #else
                         Menu {
@@ -955,7 +955,7 @@ private struct RivuneMPVInternalPlayerView: View {
                                     else { Text(trackLabel(track)) }
                                 }
                             }
-                        } label: { Image(systemName: "speaker.wave.2").frame(minWidth: 24).accessibilityLabel("Audio") }
+                        } label: { Image(systemName: "speaker.wave.2").frame(minWidth: 24).accessibilityLabel(rivuneLocalized("Audio")) }
 
                         Menu {
                             Button { selectSubtitle(nil) } label: {
@@ -968,20 +968,20 @@ private struct RivuneMPVInternalPlayerView: View {
                                     else { Text(subtitleLabel(subtitle)) }
                                 }
                             }
-                        } label: { Image(systemName: "captions.bubble").frame(minWidth: 24).accessibilityLabel("Subtitles") }
+                        } label: { Image(systemName: "captions.bubble").frame(minWidth: 24).accessibilityLabel(rivuneLocalized("Subtitles")) }
 
                         Menu {
                             ForEach(RivuneVideoAspect.allCases) { aspect in
                                 Button { sessionAspect = aspect; scheduleControlsHide() } label: {
-                                    if sessionAspect == aspect { Label(aspect.displayName, systemImage: "checkmark") }
-                                    else { Text(aspect.displayName) }
+                                    if sessionAspect == aspect { Label(rivuneLocalized(aspect.displayName), systemImage: "checkmark") }
+                                    else { Text(rivuneLocalized(aspect.displayName)) }
                                 }
                             }
-                        } label: { Label(sessionAspect.displayName, systemImage: "aspectratio") }
+                        } label: { Label(rivuneLocalized(sessionAspect.displayName), systemImage: "aspectratio") }
 
                         Menu {
                             ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { speed in
-                                Button(speed == 1 ? "Normal" : "\(speed.formatted())×") { setSpeed(speed) }
+                                Button(speed == 1 ? rivuneLocalized("Normal") : "\(speed.formatted())×") { setSpeed(speed) }
                             }
                         } label: { Label(playbackSpeed == 1 ? "1×" : "\(playbackSpeed.formatted())×", systemImage: "speedometer") }
 #endif
@@ -1206,11 +1206,11 @@ private struct RivuneMPVInternalPlayerView: View {
     }
 
     private func trackLabel(_ track: PlaybackMediaTrack) -> String {
-        [track.title, track.language?.uppercased(), track.channels.map { "\($0) ch" }].compactMap { $0 }.joined(separator: " · ").nilIfEmpty ?? "Track \(track.index)"
+        [track.title, track.language?.uppercased(), track.channels.map { rivuneLocalizedFormat("%d ch", $0) }].compactMap { $0 }.joined(separator: " · ").nilIfEmpty ?? rivuneLocalizedFormat("Track %d", track.index)
     }
 
     private func subtitleLabel(_ subtitle: PlaybackSubtitle) -> String {
-        [subtitle.language?.uppercased(), subtitle.forced == true ? "Forced" : nil].compactMap { $0 }.joined(separator: " · ").nilIfEmpty ?? "Subtitle"
+        [subtitle.language?.uppercased(), subtitle.forced == true ? rivuneLocalized("Forced") : nil].compactMap { $0 }.joined(separator: " · ").nilIfEmpty ?? rivuneLocalized("Subtitle")
     }
 
     private func shouldAutoSkip(_ type: PlaybackMarkerType) -> Bool {
@@ -1218,7 +1218,7 @@ private struct RivuneMPVInternalPlayerView: View {
     }
 
     private func skipTitle(_ type: PlaybackMarkerType) -> String {
-        switch type { case .intro: return "Skip intro"; case .recap: return "Skip recap"; case .outro: return "Skip outro" }
+        switch type { case .intro: return rivuneLocalized("Skip intro"); case .recap: return rivuneLocalized("Skip recap"); case .outro: return rivuneLocalized("Skip outro") }
     }
 
     private func markerKey(_ marker: PlaybackMarker) -> String { "\(marker.type.rawValue):\(marker.startSeconds):\(marker.endSeconds)" }
@@ -1239,7 +1239,7 @@ private struct RivunePlaybackFailureView: View {
         VStack(spacing: 16) {
             Image(systemName: "exclamationmark.triangle.fill").font(.largeTitle).foregroundStyle(.yellow)
             Text("Playback failed").font(.title2.bold())
-            Text(message)
+            Text(rivuneLocalized(message))
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -1299,10 +1299,10 @@ private struct RivuneNativeMiniPlayerView: View {
                 Spacer()
                 HStack(spacing: 18) {
                     Button { togglePlayback() } label: { Image(systemName: playing ? "pause.fill" : "play.fill").font(.title2) }
-                        .accessibilityLabel(playing ? "Pause" : "Play")
+                        .accessibilityLabel(rivuneLocalized(playing ? "Pause" : "Play"))
                     Spacer()
                     Button { restore() } label: { Image(systemName: "pip.exit").font(.title3) }
-                        .accessibilityLabel("Return to full player")
+                        .accessibilityLabel(rivuneLocalized("Return to full player"))
                 }
             }
             .buttonStyle(.plain)
@@ -1310,7 +1310,7 @@ private struct RivuneNativeMiniPlayerView: View {
             if let failureMessage {
                 VStack(spacing: 8) {
                     Text("Playback failed").font(.caption.bold())
-                    Text(failureMessage).font(.caption2).lineLimit(3).multilineTextAlignment(.center)
+                    Text(rivuneLocalized(failureMessage)).font(.caption2).lineLimit(3).multilineTextAlignment(.center)
                     Button("Try again") { self.failureMessage = nil; loadAttempt += 1 }.buttonStyle(.borderedProminent)
                 }
                 .padding(12).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)).padding(8)
@@ -1368,7 +1368,7 @@ private struct RivuneNativeMiniPlayerView: View {
             player.replaceCurrentItem(with: nil)
             model.fallbackMinimizedPlaybackToMPV(position: Int(position), duration: max(Int(duration), Int(position)))
         } else {
-            failureMessage = "Apple player: \(detail)"
+            failureMessage = rivuneLocalizedFormat("Apple player: %@", detail)
             player.pause()
             playing = false
         }
@@ -1452,16 +1452,16 @@ private struct RivuneMPVMiniPlayerView: View {
                 Spacer()
                 HStack(spacing: 18) {
                     Button { player.playing ? player.pause() : player.play() } label: { Image(systemName: player.playing ? "pause.fill" : "play.fill").font(.title2) }
-                        .accessibilityLabel(player.playing ? "Pause" : "Play")
+                        .accessibilityLabel(rivuneLocalized(player.playing ? "Pause" : "Play"))
                     Spacer()
-                    Button { restore() } label: { Image(systemName: "pip.exit").font(.title3) }.accessibilityLabel("Return to full player")
+                    Button { restore() } label: { Image(systemName: "pip.exit").font(.title3) }.accessibilityLabel(rivuneLocalized("Return to full player"))
                 }
             }
             .buttonStyle(.plain).padding(12)
             if let failureMessage {
                 VStack(spacing: 8) {
                     Text("Playback failed").font(.caption.bold())
-                    Text(failureMessage).font(.caption2).lineLimit(3).multilineTextAlignment(.center)
+                    Text(rivuneLocalized(failureMessage)).font(.caption2).lineLimit(3).multilineTextAlignment(.center)
                     Button("Try again") { self.failureMessage = nil; loadAttempt += 1 }.buttonStyle(.borderedProminent)
                 }
                 .padding(12).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)).padding(8)

@@ -7,6 +7,10 @@ import java.util.Locale
 internal enum class AppLanguage(val preferenceValue: String, val languageTag: String?) {
     ENGLISH("en", "en"),
     FRENCH("fr", "fr"),
+    SPANISH("es", "es"),
+    GERMAN("de", "de"),
+    ITALIAN("it", "it"),
+    PORTUGUESE_BRAZIL("pt-BR", "pt-BR"),
     SYSTEM("system", null),
     ;
 

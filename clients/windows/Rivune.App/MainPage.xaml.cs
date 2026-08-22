@@ -109,6 +109,7 @@ public sealed partial class MainPage : Page
     public MainPage()
     {
         InitializeComponent();
+        LocalizeVisualTree(this);
         _diagnostics.Record(DiagnosticEventCode.AppStarted);
         Root.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler(Root_PointerMoved), handledEventsToo: true);
         ConfigureZoomButton(ConnectButton);
@@ -385,8 +386,8 @@ public sealed partial class MainPage : Page
             _state.ResetServer();
             ServerAddressBox.Text = string.Empty;
             ShowServer(addressCleared
-                ? FriendlyError(exception)
-                : $"{FriendlyError(exception)} The invalid saved address could not be removed; fix local file access before restarting Rivune.");
+                ? UiText(FriendlyError(exception))
+                : UiFormat("{0} The invalid saved address could not be removed; fix local file access before restarting Rivune.", UiText(FriendlyError(exception))));
         }
         catch (Exception exception)
         {
@@ -422,8 +423,8 @@ public sealed partial class MainPage : Page
             ? "Encrypted HTTPS connection."
             : "Unencrypted HTTP. Continue only on a trusted private network.";
         var dialog = Dialog(
-            $"Connect to {server.Name}?",
-            $"{server.Address.GetLeftPart(UriPartial.Authority)}\n\n{transport}",
+            UiFormat("Connect to {0}?", server.Name),
+            UiFormat("{0}\n\n{1}", server.Address.GetLeftPart(UriPartial.Authority), UiText(transport)),
             "Connect");
         if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary || _closed) return;
         ServerAddressBox.Text = server.Address.GetLeftPart(UriPartial.Authority);
@@ -510,7 +511,7 @@ public sealed partial class MainPage : Page
         }
         catch (Exception exception)
         {
-            ServerError.Message = $"The saved server address could not be removed. {exception.Message}";
+            ServerError.Message = UiFormat("The saved server address could not be removed. {0}", exception.Message);
             ServerError.IsOpen = true;
             return false;
         }
@@ -672,7 +673,7 @@ public sealed partial class MainPage : Page
         if (roomLeaveFailure is not null)
         {
             ProfileBanner.Severity = InfoBarSeverity.Warning;
-            ProfileBanner.Message = $"The previous watch room could not be closed: {FriendlyError(roomLeaveFailure)}";
+            ProfileBanner.Message = UiFormat("The previous watch room could not be closed: {0}", FriendlyError(roomLeaveFailure));
             ProfileBanner.IsOpen = true;
         }
         ProfileProgress.IsActive = true;
@@ -736,7 +737,7 @@ public sealed partial class MainPage : Page
         checking.Children.Add(new ProgressRing { IsActive = true, Width = 20, Height = 20 });
         checking.Children.Add(new TextBlock { Text = "Checking…", VerticalAlignment = VerticalAlignment.Center });
         var panel = new StackPanel { Spacing = 12 };
-        panel.Children.Add(new TextBlock { Text = $"Unlock {profile.Name} to continue.", TextWrapping = TextWrapping.Wrap });
+        panel.Children.Add(new TextBlock { Text = UiFormat("Unlock {0} to continue.", profile.Name), TextWrapping = TextWrapping.Wrap });
         panel.Children.Add(pin);
         panel.Children.Add(checking);
         panel.Children.Add(error);
@@ -868,8 +869,8 @@ public sealed partial class MainPage : Page
         SetOnlineNavigationEnabled(true);
         await OfferOfflineUnlockForActiveProfileAsync();
         var profileName = _state.Profile?.Name ?? "profile";
-        AutomationProperties.SetName(ProfileMenuButton, $"Account for {profileName}");
-        AutomationProperties.SetName(DockAccountButton, $"Account for {profileName}");
+        AutomationProperties.SetName(ProfileMenuButton, UiFormat("Account for {0}", profileName));
+        AutomationProperties.SetName(DockAccountButton, UiFormat("Account for {0}", profileName));
         CompactProfileImage.Source = null;
         CompactProfileInitial.Opacity = 1;
         CompactProfileImage.Opacity = 0;
@@ -1020,7 +1021,7 @@ public sealed partial class MainPage : Page
         else if (sources.Sources.Count == 0)
         {
             SourceBanner.Severity = InfoBarSeverity.Informational;
-            SourceBanner.Message = $"No enabled source add-on returned a stream for media ID “{resourceId}”.";
+            SourceBanner.Message = UiFormat("No enabled source add-on returned a stream for media ID “{0}”.", resourceId);
             SourceBanner.IsOpen = true;
         }
         else
@@ -1029,11 +1030,11 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private static string ProviderFailureMessage(IReadOnlyList<PlaybackProviderError> errors, bool noSources)
+    private string ProviderFailureMessage(IReadOnlyList<PlaybackProviderError> errors, bool noSources)
     {
-        var details = string.Join(" · ", errors.Take(3).Select(error => $"{error.ManifestId}: {error.Message}"));
-        if (errors.Count > 3) details += $" · {errors.Count - 3} more";
-        return $"{(noSources ? "Source providers failed" : "Some source providers failed")}: {details}";
+        var details = string.Join(" · ", errors.Take(3).Select(error => UiFormat("{0}: {1}", error.ManifestId, error.Message)));
+        if (errors.Count > 3) details += " · " + UiFormat("{0} more", errors.Count - 3);
+        return $"{UiText(noSources ? "Source providers failed" : "Some source providers failed")}: {details}";
     }
 
     private async void SourceList_ItemClick(object sender, ItemClickEventArgs e)
@@ -1050,7 +1051,7 @@ public sealed partial class MainPage : Page
         _state.Preparation = null;
         PlaySourceButton.IsEnabled = false;
         SourceProgress.IsActive = true;
-        SourceStatus.Text = $"Preparing {source.Name}…";
+        SourceStatus.Text = UiFormat("Preparing {0}…", source.Name);
         try
         {
             var progress = _tracksProgress ? await client.GetPlaybackProgressAsync(_progressTitleId, _state.Token) : null;
@@ -1060,7 +1061,7 @@ public sealed partial class MainPage : Page
             var preparation = await client.PreparePlaybackAsync(source.SourceRef, startSeconds, _state.Token);
             if (!_state.IsCurrent(generation) || !ReferenceEquals(_state.SelectedSource, source)) return;
             _state.Preparation = preparation;
-            SourceStatus.Text = $"Ready · {preparation.Mode} · {preparation.Protocol} · {preparation.Container ?? "automatic"}";
+            SourceStatus.Text = UiFormat("Ready · {0} · {1} · {2}", preparation.Mode, preparation.Protocol, preparation.Container ?? UiText("Automatic"));
             PlaySourceButton.IsEnabled = true;
             PlaySourceButton.Visibility = Visibility.Visible;
             var downloadable = !preparation.Protocol.Equals("hls", StringComparison.OrdinalIgnoreCase) &&
@@ -1171,7 +1172,7 @@ public sealed partial class MainPage : Page
         var progress = new Progress<long>(bytes =>
         {
             if (!_closed && !cancellation.IsCancellationRequested && StringComparer.Ordinal.Equals(_offlineScope, scope))
-                DownloadSourceLabel.Text = $"Downloading {FormatBytes(bytes)} · Cancel";
+                DownloadSourceLabel.Text = UiFormat("Downloading {0} · Cancel", FormatBytes(bytes));
         });
         try
         {
@@ -2624,13 +2625,14 @@ public sealed partial class MainPage : Page
         PlayerView.Visibility = view == PlayerView ? Visibility.Visible : Visibility.Collapsed;
         DetailView.Visibility = view == DetailView ? Visibility.Visible : Visibility.Collapsed;
         SettingsView.Visibility = view == SettingsView ? Visibility.Visible : Visibility.Collapsed;
+        LocalizeVisualTree(view);
     }
 
-    private ContentDialog Dialog(string title, string body, string primary) => new() { XamlRoot = XamlRoot, Title = title, Content = body, PrimaryButtonText = primary, CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Close };
+    private ContentDialog Dialog(string title, string body, string primary) => new() { XamlRoot = XamlRoot, Title = UiText(title), Content = UiText(body), PrimaryButtonText = UiText(primary), CloseButtonText = UiText("Cancel"), DefaultButton = ContentDialogButton.Close };
     private static bool IsAuthenticationFailure(Exception exception) => exception is NotAuthenticatedException || exception is RivuneServerException { StatusCode: 401 };
     private static DateTimeOffset ParseDate(string value) => DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var result) ? result : DateTimeOffset.UtcNow;
-    private static string ExpiryText(string value) { var remaining = ParseDate(value) - DateTimeOffset.UtcNow; return $"Expires in {Math.Max(0, (int)Math.Ceiling(remaining.TotalMinutes))} minutes"; }
-    private static string RetryText(TimeSpan? retry) => retry is { } value ? $"in {Math.Max(1, (int)Math.Ceiling(value.TotalSeconds))} seconds" : "later";
+    private string ExpiryText(string value) { var remaining = ParseDate(value) - DateTimeOffset.UtcNow; return UiFormat("Expires in {0} minutes", Math.Max(0, (int)Math.Ceiling(remaining.TotalMinutes))); }
+    private string RetryText(TimeSpan? retry) => retry is { } value ? UiFormat("in {0} seconds", Math.Max(1, (int)Math.Ceiling(value.TotalSeconds))) : UiText("later");
     private static string FormatTime(TimeSpan value) => value.TotalHours >= 1 ? value.ToString(@"h\:mm\:ss", CultureInfo.InvariantCulture) : value.ToString(@"m\:ss", CultureInfo.InvariantCulture);
     private double AbsolutePlaybackPosition(TimeSpan mediaPosition) => _timeline.ToAbsolutePosition(mediaPosition);
 

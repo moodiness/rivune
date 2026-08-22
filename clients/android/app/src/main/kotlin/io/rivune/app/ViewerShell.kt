@@ -1265,6 +1265,10 @@ private fun AppLanguagePreferenceRow(
     val selectedLabel = when (selected) {
         AppLanguage.ENGLISH -> stringResource(R.string.viewer_language_english)
         AppLanguage.FRENCH -> stringResource(R.string.viewer_language_french)
+        AppLanguage.SPANISH -> stringResource(R.string.viewer_language_spanish)
+        AppLanguage.GERMAN -> stringResource(R.string.viewer_language_german)
+        AppLanguage.ITALIAN -> stringResource(R.string.viewer_language_italian)
+        AppLanguage.PORTUGUESE_BRAZIL -> stringResource(R.string.preferences_language_portuguese_brazil)
         AppLanguage.SYSTEM -> stringResource(R.string.preferences_language_system)
     }
     RivuneFocusSurface(
@@ -1328,9 +1332,13 @@ private fun AppLanguageChoiceDialog(
 ) {
     val selectedFocus = remember { FocusRequester() }
     val options = listOf(
+        AppLanguage.SYSTEM to stringResource(R.string.preferences_language_system),
         AppLanguage.ENGLISH to stringResource(R.string.viewer_language_english),
         AppLanguage.FRENCH to stringResource(R.string.viewer_language_french),
-        AppLanguage.SYSTEM to stringResource(R.string.preferences_language_system),
+        AppLanguage.SPANISH to stringResource(R.string.viewer_language_spanish),
+        AppLanguage.GERMAN to stringResource(R.string.viewer_language_german),
+        AppLanguage.ITALIAN to stringResource(R.string.viewer_language_italian),
+        AppLanguage.PORTUGUESE_BRAZIL to stringResource(R.string.preferences_language_portuguese_brazil),
     )
     LaunchedEffect(isTv, selected) {
         if (isTv) selectedFocus.requestFocus()

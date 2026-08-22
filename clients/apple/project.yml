@@ -14,7 +14,7 @@ packages:
 settings:
   base:
     CURRENT_PROJECT_VERSION: 1
-    MARKETING_VERSION: 1.11.4
+    MARKETING_VERSION: 1.11.5
     SWIFT_VERSION: 5.9
     DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Automatic
@@ -27,6 +27,8 @@ targets:
     platform: iOS
     sources:
       - path: Apps/iOS
+      - path: Apps/Shared/Localization
+        buildPhase: resources
     dependencies:
       - package: RivunePackages
         product: RivuneAppCore
@@ -70,6 +72,8 @@ targets:
     platform: tvOS
     sources:
       - path: Apps/tvOS
+      - path: Apps/Shared/Localization
+        buildPhase: resources
     dependencies:
       - package: RivunePackages
         product: RivuneAppCore
@@ -111,6 +115,8 @@ targets:
     platform: visionOS
     sources:
       - path: Apps/visionOS
+      - path: Apps/Shared/Localization
+        buildPhase: resources
     dependencies:
       - package: RivunePackages
         product: RivuneAppCore
@@ -152,6 +158,8 @@ targets:
     platform: macOS
     sources:
       - path: Apps/macOS
+      - path: Apps/Shared/Localization
+        buildPhase: resources
     entitlements:
       path: Apps/macOS/Rivune.entitlements
     dependencies:

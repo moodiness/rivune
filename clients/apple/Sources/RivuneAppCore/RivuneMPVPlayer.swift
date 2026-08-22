@@ -125,7 +125,7 @@ final class RivuneMPVPlaybackController: ObservableObject {
                 self.setStringLocked("aid", String(id), handle: handle)
                 return
             }
-            self.publishFailure("MPV could not select audio stream \(streamIndex).")
+            self.publishFailure(rivuneLocalizedFormat("MPV could not select audio stream %d.", streamIndex))
         }
     }
 
@@ -143,13 +143,13 @@ final class RivuneMPVPlaybackController: ObservableObject {
                 arguments.append(language)
             }
             let status = self.commandLocked(arguments, handle: handle)
-            if status < 0 { self.publishFailure(self.errorMessage(status, action: "load subtitles")) }
+            if status < 0 { self.publishFailure(self.errorMessage(status, key: "MPV could not load subtitles: %@.")) }
         }
     }
 
     private func setUpLocked(surface: CAMetalLayer) -> Bool {
         guard let handle = mpv_create() else {
-            publishFailure("MPV could not create a playback context.")
+            publishFailure(rivuneLocalized("MPV could not create a playback context."))
             return false
         }
 
@@ -168,20 +168,20 @@ final class RivuneMPVPlaybackController: ObservableObject {
             let status = mpv_set_option_string(handle, name, value)
             guard status >= 0 else {
                 mpv_terminate_destroy(handle)
-                publishFailure(errorMessage(status, action: "configure \(name)"))
+                publishFailure(errorMessage(status, key: "MPV could not configure %@: %@.", parameter: name))
                 return false
             }
         }
         let windowStatus = mpv_set_option(handle, "wid", MPV_FORMAT_INT64, &windowID)
         guard windowStatus >= 0 else {
             mpv_terminate_destroy(handle)
-            publishFailure(errorMessage(windowStatus, action: "attach the video surface"))
+            publishFailure(errorMessage(windowStatus, key: "MPV could not attach the video surface: %@."))
             return false
         }
         let initializeStatus = mpv_initialize(handle)
         guard initializeStatus >= 0 else {
             mpv_terminate_destroy(handle)
-            publishFailure(errorMessage(initializeStatus, action: "initialize"))
+            publishFailure(errorMessage(initializeStatus, key: "MPV could not initialize: %@."))
             return false
         }
 
@@ -207,7 +207,7 @@ final class RivuneMPVPlaybackController: ObservableObject {
         var arguments = ["loadfile", request.url.absoluteString, "replace"]
         if request.startSeconds > 0 { arguments += ["-1", "start=\(request.startSeconds)"] }
         let status = commandLocked(arguments, handle: handle)
-        if status < 0 { publishFailure(errorMessage(status, action: "open the media URL")) }
+        if status < 0 { publishFailure(errorMessage(status, key: "MPV could not open the media URL: %@.")) }
     }
 
     private func enqueueEventRead() {
@@ -231,7 +231,7 @@ final class RivuneMPVPlaybackController: ObservableObject {
                 if end.reason == MPV_END_FILE_REASON_EOF {
                     publish { $0.ended = true; $0.playing = false }
                 } else if end.reason == MPV_END_FILE_REASON_ERROR || end.error < 0 {
-                    publishFailure(errorMessage(Int32(end.error), action: "play this media"))
+                    publishFailure(errorMessage(Int32(end.error), key: "MPV could not play this media: %@."))
                 }
             case MPV_EVENT_PROPERTY_CHANGE:
                 handlePropertyChange(event.pointee.data)
@@ -267,7 +267,7 @@ final class RivuneMPVPlaybackController: ObservableObject {
 
     private func selectSubtitleLocked(url: URL, handle: OpaquePointer) {
         let status = commandLocked(["sub-add", url.absoluteString, "select"], handle: handle)
-        if status < 0 { publishFailure(errorMessage(status, action: "load subtitles")) }
+        if status < 0 { publishFailure(errorMessage(status, key: "MPV could not load subtitles: %@.")) }
     }
 
     private func selectAudioLocked(streamIndex: Int, handle: OpaquePointer) {
@@ -286,7 +286,7 @@ final class RivuneMPVPlaybackController: ObservableObject {
             guard let self, let handle = self.handle else { return }
             var flag: Int32 = value ? 1 : 0
             let status = mpv_set_property(handle, name, MPV_FORMAT_FLAG, &flag)
-            if status < 0 { self.publishFailure(self.errorMessage(status, action: "set \(name)")) }
+            if status < 0 { self.publishFailure(self.errorMessage(status, key: "MPV could not set %@: %@.", parameter: name)) }
         }
     }
 
@@ -295,18 +295,18 @@ final class RivuneMPVPlaybackController: ObservableObject {
             guard let self, let handle = self.handle else { return }
             var value = value
             let status = mpv_set_property(handle, name, MPV_FORMAT_DOUBLE, &value)
-            if status < 0 { self.publishFailure(self.errorMessage(status, action: "set \(name)")) }
+            if status < 0 { self.publishFailure(self.errorMessage(status, key: "MPV could not set %@: %@.", parameter: name)) }
         }
     }
 
     private func setStringLocked(_ name: String, _ value: String, handle: OpaquePointer) {
         let status = mpv_set_property_string(handle, name, value)
-        if status < 0 { publishFailure(errorMessage(status, action: "set \(name)")) }
+        if status < 0 { publishFailure(errorMessage(status, key: "MPV could not set %@: %@.", parameter: name)) }
     }
 
     private func observe(_ name: String, format: mpv_format, handle: OpaquePointer) {
         let status = mpv_observe_property(handle, 0, name, format)
-        if status < 0 { publishFailure(errorMessage(status, action: "observe \(name)")) }
+        if status < 0 { publishFailure(errorMessage(status, key: "MPV could not observe %@: %@.", parameter: name)) }
     }
 
     private func int64Property(_ name: String, handle: OpaquePointer) -> Int64? {
@@ -348,9 +348,9 @@ final class RivuneMPVPlaybackController: ObservableObject {
         self.wakeupContext = nil
     }
 
-    private func errorMessage(_ status: Int32, action: String) -> String {
-        let detail = mpv_error_string(status).map(String.init(cString:)) ?? "unknown error"
-        return "MPV could not \(action): \(detail)."
+    private func errorMessage(_ status: Int32, key: String, parameter: String? = nil) -> String {
+        let detail = mpv_error_string(status).map(String.init(cString:)) ?? rivuneLocalized("unknown error")
+        return parameter.map { rivuneLocalizedFormat(key, $0, detail) } ?? rivuneLocalizedFormat(key, detail)
     }
 
     private func publishFailure(_ message: String) {
