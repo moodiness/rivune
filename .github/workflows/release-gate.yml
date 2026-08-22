@@ -285,10 +285,10 @@ jobs:
             -p:IncludeAllContentForSelfExtract=true `
             -p:SelfContained=true `
             -p:WindowsAppSDKSelfContained=true `
-            -p:Version=1.11.4 `
-            -p:AssemblyVersion=1.11.4.0 `
-            -p:FileVersion=1.11.4.0 `
-            -p:InformationalVersion=1.11.4 `
+            -p:Version=1.11.5 `
+            -p:AssemblyVersion=1.11.5.0 `
+            -p:FileVersion=1.11.5.0 `
+            -p:InformationalVersion=1.11.5 `
             -p:IncludeSourceRevisionInInformationalVersion=false
           if ($LASTEXITCODE -ne 0) { throw "Windows $env:PLATFORM portable publish failed." }
 
@@ -320,7 +320,7 @@ jobs:
             if ($null -ne $reader) { $reader.Dispose() } else { $stream.Dispose() }
           }
           $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($executable)
-          if ($version.FileVersion -ne '1.11.4.0' -or $version.ProductVersion -ne '1.11.4') {
+          if ($version.FileVersion -ne '1.11.5.0' -or $version.ProductVersion -ne '1.11.5') {
             throw "Portable executable version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
           }
           if ((Get-AuthenticodeSignature -FilePath $executable).Status -ne 'NotSigned') {

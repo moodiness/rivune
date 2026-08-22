@@ -16,4 +16,12 @@ class AppLanguageTest {
             assertEquals(language, AppLanguage.fromPreference(language.preferenceValue))
         }
     }
+
+    @Test
+    fun supportedTranslationsUseTheirExactLanguageTags() {
+        assertEquals("es", AppLanguage.SPANISH.languageTag)
+        assertEquals("de", AppLanguage.GERMAN.languageTag)
+        assertEquals("it", AppLanguage.ITALIAN.languageTag)
+        assertEquals("pt-BR", AppLanguage.PORTUGUESE_BRAZIL.languageTag)
+    }
 }

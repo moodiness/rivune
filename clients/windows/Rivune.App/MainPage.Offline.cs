@@ -27,7 +27,7 @@ public sealed partial class MainPage
                 MinHeight = 48,
                 Content = LabeledActionContent(profile.Name, profile.RequiresPin ? "\uE72E" : "\uE896"),
             };
-            AutomationProperties.SetName(button, $"Open downloads for {profile.Name}");
+            AutomationProperties.SetName(button, UiFormat("Open downloads for {0}", profile.Name));
             button.Click += OfflineProfile_Click;
             ConfigureZoomButton(button);
             OfflineProfileActions.Children.Add(button);
@@ -75,7 +75,7 @@ public sealed partial class MainPage
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
-            Title = $"Unlock downloads for {profileName}",
+            Title = UiFormat("Unlock downloads for {0}", profileName),
             Content = pin,
             PrimaryButtonText = "Unlock",
             CloseButtonText = "Cancel",
@@ -141,7 +141,7 @@ public sealed partial class MainPage
         _devicePreferencesFailure = string.Join(" ", new[]
         {
             _devicePreferencesFailure,
-            $"Offline storage: {FriendlyError(exception)}",
+            UiFormat("Offline storage: {0}", FriendlyError(exception)),
         }.Where(value => !string.IsNullOrWhiteSpace(value)));
     }
 
@@ -207,8 +207,8 @@ public sealed partial class MainPage
         DashboardLoadingStatus.Visibility = Visibility.Collapsed;
         CompactProfileInitial.Text = ProfileInitial(profileName);
         DockProfileInitial.Text = ProfileInitial(profileName);
-        AutomationProperties.SetName(ProfileMenuButton, $"Offline downloads for {profileName}");
-        AutomationProperties.SetName(DockAccountButton, $"Offline downloads for {profileName}");
+        AutomationProperties.SetName(ProfileMenuButton, UiFormat("Offline downloads for {0}", profileName));
+        AutomationProperties.SetName(DockAccountButton, UiFormat("Offline downloads for {0}", profileName));
         SetOnlineNavigationEnabled(false);
         RebuildHomeSections([], [], []);
         ShowOnly(DashboardView);
@@ -229,7 +229,7 @@ public sealed partial class MainPage
         var section = new StackPanel { Spacing = 12 };
         section.Children.Add(new TextBlock
         {
-            Text = UiText("Downloads", "Téléchargements"),
+            Text = UiText("Downloads"),
             Style = (Style)Application.Current.Resources["RivuneTitleLargeTextStyle"],
         });
         var row = HorizontalList();
@@ -251,9 +251,9 @@ public sealed partial class MainPage
             fallbackText: item.Title.Length == 0 ? "R" : item.Title[..1].ToUpperInvariant());
         button.Tag = item;
         button.Click += OfflineMedia_Click;
-        AutomationProperties.SetName(button, $"Play downloaded {item.Title}, {FormatBytes(item.SizeBytes)}");
+        AutomationProperties.SetName(button, UiFormat("Play downloaded {0}, {1}", item.Title, FormatBytes(item.SizeBytes)));
         var menu = new MenuFlyout();
-        var remove = new MenuFlyoutItem { Text = "Delete download", Icon = new FontIcon { Glyph = "\uE74D" }, Tag = item };
+        var remove = new MenuFlyoutItem { Text = UiText("Delete download"), Icon = new FontIcon { Glyph = "\uE74D" }, Tag = item };
         remove.Click += RemoveOfflineMedia_Click;
         menu.Items.Add(remove);
         button.ContextFlyout = menu;
@@ -267,7 +267,7 @@ public sealed partial class MainPage
         catch (Exception exception)
         {
             DashboardBanner.Severity = InfoBarSeverity.Error;
-            DashboardBanner.Message = $"Downloaded media could not be opened: {FriendlyError(exception)}";
+            DashboardBanner.Message = UiFormat("Downloaded media could not be opened: {0}", FriendlyError(exception));
             DashboardBanner.IsOpen = true;
             LoadOfflineItems();
             RebuildHomeSections(_viewerCollections, _continueWatchingTargets, _recommendationTargets);
@@ -277,7 +277,7 @@ public sealed partial class MainPage
     private async void RemoveOfflineMedia_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not MenuFlyoutItem { Tag: OfflineMediaItem item } || _offlineMediaStore is null || _offlineScope is null) return;
-        var dialog = Dialog("Delete download?", $"Delete the encrypted offline copy of {item.Title}?", "Delete");
+        var dialog = Dialog("Delete download?", UiFormat("Delete the encrypted offline copy of {0}?", item.Title), "Delete");
         if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary) return;
         try
         {

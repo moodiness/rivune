@@ -8,21 +8,41 @@
 
 /* Begin PBXBuildFile section */
 		0176153387E96953E951EA71 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DE8B8805F70E366672AB4820 /* Assets.xcassets */; };
+		023644D7557AF4BD868FBE33 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = A4594B6D3F0D229111C1ACC3 /* Localizable.strings */; };
 		05A5B52684AE9C1C64FB114F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 58E8B521BA1A6800B23643C5 /* Assets.xcassets */; };
 		138A52D4C225DE12985BE926 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 13170BA7E17A80904C9D3E7D /* PrivacyInfo.xcprivacy */; };
+		15D5186665B7430610392552 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = EC4E56EAE299F0936ACAA2ED /* Localizable.strings */; };
+		21B192C2B7117184D609188D /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = EC4E56EAE299F0936ACAA2ED /* Localizable.strings */; };
 		22AA14B8F81C2CC6C0749C69 /* RivuneAppCore in Frameworks */ = {isa = PBXBuildFile; productRef = 55E135FE6F82E33CC7B7B7B2 /* RivuneAppCore */; };
 		240C4E5332E899433D3EBA6F /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 15B4B9A0C250BB447E6444CE /* LaunchScreen.storyboard */; };
+		26750097336A2E8136122402 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = EC4E56EAE299F0936ACAA2ED /* Localizable.strings */; };
 		332DF2FF551756354CA052C2 /* RivuneAppCore in Frameworks */ = {isa = PBXBuildFile; productRef = FFD187498FD788E90C2A5D6E /* RivuneAppCore */; };
 		34C2311A9EAD3110E5C20672 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 5681213C05B72E9CAA9CCAF4 /* PrivacyInfo.xcprivacy */; };
+		3979A4F174D2EEAF3DAAC0E2 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 950CA88EA1D04A7970579D6D /* Localizable.strings */; };
+		3C6FDCD911672F6FDA64E6D0 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 94E094995E8B3DCBCDC0940A /* Localizable.strings */; };
 		6D437D60A6A3CFD01B06DCB3 /* RivuneMacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F34D5FD80D3F158DB38EDB0 /* RivuneMacApp.swift */; };
+		71FD91510F51EEC3A9ACFCFD /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 950CA88EA1D04A7970579D6D /* Localizable.strings */; };
+		77E86365156E765146349532 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = CB2A9FC0D76FE4049C87EE5F /* Localizable.strings */; };
 		8428C4F065450E6ACBEBFB4A /* RivuneAppCore in Frameworks */ = {isa = PBXBuildFile; productRef = B17D0F3BB364E0D4351739A1 /* RivuneAppCore */; };
 		8AFCAB02E8D0F05CE8BBEDC3 /* RivuneTVApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FBF43D273AD736106CD4E4D /* RivuneTVApp.swift */; };
+		8CB7E9CD6646002FD1EA1544 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = CB2A9FC0D76FE4049C87EE5F /* Localizable.strings */; };
 		90C42D50B90C86ADDCD6800C /* RivuneAppCore in Frameworks */ = {isa = PBXBuildFile; productRef = 825DCD7008014753667D2801 /* RivuneAppCore */; };
+		917CC69A4AEF398CF4FE4975 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 950CA88EA1D04A7970579D6D /* Localizable.strings */; };
 		9AA6DA3F3FF1617049FD9854 /* RivuneVisionApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35F19D0E82239B43D94E5AAE /* RivuneVisionApp.swift */; };
 		9EC2B718E2C8B24E8453ABD0 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9C8B64FAE1A118902A310803 /* Assets.xcassets */; };
+		A38C223496CAB57864FCD43F /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = A4594B6D3F0D229111C1ACC3 /* Localizable.strings */; };
+		A3F97766D55E4043D1196BC3 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = EC4E56EAE299F0936ACAA2ED /* Localizable.strings */; };
 		A4570C9FB7D37CE503DF29D9 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 9C8DE299630BF35EC0BDED3B /* LaunchScreen.storyboard */; };
 		A5FB31984B56437E5EBE3494 /* RivuneIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED5017C977DBDC80461A561B /* RivuneIOSApp.swift */; };
 		A7B914BBAA4ED9017683430E /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F3E2797BB5AEC6FECE50726A /* PrivacyInfo.xcprivacy */; };
+		BE8ED941475B2D1F9420DA64 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = A4594B6D3F0D229111C1ACC3 /* Localizable.strings */; };
+		C08B46A7E32D729DABBBEA77 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 94E094995E8B3DCBCDC0940A /* Localizable.strings */; };
+		CCA884956E058B6F331AC8C8 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 94E094995E8B3DCBCDC0940A /* Localizable.strings */; };
+		D132E4472AEA6B61CDD0498C /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = CB2A9FC0D76FE4049C87EE5F /* Localizable.strings */; };
+		D534B5105F025F856762AED6 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = CB2A9FC0D76FE4049C87EE5F /* Localizable.strings */; };
+		DD610798C91491AEC431529F /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = A4594B6D3F0D229111C1ACC3 /* Localizable.strings */; };
+		E8CBF7E61446C094518AFFA0 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 950CA88EA1D04A7970579D6D /* Localizable.strings */; };
+		E95E239D8117FD75FC54171B /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 94E094995E8B3DCBCDC0940A /* Localizable.strings */; };
 		EA93F06DA5C09CEDA16893FD /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = FB11EF5A2EB93E2E1DAEB0E4 /* PrivacyInfo.xcprivacy */; };
 		ED6941E9E6BD29BDA41F4424 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 946A2E016CD76F0988530E12 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
@@ -44,11 +64,16 @@
 		58E8B521BA1A6800B23643C5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		82A189138BD45ECFABB2B0B6 /* Rivune-tvOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "Rivune-tvOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		946A2E016CD76F0988530E12 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		94E094995E8B3DCBCDC0940A /* Localizable.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = Localizable.strings; path = "pt-BR.lproj/Localizable.strings"; sourceTree = "<group>"; };
+		950CA88EA1D04A7970579D6D /* Localizable.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = Localizable.strings; path = fr.lproj/Localizable.strings; sourceTree = "<group>"; };
 		98E2D3C8F8DD3514397B6CE5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		9C8B64FAE1A118902A310803 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		9C8DE299630BF35EC0BDED3B /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
+		A4594B6D3F0D229111C1ACC3 /* Localizable.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = Localizable.strings; path = es.lproj/Localizable.strings; sourceTree = "<group>"; };
 		C822D42FDDBFF51A2C9B05B8 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		CB2A9FC0D76FE4049C87EE5F /* Localizable.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = Localizable.strings; path = de.lproj/Localizable.strings; sourceTree = "<group>"; };
 		DE8B8805F70E366672AB4820 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		EC4E56EAE299F0936ACAA2ED /* Localizable.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = Localizable.strings; path = it.lproj/Localizable.strings; sourceTree = "<group>"; };
 		ED5017C977DBDC80461A561B /* RivuneIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RivuneIOSApp.swift; sourceTree = "<group>"; };
 		F3E2797BB5AEC6FECE50726A /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		FB11EF5A2EB93E2E1DAEB0E4 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
@@ -119,11 +144,20 @@
 			);
 			sourceTree = "<group>";
 		};
+		66E49B2ECD6CB75300C25452 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				E2135FC2AF1EF9A3625C5B6F /* Localization */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
 		8BA7287E1740B5FE52C4B078 /* Apps */ = {
 			isa = PBXGroup;
 			children = (
 				AFA280D81539AF7E0E3D67F6 /* iOS */,
 				3FBC693027CF69CDD818FD99 /* macOS */,
+				66E49B2ECD6CB75300C25452 /* Shared */,
 				F993B9D2324B6128F1826894 /* tvOS */,
 				AF3504BD5BA05E6B46665846 /* visionOS */,
 			);
@@ -151,6 +185,18 @@
 				ED5017C977DBDC80461A561B /* RivuneIOSApp.swift */,
 			);
 			path = iOS;
+			sourceTree = "<group>";
+		};
+		E2135FC2AF1EF9A3625C5B6F /* Localization */ = {
+			isa = PBXGroup;
+			children = (
+				CB2A9FC0D76FE4049C87EE5F /* Localizable.strings */,
+				A4594B6D3F0D229111C1ACC3 /* Localizable.strings */,
+				950CA88EA1D04A7970579D6D /* Localizable.strings */,
+				EC4E56EAE299F0936ACAA2ED /* Localizable.strings */,
+				94E094995E8B3DCBCDC0940A /* Localizable.strings */,
+			);
+			path = Localization;
 			sourceTree = "<group>";
 		};
 		E3F23A6EC658CB05AEF6C3B1 /* Products */ = {
@@ -299,7 +345,12 @@
 			hasScannedForEncodings = 0;
 			knownRegions = (
 				Base,
+				de,
 				en,
+				es,
+				fr,
+				it,
+				"pt-BR",
 			);
 			mainGroup = 6661DCC655EAA42F94183878;
 			minimizedProjectReferenceProxies = 1;
@@ -325,6 +376,11 @@
 			buildActionMask = 2147483647;
 			files = (
 				ED6941E9E6BD29BDA41F4424 /* Assets.xcassets in Resources */,
+				8CB7E9CD6646002FD1EA1544 /* Localizable.strings in Resources */,
+				BE8ED941475B2D1F9420DA64 /* Localizable.strings in Resources */,
+				21B192C2B7117184D609188D /* Localizable.strings in Resources */,
+				E95E239D8117FD75FC54171B /* Localizable.strings in Resources */,
+				917CC69A4AEF398CF4FE4975 /* Localizable.strings in Resources */,
 				138A52D4C225DE12985BE926 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -335,6 +391,11 @@
 			files = (
 				9EC2B718E2C8B24E8453ABD0 /* Assets.xcassets in Resources */,
 				240C4E5332E899433D3EBA6F /* LaunchScreen.storyboard in Resources */,
+				D534B5105F025F856762AED6 /* Localizable.strings in Resources */,
+				023644D7557AF4BD868FBE33 /* Localizable.strings in Resources */,
+				15D5186665B7430610392552 /* Localizable.strings in Resources */,
+				C08B46A7E32D729DABBBEA77 /* Localizable.strings in Resources */,
+				E8CBF7E61446C094518AFFA0 /* Localizable.strings in Resources */,
 				EA93F06DA5C09CEDA16893FD /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -344,6 +405,11 @@
 			buildActionMask = 2147483647;
 			files = (
 				0176153387E96953E951EA71 /* Assets.xcassets in Resources */,
+				D132E4472AEA6B61CDD0498C /* Localizable.strings in Resources */,
+				DD610798C91491AEC431529F /* Localizable.strings in Resources */,
+				A3F97766D55E4043D1196BC3 /* Localizable.strings in Resources */,
+				3C6FDCD911672F6FDA64E6D0 /* Localizable.strings in Resources */,
+				71FD91510F51EEC3A9ACFCFD /* Localizable.strings in Resources */,
 				34C2311A9EAD3110E5C20672 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -354,6 +420,11 @@
 			files = (
 				05A5B52684AE9C1C64FB114F /* Assets.xcassets in Resources */,
 				A4570C9FB7D37CE503DF29D9 /* LaunchScreen.storyboard in Resources */,
+				77E86365156E765146349532 /* Localizable.strings in Resources */,
+				A38C223496CAB57864FCD43F /* Localizable.strings in Resources */,
+				26750097336A2E8136122402 /* Localizable.strings in Resources */,
+				CCA884956E058B6F331AC8C8 /* Localizable.strings in Resources */,
+				3979A4F174D2EEAF3DAAC0E2 /* Localizable.strings in Resources */,
 				A7B914BBAA4ED9017683430E /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -720,7 +791,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				MARKETING_VERSION = 1.11.4;
+				MARKETING_VERSION = 1.11.5;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -791,7 +862,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				MARKETING_VERSION = 1.11.4;
+				MARKETING_VERSION = 1.11.5;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

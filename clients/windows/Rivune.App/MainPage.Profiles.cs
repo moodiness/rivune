@@ -69,19 +69,19 @@ public sealed partial class MainPage
             {
                 const string pinRequired = "PIN required";
                 statusPanel.Children.Add(CreateProfileStatus("\uE72E", pinRequired, "RivuneAccentBrush"));
-                statuses.Add(pinRequired);
+                statuses.Add(UiText(pinRequired));
             }
             if (!profile.Enabled)
             {
                 const string disabled = "Disabled";
                 statusPanel.Children.Add(CreateProfileStatus("\uE711", disabled, "RivuneDangerBrush"));
-                statuses.Add(disabled);
+                statuses.Add(UiText(disabled));
             }
             else if (!profile.Accessible)
             {
                 const string unavailable = "Unavailable";
                 statusPanel.Children.Add(CreateProfileStatus("\uE823", unavailable, "RivuneWarningBrush"));
-                statuses.Add(unavailable);
+                statuses.Add(UiText(unavailable));
             }
             stack.Children.Add(statusPanel);
 
@@ -92,7 +92,7 @@ public sealed partial class MainPage
         }
     }
 
-    private static StackPanel CreateProfileStatus(string glyph, string text, string brushKey)
+    private StackPanel CreateProfileStatus(string glyph, string text, string brushKey)
     {
         var brush = (Brush)Application.Current.Resources[brushKey];
         var row = new StackPanel
@@ -110,7 +110,7 @@ public sealed partial class MainPage
         });
         row.Children.Add(new TextBlock
         {
-            Text = text,
+            Text = UiText(text),
             Foreground = brush,
             Style = (Style)Application.Current.Resources["RivuneLabelSmallTextStyle"],
             VerticalAlignment = VerticalAlignment.Center,
@@ -195,7 +195,7 @@ public sealed partial class MainPage
         if (!profile.Accessible || !profile.Enabled)
         {
             ProfileBanner.Severity = InfoBarSeverity.Warning;
-            ProfileBanner.Message = "This profile is not currently accessible.";
+            ProfileBanner.Message = UiText("This profile is not currently accessible.");
             ProfileBanner.IsOpen = true;
             return;
         }

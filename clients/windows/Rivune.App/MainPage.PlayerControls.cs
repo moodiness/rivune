@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml;
@@ -312,13 +313,13 @@ public sealed partial class MainPage
                 break;
             }
         }
-        audioLabel ??= "Default";
-        ToolTipService.SetToolTip(PlayerAudioButton, $"Audio: {audioLabel}");
-        AutomationProperties.SetName(PlayerAudioButton, $"Audio track, {audioLabel}");
+        audioLabel ??= UiText("Default");
+        ToolTipService.SetToolTip(PlayerAudioButton, UiFormat("Audio: {0}", audioLabel));
+        AutomationProperties.SetName(PlayerAudioButton, UiFormat("Audio track, {0}", audioLabel));
 
         if (subtitleLabel is null)
         {
-            subtitleLabel = "Off";
+            subtitleLabel = UiText("Off");
             if (_preferredSubtitleId is not null && _state.PlaybackSession is { } session)
             {
                 foreach (var subtitle in session.Subtitles)
@@ -329,15 +330,15 @@ public sealed partial class MainPage
                 }
             }
         }
-        ToolTipService.SetToolTip(PlayerSubtitlesButton, $"Subtitles: {subtitleLabel}");
-        AutomationProperties.SetName(PlayerSubtitlesButton, $"Subtitles, {subtitleLabel}");
+        ToolTipService.SetToolTip(PlayerSubtitlesButton, UiFormat("Subtitles: {0}", subtitleLabel));
+        AutomationProperties.SetName(PlayerSubtitlesButton, UiFormat("Subtitles, {0}", subtitleLabel));
     }
 
-    private static string AudioTrackLabel(PlaybackMediaTrack track) =>
-        $"{track.Language ?? "Unknown language"} · {track.Title ?? track.Codec}{(track.Channels is int channels ? $" · {channels} channels" : string.Empty)}";
+    private string AudioTrackLabel(PlaybackMediaTrack track) =>
+        $"{track.Language ?? UiText("Unknown language")} · {track.Title ?? track.Codec}{(track.Channels is int channels ? " · " + UiFormat("{0} channels", channels) : string.Empty)}";
 
-    private static string SubtitleLabel(PlaybackSubtitle subtitle) =>
-        $"{subtitle.Language ?? "Unknown language"}{(subtitle.Forced == true ? " · Forced" : string.Empty)}";
+    private string SubtitleLabel(PlaybackSubtitle subtitle) =>
+        $"{subtitle.Language ?? UiText("Unknown language")}{(subtitle.Forced == true ? " · " + UiText("Forced") : string.Empty)}";
 
     private async Task<Exception?> RestartPlaybackWithTracksAsync(int? requestedPosition = null, bool showRecovery = true)
     {
@@ -532,8 +533,8 @@ public sealed partial class MainPage
                 break;
         }
 
-        ToolTipService.SetToolTip(PlayerAspectButton, $"Video aspect: {label}");
-        AutomationProperties.SetName(PlayerAspectButton, $"Video aspect, {label.ToLowerInvariant()}");
+        ToolTipService.SetToolTip(PlayerAspectButton, UiFormat("Video aspect: {0}", UiText(label)));
+        AutomationProperties.SetName(PlayerAspectButton, UiFormat("Video aspect, {0}", UiText(label).ToLower(CultureInfo.CurrentCulture)));
     }
 
     private void PlayerSpeed_Click(object sender, RoutedEventArgs e)
@@ -580,8 +581,8 @@ public sealed partial class MainPage
 
         var label = PlaybackRateLabel(index);
         PlayerSpeedIcon.Glyph = index == 2 ? "\uEC57" : "\uEC58";
-        ToolTipService.SetToolTip(PlayerSpeedButton, $"Playback speed: {label}");
-        AutomationProperties.SetName(PlayerSpeedButton, $"Playback speed, {label[..^1]} times");
+        ToolTipService.SetToolTip(PlayerSpeedButton, UiFormat("Playback speed: {0}", label));
+        AutomationProperties.SetName(PlayerSpeedButton, UiFormat("Playback speed, {0} times", label[..^1]));
 
         if (_playbackRateItems is null) return;
         for (var itemIndex = 0; itemIndex < _playbackRateItems.Length; itemIndex++)

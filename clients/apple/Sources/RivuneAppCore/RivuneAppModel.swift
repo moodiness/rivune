@@ -101,7 +101,9 @@ public enum RivunePlaybackEnginePolicy {
 public enum RivuneAnimationPreference: String, CaseIterable, Identifiable, Sendable {
     case system, full, reduced
     public var id: String { rawValue }
-    public var displayName: String { rawValue.capitalized }
+    public var displayName: String {
+        switch self { case .system: return "System"; case .full: return "Full"; case .reduced: return "Reduced" }
+    }
 }
 
 public enum RivuneFrameRatePreference: String, CaseIterable, Identifiable, Sendable {
@@ -115,13 +117,17 @@ public enum RivuneFrameRatePreference: String, CaseIterable, Identifiable, Senda
 public enum RivuneVideoAspect: String, CaseIterable, Identifiable, Sendable {
     case fit, fill, zoom
     public var id: String { rawValue }
-    public var displayName: String { rawValue.capitalized }
+    public var displayName: String {
+        switch self { case .fit: return "Fit"; case .fill: return "Fill"; case .zoom: return "Zoom" }
+    }
 }
 
 public enum RivuneNetworkQuality: String, CaseIterable, Identifiable, Sendable {
     case automatic, economy, balanced, maximum
     public var id: String { rawValue }
-    public var displayName: String { rawValue.capitalized }
+    public var displayName: String {
+        switch self { case .automatic: return "Automatic"; case .economy: return "Economy"; case .balanced: return "Balanced"; case .maximum: return "Maximum" }
+    }
 }
 
 public struct RivuneMediaTarget: Identifiable, Equatable, Sendable {

@@ -39,30 +39,30 @@ try {
         'ftp://media.example.com'
     )) {
         Assert-Fails {
-            & $script validate -Origin $invalidOrigin -Name 'Rivune' -Version '1.11.4'
+            & $script validate -Origin $invalidOrigin -Name 'Rivune' -Version '1.11.5'
         } "Unsafe discovery origin $invalidOrigin"
     }
     Assert-Fails {
-        & $script validate -Origin 'https://media.example.com' -Name '' -Version '1.11.4'
+        & $script validate -Origin 'https://media.example.com' -Name '' -Version '1.11.5'
     } 'Empty discovery name'
     Assert-Fails {
         & $script validate -Origin 'https://media.example.com' -Name 'Rivune' -Version 'latest'
     } 'Mutable discovery version'
 
-    & $script validate -Origin 'https://media.example.com/' -Name 'Rivune Windows CI' -Version '1.11.4'
-    & $script validate -Origin 'http://192.168.1.20:8080' -Name 'Rivune Windows CI' -Version '1.11.4'
+    & $script validate -Origin 'https://media.example.com/' -Name 'Rivune Windows CI' -Version '1.11.5'
+    & $script validate -Origin 'http://192.168.1.20:8080' -Name 'Rivune Windows CI' -Version '1.11.5'
 
     $startOutput = & $script start `
         -Origin 'https://media.example.com/' `
         -Name 'Rivune Windows CI' `
-        -Version '1.11.4'
+        -Version '1.11.5'
     $started = $true
     if ($startOutput -notmatch "Rivune LAN discovery is active as 'Rivune Windows CI' at https://media.example.com") {
         throw "Unexpected discovery start output: $startOutput"
     }
 
     $statusOutput = & $script status
-    if ($statusOutput -notmatch "active as 'Rivune Windows CI' at https://media.example.com \(version 1.11.4, PID [0-9]+\)") {
+    if ($statusOutput -notmatch "active as 'Rivune Windows CI' at https://media.example.com \(version 1.11.5, PID [0-9]+\)") {
         throw "Unexpected discovery status output: $statusOutput"
     }
 
@@ -78,7 +78,7 @@ try {
 
     $config = Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json
     if ($config.origin -cne 'https://media.example.com' -or $config.name -cne 'Rivune Windows CI' -or
-        $config.version -cne '1.11.4' -or [int] $config.port -ne 443) {
+        $config.version -cne '1.11.5' -or [int] $config.port -ne 443) {
         throw "Installed discovery configuration is invalid: $($config | ConvertTo-Json -Compress)"
     }
     $publisherStatus = Get-Content -LiteralPath $statusFile -Raw | ConvertFrom-Json
@@ -105,7 +105,7 @@ try {
     }
 
     $logOutput = & $script logs
-    if ($logOutput -notmatch 'active name=Rivune Windows CI origin=https://media.example.com version=1.11.4') {
+    if ($logOutput -notmatch 'active name=Rivune Windows CI origin=https://media.example.com version=1.11.5') {
         throw 'Discovery log did not record the active bounded contract.'
     }
 

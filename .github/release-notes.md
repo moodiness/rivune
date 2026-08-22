@@ -1,21 +1,22 @@
-# Rivune v1.11.4
+# Rivune v1.11.5
 
 ## Highlights
 
-- Rivune for iPhone, iPad, Apple TV, Apple Vision Pro, and Mac checks the published Rivune update manifest on launch, subject to a successful-check throttle of 24 hours per installed version.
-- Every Apple client also exposes **Settings → Application Update → Check now**. The first-connection screen reports an available release even before a server is paired.
-- Update metadata is accepted only from Rivune's fixed HTTPS GitHub endpoint and bounded to 256 KiB. Redirects are limited to five and restricted to GitHub release hosts.
-- The client validates manifest schema 2, Semantic Versioning precedence, channel, tag, publication date, release URL, and the exact package contract for its platform: format, architectures, minimum OS, bundle identifier, unsigned state, filename, size, SHA-256, and asset URL.
-- Validated results are cached so the last state survives relaunch. Automatic checks run immediately after the installed app version changes, while failed checks never advance the 24-hour throttle.
-- Rivune never downloads or installs an Apple update automatically. iPhone, iPad, Apple Vision Pro, and Mac open the verified GitHub Release; Apple TV displays the same release as a local QR code.
-- Existing bounded diagnostics record only stable update outcome codes and never include manifest contents, URLs, package data, or raw errors.
+- Rivune's native Android, iPhone, iPad, Apple TV, Apple Vision Pro, Mac, and Windows interfaces are now available in French, Spanish, German, Italian, and Brazilian Portuguese, with English as the fallback.
+- Android adds a device-local **App language** setting with **System**, English, French, Spanish, German, Italian, and Portuguese (Brazil) choices. Selecting a language recreates the activity so the complete phone, tablet, and TV interface updates immediately.
+- Apple clients use the language selected by iOS, iPadOS, tvOS, visionOS, or macOS. The same localization catalog is embedded in every Apple target, including playback controls, accessibility labels, settings, offline playback, diagnostics presentation, and update status.
+- Windows follows the effective profile interface language, then the connected server language, then the Windows UI language. Changing the profile setting refreshes the current native interface without restarting Rivune.
+- Server-provided media titles, collection names, profile names, provider data, and error details remain unchanged. Only Rivune-owned interface copy is translated.
+- Translation catalogs preserve all formatting placeholders and keep unsupported locales on the complete English interface rather than mixing partial translations.
 
-## Using Apple update checks
+## Supported interface languages
 
-- Rivune checks on launch if no successful check was completed for the installed version during the previous 24 hours.
-- Open **Settings → Application Update** to see the installed version, the last validated result, or a stable failure state, and choose **Check now** to bypass the daily throttle.
-- On Apple TV, choose **View release QR code** and scan it from another device.
-- Public iOS, tvOS, and visionOS IPA files remain unsigned and require an authorized signing identity and provisioning profile before installation. The macOS DMG remains unsigned and may require explicit Gatekeeper approval.
+- English
+- French
+- Spanish
+- German
+- Italian
+- Portuguese (Brazil)
 
 ## Application installation
 
@@ -27,17 +28,17 @@
 ## Upgrade notes
 
 - This patch release adds no database migration. The current schema remains unchanged from v1.11.0.
-- Existing operators can set `RIVUNE_VERSION=1.11.4`, pull, and recreate Rivune. Fresh Compose deployments now default to the immutable `1.11.4` image tag.
-- The Apple update checker stores only its last successful time, installed-version key, last-notified version, and, when an update exists, validated public release metadata. It adds no credential, background-service, or installation permission.
+- Existing operators can set `RIVUNE_VERSION=1.11.5`, pull, and recreate Rivune. Fresh Compose deployments now default to the immutable `1.11.5` image tag.
+- The Android app-language choice is stored only in the app's private preferences. Apple uses platform language selection. Windows uses existing effective profile and discovery settings; no new credential or permission is introduced.
 - GitHub publishes exactly eight release assets: `Rivune-Android.apk`, the three unsigned IPA files, `Rivune-macOS.dmg`, `rivune-update.json`, `Rivune-x64.exe`, and `Rivune-arm64.exe`.
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.11.4`
+- `ghcr.io/moodiness/rivune:1.11.5`
 - `ghcr.io/moodiness/rivune:1.11`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 - Provenance and SBOM attestations are published for both runnable platforms.
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.11.3...v1.11.4
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.11.4...v1.11.5

@@ -201,15 +201,15 @@ private struct ScreenHeading: View {
 
     var body: some View {
         VStack(alignment: centered ? .center : .leading, spacing: 10) {
-            Text(eyebrow.uppercased())
+            Text(rivuneLocalized(eyebrow).uppercased())
                 .font(.caption.weight(.bold))
                 .tracking(1.8)
                 .foregroundStyle(RivunePalette.accent)
-            Text(title)
+            Text(rivuneLocalized(title))
                 .font(.largeTitle.bold())
                 .multilineTextAlignment(centered ? .center : .leading)
             if let bodyText {
-                Text(bodyText)
+                Text(rivuneLocalized(bodyText))
                     .font(.body)
                     .foregroundStyle(RivunePalette.secondary)
                     .multilineTextAlignment(centered ? .center : .leading)
@@ -245,7 +245,7 @@ private struct FailureText: View {
 
     var body: some View {
         if let failure {
-            Label(failure.localizedDescription, systemImage: "exclamationmark.triangle.fill")
+            Label(rivuneLocalized(failure.localizedDescription), systemImage: "exclamationmark.triangle.fill")
                 .font(.callout)
                 .foregroundStyle(Color.red.opacity(0.92))
                 .fixedSize(horizontal: false, vertical: true)
@@ -300,7 +300,7 @@ private struct PrimaryButton: View {
         Button(action: action) {
             HStack(spacing: 10) {
                 if busy { ProgressView().tint(.black) }
-                Text(title).fontWeight(.bold)
+                Text(rivuneLocalized(title)).fontWeight(.bold)
                 Spacer(minLength: 0)
                 if !busy { Image(systemName: "arrow.right") }
             }
@@ -351,7 +351,7 @@ private struct ServerView: View {
             isSearching = false
         }
         .confirmationDialog(
-            selectedServer.map { "Connect to \($0.name)?" } ?? "Connect to this server?",
+            selectedServer.map { rivuneLocalizedFormat("Connect to %@?", $0.name) } ?? rivuneLocalized("Connect to this server?"),
             isPresented: Binding(
                 get: { selectedServer != nil },
                 set: { if !$0 { selectedServer = nil } }
@@ -365,7 +365,7 @@ private struct ServerView: View {
             }
             Button("Cancel", role: .cancel) { selectedServer = nil }
         } message: { server in
-            Text("\(server.address.absoluteString)\n\n\(server.usesSecureTransport ? "Encrypted HTTPS connection." : "Unencrypted HTTP. Continue only on a trusted private network.")")
+            Text(server.address.absoluteString + "\n\n" + rivuneLocalized(server.usesSecureTransport ? "Encrypted HTTPS connection." : "Unencrypted HTTP. Continue only on a trusted private network."))
         }
     }
 
@@ -571,7 +571,7 @@ private struct LANDiscoveryCard: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(isSearching)
-                .accessibilityLabel(isSearching ? "Searching for nearby servers" : "Refresh nearby servers")
+                .accessibilityLabel(rivuneLocalized(isSearching ? "Searching for nearby servers" : "Refresh nearby servers"))
                 .accessibilityIdentifier("server-discover")
             }
             .padding(cardPadding)
@@ -617,7 +617,7 @@ private struct LANDiscoveryCard: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(RivunePalette.secondary)
         } else {
-            Text("\(servers.count) \(servers.count == 1 ? "server" : "servers")")
+            Text(rivuneLocalizedFormat(servers.count == 1 ? "%d server" : "%d servers", servers.count))
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(RivunePalette.secondary)
                 .padding(.horizontal, 10)
@@ -676,11 +676,11 @@ private struct LANDiscoveryEmptyState: View {
             .frame(width: 28, height: 28)
 
             VStack(alignment: .leading, spacing: 5) {
-                Text(isSearching ? "Looking on your local network" : "No servers yet")
+                Text(rivuneLocalized(isSearching ? "Looking on your local network" : "No servers yet"))
                     .font(.subheadline.weight(.semibold))
-                Text(isSearching
+                Text(rivuneLocalized(isSearching
                      ? "Nearby Rivune servers will appear here. This can take a few seconds."
-                     : "Discovery is still active. Make sure Rivune is running and this device is on the same network.")
+                     : "Discovery is still active. Make sure Rivune is running and this device is on the same network."))
                     .font(.caption)
                     .foregroundStyle(RivunePalette.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -763,7 +763,7 @@ private struct ServerTransportBadge: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .background(RivunePalette.raised, in: Capsule())
-        .accessibilityLabel(secure ? "Secure HTTPS" : "Local network HTTP")
+        .accessibilityLabel(rivuneLocalized(secure ? "Secure HTTPS" : "Local network HTTP"))
     }
 }
 
@@ -838,7 +838,7 @@ private struct PairingCard: View {
             Image(systemName: icon)
                 .font(.system(size: 26, weight: .bold))
                 .foregroundStyle(RivunePalette.accent)
-            Text(title).font(.headline)
+            Text(rivuneLocalized(title)).font(.headline)
             if let code {
                 if let copyCode {
                     Button(action: copyCode) {
@@ -846,14 +846,14 @@ private struct PairingCard: View {
                             Text(code)
                                 .font(.system(size: 38, weight: .black, design: .monospaced))
                                 .tracking(5)
-                            Label(codeCopied ? "Copied" : "Tap to copy", systemImage: codeCopied ? "checkmark" : "doc.on.doc")
+                            Label(rivuneLocalized(codeCopied ? "Copied" : "Tap to copy"), systemImage: codeCopied ? "checkmark" : "doc.on.doc")
                                 .font(.footnote.weight(.semibold))
                                 .foregroundStyle(RivunePalette.accent)
                         }
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel(codeCopied ? "Code \(code), copied" : "Code \(code), tap to copy")
+                    .accessibilityLabel(codeCopied ? rivuneLocalizedFormat("Code %@, copied", code) : rivuneLocalizedFormat("Code %@, tap to copy", code))
                     .accessibilityIdentifier("pairing-code")
                 } else {
                     Text(code)
@@ -862,7 +862,7 @@ private struct PairingCard: View {
                         .accessibilityIdentifier("pairing-code")
                 }
             }
-            Text(subtitle)
+            Text(rivuneLocalized(subtitle))
                 .font(.callout)
                 .foregroundStyle(RivunePalette.secondary)
         }
@@ -997,7 +997,7 @@ private struct ProfileButton: View {
         .buttonStyle(.card)
 #endif
         .opacity(profile.accessible ? 1 : 0.48)
-        .accessibilityLabel("\(profile.name)\(profile.hasPin ? ", PIN required" : "")")
+        .accessibilityLabel(profile.hasPin ? rivuneLocalizedFormat("%@, PIN required", profile.name) : profile.name)
     }
 }
 
@@ -1232,15 +1232,15 @@ private struct PinView: View {
 #endif
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("PIN")
-                    .accessibilityValue("\(pin.count) digits entered")
+                    .accessibilityValue(rivuneLocalizedFormat("%d digits entered", pin.count))
 
                     if let failure {
-                        Label(failure.localizedDescription, systemImage: "exclamationmark.triangle.fill")
+                        Label(rivuneLocalized(failure.localizedDescription), systemImage: "exclamationmark.triangle.fill")
                             .font(.callout)
                             .foregroundStyle(Color.red.opacity(0.94))
                             .multilineTextAlignment(.center)
                     } else {
-                        Text(pin.isEmpty ? "Enter at least 4 digits" : "\(pin.count) of 8 digits")
+                        Text(pin.isEmpty ? rivuneLocalized("Enter at least 4 digits") : rivuneLocalizedFormat("%d of 8 digits", pin.count))
                             .font(.caption)
                             .foregroundStyle(RivunePalette.secondary)
                     }
@@ -1252,7 +1252,7 @@ private struct PinView: View {
                         Button(action: submit) {
                             HStack(spacing: 8) {
                                 if busy { ProgressView() }
-                                Text(busy ? "Unlocking…" : "Unlock").fontWeight(.semibold)
+                                Text(rivuneLocalized(busy ? "Unlocking…" : "Unlock")).fontWeight(.semibold)
                                 if !busy { Image(systemName: "lock.open.fill") }
                             }
                             .frame(minWidth: 112)
@@ -1412,10 +1412,10 @@ private struct EqualNativeTabLabel: View {
     var body: some View {
         VStack(spacing: 2) {
             Image(systemName: systemImage)
-            Text(title)
+            Text(rivuneLocalized(title))
         }
         .frame(width: 72)
-        .accessibilityLabel(title)
+        .accessibilityLabel(rivuneLocalized(title))
     }
 }
 
@@ -1489,7 +1489,7 @@ private struct PersonalLibraryTabView: View {
                         ForEach(model.libraryItems) { item in
                             Button { model.openMedia(item) } label: {
                                 MediaArtworkTile(
-                                    title: item.title ?? "Untitled",
+                                    title: item.title ?? rivuneLocalized("Untitled"),
                                     subtitle: item.releaseInfo,
                                     mediaType: item.mediaType.rawValue,
                                     landscape: item.mediaType == .tv,
@@ -1576,7 +1576,7 @@ private struct TabStatus: View {
         } else if let failure = model.tabFailure {
             FailureText(failure: failure)
         } else if let empty {
-            Text(empty).foregroundStyle(RivunePalette.secondary)
+            Text(rivuneLocalized(empty)).foregroundStyle(RivunePalette.secondary)
         }
     }
 }
@@ -1721,7 +1721,7 @@ private struct AppearanceSettingsView: View {
                     }
                     if let failure = model.settingsFailure {
                         VStack(alignment: .leading, spacing: 12) {
-                            Label(failure.localizedDescription, systemImage: "exclamationmark.triangle.fill")
+                            Label(rivuneLocalized(failure.localizedDescription), systemImage: "exclamationmark.triangle.fill")
                                 .foregroundStyle(.yellow)
                             Button("Try again", action: model.loadProfileSettings)
                                 .buttonStyle(.borderedProminent)
@@ -1738,7 +1738,7 @@ private struct AppearanceSettingsView: View {
                                 Button { model.setAccent(accent) } label: {
                                     HStack(spacing: 12) {
                                         Circle().fill(RivunePalette.color(for: accent)).frame(width: 24, height: 24)
-                                        Text(accent.displayName).fontWeight(.semibold)
+                                        Text(rivuneLocalized(accent.displayName)).fontWeight(.semibold)
                                         Spacer(minLength: 8)
                                         if model.accent == accent {
                                             Image(systemName: "checkmark.circle.fill").foregroundStyle(RivunePalette.color(for: accent))
@@ -1875,7 +1875,7 @@ private struct AppearanceSettingsView: View {
                         .buttonStyle(.borderedProminent)
 #endif
                         if let diagnosticStatus {
-                            Text(diagnosticStatus)
+                            Text(rivuneLocalized(diagnosticStatus))
                                 .font(.caption)
                                 .foregroundStyle(RivunePalette.secondary)
                         }
@@ -1917,7 +1917,7 @@ private struct AppearanceSettingsView: View {
 
     @ViewBuilder private func settingsSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(title).font(.caption.weight(.semibold)).foregroundStyle(RivunePalette.secondary)
+            Text(rivuneLocalized(title)).font(.caption.weight(.semibold)).foregroundStyle(RivunePalette.secondary)
             content()
         }
         .padding(18)
@@ -1961,11 +1961,11 @@ private struct AppearanceSettingsView: View {
 
     private func settingsPicker<Value>(_ title: String, selection: Binding<Value>, options: [Value]) -> some View where Value: Hashable, Value: RawRepresentable, Value.RawValue == String {
         HStack {
-            Text(title).font(.headline)
+            Text(rivuneLocalized(title)).font(.headline)
             Spacer()
-            Picker(title, selection: selection) {
+            Picker(rivuneLocalized(title), selection: selection) {
                 ForEach(options, id: \.self) { option in
-                    Text(displayName(option)).tag(option)
+                    Text(rivuneLocalized(displayName(option))).tag(option)
                 }
             }.labelsHidden()
         }
@@ -1992,20 +1992,20 @@ private struct AppearanceSettingsView: View {
     private func serverStringPicker(_ title: String, value: String?, source: String?, options: [(String, String)], update: @escaping (String?) -> Void) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(title).font(.headline)
+                Text(rivuneLocalized(title)).font(.headline)
                 Spacer()
-                Picker(title, selection: Binding(
+                Picker(rivuneLocalized(title), selection: Binding(
                     get: { source == "profile" ? value ?? "__server__" : "__server__" },
                     set: { update($0 == "__server__" ? nil : $0) }
                 )) {
                     Text("Use server value").tag("__server__")
-                    ForEach(options, id: \.0) { Text($0.1).tag($0.0) }
+                    ForEach(options, id: \.0) { Text(rivuneLocalized($0.1)).tag($0.0) }
                 }.labelsHidden().disabled(model.activeProfile?.canManage != true || model.settingsLoading || model.profileSettings == nil)
             }
             if model.profileSettings == nil {
                 Text("Effective value unavailable").font(.caption).foregroundStyle(RivunePalette.secondary)
             } else {
-                Text("Effective: \(value ?? "server default") · source: \(source ?? "server")").font(.caption).foregroundStyle(RivunePalette.secondary)
+                Text(rivuneLocalizedFormat("Effective: %@ · source: %@", rivuneLocalized(value ?? "server default"), rivuneLocalized(source ?? "server"))).font(.caption).foregroundStyle(RivunePalette.secondary)
             }
         }
     }
@@ -2017,11 +2017,11 @@ private struct AppearanceSettingsView: View {
     }
 
     private func settingsToggle(_ title: String, value: Binding<Bool>) -> some View {
-        Toggle(title, isOn: value).font(.headline)
+        Toggle(rivuneLocalized(title), isOn: value).font(.headline)
     }
 
     private func settingsValue(_ title: String, value: String) -> some View {
-        HStack { Text(title).font(.headline); Spacer(); Text(value).foregroundStyle(RivunePalette.secondary).lineLimit(1) }
+        HStack { Text(rivuneLocalized(title)).font(.headline); Spacer(); Text(rivuneLocalized(value)).foregroundStyle(RivunePalette.secondary).lineLimit(1) }
     }
 }
 private struct HomeHeroCarousel: View {
@@ -2101,7 +2101,7 @@ private struct ContinueWatchingSection: View {
                                     }
                                     .frame(height: 3)
                                 }
-                                Text(item.title ?? item.episodeTitle ?? "Continue watching")
+                                Text(item.title ?? item.episodeTitle ?? rivuneLocalized("Continue watching"))
                                     .font(.subheadline.weight(.semibold)).lineLimit(1).frame(width: width, alignment: .leading)
                                 if let episodeTitle = item.episodeTitle {
                                     Text(episodeTitle).font(.caption).foregroundStyle(RivunePalette.secondary).lineLimit(1).frame(width: width, alignment: .leading)
@@ -2460,7 +2460,7 @@ private struct MediaFilterButton: View {
 
     var body: some View {
         Button(action: action) {
-            Label(title, systemImage: systemImage)
+            Label(rivuneLocalized(title), systemImage: systemImage)
         }
         .rivuneGlassButton(prominent: selected)
         .tint(selected ? RivunePalette.accent : .clear)

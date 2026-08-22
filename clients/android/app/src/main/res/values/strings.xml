@@ -118,6 +118,7 @@
     <string name="preferences_app_language">App language</string>
     <string name="preferences_app_language_body">Choose the language used by Rivune on this device.</string>
     <string name="preferences_language_system">System</string>
+    <string name="preferences_language_portuguese_brazil">Portuguese (Brazil)</string>
     <string name="preferences_about_rivune">Rivune for Android</string>
     <string name="preferences_startup_page">Startup page</string>
     <string name="preferences_startup_page_body">Choose the page Rivune opens on this device.</string>
