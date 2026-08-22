@@ -806,6 +806,8 @@ internal sealed class OfflinePlaybackServer : IDisposable
     private readonly string _path;
     private readonly string _expectedHost;
     private readonly string _contentType;
+    private readonly object _lifetimeSync = new();
+    private readonly HashSet<Task> _connections = [];
     private bool _disposed;
 
     public OfflinePlaybackServer(string archivePath, ReadOnlySpan<byte> key, string container)
@@ -832,7 +834,16 @@ internal sealed class OfflinePlaybackServer : IDisposable
             catch (OperationCanceledException) { return; }
             catch (ObjectDisposedException) { return; }
             catch (System.Net.Sockets.SocketException) when (_stopping.IsCancellationRequested) { return; }
-            _ = HandleLimitedAsync(client);
+            var handling = HandleLimitedAsync(client);
+            lock (_lifetimeSync) _connections.Add(handling);
+            _ = handling.ContinueWith(
+                completed =>
+                {
+                    lock (_lifetimeSync) _connections.Remove(completed);
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
         }
     }
 
@@ -916,21 +927,32 @@ internal sealed class OfflinePlaybackServer : IDisposable
                 total += read;
                 var end = HeaderEnd(buffer.AsSpan(0, total));
                 if (end < 0) continue;
-                var lines = Encoding.ASCII.GetString(buffer, 0, end).Split("\r\n", StringSplitOptions.None);
+                string[] lines;
+                try { lines = new UTF8Encoding(false, true).GetString(buffer, 0, end).Split("\r\n", StringSplitOptions.None); }
+                catch (DecoderFallbackException) { return null; }
                 var start = lines[0].Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                if (start.Length != 3 || !start[2].StartsWith("HTTP/1.", StringComparison.Ordinal)) return null;
+                if (start.Length != 3 || start[0] is not ("GET" or "HEAD") ||
+                    !start[2].StartsWith("HTTP/1.", StringComparison.Ordinal) || start[1].Length > 512) return null;
                 string? host = null;
                 string? range = null;
                 for (var index = 1; index < lines.Length; index++)
                 {
                     var separator = lines[index].IndexOf(':');
-                    if (separator <= 0) continue;
+                    if (separator <= 0) return null;
                     var name = lines[index][..separator].Trim();
                     var value = lines[index][(separator + 1)..].Trim();
-                    if (name.Equals("Host", StringComparison.OrdinalIgnoreCase)) host = value;
-                    else if (name.Equals("Range", StringComparison.OrdinalIgnoreCase)) range = value;
+                    if (name.Equals("Host", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (host is not null) return null;
+                        host = value;
+                    }
+                    else if (name.Equals("Range", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (range is not null) return null;
+                        range = value;
+                    }
                 }
-                return new PlaybackRequest(start[0].ToUpperInvariant(), start[1], host, range);
+                return new PlaybackRequest(start[0], start[1], host, range);
             }
             return null;
         }
@@ -984,6 +1006,12 @@ internal sealed class OfflinePlaybackServer : IDisposable
         _disposed = true;
         _stopping.Cancel();
         _listener.Stop();
+        try { _accepting.Wait(TimeSpan.FromSeconds(1)); }
+        catch (AggregateException) { }
+        Task[] connections;
+        lock (_lifetimeSync) connections = _connections.ToArray();
+        try { Task.WaitAll(connections, TimeSpan.FromSeconds(2)); }
+        catch (AggregateException) { }
         _reader.Dispose();
         _connectionSlots.Dispose();
         _stopping.Dispose();

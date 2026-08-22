@@ -103,6 +103,43 @@ public sealed class OfflineMediaStoreTests : IDisposable
             path.EndsWith(".partial", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".rvn", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public async Task PlaybackServerServesAuthenticatedByteRanges()
+    {
+        var plaintext = RandomNumberGenerator.GetBytes(EncryptedMediaFormat.ChunkBytes + 120_000);
+        using var store = new OfflineMediaStore(_root, new TestKeyProtector());
+        var scope = store.RegisterProfile(Server, Profile(hasPin: false), null);
+        var item = await store.DownloadAsync(
+            scope,
+            new Uri(Server, "/media/video.mp4"),
+            uri => uri.Host == Server.Host,
+            TitleId,
+            "Movie",
+            "mp4",
+            null,
+            handler: new FixedBodyHandler(plaintext),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        using var playback = store.StartPlayback(scope, item);
+        using var http = new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false });
+        const int start = EncryptedMediaFormat.ChunkBytes - 100;
+        const int end = EncryptedMediaFormat.ChunkBytes + 100;
+        using var request = new HttpRequestMessage(HttpMethod.Get, playback.PlaybackUri);
+        request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(start, end);
+        using var response = await http.SendAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.PartialContent, response.StatusCode);
+        Assert.Equal($"bytes {start}-{end}/{plaintext.Length}", response.Content.Headers.ContentRange?.ToString());
+        Assert.Equal(plaintext[start..(end + 1)], await response.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken));
+
+        using var head = new HttpRequestMessage(HttpMethod.Head, playback.PlaybackUri);
+        using var headResponse = await http.SendAsync(head, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.OK, headResponse.StatusCode);
+        Assert.Equal(plaintext.Length, headResponse.Content.Headers.ContentLength);
+        Assert.Empty(await headResponse.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken));
+    }
+
+
     [Theory]
     [InlineData("bytes=0-99", 1000, 0, 99)]
     [InlineData("bytes=900-", 1000, 900, 999)]

@@ -1122,8 +1122,14 @@ public sealed partial class MainPage : Page
     }
     private async void DownloadSource_Click(object sender, RoutedEventArgs e)
     {
-        if (_offlineMediaStore is null || _offlineScope is null || _state.SelectedSource is null ||
-            _offlineDownloadTask is { IsCompleted: false }) return;
+        if (_offlineDownloadTask is { IsCompleted: false })
+        {
+            _offlineDownloadCancellation?.Cancel();
+            DownloadSourceButton.IsEnabled = false;
+            DownloadSourceLabel.Text = "Cancelling…";
+            return;
+        }
+        if (_offlineMediaStore is null || _offlineScope is null || _state.SelectedSource is null) return;
         var store = _offlineMediaStore;
         var scope = _offlineScope;
         var selected = _state.SelectedSource;
@@ -1134,14 +1140,15 @@ public sealed partial class MainPage : Page
         if (client is null) return;
         _offlineDownloadCancellation = CancellationTokenSource.CreateLinkedTokenSource(_state.Token);
         var cancellation = _offlineDownloadCancellation;
-        DownloadSourceButton.IsEnabled = false;
+        DownloadSourceButton.IsEnabled = true;
         PlaySourceButton.IsEnabled = false;
-        DownloadSourceLabel.Text = "Starting…";
+        DownloadSourceLabel.Text = "Starting… · Cancel";
+        AutomationProperties.SetName(DownloadSourceButton, "Cancel offline download");
         SourceBanner.IsOpen = false;
         var progress = new Progress<long>(bytes =>
         {
-            if (!_closed && StringComparer.Ordinal.Equals(_offlineScope, scope))
-                DownloadSourceLabel.Text = $"Downloading {FormatBytes(bytes)}";
+            if (!_closed && !cancellation.IsCancellationRequested && StringComparer.Ordinal.Equals(_offlineScope, scope))
+                DownloadSourceLabel.Text = $"Downloading {FormatBytes(bytes)} · Cancel";
         });
         try
         {
@@ -1154,7 +1161,16 @@ public sealed partial class MainPage : Page
             SourceBanner.IsOpen = true;
             LoadOfflineItems();
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException)
+        {
+            if (!_closed && StringComparer.Ordinal.Equals(_offlineScope, scope))
+            {
+                DownloadSourceLabel.Text = "Download";
+                SourceBanner.Severity = InfoBarSeverity.Informational;
+                SourceBanner.Message = "The offline download was cancelled.";
+                SourceBanner.IsOpen = true;
+            }
+        }
         catch (Exception exception)
         {
             if (_closed) return;
@@ -1171,6 +1187,7 @@ public sealed partial class MainPage : Page
                 cancellation.Dispose();
             }
             _offlineDownloadTask = null;
+            AutomationProperties.SetName(DownloadSourceButton, "Download for offline playback");
             if (!_closed)
             {
                 PlaySourceButton.IsEnabled = _state.Preparation is not null;
@@ -2437,10 +2454,11 @@ public sealed partial class MainPage : Page
             lock (_endingSync) ending = _endingTask;
             if (ending is not null) await ending.WaitAsync(cancellationToken);
             await EndActivePlaybackRoomAsync(_state.PlaybackSession, _state.Client).WaitAsync(cancellationToken);
-            if (ending is null && _state.PlaybackSession is not null)
+            if (ending is null && (_state.PlaybackSession is not null || _activeOfflineItem is not null))
             {
                 await FlushProgressAsync(false, cancellationToken);
-                await StopSessionOnceAsync().WaitAsync(cancellationToken);
+                if (_state.PlaybackSession is not null)
+                    await StopSessionOnceAsync().WaitAsync(cancellationToken);
             }
         },
         ShutdownTimeout,
