@@ -21,7 +21,7 @@ RIVUNE_ENCRYPTION_KEYS=1:1212121212121212121212121212121212121212121212121212121
 RIVUNE_PUBLIC_URL=https://media.example.com
 RIVUNE_DISCOVERY_URL=$DiscoveryUrl
 RIVUNE_DISCOVERY_NAME=Living room
-RIVUNE_VERSION=1.11.4
+RIVUNE_VERSION=1.11.5
 "@,
         [Text.UTF8Encoding]::new($false)
     )
@@ -110,16 +110,16 @@ exit /b 0
     & (Join-Path $caseRoot 'rivune.ps1') up | Out-Null
     Assert-Compose @('up', '-d')
     Assert-Lines $discoveryLog @(
-        'validate', 'https://media.example.com', 'Living room', '1.11.4',
-        'start', 'https://media.example.com', 'Living room', '1.11.4'
+        'validate', 'https://media.example.com', 'Living room', '1.11.5',
+        'start', 'https://media.example.com', 'Living room', '1.11.5'
     ) 'Windows discovery up delegation'
 
     Reset-Logs
     & (Join-Path $caseRoot 'rivune.ps1') restart | Out-Null
     Assert-Compose @('restart')
     Assert-Lines $discoveryLog @(
-        'validate', 'https://media.example.com', 'Living room', '1.11.4',
-        'start', 'https://media.example.com', 'Living room', '1.11.4'
+        'validate', 'https://media.example.com', 'Living room', '1.11.5',
+        'start', 'https://media.example.com', 'Living room', '1.11.5'
     ) 'Windows discovery restart delegation'
 
     Reset-Logs

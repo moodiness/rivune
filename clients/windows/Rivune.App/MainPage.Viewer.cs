@@ -122,8 +122,8 @@ public sealed partial class MainPage
         ResizeMediaGrid(LibraryResults, e.NewSize.Width);
         ApplySourcePaneLayout(e.NewSize.Width, e.NewSize.Height);
         HeroInfoLabel.Text = e.NewSize.Width < 600
-            ? UiText("Details", "Détails")
-            : UiText("Info", "Plus d’infos");
+            ? UiText("Details")
+            : UiText("Info");
     }
 
     private void ApplySourcePaneLayout(double viewportWidth, double viewportHeight)
@@ -160,7 +160,7 @@ public sealed partial class MainPage
         ServerError.IsOpen = false;
         ServerSupportText.Foreground = (Brush)Application.Current.Resources["RivuneMutedTextBrush"];
         ConnectButton.IsEnabled = !string.IsNullOrWhiteSpace(ServerAddressBox.Text);
-        ConnectButtonLabel.Text = "Continue";
+        ConnectButtonLabel.Text = UiText("Continue");
     }
 
     private async void CheckUpdates_Click(object sender, RoutedEventArgs e) =>
@@ -202,8 +202,8 @@ public sealed partial class MainPage
                     result.CurrentVersion,
                     result.LatestVersion);
                 var message = comparison == 0
-                    ? $"Rivune {result.CurrentVersion} is the latest public release."
-                    : $"This Rivune {result.CurrentVersion} build is newer than the latest public release ({result.LatestVersion}).";
+                    ? UiFormat("Rivune {0} is the latest public release.", result.CurrentVersion)
+                    : UiFormat("This Rivune {0} build is newer than the latest public release ({1}).", result.CurrentVersion, result.LatestVersion);
                 await ShowUpdateDialogAsync("Rivune is up to date", message);
                 _manualUpdateCheckRequested = false;
                 return;
@@ -213,8 +213,8 @@ public sealed partial class MainPage
             var available = new ContentDialog
             {
                 XamlRoot = XamlRoot,
-                Title = $"Rivune {result.LatestVersion} is available",
-                Content = $"You are using Rivune {result.CurrentVersion}. Download the unsigned portable {result.Package.FileName} from the exact GitHub Release, verify its size, SHA-256, and ProductVersion, then close and restart Rivune to replace this executable? This does not provide an Authenticode publisher guarantee.",
+                Title = UiFormat("Rivune {0} is available", result.LatestVersion),
+                Content = UiFormat("You are using Rivune {0}. Download the unsigned portable {1} from the exact GitHub Release, verify its size, SHA-256, and ProductVersion, then close and restart Rivune to replace this executable? This does not provide an Authenticode publisher guarantee.", result.CurrentVersion, result.Package.FileName),
                 PrimaryButtonText = "Download update",
                 CloseButtonText = "Not now",
                 DefaultButton = ContentDialogButton.Primary,
@@ -226,8 +226,8 @@ public sealed partial class MainPage
             var downloading = new ContentDialog
             {
                 XamlRoot = XamlRoot,
-                Title = $"Downloading Rivune {result.LatestVersion}",
-                Content = $"Downloading {result.Package.FileName} over HTTPS and verifying its exact size, SHA-256, and ProductVersion before any update is started.",
+                Title = UiFormat("Downloading Rivune {0}", result.LatestVersion),
+                Content = UiFormat("Downloading {0} over HTTPS and verifying its exact size, SHA-256, and ProductVersion before any update is started.", result.Package.FileName),
             };
             var downloadingOpened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             downloading.Opened += (_, _) => downloadingOpened.TrySetResult();
@@ -360,6 +360,7 @@ public sealed partial class MainPage
         {
             if (_closed) return ContentDialogResult.None;
             _activeDialog = dialog;
+            LocalizeDialog(dialog);
             return await dialog.ShowAsync();
         }
         finally
@@ -515,15 +516,9 @@ public sealed partial class MainPage
                 DashboardBanner.Severity = InfoBarSeverity.Warning;
                 DashboardBanner.Message = (continueWatching.Failed, recommendations.Failed) switch
                 {
-                    (true, true) => UiText(
-                        "Continue watching and recommendations could not be loaded. Your collections are still available.",
-                        "Les sections Continuer à regarder et Recommandations n’ont pas pu être chargées. Vos collections restent disponibles."),
-                    (true, false) => UiText(
-                        "Continue watching could not be loaded. Your collections are still available.",
-                        "La section Continuer à regarder n’a pas pu être chargée. Vos collections restent disponibles."),
-                    _ => UiText(
-                        "Recommendations could not be loaded. Continue watching and your collections are still available.",
-                        "Les recommandations n’ont pas pu être chargées. Continuer à regarder et vos collections restent disponibles."),
+                    (true, true) => UiText("Continue watching and recommendations could not be loaded. Your collections are still available."),
+                    (true, false) => UiText("Continue watching could not be loaded. Your collections are still available."),
+                    _ => UiText("Recommendations could not be loaded. Continue watching and your collections are still available."),
                 };
                 DashboardBanner.IsOpen = true;
                 DashboardRetryButton.Visibility = Visibility.Visible;
@@ -564,9 +559,9 @@ public sealed partial class MainPage
         if (_offlineItems.Count > 0)
             DashboardSections.Children.Add(CreateOfflineMediaRow());
         if (continueTargets.Count > 0)
-            DashboardSections.Children.Add(CreateMediaRow(UiText("Continue watching", "Continuer à regarder"), continueTargets, landscape: true));
+            DashboardSections.Children.Add(CreateMediaRow(UiText("Continue watching"), continueTargets, landscape: true));
         if (recommendationTargets.Count > 0)
-            DashboardSections.Children.Add(CreateMediaRow(UiText("Recommended for you", "Recommandé pour vous"), recommendationTargets, landscape: false));
+            DashboardSections.Children.Add(CreateMediaRow(UiText("Recommended for you"), recommendationTargets, landscape: false));
         foreach (var collection in collections)
             DashboardSections.Children.Add(CreateCollectionRow(collection));
         DashboardEmpty.Visibility = collections.Count == 0 && continueTargets.Count == 0 && recommendationTargets.Count == 0 && _offlineItems.Count == 0
@@ -757,15 +752,15 @@ public sealed partial class MainPage
         HeroPlayButton.Visibility = target.MediaType.Equals("series", StringComparison.OrdinalIgnoreCase) ? Visibility.Collapsed : Visibility.Visible;
         HeroCarouselControls.Visibility = _heroTargets.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
         HeroRotationButton.Visibility = DeviceAnimationsEnabled ? Visibility.Visible : Visibility.Collapsed;
-        HeroPlayLabel.Text = UiText("Play", "Lire");
-        HeroInfoLabel.Text = ActualWidth < 600 ? UiText("Details", "Détails") : UiText("Info", "Plus d’infos");
-        HeroRotationButton.Content = _heroRotationPaused ? UiText("Resume", "Reprendre") : UiText("Pause", "Pause");
-        AutomationProperties.SetName(HeroRotationButton, _heroRotationPaused ? UiText("Resume featured title rotation", "Reprendre la rotation des titres à la une") : UiText("Pause featured title rotation", "Mettre en pause la rotation des titres à la une"));
+        HeroPlayLabel.Text = UiText("Play");
+        HeroInfoLabel.Text = ActualWidth < 600 ? UiText("Details") : UiText("Info");
+        HeroRotationButton.Content = _heroRotationPaused ? UiText("Resume") : UiText("Pause");
+        AutomationProperties.SetName(HeroRotationButton, _heroRotationPaused ? UiText("Resume featured title rotation") : UiText("Pause featured title rotation"));
         HeroPosition.Text = _heroTargets.Count > 0 ? HeroPositionLabel(_heroIndex + 1, _heroTargets.Count) : string.Empty;
-        AutomationProperties.SetName(HeroPanel, UsesFrenchInterface ? $"Titre à la une {_heroIndex + 1} sur {_heroTargets.Count} : {target.Title}" : $"Featured title {_heroIndex + 1} of {_heroTargets.Count}: {target.Title}");
+        AutomationProperties.SetName(HeroPanel, UiFormat("Featured title {0} of {1}: {2}", _heroIndex + 1, _heroTargets.Count, target.Title));
         AutomationProperties.SetName(HeroLogo, target.Title);
-        AutomationProperties.SetName(HeroPlayButton, UsesFrenchInterface ? $"Lire {target.Title}" : $"Play {target.Title}");
-        AutomationProperties.SetName(HeroInfoButton, UsesFrenchInterface ? $"Informations sur {target.Title}" : $"Information about {target.Title}");
+        AutomationProperties.SetName(HeroPlayButton, UiFormat("Play {0}", target.Title));
+        AutomationProperties.SetName(HeroInfoButton, UiFormat("Information about {0}", target.Title));
         HeroPanel.Visibility = Visibility.Visible;
         HeroImage.Source = null;
         HeroImage.Opacity = 0;
@@ -812,8 +807,8 @@ public sealed partial class MainPage
     {
         _heroRotationPaused = paused;
         _heroTimer.Stop();
-        HeroRotationButton.Content = paused ? UiText("Resume", "Reprendre") : UiText("Pause", "Pause");
-        AutomationProperties.SetName(HeroRotationButton, paused ? UiText("Resume featured title rotation", "Reprendre la rotation des titres à la une") : UiText("Pause featured title rotation", "Mettre en pause la rotation des titres à la une"));
+        HeroRotationButton.Content = paused ? UiText("Resume") : UiText("Pause");
+        AutomationProperties.SetName(HeroRotationButton, paused ? UiText("Resume featured title rotation") : UiText("Pause featured title rotation"));
         if (!paused && _heroTargets.Count > 1 && DashboardView.Visibility == Visibility.Visible && HomeView.Visibility == Visibility.Visible && DeviceAnimationsEnabled)
             _heroTimer.Start();
     }
@@ -850,7 +845,7 @@ public sealed partial class MainPage
         });
         var viewAll = new Button
         {
-            Content = UiText("View all  ›", "Tout afficher  ›"),
+            Content = UiText("View all  ›"),
             Style = (Style)Application.Current.Resources["RivuneTextButton"],
             Tag = collection,
         };
@@ -861,8 +856,8 @@ public sealed partial class MainPage
         if (collection.Folders.Count == 0)
         {
             section.Children.Add(CreateEmptyState(
-                UiText("This collection has no folders yet.", "Cette collection ne contient encore aucun dossier."),
-                UiText("Add folders from the Rivune server to start browsing.", "Ajoutez des dossiers depuis le serveur Rivune pour commencer à naviguer.")));
+                UiText("This collection has no folders yet."),
+                UiText("Add folders from the Rivune server to start browsing.")));
             return section;
         }
         var row = HorizontalList();
@@ -986,7 +981,7 @@ public sealed partial class MainPage
         var card = CreateArtworkCard(season.Name, season.PosterUrl ?? season.BackdropUrl, width, width * 3 / 2, hideTitle: false, enabled: true);
         if (card.Content is StackPanel stack)
         {
-            var metadata = new List<string> { season.EpisodeCount == 1 ? "1 episode" : $"{season.EpisodeCount} episodes" };
+            var metadata = new List<string> { UiFormat(season.EpisodeCount == 1 ? "{0} episode" : "{0} episodes", season.EpisodeCount) };
             if (season.VoteAverage > 0) metadata.Add($"★ {season.VoteAverage:0.0}");
             stack.Children.Add(new TextBlock
             {
@@ -1230,7 +1225,7 @@ public sealed partial class MainPage
                 title.Height = 40;
             var metadata = new List<string>();
             if (!string.IsNullOrWhiteSpace(target.ReleaseInfo ?? target.Released)) metadata.Add(target.ReleaseInfo ?? target.Released!);
-            if (target.RuntimeMinutes is > 0) metadata.Add($"{target.RuntimeMinutes} min");
+            if (target.RuntimeMinutes is > 0) metadata.Add(UiFormat("{0} min", target.RuntimeMinutes));
             if (target.Rating is > 0) metadata.Add($"★ {target.Rating:0.0}");
             if (landscape || metadata.Count > 0)
             {
@@ -1260,7 +1255,7 @@ public sealed partial class MainPage
         }
         card.Tag = target;
         card.Click += MediaCard_Click;
-        AutomationProperties.SetName(card, target.Available ? target.Title : $"{target.Title}, unavailable");
+        AutomationProperties.SetName(card, target.Available ? target.Title : UiFormat("{0}, unavailable", target.Title));
         return card;
     }
     private Button CreateEpisodeCard(MediaTarget target, PlaybackProgress? progress)
@@ -1323,14 +1318,14 @@ public sealed partial class MainPage
         stack.Children.Add(artwork);
         stack.Children.Add(new TextBlock
         {
-            Text = $"E{target.EpisodeNumber ?? 0} · {target.Title}",
+            Text = UiFormat("E{0} · {1}", target.EpisodeNumber ?? 0, target.Title),
             Style = (Style)Application.Current.Resources["RivuneTitleSmallTextStyle"],
             Height = 40,
             MaxLines = 2,
             TextTrimming = TextTrimming.CharacterEllipsis,
         });
         var primary = new List<string>();
-        if (target.RuntimeMinutes is > 0) primary.Add($"{target.RuntimeMinutes} min");
+        if (target.RuntimeMinutes is > 0) primary.Add(UiFormat("{0} min", target.RuntimeMinutes));
         if (target.Rating is > 0) primary.Add($"★ {target.Rating:0.0}");
         stack.Children.Add(new TextBlock
         {
@@ -1350,7 +1345,7 @@ public sealed partial class MainPage
             Height = 16,
         });
         button.Content = stack;
-        AutomationProperties.SetName(button, $"Episode {target.EpisodeNumber ?? 0}, {target.Title}{(progress?.Completed == true ? ", watched" : string.Empty)}");
+        AutomationProperties.SetName(button, UiFormat(progress?.Completed == true ? "Episode {0}, {1}, watched" : "Episode {0}, {1}", target.EpisodeNumber ?? 0, target.Title));
         return button;
     }
 
@@ -1429,20 +1424,20 @@ public sealed partial class MainPage
     private FrameworkElement CreateMediaRow(string title, IReadOnlyList<MediaTarget> items, bool landscape)
     {
         var section = new StackPanel { Spacing = 12 };
-        section.Children.Add(new TextBlock { Text = title, Style = (Style)Application.Current.Resources["RivuneTitleLargeTextStyle"] });
+        section.Children.Add(new TextBlock { Text = UiText(title), Style = (Style)Application.Current.Resources["RivuneTitleLargeTextStyle"] });
         var row = HorizontalList();
         foreach (var target in items) row.Items.Add(CreateMediaCard(target, landscape));
         section.Children.Add(row);
         return section;
     }
 
-    private static FrameworkElement CreateEmptyState(string title, string body)
+    private FrameworkElement CreateEmptyState(string title, string body)
     {
         var panel = new StackPanel { Spacing = 8, Padding = new Thickness(8, 16, 8, 16) };
-        var heading = new TextBlock { Text = title, Style = (Style)Application.Current.Resources["RivuneTitleMediumTextStyle"] };
+        var heading = new TextBlock { Text = UiText(title), Style = (Style)Application.Current.Resources["RivuneTitleMediumTextStyle"] };
         AutomationProperties.SetHeadingLevel(heading, AutomationHeadingLevel.Level2);
         panel.Children.Add(heading);
-        panel.Children.Add(new TextBlock { Text = body, Style = (Style)Application.Current.Resources["RivuneBodyMediumTextStyle"] });
+        panel.Children.Add(new TextBlock { Text = UiText(body), Style = (Style)Application.Current.Resources["RivuneBodyMediumTextStyle"] });
         return panel;
     }
 
@@ -1531,7 +1526,7 @@ public sealed partial class MainPage
             if (result.Errors.Count > 0)
             {
                 DetailBanner.Severity = InfoBarSeverity.Warning;
-                DetailBanner.Message = "Some titles could not be loaded. The available results are shown.";
+                DetailBanner.Message = UiText("Some titles could not be loaded. The available results are shown.");
                 DetailBanner.IsOpen = true;
             }
         }
@@ -1610,7 +1605,7 @@ public sealed partial class MainPage
         {
             var more = new Button
             {
-                Content = "Load more",
+                Content = UiText("Load more"),
                 Style = (Style)Application.Current.Resources["RivuneTextButton"],
                 HorizontalAlignment = HorizontalAlignment.Center,
             };
@@ -1623,14 +1618,14 @@ public sealed partial class MainPage
         }
     }
 
-    private static FrameworkElement CreateFolderFilterRow(IEnumerable<(string Label, string? Glyph, bool Selected, Action Select)> filters)
+    private FrameworkElement CreateFolderFilterRow(IEnumerable<(string Label, string? Glyph, bool Selected, Action Select)> filters)
     {
         var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
         foreach (var filter in filters)
         {
             var content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
             if (filter.Glyph is not null) content.Children.Add(new FontIcon { Glyph = filter.Glyph, FontSize = 16 });
-            content.Children.Add(new TextBlock { Text = filter.Label });
+            content.Children.Add(new TextBlock { Text = UiText(filter.Label) });
             var button = new ToggleButton
             {
                 Content = content,
@@ -1638,7 +1633,7 @@ public sealed partial class MainPage
                 Style = (Style)Application.Current.Resources["RivuneCatalogFilterToggle"],
                 MinWidth = 72,
             };
-            AutomationProperties.SetName(button, filter.Label);
+            AutomationProperties.SetName(button, UiText(filter.Label));
             button.Click += (_, _) => filter.Select();
             row.Children.Add(button);
         }
@@ -1796,8 +1791,8 @@ public sealed partial class MainPage
             SearchResultCount.Text = string.Empty;
             SearchMoreButton.Visibility = Visibility.Collapsed;
             SearchResultContent.Visibility = Visibility.Collapsed;
-            ((TextBlock)SearchEmpty.Children[0]).Text = "What would you like to watch?";
-            ((TextBlock)SearchEmpty.Children[1]).Text = "Enter at least two characters to search movies and series.";
+            ((TextBlock)SearchEmpty.Children[0]).Text = UiText("What would you like to watch?");
+            ((TextBlock)SearchEmpty.Children[1]).Text = UiText("Enter at least two characters to search movies and series.");
             SearchEmpty.Visibility = Visibility.Visible;
             return;
         }
@@ -1810,12 +1805,12 @@ public sealed partial class MainPage
             SearchMoreButton.Visibility = Visibility.Collapsed;
             SearchResultContent.Visibility = Visibility.Collapsed;
             SearchEmpty.Visibility = Visibility.Visible;
-            ((TextBlock)SearchEmpty.Children[0]).Text = "Search unavailable";
-            ((TextBlock)SearchEmpty.Children[1]).Text = "No searchable source is available for this profile.";
+            ((TextBlock)SearchEmpty.Children[0]).Text = UiText("Search unavailable");
+            ((TextBlock)SearchEmpty.Children[1]).Text = UiText("No searchable source is available for this profile.");
             if (!SearchBanner.IsOpen)
             {
                 SearchBanner.Severity = InfoBarSeverity.Warning;
-                SearchBanner.Message = "No searchable source is available for this profile.";
+                SearchBanner.Message = UiText("No searchable source is available for this profile.");
                 SearchBanner.IsOpen = true;
             }
             return;
@@ -1847,19 +1842,19 @@ public sealed partial class MainPage
             _searchPage = page;
             _searchHasMore = batches.Any(value => value.HasFullPage(SearchPageSize));
             PopulateMediaGrid(SearchResults, _searchTargets);
-            SearchResultCount.Text = _searchTargets.Count == 1 ? "1 title" : $"{_searchTargets.Count} titles";
+            SearchResultCount.Text = UiFormat(_searchTargets.Count == 1 ? "{0} title" : "{0} titles", _searchTargets.Count);
             SearchResultContent.Visibility = _searchTargets.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
             SearchEmpty.Visibility = _searchTargets.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             if (_searchTargets.Count == 0)
             {
-                ((TextBlock)SearchEmpty.Children[0]).Text = "No matching title";
-                ((TextBlock)SearchEmpty.Children[1]).Text = "Try another title or a broader search.";
+                ((TextBlock)SearchEmpty.Children[0]).Text = UiText("No matching title");
+                ((TextBlock)SearchEmpty.Children[1]).Text = UiText("Try another title or a broader search.");
             }
             SearchMoreButton.Visibility = _searchHasMore ? Visibility.Visible : Visibility.Collapsed;
             if (results.Any(value => value is null) || batches.Any(value => value.Errors.Count > 0))
             {
                 SearchBanner.Severity = InfoBarSeverity.Warning;
-                SearchBanner.Message = "Some sources could not be reached. Available results are shown.";
+                SearchBanner.Message = UiText("Some sources could not be reached. Available results are shown.");
                 SearchBanner.IsOpen = true;
             }
         }
@@ -1928,7 +1923,7 @@ public sealed partial class MainPage
             _libraryPage = response.Page;
             _libraryTotalPages = response.TotalPages;
             PopulateMediaGrid(LibraryResults, _libraryItems.Select(value => value.ToMediaTarget()));
-            LibraryResultCount.Text = response.TotalResults == 1 ? "1 saved title" : $"{response.TotalResults} saved titles";
+            LibraryResultCount.Text = UiFormat(response.TotalResults == 1 ? "{0} saved title" : "{0} saved titles", response.TotalResults);
             LibraryEmpty.Visibility = _libraryItems.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             LibraryMoreButton.Visibility = _libraryPage < _libraryTotalPages ? Visibility.Visible : Visibility.Collapsed;
         }
@@ -2023,7 +2018,7 @@ public sealed partial class MainPage
                     var copy = new StackPanel { Spacing = 4, VerticalAlignment = VerticalAlignment.Center };
                     copy.Children.Add(new TextBlock { Text = item.SeriesTitle ?? MediaTypeLabel(target.MediaType), Style = (Style)Application.Current.Resources["RivuneLabelSmallTextStyle"] });
                     copy.Children.Add(new TextBlock { Text = item.Title, Style = (Style)Application.Current.Resources["RivuneTitleMediumTextStyle"] });
-                    copy.Children.Add(new TextBlock { Text = item.SeasonNumber is int season && item.EpisodeNumber is int episode ? $"S{season} · E{episode}" : MediaTypeLabel(target.MediaType), Style = (Style)Application.Current.Resources["RivuneBodySmallTextStyle"] });
+                    copy.Children.Add(new TextBlock { Text = item.SeasonNumber is int season && item.EpisodeNumber is int episode ? UiFormat("S{0} · E{1}", season, episode) : MediaTypeLabel(target.MediaType), Style = (Style)Application.Current.Resources["RivuneBodySmallTextStyle"] });
                     Grid.SetColumn(copy, 1);
                     grid.Children.Add(copy);
                     var chevron = new FontIcon { Glyph = "\uE76C", Foreground = (Brush)Application.Current.Resources["RivuneAccentBrush"], VerticalAlignment = VerticalAlignment.Center };
@@ -2330,7 +2325,7 @@ public sealed partial class MainPage
         DetailTagline.Visibility = string.IsNullOrWhiteSpace(tagline) ? Visibility.Collapsed : Visibility.Visible;
         if (isEpisode && _detailTarget is { SeasonNumber: int seasonNumber, EpisodeNumber: int episodeNumber })
         {
-            DetailEpisodeCoordinates.Text = $"Season {seasonNumber} · Episode {episodeNumber}";
+            DetailEpisodeCoordinates.Text = UiFormat("Season {0} · Episode {1}", seasonNumber, episodeNumber);
             DetailEpisodeCoordinates.Visibility = Visibility.Visible;
         }
         else
@@ -2343,7 +2338,7 @@ public sealed partial class MainPage
         var release = isEpisode ? _detailTarget?.ReleaseInfo : _detailMovie?.ReleaseDate ?? _detailSeason?.AirDate ?? _detailSeries?.FirstAirDate ?? _detailTarget?.ReleaseInfo;
         if (!string.IsNullOrWhiteSpace(release)) primary.Add(ViewerDatePresentation.ReleaseDate(release));
         var runtime = _detailMovie?.RuntimeMinutes ?? _detailTarget?.RuntimeMinutes;
-        if (runtime is > 0) primary.Add($"{runtime} min");
+        if (runtime is > 0) primary.Add(UiFormat("{0} min", runtime));
         if (rating is > 0) primary.Add($"★ {rating:0.0}");
         if (!isEpisode && !string.IsNullOrWhiteSpace(_detailSeries?.Status)) primary.Add(_detailSeries.Status);
         DetailMetadata.Text = string.Join("  ·  ", primary);
@@ -2351,11 +2346,11 @@ public sealed partial class MainPage
         var secondary = new List<string>();
         if (!isEpisode)
         {
-            if (_detailSeason is not null) secondary.Add(_detailSeason.Episodes.Count == 1 ? "1 episode" : $"{_detailSeason.Episodes.Count} episodes");
+            if (_detailSeason is not null) secondary.Add(UiFormat(_detailSeason.Episodes.Count == 1 ? "{0} episode" : "{0} episodes", _detailSeason.Episodes.Count));
             else
             {
-                if (_detailSeries?.NumberOfSeasons is > 0) secondary.Add($"{_detailSeries.NumberOfSeasons} seasons");
-                if (_detailSeries?.NumberOfEpisodes is > 0) secondary.Add($"{_detailSeries.NumberOfEpisodes} episodes");
+                if (_detailSeries?.NumberOfSeasons is > 0) secondary.Add(UiFormat("{0} seasons", _detailSeries.NumberOfSeasons));
+                if (_detailSeries?.NumberOfEpisodes is > 0) secondary.Add(UiFormat("{0} episodes", _detailSeries.NumberOfEpisodes));
             }
             var genres = (_detailMovie?.Genres ?? _detailSeries?.Genres ?? []).Select(value => value.Name).ToArray();
             if (genres.Length > 0) secondary.Add(string.Join(" · ", genres));
@@ -2384,7 +2379,7 @@ public sealed partial class MainPage
             var label = _detailProgress is { PositionSeconds: > 0, Completed: false } ? "Resume" : "Play";
             var playAction = ActionButton(label, "\uE768", () => OpenSourcesForCurrentDetailAsync());
             if (_detailProgress is { PositionSeconds: > 0, DurationSeconds: > 0, Completed: false } progress)
-                AutomationProperties.SetHelpText(playAction, $"Resume at {Math.Clamp(progress.PositionSeconds * 100 / progress.DurationSeconds, 0, 100)} percent");
+                AutomationProperties.SetHelpText(playAction, UiFormat("Resume at {0} percent", Math.Clamp(progress.PositionSeconds * 100 / progress.DurationSeconds, 0, 100)));
             DetailActions.Items.Add(playAction);
         }
         Trailer? trailer = null;
@@ -2401,7 +2396,7 @@ public sealed partial class MainPage
         if (actionVisibility.Watched && _detailTarget is not null)
         {
             var watchedAction = ActionButton(watched ? "Mark as unwatched" : "Mark as watched", watched ? "\uE890" : "\uE8F5", ToggleWatchedAsync);
-            AutomationProperties.SetHelpText(watchedAction, watched ? "Marks this title as not watched" : "Marks this title as watched");
+            AutomationProperties.SetHelpText(watchedAction, UiText(watched ? "Marks this title as not watched" : "Marks this title as watched"));
             DetailActions.Items.Add(watchedAction);
         }
         if (actionVisibility.Library)
@@ -2410,7 +2405,7 @@ public sealed partial class MainPage
         DetailSections.Children.Clear();
         if (_detailSeries is not null && _detailSeason is null)
         {
-            DetailSections.Children.Add(new TextBlock { Text = "Seasons", Style = (Style)Application.Current.Resources["RivuneTitleLargeTextStyle"] });
+            DetailSections.Children.Add(new TextBlock { Text = UiText("Seasons"), Style = (Style)Application.Current.Resources["RivuneTitleLargeTextStyle"] });
             var row = HorizontalList();
             foreach (var season in _detailSeries.Seasons.Where(value => value.EpisodeCount > 0).OrderBy(value => value.SeasonNumber))
                 row.Items.Add(CreateSeasonCard(season));
@@ -2418,7 +2413,7 @@ public sealed partial class MainPage
         }
         if (_detailSeason is not null && _detailSeries is not null && !isEpisode)
         {
-            DetailSections.Children.Add(new TextBlock { Text = "Episodes", Style = (Style)Application.Current.Resources["RivuneTitleLargeTextStyle"] });
+            DetailSections.Children.Add(new TextBlock { Text = UiText("Episodes"), Style = (Style)Application.Current.Resources["RivuneTitleLargeTextStyle"] });
             var row = HorizontalList();
             foreach (var episode in _detailSeason.Episodes)
             {
@@ -2434,7 +2429,7 @@ public sealed partial class MainPage
         var cast = _detailMovie?.Cast ?? _detailSeries?.Cast ?? [];
         if (cast.Count > 0)
         {
-            DetailSections.Children.Add(new TextBlock { Text = "Cast", Style = (Style)Application.Current.Resources["RivuneTitleLargeTextStyle"] });
+            DetailSections.Children.Add(new TextBlock { Text = UiText("Cast"), Style = (Style)Application.Current.Resources["RivuneTitleLargeTextStyle"] });
             var row = HorizontalList();
             foreach (var member in cast)
             {
@@ -2492,10 +2487,10 @@ public sealed partial class MainPage
 
         if (room is not null)
         {
-            var roomLabel = room.JoinCode is { Length: > 0 } ? $"Room {room.JoinCode}" : "Watch room";
+            var roomLabel = room.JoinCode is { Length: > 0 } ? UiFormat("Room {0}", room.JoinCode) : UiText("Watch room");
             var status = new Button
             {
-                Content = LabeledActionContent($"{roomLabel} · {room.Members.Count} watching", "\uE716"),
+                Content = LabeledActionContent(UiFormat("{0} · {1} watching", roomLabel, room.Members.Count), "\uE716"),
                 Style = (Style)Application.Current.Resources["RivuneLabeledActionButton"],
                 Margin = new Thickness(0, 0, 8, 8),
                 IsEnabled = false,
@@ -2514,7 +2509,7 @@ public sealed partial class MainPage
         if (devices.Length > 0)
             CoordinationActions.Items.Add(ActionButton("Send to device", "\uE7F4", ChooseHandoffDeviceAsync));
         foreach (var device in devices.Where(device => device.State.Item is not null))
-            CoordinationActions.Items.Add(ActionButton($"Control {device.Name}", "\uE768", () => ShowRemoteControlsAsync(device)));
+            CoordinationActions.Items.Add(ActionButton(UiFormat("Control {0}", device.Name), "\uE768", () => ShowRemoteControlsAsync(device)));
         CoordinationActionsScroller.Visibility = Visibility.Visible;
     }
 
@@ -2542,17 +2537,17 @@ public sealed partial class MainPage
         PlaybackDevice LatestDevice() =>
             _state.PlaybackDevices.FirstOrDefault(value => value.SessionId == device.SessionId) ?? device;
         var panel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-        var play = new Button { Content = "Play", MinHeight = 48 };
-        var pause = new Button { Content = "Pause", MinHeight = 48 };
+        var play = new Button { Content = UiText("Play"), MinHeight = 48 };
+        var pause = new Button { Content = UiText("Pause"), MinHeight = 48 };
         var seekBack = new Button { Content = "−10s", MinHeight = 48 };
         var seekForward = new Button { Content = "+10s", MinHeight = 48 };
-        var stop = new Button { Content = "Stop", MinHeight = 48 };
+        var stop = new Button { Content = UiText("Stop"), MinHeight = 48 };
         panel.Children.Add(play);
         panel.Children.Add(pause);
         panel.Children.Add(seekBack);
         panel.Children.Add(seekForward);
         panel.Children.Add(stop);
-        var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = device.Name, Content = panel, CloseButtonText = "Done" };
+        var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = device.Name, Content = panel, CloseButtonText = UiText("Done") };
         async Task SendAsync(string command, long? position = null)
         {
             try
@@ -2697,12 +2692,12 @@ public sealed partial class MainPage
     {
         var button = new Button
         {
-            Content = LabeledActionContent(label, glyph),
+            Content = LabeledActionContent(UiText(label), glyph),
             Style = (Style)Application.Current.Resources["RivuneLabeledActionButton"],
             Margin = new Thickness(0, 0, 8, 8),
             Tag = action,
         };
-        ApplyLabeledActionPresentation(button, label);
+        ApplyLabeledActionPresentation(button, UiText(label));
         ConfigureZoomButton(button);
         button.Click += DetailAction_Click;
         return button;
@@ -2712,24 +2707,24 @@ public sealed partial class MainPage
     {
         var button = new ToggleButton
         {
-            Content = LabeledActionContent(label, glyph),
+            Content = LabeledActionContent(UiText(label), glyph),
             IsChecked = selected,
             Style = (Style)Application.Current.Resources["RivuneLabeledActionToggleButton"],
             Margin = new Thickness(0, 0, 8, 8),
             Tag = action,
         };
-        ApplyLabeledActionPresentation(button, label);
+        ApplyLabeledActionPresentation(button, UiText(label));
         ConfigureZoomButton(button);
         button.Click += DetailAction_Click;
         return button;
     }
 
 
-    private static StackPanel LabeledActionContent(string label, string glyph)
+    private StackPanel LabeledActionContent(string label, string glyph)
     {
         var content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
         content.Children.Add(new FontIcon { Glyph = glyph, FontSize = 20 });
-        content.Children.Add(new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center });
+        content.Children.Add(new TextBlock { Text = UiText(label), VerticalAlignment = VerticalAlignment.Center });
         return content;
     }
 
@@ -3003,11 +2998,11 @@ public sealed partial class MainPage
     }
     private string MediaTypeLabel(string value) => value.ToLowerInvariant() switch
     {
-        "movie" => UiText("Movie", "Film"),
-        "series" => UiText("Series", "Série"),
-        "season" => UiText("Season", "Saison"),
-        "episode" => UiText("Episode", "Épisode"),
-        "tv" => UiText("Live TV", "Télévision en direct"),
+        "movie" => UiText("Movie"),
+        "series" => UiText("Series"),
+        "season" => UiText("Season"),
+        "episode" => UiText("Episode"),
+        "tv" => UiText("Live TV"),
         _ => value,
     };
 

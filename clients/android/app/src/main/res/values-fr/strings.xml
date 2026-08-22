@@ -25,6 +25,9 @@
     <string name="server_local_http_explanation">Ce serveur découvert utilise une connexion HTTP non chiffrée. Continuez uniquement sur un réseau privé de confiance.</string>
     <string name="server_confirm_connect">Se connecter</string>
     <string name="server_confirm_cancel">Annuler</string>
+    <string name="offline_profiles_title">REGARDER HORS CONNEXION</string>
+    <string name="offline_pin_label">PIN du profil hors connexion</string>
+    <string name="offline_open">Ouvrir les téléchargements</string>
 
 
     <string name="pairing_eyebrow">APPAIRAGE DE L’APPAREIL</string>
@@ -115,6 +118,7 @@
     <string name="preferences_app_language">Langue de l’application</string>
     <string name="preferences_app_language_body">Choisissez la langue utilisée par Rivune sur cet appareil.</string>
     <string name="preferences_language_system">Système</string>
+    <string name="preferences_language_portuguese_brazil">Portugais (Brésil)</string>
     <string name="preferences_about_rivune">Rivune pour Android</string>
     <string name="preferences_startup_page">Page de démarrage</string>
     <string name="preferences_startup_page_body">Choisissez la page ouverte par Rivune sur cet appareil.</string>

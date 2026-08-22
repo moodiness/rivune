@@ -24,33 +24,42 @@ public sealed partial class MainPage
     private string? _settingsLoadFailure;
     private bool _settingsUpdateInProgress;
 
-    private bool UsesFrenchInterface =>
-        _effectiveSettings?.Settings.InterfaceLanguage?.StartsWith("fr", StringComparison.OrdinalIgnoreCase) == true;
+    private sealed record LocalizedChoice(string Value, string Label)
+    {
+        public override string ToString() => Label;
+    }
 
-    private string UiText(string english, string french) => UsesFrenchInterface ? french : english;
+    private string InterfaceLanguage =>
+        _effectiveSettings?.Settings.InterfaceLanguage ?? _state.Discovery?.InterfaceLanguage ?? CultureInfo.CurrentUICulture.Name;
+
+    private string UiText(string english) => WindowsLocalization.Translate(english, InterfaceLanguage);
+
+
+    private string UiFormat(string english, params object?[] arguments) =>
+        WindowsLocalization.Format(english, InterfaceLanguage, arguments);
 
     private string ViewerTabLabel(ViewerTab tab) => tab switch
     {
-        ViewerTab.Home => UiText("Home", "Accueil"),
-        ViewerTab.Search => UiText("Search", "Recherche"),
-        ViewerTab.Library => UiText("Library", "Bibliothèque"),
-        ViewerTab.Calendar => UiText("Calendar", "Calendrier"),
+        ViewerTab.Home => UiText("Home"),
+        ViewerTab.Search => UiText("Search"),
+        ViewerTab.Library => UiText("Library"),
+        ViewerTab.Calendar => UiText("Calendar"),
         _ => tab.ToString(),
     };
 
-    private string HeroPositionLabel(int position, int total) =>
-        UsesFrenchInterface ? $"{position} sur {total}" : $"{position} of {total}";
+    private string HeroPositionLabel(int position, int total) => UiFormat("{0} of {1}", position, total);
 
     private void ApplyInterfaceLanguage()
     {
+        LocalizeVisualTree(this);
         DashboardHeading.Text = ViewerTabLabel(_selectedViewerTab);
-        DashboardRetryButton.Content = UiText("Retry", "Réessayer");
-        DashboardLoadingStatus.Text = UiText("Loading your home", "Chargement de votre accueil");
-        HeroPlayLabel.Text = UiText("Play", "Lire");
-        HeroInfoLabel.Text = UiText("Info", "Plus d’infos");
-        HeroRotationButton.Content = _heroRotationPaused ? UiText("Resume", "Reprendre") : UiText("Pause", "Pause");
-        AutomationProperties.SetName(HeroPlayButton, UiText("Play", "Lire"));
-        AutomationProperties.SetName(HeroInfoButton, UiText("More information", "Plus d’informations"));
+        DashboardRetryButton.Content = UiText("Retry");
+        DashboardLoadingStatus.Text = UiText("Loading your home");
+        HeroPlayLabel.Text = UiText("Play");
+        HeroInfoLabel.Text = UiText("Info");
+        HeroRotationButton.Content = UiText(_heroRotationPaused ? "Resume" : "Pause");
+        AutomationProperties.SetName(HeroPlayButton, UiText("Play"));
+        AutomationProperties.SetName(HeroInfoButton, UiText("More information"));
         AutomationProperties.SetName(HomeNav, ViewerTabLabel(ViewerTab.Home));
         AutomationProperties.SetName(SearchNav, ViewerTabLabel(ViewerTab.Search));
         AutomationProperties.SetName(LibraryNav, ViewerTabLabel(ViewerTab.Library));
@@ -124,6 +133,7 @@ public sealed partial class MainPage
             row.Children.Add(chevron);
             button.Content = row;
             AutomationProperties.SetName(button, category);
+            LocalizeVisualTree(button);
             _settingsCategoryButtons.Add(button);
             SettingsCategories.Children.Add(button);
         }
@@ -294,7 +304,7 @@ public sealed partial class MainPage
         _state.Transition(AppPhase.Settings);
         _activeSettingsCategory = null;
         _returningSettingsCategory = null;
-        SettingsHeading.Text = "Settings";
+        SettingsHeading.Text = UiText("Settings");
         SettingsCategories.Visibility = Visibility.Visible;
         SettingsPanelHost.Visibility = Visibility.Collapsed;
         ShowOnly(SettingsView);
@@ -342,7 +352,7 @@ public sealed partial class MainPage
         if (sender is not Button { Tag: string category }) return;
         _activeSettingsCategory = category;
         _returningSettingsCategory = category;
-        SettingsHeading.Text = category;
+        SettingsHeading.Text = UiText(category);
         SettingsCategories.Visibility = Visibility.Collapsed;
         SettingsPanelHost.Visibility = Visibility.Visible;
         SettingsBackButton.Focus(FocusState.Programmatic);
@@ -351,7 +361,7 @@ public sealed partial class MainPage
             SettingsPanelHost.Children.Clear();
             var loading = new StackPanel { Spacing = 12, HorizontalAlignment = HorizontalAlignment.Center };
             loading.Children.Add(new ProgressRing { IsActive = true, Width = 28, Height = 28 });
-            loading.Children.Add(new TextBlock { Text = "Loading profile settings…", Style = (Style)Application.Current.Resources["RivuneBodyMediumTextStyle"] });
+            loading.Children.Add(new TextBlock { Text = UiText("Loading profile settings…"), Style = (Style)Application.Current.Resources["RivuneBodyMediumTextStyle"] });
             SettingsPanelHost.Children.Add(loading);
             await LoadProfileSettingsAsync();
         }
@@ -372,18 +382,18 @@ public sealed partial class MainPage
         var sources = _effectiveSettings?.Sources;
         if (settings is null || sources is null)
         {
-            SettingsPanelHost.Children.Add(CreateSettingsError(_settingsLoadFailure ?? "Profile settings are not available for this session."));
+            SettingsPanelHost.Children.Add(CreateSettingsError(UiText(_settingsLoadFailure ?? "Profile settings are not available for this session.")));
             return;
         }
-        SettingsPanelHost.Children.Add(new TextBlock { Text = category, Style = (Style)Application.Current.Resources["RivuneHeadlineMediumTextStyle"] });
+        SettingsPanelHost.Children.Add(new TextBlock { Text = UiText(category), Style = (Style)Application.Current.Resources["RivuneHeadlineMediumTextStyle"] });
         if (_devicePreferencesFailure is not null)
-            SettingsPanelHost.Children.Add(CreateSettingsError($"Device preferences are unavailable: {_devicePreferencesFailure}"));
+            SettingsPanelHost.Children.Add(CreateSettingsError(UiFormat("Device preferences are unavailable: {0}", _devicePreferencesFailure)));
         if (_state.Profile?.CanManage != true)
         {
             SettingsPanelHost.Children.Add(new InfoBar
             {
                 Severity = InfoBarSeverity.Informational,
-                Message = "This profile's effective settings are read-only for the current account.",
+                Message = UiText("This profile's effective settings are read-only for the current account."),
                 IsOpen = true,
                 IsClosable = false,
             });
@@ -438,10 +448,10 @@ public sealed partial class MainPage
         var discovery = _state.Discovery;
 
         var application = AboutSection("Rivune for Windows", "\uE7F4");
-        application.Children.Add(DiagnosticValue("App build", $"Version {CurrentAppVersion}"));
+        application.Children.Add(DiagnosticValue("App build", UiFormat("Version {0}", CurrentAppVersion)));
         application.Children.Add(new TextBlock
         {
-            Text = "Checks automatically at most once every 24 hours and whenever you ask.",
+            Text = UiText("Checks automatically at most once every 24 hours and whenever you ask."),
             Style = (Style)Application.Current.Resources["RivuneBodyMediumTextStyle"],
             Foreground = (Brush)Application.Current.Resources["RivuneSecondaryTextBrush"],
         });
@@ -466,7 +476,7 @@ public sealed partial class MainPage
         var diagnostics = AboutSection("Diagnostics", "\uE8C8");
         diagnostics.Children.Add(new TextBlock
         {
-            Text = "Copy a private, token-free summary or export recent in-memory event codes. Reports are limited to 64 KiB and Rivune never uploads them.",
+            Text = UiText("Copy a private, token-free summary or export recent in-memory event codes. Reports are limited to 64 KiB and Rivune never uploads them."),
             Style = (Style)Application.Current.Resources["RivuneBodyMediumTextStyle"],
             Foreground = (Brush)Application.Current.Resources["RivuneSecondaryTextBrush"],
             TextWrapping = TextWrapping.Wrap,
@@ -570,10 +580,10 @@ public sealed partial class MainPage
                 SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
                 SuggestedFileName = "rivune-diagnostics",
                 DefaultFileExtension = ".txt",
-                CommitButtonText = "Export",
+                CommitButtonText = UiText("Export"),
                 ShowOverwritePrompt = true,
             };
-            picker.FileTypeChoices.Add("Text document", new List<string> { ".txt" });
+            picker.FileTypeChoices.Add(UiText("Text document"), new List<string> { ".txt" });
             var file = await picker.PickSaveFileAsync();
             if (file is null) return;
             await File.WriteAllBytesAsync(file.Path, DiagnosticsReport.BuildUtf8(BuildDiagnosticReportInput()));
@@ -611,7 +621,7 @@ public sealed partial class MainPage
             Spacing = 10,
         };
         content.Children.Add(new FontIcon { Glyph = glyph, FontSize = 18 });
-        content.Children.Add(new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center });
+        content.Children.Add(new TextBlock { Text = UiText(label), VerticalAlignment = VerticalAlignment.Center });
         var button = new Button
         {
             Content = content,
@@ -619,7 +629,7 @@ public sealed partial class MainPage
             HorizontalAlignment = HorizontalAlignment.Stretch,
             HorizontalContentAlignment = HorizontalAlignment.Center,
         };
-        AutomationProperties.SetName(button, label);
+        AutomationProperties.SetName(button, UiText(label));
         button.Click += async (_, _) => await action();
         return button;
     }
@@ -644,7 +654,7 @@ public sealed partial class MainPage
         });
         var text = new TextBlock
         {
-            Text = label,
+            Text = UiText(label),
             Style = (Style)Application.Current.Resources["RivuneBodyLargeTextStyle"],
             VerticalAlignment = VerticalAlignment.Center,
         };
@@ -666,12 +676,12 @@ public sealed partial class MainPage
             HorizontalAlignment = HorizontalAlignment.Stretch,
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
         };
-        AutomationProperties.SetName(button, label);
+        AutomationProperties.SetName(button, UiText(label));
         button.Click += async (_, _) => await OpenAboutLinkAsync(uri);
         return button;
     }
 
-    private static StackPanel AboutSection(string title, string glyph)
+    private StackPanel AboutSection(string title, string glyph)
     {
         var section = new StackPanel
         {
@@ -698,7 +708,7 @@ public sealed partial class MainPage
         });
         var text = new TextBlock
         {
-            Text = title,
+            Text = UiText(title),
             Style = (Style)Application.Current.Resources["RivuneTitleMediumTextStyle"],
             VerticalAlignment = VerticalAlignment.Center,
         };
@@ -720,18 +730,18 @@ public sealed partial class MainPage
         Child = content,
     };
 
-    private static StackPanel DiagnosticValue(string label, string value)
+    private StackPanel DiagnosticValue(string label, string value)
     {
         var field = new StackPanel { Spacing = 2 };
         field.Children.Add(new TextBlock
         {
-            Text = label,
+            Text = UiText(label),
             Style = (Style)Application.Current.Resources["RivuneLabelLargeTextStyle"],
             Foreground = (Brush)Application.Current.Resources["RivuneSecondaryTextBrush"],
         });
         field.Children.Add(new TextBlock
         {
-            Text = value,
+            Text = UiText(value),
             Style = (Style)Application.Current.Resources["RivuneBodyMediumTextStyle"],
             Foreground = (Brush)Application.Current.Resources["RivunePrimaryTextBrush"],
             TextWrapping = TextWrapping.Wrap,
@@ -742,17 +752,18 @@ public sealed partial class MainPage
     private void AddChoice(string title, string description, string effectiveValue, IReadOnlyList<string> choices, SettingSource source, Func<string?, Task> save)
     {
         const string inherit = "Use server value";
-        var options = new List<string> { inherit };
-        options.AddRange(choices);
-        if (source == SettingSource.Profile && !options.Contains(effectiveValue)) options.Add(effectiveValue);
+        var values = new List<string> { inherit };
+        values.AddRange(choices);
+        if (source == SettingSource.Profile && !values.Contains(effectiveValue)) values.Add(effectiveValue);
         var selected = source == SettingSource.Profile ? effectiveValue : inherit;
+        var options = values.Select(value => new LocalizedChoice(value, ChoiceLabel(value))).ToArray();
         var panel = PreferencePanel(title, SourceDescription(description, source, effectiveValue));
-        var combo = new ComboBox { Header = title, MinWidth = 200, ItemsSource = options, SelectedItem = selected, IsEnabled = _state.Profile?.CanManage == true };
-        AutomationProperties.SetName(combo, $"{title}. Effective value: {effectiveValue}. Source: {SourceLabel(source)}");
+        var combo = new ComboBox { Header = UiText(title), MinWidth = 200, ItemsSource = options, SelectedItem = options.First(value => value.Value == selected), IsEnabled = _state.Profile?.CanManage == true };
+        AutomationProperties.SetName(combo, UiFormat("{0}. Effective value: {1}. Source: {2}", UiText(title), ChoiceLabel(effectiveValue), SourceLabel(source)));
         combo.SelectionChanged += async (_, _) =>
         {
-            if (combo.SelectedItem is string value && value != selected)
-                await RunSettingsUpdateAsync(() => save(value == inherit ? null : value));
+            if (combo.SelectedItem is LocalizedChoice choice && choice.Value != selected)
+                await RunSettingsUpdateAsync(() => save(choice.Value == inherit ? null : choice.Value));
         };
         panel.Children.Add(combo);
         SettingsPanelHost.Children.Add(panel);
@@ -770,25 +781,26 @@ public sealed partial class MainPage
 
     private void AddDeviceChoice(string title, string description, string selected, IReadOnlyList<string> choices, Func<WindowsDevicePreferences, string, WindowsDevicePreferences> update)
     {
-        var panel = PreferencePanel(title, $"{description}\nStored on this device.");
-        var combo = new ComboBox { Header = title, MinWidth = 200, ItemsSource = choices, SelectedItem = selected, IsEnabled = _devicePreferencesStore is not null };
+        var options = choices.Select(value => new LocalizedChoice(value, ChoiceLabel(value))).ToArray();
+        var panel = PreferencePanel(title, UiFormat("{0}\nStored on this device.", UiText(description)));
+        var combo = new ComboBox { Header = UiText(title), MinWidth = 200, ItemsSource = options, SelectedItem = options.First(value => value.Value == selected), IsEnabled = _devicePreferencesStore is not null };
         var committedValue = selected;
         var saveInProgress = false;
-        AutomationProperties.SetName(combo, $"{title}. Device value: {committedValue}");
+        AutomationProperties.SetName(combo, UiFormat("{0}. Device value: {1}", UiText(title), ChoiceLabel(committedValue)));
         combo.SelectionChanged += async (_, _) =>
         {
-            if (_closed || saveInProgress || combo.SelectedItem is not string value || value == committedValue) return;
+            if (_closed || saveInProgress || combo.SelectedItem is not LocalizedChoice choice || choice.Value == committedValue) return;
             saveInProgress = true;
-            var saved = await RunSettingsUpdateAsync(() => SaveDevicePreferencesAsync(preferences => update(preferences, value)), "Saving device setting…");
+            var saved = await RunSettingsUpdateAsync(() => SaveDevicePreferencesAsync(preferences => update(preferences, choice.Value)), "Saving device setting…");
             if (_closed) return;
             if (saved)
             {
-                committedValue = value;
-                AutomationProperties.SetName(combo, $"{title}. Device value: {committedValue}");
+                committedValue = choice.Value;
+                AutomationProperties.SetName(combo, UiFormat("{0}. Device value: {1}", UiText(title), ChoiceLabel(committedValue)));
             }
             else
             {
-                combo.SelectedItem = committedValue;
+                combo.SelectedItem = options.First(value => value.Value == committedValue);
             }
             saveInProgress = false;
         };
@@ -825,27 +837,52 @@ public sealed partial class MainPage
         ApplyAccentPalette();
     }
 
+    private string ChoiceLabel(string value) => value.ToLowerInvariant() switch
+    {
+        "en" => UiText("English"),
+        "fr" => UiText("French"),
+        "de" => UiText("German"),
+        "es" => UiText("Spanish"),
+        "it" => UiText("Italian"),
+        "pt" or "pt-br" => UiText("Portuguese"),
+        "ja" => UiText("Japanese"),
+        "auto" => UiText("Automatic"),
+        "none" => UiText("None"),
+        "system" => UiText("System"),
+        "dark" => UiText("Dark"),
+        "light" => UiText("Light"),
+        "comfortable" => UiText("Comfortable"),
+        "compact" => UiText("Compact"),
+        "white" => UiText("White"),
+        "yellow" => UiText("Yellow"),
+        "cyan" => UiText("Cyan"),
+        "green" => UiText("Green"),
+        "tmdb" => "TMDB",
+        "tvdb" => "TVDB",
+        _ => UiText(value),
+    };
+
     private void AddReadOnly(string title, string value)
     {
-        var panel = PreferencePanel(title, value);
+        var panel = PreferencePanel(title, UiText(value));
         SettingsPanelHost.Children.Add(panel);
     }
     private static PatchField<string> StringPatch(string? value) => value is null ? PatchField<string>.Null : PatchField<string>.FromValue(value);
     private static PatchField<bool> BooleanPatch(bool? value) => value is null ? PatchField<bool>.Null : PatchField<bool>.FromValue(value.Value);
 
-    private static string SourceDescription(string description, SettingSource? source, string effectiveValue) =>
-        $"{description}\nEffective: {effectiveValue}. Source: {SourceLabel(source)}.";
+    private string SourceDescription(string description, SettingSource? source, string effectiveValue) =>
+        UiFormat("{0}\nEffective: {1}. Source: {2}.", UiText(description), ChoiceLabel(effectiveValue), SourceLabel(source));
 
-    private static string SourceLabel(SettingSource? source) => source switch
+    private string SourceLabel(SettingSource? source) => UiText(source switch
     {
         SettingSource.Profile => "Profile override",
         SettingSource.Instance => "Server setting",
         SettingSource.Device => "Device setting",
         SettingSource.Default => "Server default",
         _ => "Server",
-    };
+    });
 
-    private static StackPanel PreferencePanel(string title, string description)
+    private StackPanel PreferencePanel(string title, string description)
     {
         var panel = new StackPanel
         {
@@ -853,8 +890,8 @@ public sealed partial class MainPage
             Padding = new Thickness(16),
             Background = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["RivuneSurfaceBrush"],
         };
-        panel.Children.Add(new TextBlock { Text = title, Style = (Style)Application.Current.Resources["RivuneTitleMediumTextStyle"] });
-        panel.Children.Add(new TextBlock { Text = description, Style = (Style)Application.Current.Resources["RivuneBodySmallTextStyle"], TextWrapping = TextWrapping.Wrap });
+        panel.Children.Add(new TextBlock { Text = UiText(title), Style = (Style)Application.Current.Resources["RivuneTitleMediumTextStyle"] });
+        panel.Children.Add(new TextBlock { Text = UiText(description), Style = (Style)Application.Current.Resources["RivuneBodySmallTextStyle"], TextWrapping = TextWrapping.Wrap });
         return panel;
     }
 
@@ -873,7 +910,7 @@ public sealed partial class MainPage
         var saving = new InfoBar
         {
             Severity = InfoBarSeverity.Informational,
-            Message = status,
+            Message = UiText(status),
             IsOpen = true,
             IsClosable = false,
         };
@@ -894,7 +931,7 @@ public sealed partial class MainPage
             if (!_closed)
             {
                 if (SettingsPanelHost.Children.Contains(saving)) SettingsPanelHost.Children.Remove(saving);
-                SettingsPanelHost.Children.Insert(0, CreateSettingsError(FriendlyError(exception)));
+                SettingsPanelHost.Children.Insert(0, CreateSettingsError(UiText(FriendlyError(exception))));
             }
             return false;
         }
@@ -937,7 +974,7 @@ public sealed partial class MainPage
     private void ShowSettingsCategories()
     {
         _activeSettingsCategory = null;
-        SettingsHeading.Text = "Settings";
+        SettingsHeading.Text = UiText("Settings");
         SettingsPanelHost.Visibility = Visibility.Collapsed;
         SettingsCategories.Visibility = Visibility.Visible;
         FocusSettingsCategories();

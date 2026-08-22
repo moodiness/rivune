@@ -87,7 +87,7 @@ function Get-ValidatedDiscoveryConfig([string] $RawOrigin, [string] $RawName, [s
         throw 'RIVUNE_DISCOVERY_NAME must be 1 to 63 UTF-8 bytes without control characters.'
     }
     if ($RawVersion -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
-        throw 'RIVUNE_VERSION must be a stable numeric version such as 1.11.4.'
+        throw 'RIVUNE_VERSION must be a stable numeric version such as 1.11.5.'
     }
 
     return [pscustomobject]@{
