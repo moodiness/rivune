@@ -12,12 +12,16 @@ public struct URLSessionTransport: HTTPTransport {
 
     let loader: BoundedURLSessionLoader
 
-    public init(session: URLSession = .shared) {
+    public init(
+        session: URLSession = .shared,
+        maximumResponseBodyBytes: Int = Self.maximumResponseBodyBytes
+    ) {
+        precondition(maximumResponseBodyBytes > 0)
         self.loader = BoundedURLSessionLoader(
             configuration: session.configuration,
             authenticationDelegate: session.delegate,
             delegateQueue: session.delegateQueue,
-            maximumResponseBodyBytes: Self.maximumResponseBodyBytes
+            maximumResponseBodyBytes: maximumResponseBodyBytes
         )
     }
 

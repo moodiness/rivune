@@ -26,7 +26,7 @@ struct RivuneTelevisionDiagnosticView: View {
                         Spacer()
                         Button("Done") { dismiss() }.buttonStyle(.borderedProminent)
                     }
-                    if let image = diagnosticQRCode(report) {
+                    if let image = rivuneQRCode(report, correctionLevel: "L") {
                         image
                             .interpolation(.none)
                             .resizable()
@@ -49,17 +49,54 @@ struct RivuneTelevisionDiagnosticView: View {
         }
         .preferredColorScheme(.dark)
     }
+}
 
-    private func diagnosticQRCode(_ value: String) -> Image? {
-        let filter = CIFilter.qrCodeGenerator()
-        filter.message = Data(value.utf8)
-        filter.correctionLevel = "L"
-        guard let output = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 12, y: 12)),
-              let image = CIContext(options: [.useSoftwareRenderer: false]).createCGImage(output, from: output.extent) else {
-            return nil
+struct RivuneTelevisionUpdateView: View {
+    let update: RivuneAppleUpdate
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(alignment: .leading, spacing: 28) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Rivune \(update.latestVersion)").font(.largeTitle.bold())
+                        Text("Scan the QR code to open the verified GitHub release. The public tvOS package is unsigned and must be signed before installation.")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Done") { dismiss() }.buttonStyle(.borderedProminent)
+                }
+                if let image = rivuneQRCode(update.releaseURL.absoluteString, correctionLevel: "M") {
+                    image
+                        .interpolation(.none)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 620, height: 620)
+                        .padding(28)
+                        .background(.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        .frame(maxWidth: .infinity)
+                }
+                Text(update.releaseURL.absoluteString)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
+            .padding(48)
         }
-        return Image(decorative: image, scale: 1)
+        .preferredColorScheme(.dark)
     }
+}
+
+private func rivuneQRCode(_ value: String, correctionLevel: String) -> Image? {
+    let filter = CIFilter.qrCodeGenerator()
+    filter.message = Data(value.utf8)
+    filter.correctionLevel = correctionLevel
+    guard let output = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 12, y: 12)),
+          let image = CIContext(options: [.useSoftwareRenderer: false]).createCGImage(output, from: output.extent) else {
+        return nil
+    }
+    return Image(decorative: image, scale: 1)
 }
 #else
 struct RivuneDiagnosticTextDocument: FileDocument {

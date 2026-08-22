@@ -354,7 +354,11 @@ public final class RivuneAppModel: ObservableObject {
     @Published public private(set) var profileSettingsSources: EffectiveSettingsSources?
     @Published public private(set) var settingsLoading = false
     @Published public private(set) var settingsFailure: RivuneAppFailure?
+    @Published public private(set) var updateState: RivuneAppleUpdateState = .idle
+    @Published public private(set) var updateNotice: RivuneAppleUpdate?
     private let diagnostics = RivuneDiagnosticsBuffer()
+    private let installedApplicationVersion: String
+    private let updateChecker: any RivuneAppleUpdateChecking
     private let defaults: UserDefaults
     private var serverOrigin: URL?
     private var client: RivuneAPIClient?
@@ -362,6 +366,7 @@ public final class RivuneAppModel: ObservableObject {
     private var currentOfflineAccess: RivuneOfflineProfileAccess?
     private var storedOfflineProfiles: [RivuneOfflineProfileAccess] = []
     private var operation: Task<Void, Never>?
+    private var updateOperation: Task<Void, Never>?
     private var tabOperation: Task<Void, Never>?
     private var tabGeneration: UInt64 = 0
     private var generation: UInt64 = 0
@@ -383,9 +388,24 @@ public final class RivuneAppModel: ObservableObject {
     public var offlineAccessUnlocked: Bool { offlineScope != nil }
     private var usesCellularNetwork = false
     public var canNavigateBackFromMedia: Bool { selectedSeason != nil || previousMediaDetail != nil }
+    public var applicationVersion: String { installedApplicationVersion }
 
-    public init(defaults: UserDefaults = .standard) {
+    public convenience init(defaults: UserDefaults = .standard) {
+        self.init(
+            defaults: defaults,
+            updateChecker: RivuneAppleUpdateChecker(),
+            applicationVersion: RivuneAppleDiagnosticMetadata.current().appVersion
+        )
+    }
+
+    init(
+        defaults: UserDefaults,
+        updateChecker: any RivuneAppleUpdateChecking,
+        applicationVersion: String
+    ) {
         self.defaults = defaults
+        self.updateChecker = updateChecker
+        self.installedApplicationVersion = applicationVersion
         self.serverAddress = defaults.string(forKey: Self.serverKey) ?? ""
         self.accent = defaults.string(forKey: Self.accentKey).flatMap(RivuneAccent.init(rawValue:)) ?? .blue
         self.preferredPlayer = defaults.string(forKey: Self.playerKey).flatMap(RivunePlayerPreference.init(rawValue:)) ?? .ask
@@ -412,6 +432,19 @@ public final class RivuneAppModel: ObservableObject {
         }
         defaults.removeObject(forKey: Self.offlineScopeKey)
         diagnostics.record(.appStarted)
+        if let data = defaults.data(forKey: Self.updateCacheKey) {
+            if let cached = try? JSONDecoder().decode(RivuneAppleUpdateCache.self, from: data),
+               let restored = cached.restoredState(
+                   installedVersion: applicationVersion,
+                   platform: .current
+               ) {
+                updateState = restored
+            } else {
+                defaults.removeObject(forKey: Self.updateCacheKey)
+                defaults.removeObject(forKey: Self.lastUpdateCheckKey)
+                defaults.removeObject(forKey: Self.lastUpdateVersionKey)
+            }
+        }
     }
 
     deinit {
@@ -420,16 +453,17 @@ public final class RivuneAppModel: ObservableObject {
         mediaOperation?.cancel()
         settingsOperation?.cancel()
         coordinationOperation?.cancel()
+        updateOperation?.cancel()
         Task { await RivuneOfflineMediaStore.shared.stopPlayback() }
         pathMonitor.cancel()
     }
 
     public func start() {
         refreshAvailableOfflineProfiles()
+        checkForUpdates(manual: false)
         guard destination == .server, !serverAddress.isEmpty else { return }
         connect(to: serverAddress)
     }
-
 
     public func connect(to address: String) {
         diagnostics.record(.serverConnectionStarted)
@@ -813,6 +847,90 @@ public final class RivuneAppModel: ObservableObject {
 
     func recordDiagnosticExport(succeeded: Bool) {
         diagnostics.record(succeeded ? .diagnosticExportSucceeded : .diagnosticExportFailed)
+    }
+
+    public func checkForUpdates(manual: Bool = true) {
+        guard updateOperation == nil else { return }
+        let now = Date()
+        let version = applicationVersion
+        if !manual,
+           defaults.string(forKey: Self.lastUpdateVersionKey) == version,
+           !RivuneAppleUpdateChecker.automaticCheckIsDue(
+               lastSuccessfulCheck: defaults.object(forKey: Self.lastUpdateCheckKey) as? Date,
+               now: now
+           ) { return }
+
+        let checker = updateChecker
+        updateState = .checking
+        diagnostics.record(.updateCheckStarted)
+        updateOperation = Task { [weak self] in
+            do {
+                let result = try await checker.check(currentVersion: version)
+                try Task.checkCancellation()
+                guard let self else { return }
+                self.defaults.set(Date(), forKey: Self.lastUpdateCheckKey)
+                self.defaults.set(version, forKey: Self.lastUpdateVersionKey)
+                switch result {
+                case .upToDate(let currentVersion, let latestVersion):
+                    self.updateState = .upToDate(currentVersion: currentVersion, latestVersion: latestVersion)
+                    self.persistUpdateCache(.upToDate(currentVersion: currentVersion, latestVersion: latestVersion))
+                    self.updateNotice = nil
+                    self.diagnostics.record(.updateUpToDate)
+                case .available(let update):
+                    self.updateState = .available(update)
+                    self.persistUpdateCache(.available(update))
+                    if self.defaults.string(forKey: Self.lastNotifiedUpdateKey) != update.latestVersion {
+                        self.defaults.set(update.latestVersion, forKey: Self.lastNotifiedUpdateKey)
+                        self.updateNotice = update
+                    }
+                    self.diagnostics.record(.updateAvailable)
+                }
+            } catch is CancellationError {
+                guard let self else { return }
+                if case .checking = self.updateState { self.updateState = .idle }
+            } catch {
+                guard let self else { return }
+                self.updateState = .failed
+                self.diagnostics.record(.updateCheckFailed)
+            }
+            guard let self else { return }
+            self.updateOperation = nil
+        }
+    }
+
+    public func dismissUpdateNotice() {
+        updateNotice = nil
+    }
+
+    private func persistUpdateCache(_ result: RivuneAppleUpdateCheckResult) {
+        let cache: RivuneAppleUpdateCache
+        switch result {
+        case .upToDate(let currentVersion, let latestVersion):
+            cache = RivuneAppleUpdateCache(
+                currentVersion: currentVersion,
+                latestVersion: latestVersion,
+                publishedAt: "",
+                releaseURL: "",
+                packageURL: "",
+                packageFileName: "",
+                packageSize: 0,
+                packageSHA256: ""
+            )
+        case .available(let update):
+            cache = RivuneAppleUpdateCache(
+                currentVersion: update.currentVersion,
+                latestVersion: update.latestVersion,
+                publishedAt: ISO8601DateFormatter().string(from: update.publishedAt),
+                releaseURL: update.releaseURL.absoluteString,
+                packageURL: update.packageURL.absoluteString,
+                packageFileName: update.packageFileName,
+                packageSize: update.packageSize,
+                packageSHA256: update.packageSHA256
+            )
+        }
+        if let data = try? JSONEncoder().encode(cache) {
+            defaults.set(data, forKey: Self.updateCacheKey)
+        }
     }
 
     func recordPlaybackFailure() {
@@ -2246,6 +2364,10 @@ public final class RivuneAppModel: ObservableObject {
     private static let skipIntroKey = "rivune.playback.skip-intro"
     private static let skipRecapKey = "rivune.playback.skip-recap"
     private static let skipOutroKey = "rivune.playback.skip-outro"
+    private static let lastUpdateVersionKey = "rivune.update.last-successful-version"
+    private static let lastNotifiedUpdateKey = "rivune.update.last-notified-version"
+    private static let lastUpdateCheckKey = "rivune.update.last-successful-check"
+    private static let updateCacheKey = "rivune.update.cached-result"
 
     private static func origin(of url: URL) -> URL? {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: true),

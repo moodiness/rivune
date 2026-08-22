@@ -1,23 +1,21 @@
-# Rivune v1.11.3
+# Rivune v1.11.4
 
 ## Highlights
 
-- Android, Apple, and Windows clients now expose the same bounded, token-free support report from their settings surfaces.
-- Each process keeps at most 64 KiB of structured event codes in memory, and every exported UTF-8 report is capped at 64 KiB.
-- Reports use a strict allowlist: app/build, platform and device metadata, selected local preferences, the server origin/name/version/protocol, and timestamped lifecycle event codes.
-- Credentials, cookies, headers, payloads, media and profile identifiers, titles, provider data, filesystem paths, raw errors, and URL credentials/path/query/fragment are excluded by construction.
-- Rivune never uploads diagnostics. Android, Apple, and Windows use user-initiated local copy or export surfaces; Android TV displays the report locally, and Apple TV adds a local QR representation because tvOS has no public clipboard, share sheet, or file exporter.
-- Windows copies opt out of clipboard history and roaming/device sync and clear after 60 seconds. Apple device copies are local-only and expire after 60 seconds. While Rivune remains alive, Android marks copies sensitive and clears them after 60 seconds or when Rivune leaves the foreground, whichever comes first; Android has no standard per-clip local-only or process-death-safe expiry guarantee, so use **Export logs** wherever clipboard synchronization or retention cannot be ruled out.
-- Connection, catalogue, playback, update, and export outcomes are recorded only as stable event codes without attached values or exception text.
-- The complete backend, browser, Android, Apple, Windows, migration, proxy, backup, and multi-architecture container gates run before publication.
+- Rivune for iPhone, iPad, Apple TV, Apple Vision Pro, and Mac checks the published Rivune update manifest on launch, subject to a successful-check throttle of 24 hours per installed version.
+- Every Apple client also exposes **Settings → Application Update → Check now**. The first-connection screen reports an available release even before a server is paired.
+- Update metadata is accepted only from Rivune's fixed HTTPS GitHub endpoint and bounded to 256 KiB. Redirects are limited to five and restricted to GitHub release hosts.
+- The client validates manifest schema 2, Semantic Versioning precedence, channel, tag, publication date, release URL, and the exact package contract for its platform: format, architectures, minimum OS, bundle identifier, unsigned state, filename, size, SHA-256, and asset URL.
+- Validated results are cached so the last state survives relaunch. Automatic checks run immediately after the installed app version changes, while failed checks never advance the 24-hour throttle.
+- Rivune never downloads or installs an Apple update automatically. iPhone, iPad, Apple Vision Pro, and Mac open the verified GitHub Release; Apple TV displays the same release as a local QR code.
+- Existing bounded diagnostics record only stable update outcome codes and never include manifest contents, URLs, package data, or raw errors.
 
-## Using diagnostics
+## Using Apple update checks
 
-- On Android mobile or tablet, open Settings → About, then choose **Copy diagnostics** or **Export logs**. On Android TV, choose **View diagnostics** to inspect or photograph the local report; **Export logs** remains available when the TV provides a document destination.
-- On iPhone, iPad, or visionOS, open Settings → Diagnostics, then copy locally or export the text report. On macOS, export the text report to a user-selected file.
-- On Apple TV, open Settings → Diagnostics and choose **View or scan diagnostics**. Scan the QR code on the local display or photograph the visible allowlisted report.
-- On Windows, open Settings → About, then choose **Copy diagnostics** or **Export logs**.
-- Review every report before sharing it. Diagnostics are designed to exclude secrets, but device and server-origin metadata may still identify an installation.
+- Rivune checks on launch if no successful check was completed for the installed version during the previous 24 hours.
+- Open **Settings → Application Update** to see the installed version, the last validated result, or a stable failure state, and choose **Check now** to bypass the daily throttle.
+- On Apple TV, choose **View release QR code** and scan it from another device.
+- Public iOS, tvOS, and visionOS IPA files remain unsigned and require an authorized signing identity and provisioning profile before installation. The macOS DMG remains unsigned and may require explicit Gatekeeper approval.
 
 ## Application installation
 
@@ -29,17 +27,17 @@
 ## Upgrade notes
 
 - This patch release adds no database migration. The current schema remains unchanged from v1.11.0.
-- Existing operators can set `RIVUNE_VERSION=1.11.3`, pull, and recreate Rivune. Fresh Compose deployments now default to the immutable `1.11.3` image tag.
-- Diagnostic history exists only in process memory and begins empty after every app restart; no new persistent file or permission is introduced.
+- Existing operators can set `RIVUNE_VERSION=1.11.4`, pull, and recreate Rivune. Fresh Compose deployments now default to the immutable `1.11.4` image tag.
+- The Apple update checker stores only its last successful time, installed-version key, last-notified version, and, when an update exists, validated public release metadata. It adds no credential, background-service, or installation permission.
 - GitHub publishes exactly eight release assets: `Rivune-Android.apk`, the three unsigned IPA files, `Rivune-macOS.dmg`, `rivune-update.json`, `Rivune-x64.exe`, and `Rivune-arm64.exe`.
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.11.3`
+- `ghcr.io/moodiness/rivune:1.11.4`
 - `ghcr.io/moodiness/rivune:1.11`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 - Provenance and SBOM attestations are published for both runnable platforms.
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.11.2...v1.11.3
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.11.3...v1.11.4
