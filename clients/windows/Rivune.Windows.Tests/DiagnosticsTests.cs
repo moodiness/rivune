@@ -27,7 +27,7 @@ public sealed class DiagnosticsTests
         var report = DiagnosticsReport.Build(Input([
             new DiagnosticEvent(DateTimeOffset.FromUnixTimeMilliseconds(1_000), DiagnosticEventCode.AppStarted),
         ]));
-        var expected = """
+        var expected = ("""
             Rivune Windows diagnostics
             Report format: 1
             Generated at: 1970-01-01T00:00:00Z
@@ -48,7 +48,7 @@ public sealed class DiagnosticsTests
             Video aspect: zoom
             Events:
             1970-01-01T00:00:01Z APP_STARTED
-            """ + "\n";
+            """).ReplaceLineEndings("\n") + "\n";
 
         Assert.Equal(expected, report);
         foreach (var secret in new[] { "diagnostic-user", "diagnostic-password", "private-profile", "access_token", "diagnostic-token", "diagnostic-fragment" })
