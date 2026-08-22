@@ -61,7 +61,6 @@ extension RivuneAppleUpdateCache {
               packageSize <= rivuneMaximumAppleUpdatePackageBytes,
               packageSHA256.utf8.count == 64,
               packageSHA256.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
-              let publishedDate,
               let releaseURL = URL(string: releaseURL),
               let packageURL = URL(string: packageURL) else { return nil }
         return .available(RivuneAppleUpdate(

@@ -496,13 +496,15 @@ private struct UpdateStatusCard: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Label("Rivune \(update.latestVersion) is available", systemImage: "arrow.down.circle.fill")
                         .font(.headline)
+                    Group {
 #if os(tvOS)
-                    Text("Scan the release QR code on another device to download and prepare the unsigned Apple package.")
+                        Text("Scan the release QR code on another device to download and prepare the unsigned Apple package.")
 #else
-                    Text("Open the verified GitHub release to download the unsigned Apple package and follow its installation instructions.")
+                        Text("Open the verified GitHub release to download the unsigned Apple package and follow its installation instructions.")
 #endif
-                        .font(.footnote)
-                        .foregroundStyle(RivunePalette.secondary)
+                    }
+                    .font(.footnote)
+                    .foregroundStyle(RivunePalette.secondary)
 #if os(tvOS)
                     Button("View release QR code") { televisionUpdate = update }
                         .buttonStyle(.borderedProminent)

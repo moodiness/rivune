@@ -132,8 +132,8 @@ final class AppleUpdateModelTests: XCTestCase {
             latestVersion: "1.11.4",
             publishedAt: Date(timeIntervalSince1970: 1_787_420_437),
             releaseURL: URL(string: "https://github.com/moodiness/rivune/releases/tag/v1.11.4")!,
-            packageURL: URL(string: "https://github.com/moodiness/rivune/releases/download/v1.11.4/Rivune-iOS-unsigned.ipa")!,
-            packageFileName: "Rivune-iOS-unsigned.ipa",
+            packageURL: URL(string: "https://github.com/moodiness/rivune/releases/download/v1.11.4/Rivune-macOS.dmg")!,
+            packageFileName: "Rivune-macOS.dmg",
             packageSize: 1_048_576,
             packageSHA256: String(repeating: "a", count: 64)
         )
