@@ -70,7 +70,10 @@ param(
     [string] $Name = '',
     [string] $Version = ''
 )
-[IO.File]::AppendAllLines($env:RIVUNE_TEST_DISCOVERY_LOG, @($Command, $Origin, $Name, $Version))
+[IO.File]::AppendAllText(
+    $env:RIVUNE_TEST_DISCOVERY_LOG,
+    (@($Command, $Origin, $Name, $Version) -join [Environment]::NewLine) + [Environment]::NewLine
+)
 if ($Command -eq 'status') { Write-Output 'fake discovery status' }
 '@,
         [Text.UTF8Encoding]::new($false)
