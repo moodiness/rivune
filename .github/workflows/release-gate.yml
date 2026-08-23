@@ -454,6 +454,12 @@ jobs:
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.x
+      - name: Set up Go for universal Windows setup
+        if: matrix.label == 'x64'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.6
+          cache: false
       - name: Test private Windows environment-file creation
         if: matrix.label == 'x64'
         run: pwsh -NoProfile -File scripts/create-env.Tests.ps1
@@ -478,16 +484,18 @@ jobs:
           $project = Join-Path $env:GITHUB_WORKSPACE 'clients/windows/Rivune.App/Rivune.App.csproj'
           $publish = Join-Path $env:RUNNER_TEMP 'rivune-portable-publish'
           & dotnet publish $project --configuration Release --runtime $env:RUNTIME --output $publish --nologo `
+            -p:PublishProfile= `
+            -p:AssemblyName=$([IO.Path]::GetFileNameWithoutExtension($env:ASSET_FILE_NAME)) `
             -p:Platform=$env:PLATFORM `
             -p:WindowsPackageType=None `
             -p:PublishSingleFile=true `
             -p:IncludeAllContentForSelfExtract=true `
             -p:SelfContained=true `
             -p:WindowsAppSDKSelfContained=true `
-            -p:Version=1.12.0 `
-            -p:AssemblyVersion=1.12.0.0 `
-            -p:FileVersion=1.12.0.0 `
-            -p:InformationalVersion=1.12.0 `
+            -p:Version=1.12.1 `
+            -p:AssemblyVersion=1.12.1.0 `
+            -p:FileVersion=1.12.1.0 `
+            -p:InformationalVersion=1.12.1 `
             -p:IncludeSourceRevisionInInformationalVersion=false
           if ($LASTEXITCODE -ne 0) { throw "Windows $env:PLATFORM portable publish failed." }
 
@@ -519,7 +527,7 @@ jobs:
             if ($null -ne $reader) { $reader.Dispose() } else { $stream.Dispose() }
           }
           $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($executable)
-          if ($version.FileVersion -ne '1.12.0.0' -or $version.ProductVersion -ne '1.12.0') {
+          if ($version.FileVersion -ne '1.12.1.0' -or $version.ProductVersion -ne '1.12.1') {
             throw "Portable executable version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
           }
           if ((Get-AuthenticodeSignature -FilePath $executable).Status -ne 'NotSigned') {
@@ -529,6 +537,98 @@ jobs:
           try {
             Start-Sleep -Seconds 5
             if ($process.HasExited) { throw "Portable executable exited during smoke test with code $($process.ExitCode)." }
+          } finally {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }
+      - name: Build and smoke the universal Windows setup
+        if: matrix.label == 'x64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $payloadRoot = Join-Path $env:RUNNER_TEMP 'rivune-setup-payloads'
+          New-Item -ItemType Directory -Force -Path $payloadRoot | Out-Null
+          Copy-Item `
+            -LiteralPath (Join-Path $env:RUNNER_TEMP 'rivune-portable-stage/Rivune-x64.exe') `
+            -Destination (Join-Path $payloadRoot 'Rivune-x64.exe')
+
+          $appProject = Join-Path $env:GITHUB_WORKSPACE 'clients/windows/Rivune.App/Rivune.App.csproj'
+          $arm64Publish = Join-Path $env:RUNNER_TEMP 'rivune-setup-arm64-publish'
+          & dotnet publish $appProject --configuration Release --runtime win-arm64 --output $arm64Publish --nologo `
+            -p:PublishProfile= `
+            -p:AssemblyName=Rivune-arm64 `
+            -p:Platform=ARM64 `
+            -p:WindowsPackageType=None `
+            -p:PublishSingleFile=true `
+            -p:IncludeAllContentForSelfExtract=true `
+            -p:SelfContained=true `
+            -p:WindowsAppSDKSelfContained=true `
+            -p:Version=1.12.1 `
+            -p:AssemblyVersion=1.12.1.0 `
+            -p:FileVersion=1.12.1.0 `
+            -p:InformationalVersion=1.12.1 `
+            -p:IncludeSourceRevisionInInformationalVersion=false
+          if ($LASTEXITCODE -ne 0) { throw 'ARM64 setup payload publish failed.' }
+          $arm64Files = @(Get-ChildItem -LiteralPath $arm64Publish -File -Recurse | Where-Object { $_.Extension -ne '.pdb' })
+          if ($arm64Files.Count -ne 1 -or $arm64Files[0].Name -cne 'Rivune-arm64.exe') {
+            throw "ARM64 setup payload publish is invalid: $($arm64Files.Name -join ', ')."
+          }
+          Copy-Item -LiteralPath $arm64Files[0].FullName -Destination (Join-Path $payloadRoot 'Rivune-arm64.exe')
+
+          $uninstaller = Join-Path $payloadRoot 'Rivune-Uninstall.exe'
+          Push-Location (Join-Path $env:GITHUB_WORKSPACE 'clients/windows/uninstaller')
+          try {
+            $env:CGO_ENABLED = '0'
+            $env:GOOS = 'windows'
+            $env:GOARCH = '386'
+            & go build -trimpath -ldflags '-s -w -H windowsgui' -o $uninstaller .
+            if ($LASTEXITCODE -ne 0) { throw 'Windows uninstaller build failed.' }
+          } finally {
+            Pop-Location
+            Remove-Item Env:CGO_ENABLED, Env:GOOS, Env:GOARCH -ErrorAction SilentlyContinue
+          }
+
+          $bootstrapperProject = Join-Path $env:GITHUB_WORKSPACE 'clients/windows/Rivune.Bootstrapper/Rivune.Bootstrapper.csproj'
+          $bootstrapperPublish = Join-Path $env:RUNNER_TEMP 'rivune-setup-bootstrapper'
+          & dotnet publish $bootstrapperProject --configuration Release --runtime win-x86 --output $bootstrapperPublish --nologo `
+            -p:Version=1.12.1 `
+            -p:AssemblyVersion=1.12.1.0 `
+            -p:FileVersion=1.12.1.0 `
+            -p:InformationalVersion=1.12.1 `
+            -p:IncludeSourceRevisionInInformationalVersion=false
+          if ($LASTEXITCODE -ne 0) { throw 'Windows setup bootstrapper publish failed.' }
+          $bootstrapperFiles = @(Get-ChildItem -LiteralPath $bootstrapperPublish -File -Recurse | Where-Object { $_.Extension -ne '.pdb' })
+          if ($bootstrapperFiles.Count -ne 1 -or $bootstrapperFiles[0].Name -cne 'Rivune.Bootstrapper.exe') {
+            throw "Windows setup bootstrapper publish is invalid: $($bootstrapperFiles.Name -join ', ')."
+          }
+
+          $bundle = Join-Path $env:RUNNER_TEMP 'Rivune-Windows.exe'
+          Push-Location (Join-Path $env:GITHUB_WORKSPACE 'clients/tv-installer')
+          try {
+            & go run ./cmd/windows-bundle `
+              $bootstrapperFiles[0].FullName `
+              $bundle `
+              (Join-Path $payloadRoot 'Rivune-x64.exe') `
+              (Join-Path $payloadRoot 'Rivune-arm64.exe') `
+              $uninstaller
+            if ($LASTEXITCODE -ne 0) { throw 'Universal Windows setup packaging failed.' }
+          } finally {
+            Pop-Location
+          }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead($bundle)
+          try {
+            $entries = @($archive.Entries | ForEach-Object { $_.FullName } | Sort-Object)
+            $expected = @('Rivune-Uninstall.exe', 'Rivune-arm64.exe', 'Rivune-x64.exe')
+            if (Compare-Object -ReferenceObject $expected -DifferenceObject $entries -CaseSensitive) {
+              throw "Universal setup payload is invalid: $($entries -join ', ')."
+            }
+          } finally {
+            $archive.Dispose()
+          }
+          $process = Start-Process -FilePath $bundle -PassThru
+          try {
+            Start-Sleep -Seconds 5
+            if ($process.HasExited) { throw "Universal setup exited during UI smoke test with code $($process.ExitCode)." }
           } finally {
             if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
           }
@@ -711,7 +811,7 @@ jobs:
     needs:
       - scope
     if: needs.scope.outputs.tv_installer == 'true'
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -722,19 +822,16 @@ jobs:
         with:
           go-version-file: clients/tv-installer/go.mod
           cache: false
-      - name: Test and build cross-platform TV installer companions
+      - name: Test and build Windows and macOS TV installer companions
         shell: bash
         run: |
           set -euo pipefail
           (cd clients/tv-installer && go test ./...)
           version="$(jq -er '.version | select(type == "string" and test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))' clients/tv/package.json)"
           clients/tv-installer/scripts/build-release.sh "${version}" tv-installer-assets
-          expected_files="$(printf '%s\n' Rivune-TV-Installer-Windows-x64.exe Rivune-TV-Installer-Windows-arm64.exe Rivune-TV-Installer-macOS-x64.zip Rivune-TV-Installer-macOS-arm64.zip Rivune-TV-Installer-Linux-x64.zip Rivune-TV-Installer-Linux-arm64.zip | sort)"
-          actual_files="$(find tv-installer-assets -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+          expected_files="$(printf '%s\n' Rivune-TV-Installer-Windows.exe Rivune-TV-Installer-macOS.dmg | sort)"
+          actual_files="$(find tv-installer-assets -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | sort)"
           [[ "${actual_files}" == "${expected_files}" ]]
-          unzip -p tv-installer-assets/Rivune-TV-Installer-Linux-x64.zip Rivune-TV-Installer-Linux-x64 > /tmp/rivune-tv-installer
-          chmod 0755 /tmp/rivune-tv-installer
-          [[ "$(/tmp/rivune-tv-installer --version)" == "${version}" ]]
 
   required-checks:
     name: Required checks

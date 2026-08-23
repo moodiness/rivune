@@ -232,7 +232,7 @@ jobs:
     if: needs.authorize.outputs.authorized == 'true'
     needs:
       - authorize
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     permissions:
       contents: read
     steps:
@@ -257,22 +257,19 @@ jobs:
           version="${version%%-*}"
           (cd clients/tv-installer && go test ./...)
           clients/tv-installer/scripts/build-release.sh "${version}" tv-installer-assets
-          expected_files="$(printf '%s\n' Rivune-TV-Installer-Windows-x64.exe Rivune-TV-Installer-Windows-arm64.exe Rivune-TV-Installer-macOS-x64.zip Rivune-TV-Installer-macOS-arm64.zip Rivune-TV-Installer-Linux-x64.zip Rivune-TV-Installer-Linux-arm64.zip | sort)"
-          actual_files="$(find tv-installer-assets -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+          expected_files="$(printf '%s\n' Rivune-TV-Installer-Windows.exe Rivune-TV-Installer-macOS.dmg | sort)"
+          actual_files="$(find tv-installer-assets -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | sort)"
           if [[ "${actual_files}" != "${expected_files}" ]]; then
             echo 'TV installer build did not produce the exact cross-platform asset set.' >&2
             exit 1
           fi
           for asset in tv-installer-assets/*; do
-            size="$(stat -c %s "${asset}")"
+            size="$(stat -f %z "${asset}")"
             if (( size <= 0 || size > 67108864 )); then
               echo "$(basename "${asset}") size is invalid: ${size} bytes." >&2
               exit 1
             fi
           done
-          unzip -p tv-installer-assets/Rivune-TV-Installer-Linux-x64.zip Rivune-TV-Installer-Linux-x64 > /tmp/rivune-tv-installer
-          chmod 0755 /tmp/rivune-tv-installer
-          [[ "$(/tmp/rivune-tv-installer --version)" == "${version}" ]]
       - name: Upload immutable TV installer companions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
