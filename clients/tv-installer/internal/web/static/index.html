@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Rivune TV Installer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header><div class="mark"><span></span></div><div><p>RIVUNE LOCAL COMPANION</p><h1>Install Rivune on your TV.</h1><span id="summary">Checking local tools and the verified GitHub release…</span></div></header>
+    <section class="trust"><strong>Local by design</strong><span>This page is served by the companion on 127.0.0.1. TV addresses, LG passphrases, and Tizen profiles never leave this computer.</span></section>
+    <nav aria-label="TV platform"><button class="active" data-platform="webos">LG webOS</button><button data-platform="tizen">Samsung Tizen</button></nav>
+    <section class="panel">
+      <div class="release"><span>Verified release</span><strong id="release">Loading…</strong><small id="digest"></small></div>
+      <form id="installer">
+        <label><span>TV private IPv4 address</span><input id="ip" required inputmode="decimal" placeholder="192.168.1.42" autocomplete="off"></label>
+        <div id="webos-fields">
+          <label><span>Device name</span><input id="device-name" placeholder="rivune-lg-living-room" autocomplete="off"></label>
+          <label><span>Developer Mode passphrase</span><input id="passphrase" type="password" autocomplete="off"><small>Required for the first install or after LG renews the developer key.</small></label>
+        </div>
+        <div id="tizen-fields" hidden>
+          <label><span>Tizen Studio security profile</span><input id="profile" placeholder="RivuneTV" autocomplete="off"><small>The profile must contain author and distributor certificates valid for this TV.</small></label>
+          <aside><strong>Before installing</strong><ol><li>Open Apps on the Samsung TV and press 12345.</li><li>Enable Developer Mode and enter this computer’s IP: <code id="host-ip">unavailable</code>.</li><li>Restart the TV and ensure Tizen Studio can see it.</li></ol></aside>
+        </div>
+        <div class="actions"><button type="submit" data-action="install">Install / update</button><button type="button" data-action="launch">Launch</button><button type="button" class="danger" data-action="uninstall">Uninstall</button></div>
+      </form>
+    </section>
+    <section class="log" aria-live="polite"><div><strong>Operation log</strong><button id="clear" type="button">Clear</button></div><pre id="log">Ready.</pre></section>
+    <footer><span id="version"></span><button id="close" type="button">Quit companion</button></footer>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

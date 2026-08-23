@@ -12,6 +12,12 @@ const publishedAtPattern = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{
 
 const expectedAssetNames = [
   "Rivune-Android.apk",
+  "Rivune-TV-Installer-Linux-arm64.zip",
+  "Rivune-TV-Installer-Linux-x64.zip",
+  "Rivune-TV-Installer-Windows-arm64.exe",
+  "Rivune-TV-Installer-Windows-x64.exe",
+  "Rivune-TV-Installer-macOS-arm64.zip",
+  "Rivune-TV-Installer-macOS-x64.zip",
   "Rivune-Tizen.wgt",
   "Rivune-TV-runtime.json",
   "Rivune-arm64.exe",

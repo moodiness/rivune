@@ -2661,6 +2661,29 @@
   .applications-card__digest button:hover { color: var(--text); background: var(--surface-hover); }
   .applications-card__warning { margin: auto 0 0; padding-top: 14px; display: flex; align-items: flex-start; gap: 8px; border-top: 1px solid var(--line); color: var(--text-soft); font-size: 11px; line-height: 1.5; }
   .applications-card__warning > svg { margin-top: 1px; flex: 0 0 auto; color: var(--warning); }
+  .applications-tv-installer { max-width: 1440px; margin: 44px auto 0; padding: clamp(26px, 4vw, 48px); display: grid; grid-template-columns: minmax(0, .85fr) minmax(460px, 1.15fr); gap: 28px 48px; border: 1px solid color-mix(in srgb, var(--success) 26%, var(--line)); border-radius: 28px; background: linear-gradient(145deg, rgba(20, 31, 29, .95), rgba(13, 17, 24, .97)); box-shadow: 0 24px 80px rgba(0, 0, 0, .3); scroll-margin-top: 24px; }
+  .applications-tv-installer__intro h2 { max-width: 680px; margin: 18px 0 14px; font-size: clamp(30px, 4vw, 52px); line-height: 1; letter-spacing: -.045em; text-wrap: balance; }
+  .applications-tv-installer__intro > p { max-width: 670px; margin: 0 0 22px; color: var(--text-soft); line-height: 1.65; }
+  .applications-tv-installer__steps { margin: 0; padding: 0; display: grid; gap: 12px; list-style: none; counter-reset: tv-installer-step; }
+  .applications-tv-installer__steps li { padding: 15px; display: grid; grid-template-columns: auto 1fr; gap: 13px; border: 1px solid var(--line); border-radius: 15px; background: rgba(255, 255, 255, .025); counter-increment: tv-installer-step; }
+  .applications-tv-installer__steps li > span { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; color: var(--success); background: var(--surface-success); }
+  .applications-tv-installer__steps strong::before { content: counter(tv-installer-step) ". "; color: var(--success); }
+  .applications-tv-installer__steps p { margin: 4px 0 0; color: var(--text-soft); font-size: 12px; line-height: 1.5; }
+  .applications-tv-installer__download { grid-column: 1 / -1; padding: 20px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px; border: 1px solid var(--line); border-radius: 20px; background: rgba(6, 8, 12, .44); }
+  .applications-tv-installer__download > div { min-width: 0; display: grid; gap: 4px; }
+  .applications-tv-installer__download span, .applications-tv-installer__download small { color: var(--text-muted); font-size: 10px; }
+  .applications-tv-installer__download strong { overflow-wrap: anywhere; }
+  .applications-tv-installer__download > a, .applications-tv-installer__download > button { min-height: 42px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; text-decoration: none; }
+  .applications-tv-installer__download > button { color: var(--text-soft); background: var(--surface-interactive); }
+  .applications-tv-installer__download > code { grid-column: 1 / -1; padding: 11px 13px; border: 1px solid var(--line); border-radius: 10px; color: var(--success); background: rgba(0, 0, 0, .24); font-size: 10px; overflow-wrap: anywhere; }
+  .applications-tv-installer__alternatives { grid-column: 1 / -1; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; background: rgba(6, 8, 12, .28); }
+  .applications-tv-installer__alternatives summary { padding: 14px 17px; cursor: pointer; color: var(--text-soft); font-size: 12px; font-weight: 720; }
+  .applications-tv-installer__alternatives > div { padding: 0 14px 14px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .applications-tv-installer__alternatives a { min-width: 0; padding: 10px 12px; display: flex; justify-content: space-between; gap: 10px; border-radius: 10px; color: var(--text-soft); background: var(--surface-interactive); text-decoration: none; font-size: 10px; }
+  .applications-tv-installer__alternatives a span { min-width: 0; overflow-wrap: anywhere; }
+  .applications-tv-installer__alternatives small { color: var(--text-muted); flex: 0 0 auto; }
+  .applications-tv-installer__privacy { grid-column: 1 / -1; padding: 16px 18px; display: grid; grid-template-columns: auto 1fr; gap: 12px; border: 1px solid color-mix(in srgb, var(--success) 24%, var(--line)); border-radius: 15px; color: var(--success); background: var(--surface-success); }
+  .applications-tv-installer__privacy p { margin: 4px 0 0; color: var(--text-soft); font-size: 12px; line-height: 1.5; }
   .applications-apple-guide { max-width: 1440px; margin: 44px auto 0; padding: clamp(26px, 4vw, 48px); display: grid; grid-template-columns: minmax(0, .8fr) minmax(480px, 1.2fr); gap: 28px 48px; border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line)); border-radius: 28px; background: linear-gradient(145deg, rgba(31, 25, 30, .94), rgba(13, 17, 24, .97)); box-shadow: 0 24px 80px rgba(0, 0, 0, .3); scroll-margin-top: 24px; }
   .applications-apple-guide__intro h2 { max-width: 620px; margin: 18px 0 14px; font-size: clamp(30px, 4vw, 52px); line-height: 1; letter-spacing: -.045em; text-wrap: balance; }
   .applications-apple-guide__intro > p { max-width: 640px; margin: 0; color: var(--text-soft); line-height: 1.65; }
@@ -2697,6 +2720,8 @@
 
 @media (max-width: 1080px) {
   .applications-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .applications-tv-installer { grid-template-columns: 1fr; }
+  .applications-tv-installer__download, .applications-tv-installer__privacy { grid-column: auto; }
   .applications-apple-guide { grid-template-columns: 1fr; }
   .applications-apple-guide__builder, .applications-apple-guide__privacy { grid-column: auto; }
   .applications-signing-fields { grid-template-columns: 1fr 1fr; }
@@ -2724,6 +2749,11 @@
   .applications-language > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
   .applications-language select { min-width: 62px; }
   .applications-apple-guide { margin-top: 28px; padding: 22px 18px; border-radius: 20px; }
+  .applications-tv-installer { margin-top: 28px; padding: 22px 18px; border-radius: 20px; }
+  .applications-tv-installer__download { grid-template-columns: 1fr; }
+  .applications-tv-installer__download > a, .applications-tv-installer__download > button { width: 100%; }
+  .applications-tv-installer__download > code { grid-column: auto; }
+  .applications-tv-installer__alternatives > div { grid-template-columns: 1fr; }
   .applications-signing-fields { grid-template-columns: 1fr; }
   .applications-command > div { align-items: flex-start; flex-direction: column; }
   .applications-command button { width: 100%; justify-content: center; }

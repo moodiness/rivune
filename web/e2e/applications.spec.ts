@@ -19,6 +19,20 @@ const assets = [
   digest: `sha256:${String(index + 1).repeat(64)}`,
   browser_download_url: `https://github.com/moodiness/rivune/releases/download/${tag}/${name}`,
 }));
+const installerAssets = [
+  "Rivune-TV-Installer-Windows-x64.exe",
+  "Rivune-TV-Installer-Windows-arm64.exe",
+  "Rivune-TV-Installer-macOS-x64.zip",
+  "Rivune-TV-Installer-macOS-arm64.zip",
+  "Rivune-TV-Installer-Linux-x64.zip",
+  "Rivune-TV-Installer-Linux-arm64.zip",
+].map((name, index) => ({
+  name,
+  state: "uploaded",
+  size: 3 * 1024 * 1024 + index,
+  digest: `sha256:${"abcdef"[index].repeat(64)}`,
+  browser_download_url: `https://github.com/moodiness/rivune/releases/download/${tag}/${name}`,
+}));
 
 const release = {
   tag_name: tag,
@@ -36,6 +50,7 @@ const release = {
       browser_download_url: `https://github.com/moodiness/rivune/releases/download/${tag}/Rivune-TV-runtime.json`,
     },
     ...assets,
+    ...installerAssets,
     {
       name: "rivune-update.json",
       state: "uploaded",
@@ -44,6 +59,26 @@ const release = {
       browser_download_url: `https://github.com/moodiness/rivune/releases/download/${tag}/rivune-update.json`,
     },
   ],
+};
+const legacyTag = "v1.11.4";
+const legacyAssetNames = new Set([
+  "Rivune-Android.apk",
+  "Rivune-iOS-unsigned.ipa",
+  "Rivune-tvOS-unsigned.ipa",
+  "Rivune-visionOS-unsigned.ipa",
+  "Rivune-macOS.dmg",
+  "Rivune-x64.exe",
+  "Rivune-arm64.exe",
+  "rivune-update.json",
+]);
+const legacyRelease = {
+  ...release,
+  tag_name: legacyTag,
+  name: legacyTag,
+  html_url: `https://github.com/moodiness/rivune/releases/tag/${legacyTag}`,
+  assets: release.assets
+    .filter((asset) => legacyAssetNames.has(asset.name))
+    .map((asset) => ({ ...asset, browser_download_url: asset.browser_download_url.replace(tag, legacyTag) })),
 };
 
 async function serveRelease(page: Page) {
@@ -55,6 +90,10 @@ async function serveRelease(page: Page) {
 }
 
 test("lists exact stable assets, fingerprints, warnings, and QR links without booting auth", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "platform", { configurable: true, get: () => "Win32" });
+    Object.defineProperty(navigator, "userAgent", { configurable: true, get: () => "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36" });
+  });
   let backendRequests = 0;
   page.on("request", (request) => {
     if (request.url().includes("/.well-known/rivune")) backendRequests += 1;
@@ -70,6 +109,8 @@ test("lists exact stable assets, fingerprints, warnings, and QR links without bo
   await expect(page.locator(".applications-card")).toHaveCount(9);
   await expect(page.locator(`[data-asset="Rivune-Android.apk"] code`)).toHaveText("1".repeat(64));
   await expect(page.locator(`[data-asset="Rivune-iOS-unsigned.ipa"]`)).toContainText("cannot be installed as downloaded");
+  await expect(page.locator(`[data-asset="Rivune-webOS.ipk"]`).getByRole("link", { name: "Install with TV companion" })).toHaveAttribute("href", "#tv-installer");
+  await expect(page.locator(`[data-asset="Rivune-Tizen.wgt"]`).getByRole("link", { name: "Install with TV companion" })).toHaveAttribute("href", "#tv-installer");
   await expect(page.locator(`[data-asset="Rivune-x64.exe"]`)).toContainText("SmartScreen");
   await expect(page.locator(`[data-asset="Rivune-iOS-unsigned.ipa"]`).getByRole("link", { name: "Sign and install locally" })).toHaveAttribute("href", "#apple-signing");
   await expect(page.locator(`[data-asset="Rivune-tvOS-unsigned.ipa"]`).getByRole("link", { name: "Sign and install locally" })).toBeVisible();
@@ -83,6 +124,29 @@ test("lists exact stable assets, fingerprints, warnings, and QR links without bo
   await android.getByRole("button", { name: "Show QR" }).click();
   await expect(android.getByRole("img", { name: "Download Rivune-Android.apk" })).toBeVisible();
   expect(backendRequests).toBe(0);
+  const installer = page.locator("#tv-installer");
+  await expect(installer.getByRole("heading", { name: "Install from your computer, without sending it your secrets." })).toBeVisible();
+  await installer.getByText("Other operating systems and architectures").click();
+  await expect(installer.getByRole("link", { name: /Rivune-TV-Installer-macOS-arm64\.zip/ })).toHaveAttribute("href", installerAssets[3].browser_download_url);
+  await expect(installer.getByRole("link", { name: "Download TV installer" })).toHaveAttribute("href", installerAssets[0].browser_download_url);
+  await installer.getByRole("tab", { name: "Samsung Tizen" }).click();
+  await expect(installer).toContainText("Prepare Tizen Studio");
+  await expect(installer).toContainText("Samsung credentials remain in Tizen Studio");
+});
+
+test("keeps the public page usable before the first TV-installer release", async ({ page }) => {
+  await page.route(releaseEndpoint, (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(legacyRelease),
+  }));
+
+  await page.goto("/apps");
+
+  await expect(page.getByText(legacyTag, { exact: true })).toBeVisible();
+  await expect(page.locator(".applications-card")).toHaveCount(7);
+  await expect(page.locator("#tv-installer")).toHaveCount(0);
+  await expect(page.locator(`[data-asset="Rivune-Android.apk"] a`, { hasText: "Download" })).toHaveAttribute("href", legacyRelease.assets[0].browser_download_url);
 });
 
 test("localizes the page in French and generates an exact local Apple install command", async ({ page }) => {

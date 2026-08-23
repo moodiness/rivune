@@ -226,3 +226,59 @@ jobs:
           retention-days: 7
           compression-level: 0
           overwrite: false
+
+  tv-installer-assets:
+    name: Build TV installer companion assets
+    if: needs.authorize.outputs.authorized == 'true'
+    needs:
+      - authorize
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the approved release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.6
+          cache: false
+      - name: Test and build TV installer companions
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          version="${version%%+*}"
+          version="${version%%-*}"
+          (cd clients/tv-installer && go test ./...)
+          clients/tv-installer/scripts/build-release.sh "${version}" tv-installer-assets
+          expected_files="$(printf '%s\n' Rivune-TV-Installer-Windows-x64.exe Rivune-TV-Installer-Windows-arm64.exe Rivune-TV-Installer-macOS-x64.zip Rivune-TV-Installer-macOS-arm64.zip Rivune-TV-Installer-Linux-x64.zip Rivune-TV-Installer-Linux-arm64.zip | sort)"
+          actual_files="$(find tv-installer-assets -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+          if [[ "${actual_files}" != "${expected_files}" ]]; then
+            echo 'TV installer build did not produce the exact cross-platform asset set.' >&2
+            exit 1
+          fi
+          for asset in tv-installer-assets/*; do
+            size="$(stat -c %s "${asset}")"
+            if (( size <= 0 || size > 67108864 )); then
+              echo "$(basename "${asset}") size is invalid: ${size} bytes." >&2
+              exit 1
+            fi
+          done
+          unzip -p tv-installer-assets/Rivune-TV-Installer-Linux-x64.zip Rivune-TV-Installer-Linux-x64 > /tmp/rivune-tv-installer
+          chmod 0755 /tmp/rivune-tv-installer
+          [[ "$(/tmp/rivune-tv-installer --version)" == "${version}" ]]
+      - name: Upload immutable TV installer companions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tv-installer-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tv-installer-assets/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
