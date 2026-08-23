@@ -106,7 +106,7 @@ public sealed partial class MainPage
     private void RegisterOfflineProfile(Profile profile, string? pin)
     {
         var store = _offlineMediaStore;
-        if (store is null || !CurrentServerOrigin(out var origin)) return;
+        if (store is null || CurrentServerOrigin() is not { } origin) return;
         try
         {
             _offlineScope = store.RegisterProfile(origin, profile, pin);
@@ -120,7 +120,7 @@ public sealed partial class MainPage
     private void RestoreOfflineProfile(Profile profile)
     {
         var store = _offlineMediaStore;
-        if (store is null || !CurrentServerOrigin(out var origin)) return;
+        if (store is null || CurrentServerOrigin() is not { } origin) return;
         try
         {
             _offlineScope = store.OpenRestoredProfile(origin, profile);
@@ -145,16 +145,16 @@ public sealed partial class MainPage
         }.Where(value => !string.IsNullOrWhiteSpace(value)));
     }
 
-    private bool CurrentServerOrigin(out Uri origin)
+    private Uri? CurrentServerOrigin()
     {
-        origin = null!;
-        return Uri.TryCreate(ServerAddressBox.Text, UriKind.Absolute, out origin) && origin.IsAbsoluteUri;
+        if (!Uri.TryCreate(ServerAddressBox.Text, UriKind.Absolute, out var origin) || !origin.IsAbsoluteUri) return null;
+        return origin;
     }
 
     private async Task OfferOfflineUnlockForActiveProfileAsync()
     {
         if (_offlineScope is not null || _state.Profile is not { } profile || _offlineMediaStore is null ||
-            !CurrentServerOrigin(out var origin)) return;
+            CurrentServerOrigin() is not { } origin) return;
         var scope = OfflineMediaStore.ScopeFor(origin, profile.Id);
         var gate = _offlineMediaStore.Profiles().FirstOrDefault(value => StringComparer.Ordinal.Equals(value.Scope, scope));
         if (gate is null) return;
