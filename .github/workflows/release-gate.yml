@@ -14,15 +14,98 @@ env:
   DOCKER_BUILD_RECORD_UPLOAD: "false"
 
 jobs:
-  conventional-history:
-    name: Conventional PR and commit history
+  scope:
+    name: Select checks and validate history
     runs-on: ubuntu-latest
+    outputs:
+      documentation: ${{ steps.select.outputs.documentation }}
+      backend: ${{ steps.select.outputs.backend }}
+      server_windows: ${{ steps.select.outputs.server_windows }}
+      frontend: ${{ steps.select.outputs.frontend }}
+      openapi: ${{ steps.select.outputs.openapi }}
+      swift: ${{ steps.select.outputs.swift }}
+      android: ${{ steps.select.outputs.android }}
+      windows: ${{ steps.select.outputs.windows }}
+      container: ${{ steps.select.outputs.container }}
+      container_arm64: ${{ steps.select.outputs.container_arm64 }}
+      tv: ${{ steps.select.outputs.tv }}
+      tv_installer: ${{ steps.select.outputs.tv_installer }}
     steps:
       - name: Check out complete history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Select checks from changed paths
+        id: select
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          checks=(documentation backend server_windows frontend openapi swift android windows container container_arm64 tv tv_installer)
+          declare -A selected=()
+          for check in "${checks[@]}"; do selected["${check}"]=false; done
+
+          enable() {
+            for check in "$@"; do selected["${check}"]=true; done
+          }
+          enable_all() { enable "${checks[@]}"; }
+          classify() {
+            case "$1" in
+              .github/workflows/*|LICENSE|NOTICE)
+                enable_all ;;
+              *.md)
+                enable documentation ;;
+              scripts/ci/check-doc-links.go)
+                enable documentation ;;
+              server/Dockerfile|server/docker-entrypoint.sh)
+                enable container container_arm64 ;;
+              server/*)
+                enable backend server_windows container container_arm64 ;;
+              web/*)
+                enable backend server_windows frontend container container_arm64 ;;
+              protocol/*.yaml)
+                enable backend openapi swift android windows tv ;;
+              clients/apple/*)
+                enable swift ;;
+              clients/android/*)
+                enable android ;;
+              clients/update/*)
+                enable android windows ;;
+              clients/windows/*)
+                enable windows ;;
+              clients/tv-installer/*)
+                enable tv_installer ;;
+              clients/tv/*)
+                enable tv tv_installer ;;
+              rivune.ps1|scripts/*.ps1)
+                enable windows ;;
+              compose*.yaml|.dockerignore|rivune|scripts/*.sh|scripts/ci/*|templates/unraid/*)
+                enable container container_arm64 ;;
+              *)
+                enable_all ;;
+            esac
+          }
+
+          if [[ "${EVENT_NAME}" != pull_request ]] ||
+             [[ ! "${BASE_SHA}" =~ ^[0-9a-f]{40}$ ]] ||
+             [[ ! "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            enable_all
+          else
+            saw_path=false
+            while IFS= read -r -d '' path; do
+              saw_path=true
+              classify "${path}"
+            done < <(git diff --name-only -z "${BASE_SHA}" "${HEAD_SHA}")
+            if [[ "${saw_path}" != true ]]; then enable_all; fi
+          fi
+
+          for check in "${checks[@]}"; do
+            printf '%s=%s\n' "${check}" "${selected[${check}]}" | tee -a "${GITHUB_OUTPUT}"
+          done
       - name: Require semantic-release Angular headers
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || '' }}
@@ -61,9 +144,62 @@ jobs:
               exit 1
             fi
           done
+      - name: Set up Go for documentation
+        if: steps.select.outputs.documentation == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.6"
+          cache: false
+      - name: Verify internal Markdown links
+        if: steps.select.outputs.documentation == 'true'
+        shell: bash
+        run: git ls-files -z '*.md' | xargs -0 go run scripts/ci/check-doc-links.go
+
+
+
+  web-bundle:
+    name: Production web bundle
+    needs:
+      - scope
+    if: needs.scope.outputs.backend == 'true' || needs.scope.outputs.server_windows == 'true' || needs.scope.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+      - name: Audit frontend dependencies
+        if: needs.scope.outputs.frontend == 'true'
+        working-directory: web
+        run: npm audit --audit-level=high
+      - name: Build production frontend
+        working-directory: web
+        run: npm run build
+      - name: Upload embedded frontend
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: embedded-web-${{ github.run_id }}-${{ github.run_attempt }}
+          path: server/internal/webui/dist/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 6
+          overwrite: false
 
   backend:
     name: Backend tests
+    needs:
+      - scope
+      - web-bundle
+    if: always() && needs.scope.outputs.backend == 'true' && needs['web-bundle'].result == 'success'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -87,23 +223,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Remove committed frontend snapshot
+        run: rm -rf server/internal/webui/dist
+      - name: Download embedded frontend
+        uses: actions/download-artifact@3ef4f5b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: embedded-web-${{ github.run_id }}-${{ github.run_attempt }}
+          path: server/internal/webui/dist/
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
       - name: Initialize PostgreSQL schema for integration tests
         working-directory: server
         run: go run ./cmd/rivune-migrate
-      - name: Build embedded frontend for Go tests
-        working-directory: web
-        run: npm ci && npm run build
       - name: Vet backend
         working-directory: server
         run: go vet ./...
@@ -113,26 +247,29 @@ jobs:
 
   server-windows:
     name: Server Windows compile
+    needs:
+      - scope
+      - web-bundle
+    if: always() && needs.scope.outputs.server_windows == 'true' && needs['web-bundle'].result == 'success'
     runs-on: windows-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Remove committed frontend snapshot
+        shell: pwsh
+        run: if (Test-Path -LiteralPath server/internal/webui/dist) { Remove-Item -LiteralPath server/internal/webui/dist -Recurse -Force }
+      - name: Download embedded frontend
+        uses: actions/download-artifact@3ef4f5b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: embedded-web-${{ github.run_id }}-${{ github.run_attempt }}
+          path: server/internal/webui/dist/
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - name: Build embedded frontend
-        working-directory: web
-        run: npm ci && npm run build
       - name: Compile server and Windows test binaries
         working-directory: server
         run: go test -run '^$' ./...
@@ -141,8 +278,17 @@ jobs:
         run: go build ./cmd/rivune ./cmd/rivune-migrate
 
   frontend:
-    name: Frontend build and E2E
+    name: Frontend E2E (${{ matrix.shard }})
+    needs:
+      - scope
+    if: needs.scope.outputs.frontend == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - "1/2"
+          - "2/2"
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -157,21 +303,18 @@ jobs:
       - name: Install frontend dependencies
         working-directory: web
         run: npm ci
-      - name: Audit frontend dependencies
-        working-directory: web
-        run: npm audit --audit-level=high
-      - name: Build frontend
-        working-directory: web
-        run: npm run build
       - name: Install Playwright Chromium
         working-directory: web
         run: npx playwright install --with-deps chromium
-      - name: Run deterministic browser E2E
+      - name: Run deterministic browser E2E shard
         working-directory: web
-        run: npm run test:e2e
+        run: npm run test:e2e -- --shard=${{ matrix.shard }}
 
   openapi:
     name: OpenAPI lint and contract resolution
+    needs:
+      - scope
+    if: needs.scope.outputs.openapi == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -193,6 +336,9 @@ jobs:
 
   swift-client:
     name: Swift API client
+    needs:
+      - scope
+    if: needs.scope.outputs.swift == 'true'
     runs-on: macos-latest
     steps:
       - name: Check out repository
@@ -207,6 +353,9 @@ jobs:
 
   android-client:
     name: Android client
+    needs:
+      - scope
+    if: needs.scope.outputs.android == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -237,7 +386,6 @@ jobs:
           set -euo pipefail
           bash clients/android/gradlew -p clients/android --no-daemon \
             :rivune-api:testDebugUnitTest \
-            :rivune-api:assembleRelease \
             :app:testDebugUnitTest \
             :app:assembleDebug \
             :app:assembleRelease \
@@ -277,6 +425,9 @@ jobs:
 
   windows-client:
     name: Windows ${{ matrix.label }} portable client
+    needs:
+      - scope
+    if: needs.scope.outputs.windows == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -333,10 +484,10 @@ jobs:
             -p:IncludeAllContentForSelfExtract=true `
             -p:SelfContained=true `
             -p:WindowsAppSDKSelfContained=true `
-            -p:Version=1.11.5 `
-            -p:AssemblyVersion=1.11.5.0 `
-            -p:FileVersion=1.11.5.0 `
-            -p:InformationalVersion=1.11.5 `
+            -p:Version=1.12.0 `
+            -p:AssemblyVersion=1.12.0.0 `
+            -p:FileVersion=1.12.0.0 `
+            -p:InformationalVersion=1.12.0 `
             -p:IncludeSourceRevisionInInformationalVersion=false
           if ($LASTEXITCODE -ne 0) { throw "Windows $env:PLATFORM portable publish failed." }
 
@@ -368,7 +519,7 @@ jobs:
             if ($null -ne $reader) { $reader.Dispose() } else { $stream.Dispose() }
           }
           $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($executable)
-          if ($version.FileVersion -ne '1.11.5.0' -or $version.ProductVersion -ne '1.11.5') {
+          if ($version.FileVersion -ne '1.12.0.0' -or $version.ProductVersion -ne '1.12.0') {
             throw "Portable executable version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
           }
           if ((Get-AuthenticodeSignature -FilePath $executable).Status -ne 'NotSigned') {
@@ -384,6 +535,9 @@ jobs:
 
   container:
     name: Container, migrations, and HTTPS proxy (amd64)
+    needs:
+      - scope
+    if: needs.scope.outputs.container == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -487,6 +641,9 @@ jobs:
 
   container-arm64:
     name: Container image (arm64)
+    needs:
+      - scope
+    if: needs.scope.outputs.container_arm64 == 'true'
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Check out repository
@@ -508,6 +665,9 @@ jobs:
 
   tv-client:
     name: Packaged TV clients
+    needs:
+      - scope
+    if: needs.scope.outputs.tv == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -548,6 +708,9 @@ jobs:
 
   tv-installer:
     name: TV installer companion
+    needs:
+      - scope
+    if: needs.scope.outputs.tv_installer == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -577,7 +740,8 @@ jobs:
     name: Required checks
     if: ${{ always() }}
     needs:
-      - conventional-history
+      - scope
+      - web-bundle
       - backend
       - server-windows
       - frontend
@@ -591,7 +755,34 @@ jobs:
       - tv-installer
     runs-on: ubuntu-latest
     steps:
-      - name: Require every project check
+      - name: Require every selected project check
         env:
           JOB_RESULTS: ${{ toJSON(needs) }}
-        run: jq -e 'all(.[]; .result == "success")' <<<"${JOB_RESULTS}"
+        shell: bash
+        run: |
+          jq -e '
+            . as $jobs |
+            ($jobs.scope.result == "success") and
+            (all($jobs[]; .result == "success" or .result == "skipped")) and
+            ([
+              ["backend", "backend"],
+              ["server-windows", "server_windows"],
+              ["frontend", "frontend"],
+              ["openapi", "openapi"],
+              ["swift-client", "swift"],
+              ["android-client", "android"],
+              ["windows-client", "windows"],
+              ["container", "container"],
+              ["container-arm64", "container_arm64"],
+              ["tv-client", "tv"],
+              ["tv-installer", "tv_installer"]
+            ] | all(.[];
+              ($jobs.scope.outputs[.[1]] == "true") ==
+              ($jobs[.[0]].result == "success")
+            )) and
+            (((
+              $jobs.scope.outputs.backend == "true" or
+              $jobs.scope.outputs.server_windows == "true" or
+              $jobs.scope.outputs.frontend == "true"
+            )) == ($jobs["web-bundle"].result == "success"))
+          ' <<<"${JOB_RESULTS}"

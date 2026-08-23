@@ -1,82 +1,41 @@
-# Rivune protocol compatibility
+# Protocol compatibility
 
-The current Rivune wire protocol is **version 20**. The HTTP namespace remains `/api/v1`; the namespace and protocol version are independent. Clients must discover a server through `GET /.well-known/rivune` before using authenticated API routes and must compare the returned `protocolVersion` with the version they implement.
+The current Rivune wire protocol is **20**. Clients must call `GET /.well-known/rivune`, use the returned `apiBaseUrl`, and reject any `protocolVersion` they do not implement. The `/api/v1` namespace and `serverVersion` do not imply compatibility.
 
-Current servers also emit the optional discovery `capabilities` list. Official clients gate optional workflows on recognized identifiers and ignore unknown identifiers: `profile-archives-v1`, `request-correlation`, and `bounded-aggregate-resources`. The protocol integer remains the compatibility boundary for required behavior.
+Optional discovery capabilities are additive. Official clients currently recognize `profile-archives-v1`, `request-correlation`, and `bounded-aggregate-resources`, and ignore unknown capability names.
 
-## Version 20 cutover
+## Version 20
 
-Version 20 is a clean cutover. A v19 client is not compatible with a v20 server, and a v20 client must not silently continue against another protocol version.
+Version 20 is a clean cutover from v19:
 
-- **Jellyfin usernames are stable profile identifiers.** Each Jellyfin username is the stable UUID of exactly one Rivune profile; display names, account names, administrator identities, and PINs are not Jellyfin usernames.
-- **Application secrets are one-shot credentials.** A newly issued Jellyfin application secret is shown only once and cannot be recovered afterward.
-- **Credential changes revoke Jellyfin sessions.** Rotating or revoking a profile's Jellyfin application secret invalidates every Jellyfin session for that profile.
-- **There is no authentication fallback.** Jellyfin authentication never falls back to a Rivune account password, administrator password, or profile PIN.
-- **Jellyfin Quick Connect is profile-bound.** A Jellyfin client initiates with a stable device identifier, an authenticated manager approves the code at `/pair` under the manager's active manageable profile, and the single-use exchange creates a compatibility session for exactly that profile. Secrets expire after 10 minutes, remain hashed at rest, and never create a persistent profile application password.
+- a Jellyfin username is the stable UUID of one profile, never a display or account name;
+- profile application secrets are shown once, stored only as hashes, and never fall back to account passwords or PINs;
+- rotating or revoking a profile secret revokes that profile's Jellyfin sessions;
+- Quick Connect is device-bound, expires after 10 minutes, requires approval for a manageable profile, and exchanges once into that profile's compatibility session.
 
-Version 20 retains every v19 contract described below.
+## Earlier retained contracts
 
-## Version 19 cutover
+| Version | Retained boundary |
+| --- | --- |
+| 19 | Web profile selection returns an opaque, tab-bound `profileContext`; missing, stale, or cross-tab contexts require reselection. |
+| 18 | Access categories are server-authoritative; tokens carry immutable global/category scope; profile or device moves revoke incompatible sessions. |
+| 17 | Interface language is discovered and profile-aware; richer artwork remains optional. |
+| 16 | Trailers are plural; series mapping is explicit; season and playback source references are opaque; add-on search has an unambiguous route. |
 
-Version 19 is a clean cutover. A v18 client is not compatible with a v19 server, and a v19 client must not silently continue against another protocol version.
+There are no aliases for removed pre-v16 routes or response shapes. Upgrade incompatible clients and servers together.
 
-- **Profile selection returns a capability.** The selection response includes the required opaque `profileContext` value alongside the profile and expiry.
-- **Web profile access is tab-bound.** Web clients retain `profileContext` only in the selecting tab and send it as `X-Rivune-Profile-Context` on subsequent authenticated requests that require an active profile.
-- **Stale web contexts require reselection.** Missing, stale, or cross-tab profile capabilities produce `profile_selection_required`; clients must return to profile selection instead of retrying under another profile.
+## Change policy
 
-Version 19 retains every v18 category, media, language, artwork, mapping, playback, and addon contract described below.
+A protocol increment is required when a change removes or renames a route/property, changes a type or meaning, adds a required request property, makes an optional response property required, changes authentication, or changes identifier interpretation.
 
-## Version 18 cutover
+Without an increment, a server may add endpoints, optional properties, capabilities, or structured error codes while all existing v20 behavior remains valid. Clients must ignore unknown response properties and capability names and handle unknown error codes generically, but still reject missing or invalid required properties.
 
-Version 18 is a clean cutover. A v17 client is not compatible with a v18 server, and a v18 client must not silently continue against another protocol version.
+Access tokens are bearer tokens. Refresh tokens rotate on use. A retryable transport/server failure preserves the last credential set; only a definitive `401 invalid_refresh_token` clears it. Native clients store credentials in platform-secure storage.
 
-- **Access categories are authoritative.** Profiles and approved devices have one server-owned category. Category identifiers submitted by clients select resources for server authorization; they are never authority claims.
-- **Authorization scope is immutable.** Tokens and session DTOs expose required `authorizationScope` (`global_admin` or `category`) plus a nullable category reference. Only administrator password login may issue global authority. Device-code exchange always issues category scope.
-- **Category changes revoke incompatible sessions.** Moving profiles or devices preserves stable profile identifiers and profile-owned data while invalidating sessions or active selections that no longer match.
-- **Device approval assigns a category.** Approval requires `categoryId` and may override device name or store an internal note. The server authorizes the destination against the approver's persisted scope.
-- **Categories and devices are administrable resources.** Global administrators can manage unlimited categories, reorder them, list and update approved devices, and perform atomic profile or device moves.
+## Client release check
 
-Version 18 retains every v17 media, language, artwork, mapping, playback, and addon contract described below.
-
-## Version 17 cutover
-
-Version 17 is a clean cutover. A v16 client is not compatible with a v17 server, and a v17 client must not silently continue against another protocol version.
-
-- **Interface language is server-driven and profile-aware.** Discovery includes the required server-default `interfaceLanguage`. Settings layers expose the same field, and effective profile settings always resolve it to one supported concrete language code. Native and web clients apply the discovery value before authentication and switch to the effective profile value after profile selection.
-- **Profiles inherit the server language by default.** Clearing a profile override restores the current server setting; clearing the server override restores built-in English.
-- **Rich artwork is optional.** Movie and series detail responses may include `logoUrl`; `posterUrl` and `backdropUrl` continue to be optional. Clients must preserve their existing artwork when a richer optional image is absent or cannot be loaded.
-
-Version 17 retains every v16 media, mapping, playback, and addon contract described below.
-
-## Version 16 cutover
-
-Version 16 is a clean cutover. A v15 client is not compatible with a v16 server, and a v16 client must not silently continue against another protocol version.
-
-Breaking changes in v16 include:
-
-- **Trailers are plural.** The title trailer route is `GET /api/v1/metadata/titles/{titleId}/trailers`, not the former singular `/trailer` route. A successful response is a `TrailerList` object with a required `trailers` array rather than one trailer. The array contains one to five curated choices in preference order. Clients should initially select the first item while allowing the user to choose another.
-- **Trailer requests support series seasons.** `seasonNumber` may be supplied for a series and must be omitted for a movie. `language` controls preferred trailer audio; `captionLanguage` is only a YouTube caption preference and is not a guarantee that captions exist. Localized choices may include English fallbacks identified by `isFallback`.
-- **Series mapping is explicit.** Series and season metadata requests accept `mappingProvider=tmdb|tvdb`, and a series response reports the hierarchy actually returned in `mappingProvider`. The effective profile setting is `seriesMappingProvider`. Clients must pass the same mapping provider when loading a season selected from that series.
-- **Mapped season identifiers are opaque.** TMDB season identifiers may be UUIDs, while TVDB-mapped season identifiers may use an opaque `tvdb:` form. Clients must not parse, synthesize, or require a UUID for a season ID; they must send the returned identifier unchanged. Episode and season ordering comes from the selected hierarchy.
-- **Playback uses opaque source references.** Clients list sources, then pass the returned `sourceRef` to prepare or resolve. Provider URLs and private headers remain on the server and are never reconstructed client-side. `stableIdentity` is a non-secret logical identifier used only to match the same stream after refreshing opaque references; an empty value requires explicit source selection.
-- **Addon search is unambiguous.** Catalog search uses `GET /api/v1/addons/catalogs/search/{type}` instead of `/addons/search/{type}`, which could collide with the installed-addon refresh route.
-
-There are no compatibility aliases for the singular trailer route or pre-v16 trailer response. Upgrade clients and servers together.
-
-## Compatibility policy
-
-- A released client declares one implemented protocol integer. The Apple, Android, and Windows clients in this repository implement v20.
-- A client must reject discovery when `protocolVersion` differs from its implemented version and present an upgrade-required error. It must not infer compatibility from `serverVersion` or `/api/v1`.
-- A server may add endpoints, optional response properties, optional request properties, or new error codes without incrementing the protocol version when existing v20 behavior remains valid. Clients must ignore unknown response properties and handle unknown structured error codes generically.
-- Removing or renaming a route or property, changing a property's type or meaning, adding a required request property, making an optional response property required, changing authentication semantics, or changing identifier interpretation requires a new protocol version.
-- Within v20, an existing required response property remains required. Contract tests validate representative real handler responses against `openapi.yaml`; changes to those handlers and schemas must land together.
-- Token rotation is part of the v16 contract. Access tokens are bearer tokens, refresh tokens are single-use and replaced on refresh, and native clients must persist credentials in platform-secure storage. A retryable transport or server failure preserves the last credential set; only a definitive `401 invalid_refresh_token` response clears it and requires authentication again. Device-code sessions remain refreshable until the user disconnects or an administrator revokes the session or device.
-- Server releases must continue serving the documented version until all bundled clients implement a newer version. A future server that supports multiple versions must advertise the selected protocol explicitly; clients must never assume an undocumented range.
-
-## Client release checklist
-
-1. Discover the candidate server and require `protocolVersion == 20`.
-2. Resolve `apiBaseUrl` from discovery; do not construct it from the browser or app origin after discovery.
-3. Exercise login or refresh, account/profile selection, movie and series metadata, plural trailers, source listing, preparation, resolution, and playback stop.
-4. Verify both TMDB and TVDB series hierarchies and preserve mapped season IDs verbatim.
-5. Decode unknown response properties and error codes without crashing, while still rejecting missing or invalid required properties.
+1. Discover the server and require protocol 20.
+2. Use the discovered API base URL.
+3. Exercise login/refresh, account and profile selection, metadata, trailers, source listing, playback preparation/resolution, and stop.
+4. Verify TMDB and TVDB hierarchies and preserve opaque IDs unchanged.
+5. Confirm unknown optional properties and errors do not crash the client.
