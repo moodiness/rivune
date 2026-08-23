@@ -484,8 +484,6 @@ jobs:
           $project = Join-Path $env:GITHUB_WORKSPACE 'clients/windows/Rivune.App/Rivune.App.csproj'
           $publish = Join-Path $env:RUNNER_TEMP 'rivune-portable-publish'
           & dotnet publish $project --configuration Release --runtime $env:RUNTIME --output $publish --nologo `
-            -p:PublishProfile= `
-            -p:AssemblyName=$([IO.Path]::GetFileNameWithoutExtension($env:ASSET_FILE_NAME)) `
             -p:Platform=$env:PLATFORM `
             -p:WindowsPackageType=None `
             -p:PublishSingleFile=true `
@@ -554,8 +552,6 @@ jobs:
           $appProject = Join-Path $env:GITHUB_WORKSPACE 'clients/windows/Rivune.App/Rivune.App.csproj'
           $arm64Publish = Join-Path $env:RUNNER_TEMP 'rivune-setup-arm64-publish'
           & dotnet publish $appProject --configuration Release --runtime win-arm64 --output $arm64Publish --nologo `
-            -p:PublishProfile= `
-            -p:AssemblyName=Rivune-arm64 `
             -p:Platform=ARM64 `
             -p:WindowsPackageType=None `
             -p:PublishSingleFile=true `

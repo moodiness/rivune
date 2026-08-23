@@ -369,8 +369,6 @@ jobs:
           foreach ($target in $targets) {
             $publish = Join-Path $env:RUNNER_TEMP "rivune-portable-publish-$($target.Label.ToLowerInvariant())"
             & dotnet publish $project --configuration Release --runtime $target.Runtime --output $publish --nologo `
-              -p:PublishProfile= `
-              -p:AssemblyName=$([IO.Path]::GetFileNameWithoutExtension($target.FileName)) `
               -p:Platform=$($target.Platform) `
               -p:WindowsPackageType=None `
               -p:PublishSingleFile=true `
