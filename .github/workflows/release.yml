@@ -263,7 +263,7 @@ jobs:
     if: needs.authorize.outputs.authorized == 'true'
     needs:
       - authorize
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     outputs:
       artifact_name: tv-installer-assets-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
@@ -298,23 +298,16 @@ jobs:
           version="${version%%-*}"
           (cd clients/tv-installer && go test ./...)
           clients/tv-installer/scripts/build-release.sh "${version}" rebuilt-tv-installer-assets
-          expected_files="$(printf '%s\n' Rivune-TV-Installer-Windows-x64.exe Rivune-TV-Installer-Windows-arm64.exe Rivune-TV-Installer-macOS-x64.zip Rivune-TV-Installer-macOS-arm64.zip Rivune-TV-Installer-Linux-x64.zip Rivune-TV-Installer-Linux-arm64.zip | sort)"
-          actual_files="$(find tv-installer-assets -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+          expected_files="$(printf '%s\n' Rivune-TV-Installer-Windows.exe Rivune-TV-Installer-macOS.dmg | sort)"
+          actual_files="$(find tv-installer-assets -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | sort)"
           if [[ "${actual_files}" != "${expected_files}" ]]; then
             echo 'Candidate artifact does not contain the exact TV installer companion set.' >&2
             exit 1
           fi
-          for asset in ${expected_files}; do
-            size="$(stat -c %s "tv-installer-assets/${asset}")"
-            if (( size <= 0 || size > 67108864 )); then
-              echo "${asset} size is invalid: ${size} bytes." >&2
-              exit 1
-            fi
-            cmp "rebuilt-tv-installer-assets/${asset}" "tv-installer-assets/${asset}"
-          done
-          unzip -p tv-installer-assets/Rivune-TV-Installer-Linux-x64.zip Rivune-TV-Installer-Linux-x64 > /tmp/rivune-tv-installer
-          chmod 0755 /tmp/rivune-tv-installer
-          [[ "$(/tmp/rivune-tv-installer --version)" == "${version}" ]]
+          clients/tv-installer/scripts/compare-release.sh \
+            tv-installer-assets \
+            rebuilt-tv-installer-assets \
+            "${version}"
       - name: Upload validated immutable TV installer companions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -326,7 +319,7 @@ jobs:
           overwrite: false
 
   windows-asset:
-    name: Build unsigned Windows release assets
+    name: Build unsigned universal Windows release asset
     if: needs.authorize.outputs.authorized == 'true'
     needs:
       - authorize
@@ -345,7 +338,12 @@ jobs:
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.x
-      - name: Publish and inspect unsigned x64 and ARM64 executables
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.6
+          cache: false
+      - name: Publish, package, and inspect unsigned x64 and ARM64 executables
         env:
           RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
         shell: pwsh
@@ -371,6 +369,8 @@ jobs:
           foreach ($target in $targets) {
             $publish = Join-Path $env:RUNNER_TEMP "rivune-portable-publish-$($target.Label.ToLowerInvariant())"
             & dotnet publish $project --configuration Release --runtime $target.Runtime --output $publish --nologo `
+              -p:PublishProfile= `
+              -p:AssemblyName=$([IO.Path]::GetFileNameWithoutExtension($target.FileName)) `
               -p:Platform=$($target.Platform) `
               -p:WindowsPackageType=None `
               -p:PublishSingleFile=true `
@@ -414,12 +414,84 @@ jobs:
             if ($size -le 0 -or $size -gt 2147483647) { throw "$($target.FileName) size is invalid: $size bytes." }
           }
 
+          & go version | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Go is required to build the Windows uninstaller and package.' }
+
+          $uninstaller = Join-Path $artifactDirectory 'Rivune-Uninstall.exe'
+          Push-Location (Join-Path $env:GITHUB_WORKSPACE 'clients/windows/uninstaller')
+          try {
+            $env:CGO_ENABLED = '0'
+            $env:GOOS = 'windows'
+            $env:GOARCH = '386'
+            & go build -trimpath -ldflags '-s -w -H windowsgui' -o $uninstaller .
+            if ($LASTEXITCODE -ne 0) { throw 'Windows uninstaller build failed.' }
+          } finally {
+            Pop-Location
+            Remove-Item Env:CGO_ENABLED, Env:GOOS, Env:GOARCH -ErrorAction SilentlyContinue
+          }
+
+          $bootstrapperProject = Join-Path $env:GITHUB_WORKSPACE 'clients/windows/Rivune.Bootstrapper/Rivune.Bootstrapper.csproj'
+          $bootstrapperPublish = Join-Path $env:RUNNER_TEMP 'rivune-bootstrapper-publish'
+          & dotnet publish $bootstrapperProject --configuration Release --runtime win-x86 --output $bootstrapperPublish --nologo `
+            -p:Version=$versionName `
+            -p:AssemblyVersion=$fileVersion `
+            -p:FileVersion=$fileVersion `
+            -p:InformationalVersion=$versionName `
+            -p:IncludeSourceRevisionInInformationalVersion=false
+          if ($LASTEXITCODE -ne 0) { throw 'Windows setup bootstrapper publish failed.' }
+          $bootstrapperFiles = @(Get-ChildItem -LiteralPath $bootstrapperPublish -File -Recurse | Where-Object { $_.Extension -ne '.pdb' })
+          if ($bootstrapperFiles.Count -ne 1 -or $bootstrapperFiles[0].Name -cne 'Rivune.Bootstrapper.exe') {
+            throw "Windows setup bootstrapper publish must contain exactly Rivune.Bootstrapper.exe; found: $($bootstrapperFiles.Name -join ', ')."
+          }
+
+          $bundle = Join-Path $artifactDirectory 'Rivune-Windows.exe'
+          Push-Location (Join-Path $env:GITHUB_WORKSPACE 'clients/tv-installer')
+          try {
+            & go run ./cmd/windows-bundle `
+              $bootstrapperFiles[0].FullName `
+              $bundle `
+              (Join-Path $artifactDirectory 'Rivune-x64.exe') `
+              (Join-Path $artifactDirectory 'Rivune-arm64.exe') `
+              $uninstaller
+            if ($LASTEXITCODE -ne 0) { throw 'Universal Windows setup build failed.' }
+          } finally {
+            Pop-Location
+          }
+          Remove-Item -LiteralPath `
+            (Join-Path $artifactDirectory 'Rivune-x64.exe'), `
+            (Join-Path $artifactDirectory 'Rivune-arm64.exe'), `
+            $uninstaller
+
+          $bundleStream = [IO.File]::OpenRead($bundle)
+          try {
+            $bundleReader = [IO.BinaryReader]::new($bundleStream)
+            if ($bundleReader.ReadUInt16() -ne 0x5a4d) { throw 'Rivune-Windows.exe has no DOS PE header.' }
+            $bundleStream.Position = 0x3c
+            $bundlePeOffset = $bundleReader.ReadUInt32()
+            $bundleStream.Position = $bundlePeOffset
+            if ($bundleReader.ReadUInt32() -ne 0x00004550 -or $bundleReader.ReadUInt16() -ne 0x014c) {
+              throw 'Rivune-Windows.exe must use the cross-architecture x86 setup bootstrapper.'
+            }
+          } finally {
+            if ($null -ne $bundleReader) { $bundleReader.Dispose() } else { $bundleStream.Dispose() }
+          }
+          $bundleVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($bundle)
+          if ($bundleVersion.FileVersion -ne $fileVersion -or $bundleVersion.ProductVersion -ne $versionName) {
+            throw "Rivune-Windows.exe version metadata is invalid: FileVersion=$($bundleVersion.FileVersion), ProductVersion=$($bundleVersion.ProductVersion)."
+          }
+          if ((Get-AuthenticodeSignature -FilePath $bundle).Status -ne 'NotSigned') {
+            throw 'Rivune-Windows.exe must remain unsigned.'
+          }
+          if ((Get-Item -LiteralPath $bundle).Length -le 0 -or (Get-Item -LiteralPath $bundle).Length -gt 2147483647) {
+            throw 'Rivune-Windows.exe size is invalid.'
+          }
+
           $files = @((Get-ChildItem -LiteralPath $artifactDirectory -File).Name | Sort-Object)
-          $expectedFiles = @('Rivune-arm64.exe', 'Rivune-x64.exe')
+          $expectedFiles = @('Rivune-Windows.exe')
           if (Compare-Object -ReferenceObject $expectedFiles -DifferenceObject $files -CaseSensitive) {
             throw "Windows release artifact must contain exactly: $($expectedFiles -join ', ')."
           }
-      - name: Upload immutable unsigned Windows executables
+      - name: Upload immutable unsigned universal Windows executable
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: unsigned-windows-${{ github.run_id }}-${{ github.run_attempt }}
@@ -431,7 +503,7 @@ jobs:
 
 
   build-assets:
-    name: Build Android and collect unsigned Windows release inputs
+    name: Build Android and collect unsigned Windows release input
     if: needs.authorize.outputs.authorized == 'true'
     needs:
       - authorize
@@ -445,12 +517,10 @@ jobs:
       channel: ${{ steps.metadata.outputs.channel }}
       published_at: ${{ steps.metadata.outputs.published_at }}
       android_asset_name: ${{ steps.metadata.outputs.android_asset_name }}
-      windows_x64_asset_name: ${{ steps.metadata.outputs.windows_x64_asset_name }}
-      windows_arm64_asset_name: ${{ steps.metadata.outputs.windows_arm64_asset_name }}
+      windows_asset_name: ${{ steps.metadata.outputs.windows_asset_name }}
       release_url: ${{ steps.metadata.outputs.release_url }}
       android_asset_url: ${{ steps.metadata.outputs.android_asset_url }}
-      windows_x64_asset_url: ${{ steps.metadata.outputs.windows_x64_asset_url }}
-      windows_arm64_asset_url: ${{ steps.metadata.outputs.windows_arm64_asset_url }}
+      windows_asset_url: ${{ steps.metadata.outputs.windows_asset_url }}
     permissions:
       contents: read
     steps:
@@ -460,7 +530,7 @@ jobs:
           ref: ${{ needs.authorize.outputs.sha }}
           persist-credentials: false
           fetch-depth: 0
-      - name: Download immutable unsigned Windows release executables
+      - name: Download immutable unsigned universal Windows archive
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ needs.windows-asset.outputs.artifact_name }}
@@ -518,19 +588,15 @@ jobs:
             exit 1
           fi
           android_asset_name='Rivune-Android.apk'
-          windows_x64_asset_name='Rivune-x64.exe'
-          windows_arm64_asset_name='Rivune-arm64.exe'
+          windows_asset_name='Rivune-Windows.exe'
           release_url="https://github.com/${REPOSITORY}/releases/tag/${RELEASE_TAG}"
           android_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${android_asset_name}"
-          windows_x64_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_x64_asset_name}"
-          windows_arm64_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_arm64_asset_name}"
-          for windows_asset in "${windows_x64_asset_name}" "${windows_arm64_asset_name}"; do
-            windows_size="$(stat -c %s "release-assets/${windows_asset}")"
-            if (( windows_size <= 0 || windows_size > 2147483647 )); then
-              echo "${windows_asset} size is invalid: ${windows_size} bytes." >&2
-              exit 1
-            fi
-          done
+          windows_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_asset_name}"
+          windows_size="$(stat -c %s "release-assets/${windows_asset_name}")"
+          if (( windows_size <= 0 || windows_size > 2147483647 )); then
+            echo "${windows_asset_name} size is invalid: ${windows_size} bytes." >&2
+            exit 1
+          fi
 
           mkdir -p release-inputs unsigned-android-input
           {
@@ -539,12 +605,10 @@ jobs:
             echo "channel=${channel}"
             echo "published_at=${published_at}"
             echo "android_asset_name=${android_asset_name}"
-            echo "windows_x64_asset_name=${windows_x64_asset_name}"
-            echo "windows_arm64_asset_name=${windows_arm64_asset_name}"
+            echo "windows_asset_name=${windows_asset_name}"
             echo "release_url=${release_url}"
             echo "android_asset_url=${android_asset_url}"
-            echo "windows_x64_asset_url=${windows_x64_asset_url}"
-            echo "windows_arm64_asset_url=${windows_arm64_asset_url}"
+            echo "windows_asset_url=${windows_asset_url}"
           } >> "${GITHUB_OUTPUT}"
 
           export RIVUNE_ANDROID_VERSION_NAME="${version_name}"
@@ -569,8 +633,7 @@ jobs:
             exit 1
           fi
           cp "${unsigned_apk}" unsigned-android-input/app-release-unsigned.apk
-          mv "release-assets/${windows_x64_asset_name}" release-inputs/
-          mv "release-assets/${windows_arm64_asset_name}" release-inputs/
+          mv "release-assets/${windows_asset_name}" release-inputs/
       - name: Upload immutable unsigned Android input
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -580,7 +643,7 @@ jobs:
           retention-days: 7
           compression-level: 0
           overwrite: false
-      - name: Upload immutable Windows inputs
+      - name: Upload immutable Windows input
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-inputs-${{ github.run_id }}-${{ github.run_attempt }}
@@ -589,6 +652,7 @@ jobs:
           retention-days: 7
           compression-level: 0
           overwrite: false
+
 
   sign-android:
     name: Sign Android release on an isolated runner
@@ -814,12 +878,10 @@ jobs:
           RIVUNE_RELEASE_CHANNEL: ${{ needs.build-assets.outputs.channel }}
           RIVUNE_RELEASE_PUBLISHED_AT: ${{ needs.build-assets.outputs.published_at }}
           RIVUNE_RELEASE_ANDROID_ASSET_NAME: ${{ needs.build-assets.outputs.android_asset_name }}
-          RIVUNE_RELEASE_WINDOWS_X64_ASSET_NAME: ${{ needs.build-assets.outputs.windows_x64_asset_name }}
-          RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_NAME: ${{ needs.build-assets.outputs.windows_arm64_asset_name }}
+          RIVUNE_RELEASE_WINDOWS_ASSET_NAME: ${{ needs.build-assets.outputs.windows_asset_name }}
           RIVUNE_RELEASE_URL: ${{ needs.build-assets.outputs.release_url }}
           RIVUNE_RELEASE_ANDROID_ASSET_URL: ${{ needs.build-assets.outputs.android_asset_url }}
-          RIVUNE_RELEASE_WINDOWS_X64_ASSET_URL: ${{ needs.build-assets.outputs.windows_x64_asset_url }}
-          RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_URL: ${{ needs.build-assets.outputs.windows_arm64_asset_url }}
+          RIVUNE_RELEASE_WINDOWS_ASSET_URL: ${{ needs.build-assets.outputs.windows_asset_url }}
           RIVUNE_RELEASE_SIGNING_CERT_SHA256: ${{ needs.sign-android.outputs.signing_certificate_sha256 }}
           RIVUNE_RELEASE_IOS_ASSET_NAME: Rivune-iOS-unsigned.ipa
           RIVUNE_RELEASE_TVOS_ASSET_NAME: Rivune-tvOS-unsigned.ipa
@@ -844,12 +906,10 @@ jobs:
             RIVUNE_RELEASE_WEBOS_ASSET_NAME \
             RIVUNE_RELEASE_TIZEN_ASSET_NAME \
             RIVUNE_RELEASE_TV_RUNTIME_ASSET_NAME \
-            RIVUNE_RELEASE_WINDOWS_X64_ASSET_NAME \
-            RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_NAME \
+            RIVUNE_RELEASE_WINDOWS_ASSET_NAME \
             RIVUNE_RELEASE_URL \
             RIVUNE_RELEASE_ANDROID_ASSET_URL \
-            RIVUNE_RELEASE_WINDOWS_X64_ASSET_URL \
-            RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_URL \
+            RIVUNE_RELEASE_WINDOWS_ASSET_URL \
             RIVUNE_RELEASE_SIGNING_CERT_SHA256; do
             if [[ -z "${!name:-}" ]]; then
               echo "Required release metadata is missing: ${name}" >&2
@@ -893,10 +953,8 @@ jobs:
               --application-id io.rivune.app \
               --build-version "${RIVUNE_RELEASE_VERSION_CODE}" \
               --signing-certificate-sha256 "${RIVUNE_RELEASE_SIGNING_CERT_SHA256}" \
-              --windows-x64-executable "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_WINDOWS_X64_ASSET_NAME}" \
-              --windows-x64-executable-url "${RIVUNE_RELEASE_WINDOWS_X64_ASSET_URL}" \
-              --windows-arm64-executable "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_NAME}" \
-              --windows-arm64-executable-url "${RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_URL}"
+              --windows-executable "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_WINDOWS_ASSET_NAME}" \
+              --windows-executable-url "${RIVUNE_RELEASE_WINDOWS_ASSET_URL}"
             go run . validate \
               --apk "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_ANDROID_ASSET_NAME}" \
               --ios-archive "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_IOS_ASSET_NAME}" \
@@ -920,10 +978,8 @@ jobs:
               --application-id io.rivune.app \
               --build-version "${RIVUNE_RELEASE_VERSION_CODE}" \
               --signing-certificate-sha256 "${RIVUNE_RELEASE_SIGNING_CERT_SHA256}" \
-              --windows-x64-executable "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_WINDOWS_X64_ASSET_NAME}" \
-              --windows-x64-executable-url "${RIVUNE_RELEASE_WINDOWS_X64_ASSET_URL}" \
-              --windows-arm64-executable "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_NAME}" \
-              --windows-arm64-executable-url "${RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_URL}" \
+              --windows-executable "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_WINDOWS_ASSET_NAME}" \
+              --windows-executable-url "${RIVUNE_RELEASE_WINDOWS_ASSET_URL}" \
               "${GITHUB_WORKSPACE}/release-assets/rivune-update.json"
           )
       - name: Set up QEMU
@@ -1047,25 +1103,22 @@ jobs:
           tvos_asset_name='Rivune-tvOS-unsigned.ipa'
           visionos_asset_name='Rivune-visionOS-unsigned.ipa'
           macos_asset_name='Rivune-macOS.dmg'
-          windows_x64_asset_name='Rivune-x64.exe'
-          windows_arm64_asset_name='Rivune-arm64.exe'
+          windows_asset_name='Rivune-Windows.exe'
           webos_asset_name='Rivune-webOS.ipk'
           tizen_asset_name='Rivune-Tizen.wgt'
           tv_runtime_asset_name='Rivune-TV-runtime.json'
-          installer_asset_names=(Rivune-TV-Installer-Windows-x64.exe Rivune-TV-Installer-Windows-arm64.exe Rivune-TV-Installer-macOS-x64.zip Rivune-TV-Installer-macOS-arm64.zip Rivune-TV-Installer-Linux-x64.zip Rivune-TV-Installer-Linux-arm64.zip)
-          expected_files="$(printf '%s\n' rivune-update.json "${asset_name}" "${ios_asset_name}" "${tvos_asset_name}" "${visionos_asset_name}" "${macos_asset_name}" "${windows_x64_asset_name}" "${windows_arm64_asset_name}" "${webos_asset_name}" "${tizen_asset_name}" "${tv_runtime_asset_name}" "${installer_asset_names[@]}" | sort)"
+          installer_asset_names=(Rivune-TV-Installer-Windows.exe Rivune-TV-Installer-macOS.dmg)
+          expected_files="$(printf '%s\n' rivune-update.json "${asset_name}" "${ios_asset_name}" "${tvos_asset_name}" "${visionos_asset_name}" "${macos_asset_name}" "${windows_asset_name}" "${webos_asset_name}" "${tizen_asset_name}" "${tv_runtime_asset_name}" "${installer_asset_names[@]}" | sort)"
           actual_files="$(find release-assets -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
           if [[ "${actual_files}" != "${expected_files}" ]]; then
             echo "Immutable artifact does not contain the exact release asset set." >&2
             exit 1
           fi
-          for windows_asset in "${windows_x64_asset_name}" "${windows_arm64_asset_name}"; do
-            windows_size="$(stat -c %s "release-assets/${windows_asset}")"
-            if (( windows_size <= 0 || windows_size > 2147483647 )); then
-              echo "${windows_asset} size is invalid: ${windows_size} bytes." >&2
-              exit 1
-            fi
-          done
+          windows_size="$(stat -c %s "release-assets/${windows_asset_name}")"
+          if (( windows_size <= 0 || windows_size > 2147483647 )); then
+            echo "${windows_asset_name} size is invalid: ${windows_size} bytes." >&2
+            exit 1
+          fi
           for apple_asset in "${ios_asset_name}" "${tvos_asset_name}" "${visionos_asset_name}" "${macos_asset_name}"; do
             apple_size="$(stat -c %s "release-assets/${apple_asset}")"
             if (( apple_size <= 0 || apple_size > 536870912 )); then
@@ -1098,8 +1151,7 @@ jobs:
           expected_tvos_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${tvos_asset_name}"
           expected_visionos_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${visionos_asset_name}"
           expected_macos_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${macos_asset_name}"
-          expected_windows_x64_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_x64_asset_name}"
-          expected_windows_arm64_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_arm64_asset_name}"
+          expected_windows_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_asset_name}"
           expected_webos_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${webos_asset_name}"
           expected_tizen_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${tizen_asset_name}"
           expected_tv_runtime_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${tv_runtime_asset_name}"
@@ -1128,10 +1180,8 @@ jobs:
               --application-id io.rivune.app \
               --build-version "$(jq -er '.packages.android.buildVersion' "${GITHUB_WORKSPACE}/release-assets/rivune-update.json")" \
               --signing-certificate-sha256 "$(jq -er '.packages.android.signingCertificateSha256' "${GITHUB_WORKSPACE}/release-assets/rivune-update.json")" \
-              --windows-x64-executable "${GITHUB_WORKSPACE}/release-assets/${windows_x64_asset_name}" \
-              --windows-x64-executable-url "${expected_windows_x64_asset_url}" \
-              --windows-arm64-executable "${GITHUB_WORKSPACE}/release-assets/${windows_arm64_asset_name}" \
-              --windows-arm64-executable-url "${expected_windows_arm64_asset_url}" \
+              --windows-executable "${GITHUB_WORKSPACE}/release-assets/${windows_asset_name}" \
+              --windows-executable-url "${expected_windows_asset_url}" \
               "${GITHUB_WORKSPACE}/release-assets/rivune-update.json"
           )
       - name: Validate curated release notes
@@ -1194,7 +1244,7 @@ jobs:
           created_release=false
           created_release_json='{}'
           digest_marker_prefix='<!-- rivune-oci-image-digest:'
-          installer_asset_names=(Rivune-TV-Installer-Windows-x64.exe Rivune-TV-Installer-Windows-arm64.exe Rivune-TV-Installer-macOS-x64.zip Rivune-TV-Installer-macOS-arm64.zip Rivune-TV-Installer-Linux-x64.zip Rivune-TV-Installer-Linux-arm64.zip)
+          installer_asset_names=(Rivune-TV-Installer-Windows.exe Rivune-TV-Installer-macOS.dmg)
 
           matching_releases() {
             gh api --paginate --slurp "repos/${REPOSITORY}/releases?per_page=100" |
@@ -1331,8 +1381,7 @@ jobs:
             local tvos_name='Rivune-tvOS-unsigned.ipa'
             local visionos_name='Rivune-visionOS-unsigned.ipa'
             local macos_name='Rivune-macOS.dmg'
-            local windows_x64_name='Rivune-x64.exe'
-            local windows_arm64_name='Rivune-arm64.exe'
+            local windows_name='Rivune-Windows.exe'
             local webos_name='Rivune-webOS.ipk'
             local tizen_name='Rivune-Tizen.wgt'
             local tv_runtime_name='Rivune-TV-runtime.json'
@@ -1343,8 +1392,7 @@ jobs:
               "${tvos_name}"
               "${visionos_name}"
               "${macos_name}"
-              "${windows_x64_name}"
-              "${windows_arm64_name}"
+              "${windows_name}"
               "${webos_name}"
               "${tizen_name}"
               "${tv_runtime_name}"
@@ -1369,7 +1417,7 @@ jobs:
                 return 1
               fi
               case "${release_asset_name}" in
-                rivune-update.json|"${apk_name}"|"${ios_name}"|"${tvos_name}"|"${visionos_name}"|"${macos_name}"|"${windows_x64_name}"|"${windows_arm64_name}"|"${webos_name}"|"${tizen_name}"|"${tv_runtime_name}"|Rivune-TV-Installer-Windows-x64.exe|Rivune-TV-Installer-Windows-arm64.exe|Rivune-TV-Installer-macOS-x64.zip|Rivune-TV-Installer-macOS-arm64.zip|Rivune-TV-Installer-Linux-x64.zip|Rivune-TV-Installer-Linux-arm64.zip) ;;
+                rivune-update.json|"${apk_name}"|"${ios_name}"|"${tvos_name}"|"${visionos_name}"|"${macos_name}"|"${windows_name}"|"${webos_name}"|"${tizen_name}"|"${tv_runtime_name}"|Rivune-TV-Installer-Windows.exe|Rivune-TV-Installer-macOS.dmg) ;;
                 *)
                   echo "The partial GitHub Release contains an unexpected asset: ${release_asset_name}" >&2
                   return 1
@@ -1427,11 +1475,10 @@ jobs:
               case "${release_asset_name}" in
                 rivune-update.json) content_type='application/json' ;;
                 "${apk_name}") content_type='application/vnd.android.package-archive' ;;
-                "${ios_name}"|"${tvos_name}"|"${visionos_name}") content_type='application/octet-stream' ;;
+                "${ios_name}"|"${tvos_name}"|"${visionos_name}"|"${webos_name}"|"${tizen_name}"|"${tv_runtime_name}") content_type='application/octet-stream' ;;
                 "${macos_name}") content_type='application/x-apple-diskimage' ;;
-                "${windows_x64_name}"|"${windows_arm64_name}"|Rivune-TV-Installer-Windows-x64.exe|Rivune-TV-Installer-Windows-arm64.exe) content_type='application/vnd.microsoft.portable-executable' ;;
-                "${webos_name}"|"${tizen_name}"|"${tv_runtime_name}") content_type='application/octet-stream' ;;
-                Rivune-TV-Installer-macOS-x64.zip|Rivune-TV-Installer-macOS-arm64.zip|Rivune-TV-Installer-Linux-x64.zip|Rivune-TV-Installer-Linux-arm64.zip) content_type='application/zip' ;;
+                "${windows_name}"|Rivune-TV-Installer-Windows.exe) content_type='application/vnd.microsoft.portable-executable' ;;
+                Rivune-TV-Installer-macOS.dmg) content_type='application/x-apple-diskimage' ;;
               esac
               upload_release_asset "release-assets/${release_asset_name}" "${content_type}"
             done
@@ -1477,13 +1524,12 @@ jobs:
             local tvos_name='Rivune-tvOS-unsigned.ipa'
             local visionos_name='Rivune-visionOS-unsigned.ipa'
             local macos_name='Rivune-macOS.dmg'
-            local windows_x64_name='Rivune-x64.exe'
-            local windows_arm64_name='Rivune-arm64.exe'
+            local windows_name='Rivune-Windows.exe'
             local webos_name='Rivune-webOS.ipk'
             local tizen_name='Rivune-Tizen.wgt'
             local tv_runtime_name='Rivune-TV-runtime.json'
-            local expected_assets actual_assets expected_channel expected_release_url expected_apk_url expected_ios_url expected_tvos_url expected_visionos_url expected_macos_url expected_windows_x64_url expected_windows_arm64_url
-            expected_assets="$(printf '%s\n' rivune-update.json "${apk_name}" "${ios_name}" "${tvos_name}" "${visionos_name}" "${macos_name}" "${windows_x64_name}" "${windows_arm64_name}" "${webos_name}" "${tizen_name}" "${tv_runtime_name}" "${installer_asset_names[@]}" | sort)"
+            local expected_assets actual_assets expected_channel expected_release_url expected_apk_url expected_ios_url expected_tvos_url expected_visionos_url expected_macos_url expected_windows_url
+            expected_assets="$(printf '%s\n' rivune-update.json "${apk_name}" "${ios_name}" "${tvos_name}" "${visionos_name}" "${macos_name}" "${windows_name}" "${webos_name}" "${tizen_name}" "${tv_runtime_name}" "${installer_asset_names[@]}" | sort)"
             actual_assets="$(jq -r '.assets[].name' <<<"${release_json}" | sort)"
             if [[ "${actual_assets}" != "${expected_assets}" ]]; then
               echo "The GitHub Release asset set is incomplete or contains unexpected files." >&2
@@ -1517,13 +1563,11 @@ jobs:
             done < <(jq -r '.assets[] | [.id, .name, .size, (.digest // "")] | @tsv' <<<"${release_json}")
 
             local adopted_windows_size
-            for windows_asset in "${windows_x64_name}" "${windows_arm64_name}"; do
-              adopted_windows_size="$(stat -c %s "adopted-release-assets/${windows_asset}")"
-              if (( adopted_windows_size <= 0 || adopted_windows_size > 2147483647 )); then
-                echo "The adopted ${windows_asset} size is invalid: ${adopted_windows_size} bytes." >&2
-                return 1
-              fi
-            done
+            adopted_windows_size="$(stat -c %s "adopted-release-assets/${windows_name}")"
+            if (( adopted_windows_size <= 0 || adopted_windows_size > 2147483647 )); then
+              echo "The adopted ${windows_name} size is invalid: ${adopted_windows_size} bytes." >&2
+              return 1
+            fi
 
             local trusted_asset adopted_asset_sha trusted_asset_sha
             for trusted_asset in \
@@ -1533,8 +1577,7 @@ jobs:
               "${tvos_name}" \
               "${visionos_name}" \
               "${macos_name}" \
-              "${windows_x64_name}" \
-              "${windows_arm64_name}" \
+              "${windows_name}" \
               "${webos_name}" \
               "${tizen_name}" \
               "${tv_runtime_name}" \
@@ -1558,8 +1601,7 @@ jobs:
             expected_tvos_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${tvos_name}"
             expected_visionos_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${visionos_name}"
             expected_macos_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${macos_name}"
-            expected_windows_x64_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_x64_name}"
-            expected_windows_arm64_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_arm64_name}"
+            expected_windows_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_name}"
             expected_webos_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${webos_name}"
             expected_tizen_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${tizen_name}"
             expected_tv_runtime_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${tv_runtime_name}"
@@ -1585,10 +1627,8 @@ jobs:
                 --webos-package-url "${expected_webos_url}" \
                 --tizen-package-url "${expected_tizen_url}" \
                 --tv-runtime-url "${expected_tv_runtime_url}" \
-                --windows-x64-executable "${GITHUB_WORKSPACE}/adopted-release-assets/${windows_x64_name}" \
-                --windows-x64-executable-url "${expected_windows_x64_url}" \
-                --windows-arm64-executable "${GITHUB_WORKSPACE}/adopted-release-assets/${windows_arm64_name}" \
-                --windows-arm64-executable-url "${expected_windows_arm64_url}" \
+                --windows-executable "${GITHUB_WORKSPACE}/adopted-release-assets/${windows_name}" \
+                --windows-executable-url "${expected_windows_url}" \
                 --application-id io.rivune.app \
                 --build-version "$(jq -er '.packages.android.buildVersion' "${GITHUB_WORKSPACE}/adopted-release-assets/rivune-update.json")" \
                 --signing-certificate-sha256 "$(jq -er '.packages.android.signingCertificateSha256' "${GITHUB_WORKSPACE}/adopted-release-assets/rivune-update.json")" \
@@ -1703,9 +1743,9 @@ jobs:
           if ! asset_fingerprint="$(jq -ce '
             .assets as $assets |
             if (($assets | type) == "array" and
-                ($assets | length) == 17 and
-                ([$assets[].name] | sort) == ["Rivune-Android.apk", "Rivune-TV-Installer-Linux-arm64.zip", "Rivune-TV-Installer-Linux-x64.zip", "Rivune-TV-Installer-Windows-arm64.exe", "Rivune-TV-Installer-Windows-x64.exe", "Rivune-TV-Installer-macOS-arm64.zip", "Rivune-TV-Installer-macOS-x64.zip", "Rivune-TV-runtime.json", "Rivune-Tizen.wgt", "Rivune-arm64.exe", "Rivune-iOS-unsigned.ipa", "Rivune-macOS.dmg", "Rivune-tvOS-unsigned.ipa", "Rivune-visionOS-unsigned.ipa", "Rivune-webOS.ipk", "Rivune-x64.exe", "rivune-update.json"] and
-                ([ $assets[].id ] | unique | length) == 17 and
+                ($assets | length) == 12 and
+                ([$assets[].name] | sort) == ["Rivune-Android.apk", "Rivune-TV-Installer-Windows.exe", "Rivune-TV-Installer-macOS.dmg", "Rivune-TV-runtime.json", "Rivune-Tizen.wgt", "Rivune-Windows.exe", "Rivune-iOS-unsigned.ipa", "Rivune-macOS.dmg", "Rivune-tvOS-unsigned.ipa", "Rivune-visionOS-unsigned.ipa", "Rivune-webOS.ipk", "rivune-update.json"] and
+                ([ $assets[].id ] | unique | length) == 12 and
                 all($assets[];
                   (.id | type) == "number" and .id > 0 and .id == (.id | floor) and
                   (.name | type) == "string" and
@@ -1731,7 +1771,7 @@ jobs:
           trap - EXIT
 
   verify-windows-release:
-    name: Verify adopted unsigned Windows executables
+    name: Verify adopted unsigned universal Windows setup
     if: needs.authorize.outputs.authorized == 'true'
     needs:
       - authorize
@@ -1741,7 +1781,7 @@ jobs:
       # GitHub exposes draft release assets only to tokens with contents: write.
       contents: write
     steps:
-      - name: Verify remote executable architectures, versions, hashes, and unsigned status
+      - name: Verify remote setup, embedded architectures, versions, hashes, and unsigned status
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ needs.release.outputs.release_id }}
@@ -1769,22 +1809,18 @@ jobs:
             throw 'Could not retrieve the validated GitHub Release.'
           }
           $manifestAsset = @($release.assets | Where-Object { $_.name -ceq 'rivune-update.json' })
-          $targets = @(
-            @{ AssetName = 'Rivune-x64.exe'; Package = 'windowsX64'; Architecture = 'x64'; Machine = [uint16]0x8664 },
-            @{ AssetName = 'Rivune-arm64.exe'; Package = 'windowsArm64'; Architecture = 'arm64'; Machine = [uint16]0xAA64 }
-          )
+          $windowsAsset = @($release.assets | Where-Object { $_.name -ceq 'Rivune-Windows.exe' })
           if ($manifestAsset.Count -ne 1 -or $manifestAsset[0].id -notmatch '^[1-9][0-9]*$') {
             throw 'GitHub Release must contain exactly one global update manifest.'
           }
-          foreach ($target in $targets) {
-            $target['Asset'] = @($release.assets | Where-Object { $_.name -ceq $target.AssetName })
-            if ($target.Asset.Count -ne 1 -or $target.Asset[0].id -notmatch '^[1-9][0-9]*$') {
-              throw "GitHub Release must contain exactly one $($target.AssetName)."
-            }
+          if ($windowsAsset.Count -ne 1 -or $windowsAsset[0].id -notmatch '^[1-9][0-9]*$') {
+            throw 'GitHub Release must contain exactly one Rivune-Windows.exe.'
           }
+
           $root = Join-Path $env:RUNNER_TEMP 'rivune-adopted-windows'
           New-Item -ItemType Directory -Force -Path $root | Out-Null
           $manifestPath = Join-Path $root 'rivune-update.json'
+          $bundlePath = Join-Path $root 'Rivune-Windows.exe'
           $headers = @{
             Accept = 'application/octet-stream'
             Authorization = "Bearer $env:GH_TOKEN"
@@ -1793,51 +1829,106 @@ jobs:
           Invoke-WebRequest `
             -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$($manifestAsset[0].id)" `
             -Headers $headers -OutFile $manifestPath
+          Invoke-WebRequest `
+            -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$($windowsAsset[0].id)" `
+            -Headers $headers -OutFile $bundlePath
 
           $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-          if ($manifest.schemaVersion -ne 2) { throw 'Global update manifest schemaVersion must be 2.' }
-          foreach ($target in $targets) {
-            $executable = Join-Path $root $target.AssetName
-            Invoke-WebRequest `
-              -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$($target.Asset[0].id)" `
-              -Headers $headers -OutFile $executable
-            $package = $manifest.packages.($target.Package)
-            $expectedUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/$($target.AssetName)"
-            if ($package.format -cne 'exe' -or $package.fileName -cne $target.AssetName -or
-                $package.url -cne $expectedUrl -or @($package.architectures).Count -ne 1 -or
-                $package.architectures[0] -cne $target.Architecture -or $package.minimumOsVersion -cne '10.0.19041.0' -or
-                $package.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
-                $package.size -isnot [long] -or $package.size -le 0 -or $package.size -gt 2147483647) {
-              throw "Global update manifest has invalid $($target.Package) executable metadata."
-            }
-            $actualSize = (Get-Item -LiteralPath $executable).Length
-            $actualHash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($actualSize -ne $package.size -or $actualHash -cne $package.sha256) {
-              throw "$($target.AssetName) size or SHA-256 does not match the global update manifest."
-            }
-            $metadataDigest = $target.Asset[0].digest
-            if ($metadataDigest -cne "sha256:$actualHash") {
-              throw "$($target.AssetName) GitHub asset digest does not match its downloaded bytes."
-            }
-            $stream = [IO.File]::OpenRead($executable)
+          if ($manifest.schemaVersion -ne 3) { throw 'Global update manifest schemaVersion must be 3.' }
+          $package = $manifest.packages.windows
+          $expectedUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/Rivune-Windows.exe"
+          if ($package.format -cne 'exe' -or $package.fileName -cne 'Rivune-Windows.exe' -or
+              $package.url -cne $expectedUrl -or @($package.architectures).Count -ne 2 -or
+              $package.architectures[0] -cne 'arm64' -or $package.architectures[1] -cne 'x64' -or
+              $package.minimumOsVersion -cne '10.0.19041.0' -or $package.signature -cne 'unsigned' -or
+              $package.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $package.size -le 0 -or $package.size -gt 2147483647) {
+            throw 'Global update manifest has invalid universal Windows package metadata.'
+          }
+          $actualSize = (Get-Item -LiteralPath $bundlePath).Length
+          $actualHash = (Get-FileHash -LiteralPath $bundlePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSize -ne $package.size -or $actualHash -cne $package.sha256) {
+            throw 'Rivune-Windows.exe size or SHA-256 does not match the global update manifest.'
+          }
+          if ($windowsAsset[0].digest -cne "sha256:$actualHash") {
+            throw 'Rivune-Windows.exe GitHub asset digest does not match its downloaded bytes.'
+          }
+
+          function Assert-PortableExecutable {
+            param(
+              [Parameter(Mandatory)][string] $Path,
+              [Parameter(Mandatory)][uint16] $Machine,
+              [Parameter(Mandatory)][string] $Label,
+              [Parameter(Mandatory)][bool] $CheckVersion
+            )
+            $stream = [IO.File]::OpenRead($Path)
             try {
               $reader = [IO.BinaryReader]::new($stream)
-              if ($reader.ReadUInt16() -ne 0x5a4d) { throw "$($target.AssetName) has no DOS PE header." }
+              if ($reader.ReadUInt16() -ne 0x5a4d) { throw "$Label has no DOS PE header." }
               $stream.Position = 0x3c
               $peOffset = $reader.ReadUInt32()
               $stream.Position = $peOffset
-              if ($reader.ReadUInt32() -ne 0x00004550) { throw "$($target.AssetName) has no PE signature." }
-              if ($reader.ReadUInt16() -ne $target.Machine) { throw "$($target.AssetName) has the wrong PE machine." }
+              if ($reader.ReadUInt32() -ne 0x00004550) { throw "$Label has no PE signature." }
+              if ($reader.ReadUInt16() -ne $Machine) { throw "$Label has the wrong PE machine." }
             } finally {
               if ($null -ne $reader) { $reader.Dispose() } else { $stream.Dispose() }
             }
-            $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($executable)
-            if ($version.FileVersion -ne $fileVersion -or $version.ProductVersion -ne $versionName) {
-              throw "$($target.AssetName) version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
+            if ($CheckVersion) {
+              $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
+              if ($version.FileVersion -ne $fileVersion -or $version.ProductVersion -ne $versionName) {
+                throw "$Label version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
+              }
             }
-            if ((Get-AuthenticodeSignature -FilePath $executable).Status -ne 'NotSigned') {
-              throw "Adopted $($target.AssetName) must remain unsigned."
+            if ((Get-AuthenticodeSignature -FilePath $Path).Status -ne 'NotSigned') {
+              throw "$Label must remain unsigned."
             }
+          }
+
+          Assert-PortableExecutable -Path $bundlePath -Machine ([uint16]0x014c) -Label 'Rivune-Windows.exe' -CheckVersion $true
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead($bundlePath)
+          try {
+            $expectedEntries = @('Rivune-Uninstall.exe', 'Rivune-arm64.exe', 'Rivune-x64.exe')
+            $actualEntries = @($archive.Entries | ForEach-Object { $_.FullName } | Sort-Object)
+            if (Compare-Object -ReferenceObject $expectedEntries -DifferenceObject $actualEntries -CaseSensitive) {
+              throw 'Rivune-Windows.exe contains an invalid embedded file set.'
+            }
+            $targets = @(
+              @{ EntryName = 'Rivune-x64.exe'; Architecture = 'x64'; Machine = [uint16]0x8664 },
+              @{ EntryName = 'Rivune-arm64.exe'; Architecture = 'arm64'; Machine = [uint16]0xAA64 }
+            )
+            foreach ($target in $targets) {
+              $entry = @($archive.Entries | Where-Object { $_.FullName -ceq $target.EntryName })
+              $declared = $package.executables.($target.Architecture)
+              if ($entry.Count -ne 1 -or $entry[0].Name -cne $target.EntryName -or
+                  $declared.fileName -cne $target.EntryName -or $declared.size -le 0 -or
+                  $declared.size -gt 2147483647 -or $declared.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                  $entry[0].Length -ne $declared.size) {
+                throw "Embedded $($target.Architecture) executable metadata is invalid."
+              }
+              $executable = Join-Path $root $target.EntryName
+              $input = $entry[0].Open()
+              $output = [IO.File]::Create($executable)
+              try { $input.CopyTo($output) } finally { $output.Dispose(); $input.Dispose() }
+              $entryHash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($entryHash -cne $declared.sha256) {
+                throw "Embedded $($target.Architecture) executable SHA-256 is invalid."
+              }
+              Assert-PortableExecutable -Path $executable -Machine $target.Machine -Label $target.EntryName -CheckVersion $true
+            }
+
+            $uninstallerEntry = @($archive.Entries | Where-Object { $_.FullName -ceq 'Rivune-Uninstall.exe' })
+            if ($uninstallerEntry.Count -ne 1 -or $uninstallerEntry[0].Name -cne 'Rivune-Uninstall.exe' -or
+                $uninstallerEntry[0].Length -le 0 -or $uninstallerEntry[0].Length -gt 2147483647) {
+              throw 'Embedded Windows uninstaller metadata is invalid.'
+            }
+            $uninstaller = Join-Path $root 'Rivune-Uninstall.exe'
+            $input = $uninstallerEntry[0].Open()
+            $output = [IO.File]::Create($uninstaller)
+            try { $input.CopyTo($output) } finally { $output.Dispose(); $input.Dispose() }
+            Assert-PortableExecutable -Path $uninstaller -Machine ([uint16]0x014c) -Label 'Rivune-Uninstall.exe' -CheckVersion $false
+          } finally {
+            $archive.Dispose()
           }
 
   promote:
@@ -1896,9 +1987,9 @@ jobs:
           set -euo pipefail
           if ! expected_asset_fingerprint="$(jq -ce '
             if (type == "array" and
-                length == 17 and
-                (map(.name) | sort) == ["Rivune-Android.apk", "Rivune-TV-Installer-Linux-arm64.zip", "Rivune-TV-Installer-Linux-x64.zip", "Rivune-TV-Installer-Windows-arm64.exe", "Rivune-TV-Installer-Windows-x64.exe", "Rivune-TV-Installer-macOS-arm64.zip", "Rivune-TV-Installer-macOS-x64.zip", "Rivune-TV-runtime.json", "Rivune-Tizen.wgt", "Rivune-arm64.exe", "Rivune-iOS-unsigned.ipa", "Rivune-macOS.dmg", "Rivune-tvOS-unsigned.ipa", "Rivune-visionOS-unsigned.ipa", "Rivune-webOS.ipk", "Rivune-x64.exe", "rivune-update.json"] and
-                (map(.id) | unique | length) == 17 and
+                length == 12 and
+                (map(.name) | sort) == ["Rivune-Android.apk", "Rivune-TV-Installer-Windows.exe", "Rivune-TV-Installer-macOS.dmg", "Rivune-TV-runtime.json", "Rivune-Tizen.wgt", "Rivune-Windows.exe", "Rivune-iOS-unsigned.ipa", "Rivune-macOS.dmg", "Rivune-tvOS-unsigned.ipa", "Rivune-visionOS-unsigned.ipa", "Rivune-webOS.ipk", "rivune-update.json"] and
+                (map(.id) | unique | length) == 12 and
                 all(.[];
                   type == "object" and
                   keys == ["digest", "id", "name", "size"] and
@@ -1968,7 +2059,7 @@ jobs:
             echo "The prepared GitHub Release does not record the effective OCI image digest exactly once." >&2
             exit 1
           fi
-          expected_assets="$(printf '%s\n' rivune-update.json Rivune-Android.apk Rivune-iOS-unsigned.ipa Rivune-tvOS-unsigned.ipa Rivune-visionOS-unsigned.ipa Rivune-macOS.dmg Rivune-x64.exe Rivune-arm64.exe Rivune-webOS.ipk Rivune-Tizen.wgt Rivune-TV-runtime.json Rivune-TV-Installer-Windows-x64.exe Rivune-TV-Installer-Windows-arm64.exe Rivune-TV-Installer-macOS-x64.zip Rivune-TV-Installer-macOS-arm64.zip Rivune-TV-Installer-Linux-x64.zip Rivune-TV-Installer-Linux-arm64.zip | sort)"
+          expected_assets="$(printf '%s\n' rivune-update.json Rivune-Android.apk Rivune-iOS-unsigned.ipa Rivune-tvOS-unsigned.ipa Rivune-visionOS-unsigned.ipa Rivune-macOS.dmg Rivune-Windows.exe Rivune-webOS.ipk Rivune-Tizen.wgt Rivune-TV-runtime.json Rivune-TV-Installer-Windows.exe Rivune-TV-Installer-macOS.dmg | sort)"
           actual_assets="$(jq -r '.assets[].name' <<<"${release}" | sort)"
           if [[ "${actual_assets}" != "${expected_assets}" ]]; then
             echo "The prepared GitHub Release asset set is incomplete or contains unexpected files." >&2
@@ -1997,9 +2088,9 @@ jobs:
           set -euo pipefail
           if ! expected_asset_fingerprint="$(jq -ce '
             if (type == "array" and
-                length == 17 and
-                (map(.name) | sort) == ["Rivune-Android.apk", "Rivune-TV-Installer-Linux-arm64.zip", "Rivune-TV-Installer-Linux-x64.zip", "Rivune-TV-Installer-Windows-arm64.exe", "Rivune-TV-Installer-Windows-x64.exe", "Rivune-TV-Installer-macOS-arm64.zip", "Rivune-TV-Installer-macOS-x64.zip", "Rivune-TV-runtime.json", "Rivune-Tizen.wgt", "Rivune-arm64.exe", "Rivune-iOS-unsigned.ipa", "Rivune-macOS.dmg", "Rivune-tvOS-unsigned.ipa", "Rivune-visionOS-unsigned.ipa", "Rivune-webOS.ipk", "Rivune-x64.exe", "rivune-update.json"] and
-                (map(.id) | unique | length) == 17 and
+                length == 12 and
+                (map(.name) | sort) == ["Rivune-Android.apk", "Rivune-TV-Installer-Windows.exe", "Rivune-TV-Installer-macOS.dmg", "Rivune-TV-runtime.json", "Rivune-Tizen.wgt", "Rivune-Windows.exe", "Rivune-iOS-unsigned.ipa", "Rivune-macOS.dmg", "Rivune-tvOS-unsigned.ipa", "Rivune-visionOS-unsigned.ipa", "Rivune-webOS.ipk", "rivune-update.json"] and
+                (map(.id) | unique | length) == 12 and
                 all(.[];
                   type == "object" and
                   keys == ["digest", "id", "name", "size"] and
@@ -2140,7 +2231,7 @@ jobs:
             echo "Final published release metadata does not match the authorized release." >&2
             exit 1
           fi
-          expected_assets="$(printf '%s\n' rivune-update.json Rivune-Android.apk Rivune-iOS-unsigned.ipa Rivune-tvOS-unsigned.ipa Rivune-visionOS-unsigned.ipa Rivune-macOS.dmg Rivune-x64.exe Rivune-arm64.exe Rivune-webOS.ipk Rivune-Tizen.wgt Rivune-TV-runtime.json Rivune-TV-Installer-Windows-x64.exe Rivune-TV-Installer-Windows-arm64.exe Rivune-TV-Installer-macOS-x64.zip Rivune-TV-Installer-macOS-arm64.zip Rivune-TV-Installer-Linux-x64.zip Rivune-TV-Installer-Linux-arm64.zip | sort)"
+          expected_assets="$(printf '%s\n' rivune-update.json Rivune-Android.apk Rivune-iOS-unsigned.ipa Rivune-tvOS-unsigned.ipa Rivune-visionOS-unsigned.ipa Rivune-macOS.dmg Rivune-Windows.exe Rivune-webOS.ipk Rivune-Tizen.wgt Rivune-TV-runtime.json Rivune-TV-Installer-Windows.exe Rivune-TV-Installer-macOS.dmg | sort)"
           actual_assets="$(jq -r '.assets[].name' <<<"${final_release}" | sort)"
           if [[ "${actual_assets}" != "${expected_assets}" ]]; then
             echo "Final published release asset set is incomplete or contains unexpected files." >&2
