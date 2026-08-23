@@ -28,11 +28,19 @@ const sha256Pattern = /^sha256:([0-9a-f]{64})$/;
 const repositoryURL = "https://github.com/moodiness/rivune";
 const semverTagPattern = /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const maximumReleaseResponseBytes = 512 * 1024;
-const installerAssetNames = [
+const universalInstallerAssetNames = [
   "Rivune-TV-Installer-Windows.exe",
   "Rivune-TV-Installer-macOS.dmg",
 ] as const;
-type InstallerAssetName = typeof installerAssetNames[number];
+const legacyInstallerAssetNames = [
+  "Rivune-TV-Installer-Windows-x64.exe",
+  "Rivune-TV-Installer-Windows-arm64.exe",
+  "Rivune-TV-Installer-macOS-x64.zip",
+  "Rivune-TV-Installer-macOS-arm64.zip",
+  "Rivune-TV-Installer-Linux-x64.zip",
+  "Rivune-TV-Installer-Linux-arm64.zip",
+] as const;
+type InstallerAssetName = typeof universalInstallerAssetNames[number] | typeof legacyInstallerAssetNames[number];
 
 type AssetName =
   | "Rivune-Android.apk"
@@ -42,7 +50,9 @@ type AssetName =
   | "Rivune-tvOS-unsigned.ipa"
   | "Rivune-visionOS-unsigned.ipa"
   | "Rivune-macOS.dmg"
-  | "Rivune-Windows.exe";
+  | "Rivune-Windows.exe"
+  | "Rivune-x64.exe"
+  | "Rivune-arm64.exe";
 
 type ReleaseAsset = {
   name: string;
@@ -76,7 +86,7 @@ type DeviceRecommendation = {
   assets: readonly AssetName[];
 };
 
-const assetSpecs: AssetSpec[] = [
+const commonAssetSpecs: AssetSpec[] = [
   {
     name: "Rivune-Android.apk",
     platform: "Android",
@@ -133,19 +143,56 @@ const assetSpecs: AssetSpec[] = [
     warningKey: "applications.asset.macos.warning",
     icon: Monitor,
   },
+];
+const universalWindowsAssetSpec: AssetSpec = {
+  name: "Rivune-Windows.exe",
+  platform: "Windows",
+  detailKey: "applications.asset.windows.detail",
+  signature: "unsigned",
+  warningKey: "applications.asset.windows.warning",
+  icon: Monitor,
+};
+const legacyWindowsAssetSpecs: AssetSpec[] = [
   {
-    name: "Rivune-Windows.exe",
+    name: "Rivune-x64.exe",
     platform: "Windows",
-    detailKey: "applications.asset.windows.detail",
+    detailKey: "applications.asset.windowsX64.detail",
     signature: "unsigned",
-    warningKey: "applications.asset.windows.warning",
+    warningKey: "applications.asset.windowsPortable.warning",
+    icon: Monitor,
+  },
+  {
+    name: "Rivune-arm64.exe",
+    platform: "Windows",
+    detailKey: "applications.asset.windowsArm.detail",
+    signature: "unsigned",
+    warningKey: "applications.asset.windowsPortable.warning",
     icon: Monitor,
   },
 ];
 
 const releaseManifestName = "rivune-update.json";
-const auxiliaryReleaseAssetNames = [releaseManifestName, "Rivune-TV-runtime.json", ...installerAssetNames] as const;
-const expectedReleaseAssetNames: readonly string[] = [...assetSpecs.map((asset) => asset.name), ...auxiliaryReleaseAssetNames];
+const universalReleaseAssetNames: readonly string[] = [
+  ...commonAssetSpecs.map((asset) => asset.name),
+  universalWindowsAssetSpec.name,
+  releaseManifestName,
+  "Rivune-TV-runtime.json",
+  ...universalInstallerAssetNames,
+];
+const legacyTVReleaseAssetNames: readonly string[] = [
+  ...commonAssetSpecs.map((asset) => asset.name),
+  ...legacyWindowsAssetSpecs.map((asset) => asset.name),
+  releaseManifestName,
+  "Rivune-TV-runtime.json",
+  ...legacyInstallerAssetNames,
+];
+const legacyReleaseAssetNames: readonly string[] = [
+  ...commonAssetSpecs
+    .filter((asset) => asset.name !== "Rivune-webOS.ipk" && asset.name !== "Rivune-Tizen.wgt")
+    .map((asset) => asset.name),
+  ...legacyWindowsAssetSpecs.map((asset) => asset.name),
+  releaseManifestName,
+];
 
 
 type UserAgentData = {
@@ -157,9 +204,13 @@ async function deviceRecommendation(): Promise<DeviceRecommendation> {
   const navigatorWithHints = navigator as Navigator & { userAgentData?: UserAgentData };
   const userAgent = navigator.userAgent;
   let platform = navigatorWithHints.userAgentData?.platform ?? navigator.platform ?? "";
+  let architecture = "";
+  let bitness = "";
   try {
-    const values = await navigatorWithHints.userAgentData?.getHighEntropyValues?.(["platform"]);
+    const values = await navigatorWithHints.userAgentData?.getHighEntropyValues?.(["architecture", "bitness", "platform"]);
     platform = values?.platform ?? platform;
+    architecture = values?.architecture?.toLowerCase() ?? "";
+    bitness = values?.bitness ?? "";
   } catch {
     // Client hints are optional; the user-agent fallback remains available.
   }
@@ -186,7 +237,13 @@ async function deviceRecommendation(): Promise<DeviceRecommendation> {
     return { labelKey: "applications.device.mac", assets: ["Rivune-macOS.dmg"] };
   }
   if (/win/i.test(platform) || /windows/i.test(userAgent)) {
-    return { labelKey: "applications.device.windows", assets: ["Rivune-Windows.exe"] };
+    if (architecture.includes("arm") || /arm64/i.test(userAgent)) {
+      return { labelKey: "applications.device.windows", assets: ["Rivune-Windows.exe", "Rivune-arm64.exe"] };
+    }
+    if (architecture === "x86" && bitness === "64" || /win64|x64|amd64/i.test(userAgent)) {
+      return { labelKey: "applications.device.windows", assets: ["Rivune-Windows.exe", "Rivune-x64.exe"] };
+    }
+    return { labelKey: "applications.device.windows", assets: ["Rivune-Windows.exe", "Rivune-x64.exe", "Rivune-arm64.exe"] };
   }
   return { labelKey: "applications.device.unknown", assets: [] };
 }
@@ -202,7 +259,7 @@ function validRelease(value: unknown): value is Release {
     !Array.isArray(release.assets)
   ) return false;
 
-  const expectedAssetNames = expectedReleaseAssetNames;
+  const expectedAssetNames = expectedAssetsForRelease(release.tag_name);
   if (release.assets.length !== expectedAssetNames.length) return false;
   const assets = new Map<string, ReleaseAsset>();
   for (const candidate of release.assets) {
@@ -260,6 +317,22 @@ function supportsLocalSigningGuide(tagName: string): boolean {
 function supportsTVInstaller(tagName: string): boolean {
   const [major, minor] = tagName.slice(1).split(".").map(Number);
   return major > 1 || major === 1 && minor >= 12;
+}
+
+function supportsUniversalReleaseAssets(tagName: string): boolean {
+  const [major, minor, patch] = tagName.slice(1).split(".").map(Number);
+  return major > 1 || major === 1 && (minor > 12 || minor === 12 && patch >= 1);
+}
+
+function expectedAssetsForRelease(tagName: string): readonly string[] {
+  if (supportsUniversalReleaseAssets(tagName)) return universalReleaseAssetNames;
+  return supportsTVInstaller(tagName) ? legacyTVReleaseAssetNames : legacyReleaseAssetNames;
+}
+
+function assetSpecsForRelease(tagName: string): readonly AssetSpec[] {
+  return supportsUniversalReleaseAssets(tagName)
+    ? [...commonAssetSpecs, universalWindowsAssetSpec]
+    : [...commonAssetSpecs, ...legacyWindowsAssetSpecs];
 }
 
 const signatureLabelKeys = {
@@ -426,28 +499,38 @@ function AppleSigningGuide({ tagName }: { tagName: string }) {
   </section>;
 }
 
-async function tvInstallerRecommendation(): Promise<InstallerAssetName> {
+async function tvInstallerRecommendation(universal: boolean): Promise<InstallerAssetName> {
   const navigatorWithHints = navigator as Navigator & { userAgentData?: UserAgentData };
   const userAgent = navigator.userAgent.toLowerCase();
   let platform = (navigatorWithHints.userAgentData?.platform ?? navigator.platform).toLowerCase();
+  let architecture = "";
   try {
-    const values = await navigatorWithHints.userAgentData?.getHighEntropyValues?.(["platform"]);
+    const values = await navigatorWithHints.userAgentData?.getHighEntropyValues?.(["architecture", "platform"]);
     platform = values?.platform?.toLowerCase() ?? platform;
+    architecture = values?.architecture?.toLowerCase() ?? "";
   } catch {
     // Client hints are optional; the user-agent fallback remains available.
   }
-  if (/mac/.test(platform) || /macintosh/.test(userAgent)) return "Rivune-TV-Installer-macOS.dmg";
-  return "Rivune-TV-Installer-Windows.exe";
+  if (universal) {
+    if (/mac/.test(platform) || /macintosh/.test(userAgent)) return "Rivune-TV-Installer-macOS.dmg";
+    return "Rivune-TV-Installer-Windows.exe";
+  }
+  const arm = architecture.includes("arm") || /arm64|aarch64/.test(userAgent) || /arm/.test(platform);
+  if (/win/.test(platform) || /windows/.test(userAgent)) return arm ? "Rivune-TV-Installer-Windows-arm64.exe" : "Rivune-TV-Installer-Windows-x64.exe";
+  if (/mac/.test(platform) || /macintosh/.test(userAgent)) return arm ? "Rivune-TV-Installer-macOS-arm64.zip" : "Rivune-TV-Installer-macOS-x64.zip";
+  return arm ? "Rivune-TV-Installer-Linux-arm64.zip" : "Rivune-TV-Installer-Linux-x64.zip";
 }
 
 function TVInstallerGuide({ release }: { release: Release }) {
   const [platform, setPlatform] = useState<"webos" | "tizen">("webos");
-  const [recommendedName, setRecommendedName] = useState<InstallerAssetName>("Rivune-TV-Installer-Windows.exe");
+  const universal = supportsUniversalReleaseAssets(release.tag_name);
+  const installerNames: readonly InstallerAssetName[] = universal ? universalInstallerAssetNames : legacyInstallerAssetNames;
+  const [recommendedName, setRecommendedName] = useState<InstallerAssetName>(installerNames[0]);
   useEffect(() => {
     let active = true;
-    void tvInstallerRecommendation().then((name) => { if (active) setRecommendedName(name); });
+    void tvInstallerRecommendation(universal).then((name) => { if (active) setRecommendedName(name); });
     return () => { active = false; };
-  }, []);
+  }, [universal]);
   const byName = new Map(release.assets.map((asset) => [asset.name, asset]));
   const installer = byName.get(recommendedName)!;
   const digest = installer.digest.replace("sha256:", "");
@@ -474,7 +557,7 @@ function TVInstallerGuide({ release }: { release: Release }) {
       </div>
     </div>
     <ol className="applications-tv-installer__steps">
-      <li><span><Download size={21} /></span><div><strong>{t("applications.tvInstaller.step.download.title")}</strong><p>{t("applications.tvInstaller.step.download.body")}</p></div></li>
+      <li><span><Download size={21} /></span><div><strong>{t("applications.tvInstaller.step.download.title")}</strong><p>{t(universal ? "applications.tvInstaller.step.download.body" : "applications.tvInstaller.step.download.bodyLegacy")}</p></div></li>
       <li><span><Cable size={21} /></span><div><strong>{t(`applications.tvInstaller.step.${platform}.title`)}</strong><p>{t(`applications.tvInstaller.step.${platform}.body`)}</p></div></li>
       <li><span><ShieldCheck size={21} /></span><div><strong>{t("applications.tvInstaller.step.install.title")}</strong><p>{t("applications.tvInstaller.step.install.body")}</p></div></li>
     </ol>
@@ -485,8 +568,8 @@ function TVInstallerGuide({ release }: { release: Release }) {
       <code>{digest}</code>
     </div>
     <details className="applications-tv-installer__alternatives">
-      <summary>{t("applications.tvInstaller.otherPlatforms")}</summary>
-      <div>{installerAssetNames.map((name) => {
+      <summary>{t(universal ? "applications.tvInstaller.otherPlatforms" : "applications.tvInstaller.otherPlatformsLegacy")}</summary>
+      <div>{installerNames.map((name) => {
         const asset = byName.get(name)!;
         return <a key={name} href={asset.browser_download_url}><span>{name}</span><small>{formatSize(asset.size)}</small></a>;
       })}</div>
@@ -528,7 +611,7 @@ export function ApplicationsPage() {
   const assets = useMemo(() => {
     if (!release) return [];
     const byName = new Map(release.assets.map((asset) => [asset.name, asset]));
-    return assetSpecs
+    return assetSpecsForRelease(release.tag_name)
       .flatMap((spec, index) => {
         const asset = byName.get(spec.name);
         return asset ? [{ spec, asset, index, recommended: recommendation.assets.includes(spec.name) }] : [];

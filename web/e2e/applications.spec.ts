@@ -56,6 +56,42 @@ const release = {
   ],
 };
 
+const legacyTag = "v1.12.0";
+const legacyAssetNames = [
+  "Rivune-Android.apk",
+  "Rivune-iOS-unsigned.ipa",
+  "Rivune-tvOS-unsigned.ipa",
+  "Rivune-visionOS-unsigned.ipa",
+  "Rivune-macOS.dmg",
+  "Rivune-x64.exe",
+  "Rivune-arm64.exe",
+  "Rivune-webOS.ipk",
+  "Rivune-Tizen.wgt",
+  "Rivune-TV-runtime.json",
+  "Rivune-TV-Installer-Windows-x64.exe",
+  "Rivune-TV-Installer-Windows-arm64.exe",
+  "Rivune-TV-Installer-macOS-x64.zip",
+  "Rivune-TV-Installer-macOS-arm64.zip",
+  "Rivune-TV-Installer-Linux-x64.zip",
+  "Rivune-TV-Installer-Linux-arm64.zip",
+  "rivune-update.json",
+];
+const legacyRelease = {
+  tag_name: legacyTag,
+  name: legacyTag,
+  html_url: `https://github.com/moodiness/rivune/releases/tag/${legacyTag}`,
+  published_at: "2026-08-23T17:47:36Z",
+  draft: false,
+  prerelease: false,
+  assets: legacyAssetNames.map((name, index) => ({
+    name,
+    state: "uploaded",
+    size: 1024 * 1024 + index,
+    digest: `sha256:${(index + 1).toString(16).padStart(2, "0").repeat(32)}`,
+    browser_download_url: `https://github.com/moodiness/rivune/releases/download/${legacyTag}/${name}`,
+  })),
+};
+
 
 async function serveRelease(page: Page) {
   await page.route(releaseEndpoint, (route) => route.fulfill({
@@ -113,6 +149,32 @@ test("lists exact stable assets, fingerprints, warnings, and QR links without bo
 });
 
 
+
+test("keeps v1.12.0 downloads available during the universal asset cutover", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "platform", { configurable: true, get: () => "Win32" });
+    Object.defineProperty(navigator, "userAgent", { configurable: true, get: () => "Mozilla/5.0 (Windows NT 10.0; ARM64) AppleWebKit/537.36 Chrome/140 Safari/537.36" });
+  });
+  await page.route(releaseEndpoint, (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(legacyRelease),
+  }));
+
+  await page.goto("/apps");
+
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByText(legacyTag, { exact: true })).toBeVisible();
+  await expect(page.locator(".applications-card")).toHaveCount(9);
+  await expect(page.locator(`[data-asset="Rivune-arm64.exe"]`)).toHaveClass(/is-recommended/);
+  await expect(page.locator(`[data-asset="Rivune-arm64.exe"]`)).toContainText("portable");
+  await expect(page.locator(`[data-asset="Rivune-Windows.exe"]`)).toHaveCount(0);
+  const installer = page.locator("#tv-installer");
+  await expect(installer.getByRole("link", { name: "Download TV installer" })).toHaveAttribute(
+    "href",
+    `https://github.com/moodiness/rivune/releases/download/${legacyTag}/Rivune-TV-Installer-Windows-arm64.exe`,
+  );
+});
 
 test("localizes the page in French and generates an exact local Apple install command", async ({ page }) => {
   await serveRelease(page);
