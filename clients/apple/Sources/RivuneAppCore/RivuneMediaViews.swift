@@ -15,7 +15,7 @@ struct RivuneMediaDetailView: View {
     @State private var roomCode = ""
 
     var body: some View {
-        NavigationView {
+        RivuneSingleColumnNavigation {
             ZStack {
                 Color.black.ignoresSafeArea()
                 if let season = model.selectedSeason {
@@ -350,7 +350,7 @@ struct RivunePlaybackSourcesView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationView {
+        RivuneSingleColumnNavigation {
             List {
                 if model.mediaLoading && model.playbackSources.isEmpty { ProgressView("Finding streams…") }
                 ForEach(model.playbackSources) { source in

@@ -157,6 +157,26 @@ private extension View {
     }
 }
 
+struct RivuneSingleColumnNavigation<Content: View>: View {
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    @ViewBuilder var body: some View {
+#if os(macOS)
+        if #available(macOS 13.0, *) {
+            NavigationStack { content }
+        } else {
+            NavigationView { content }
+        }
+#else
+        NavigationView { content }
+            .navigationViewStyle(.stack)
+#endif
+    }
+}
 
 private struct RivuneBackground: View {
     var body: some View {
@@ -260,7 +280,7 @@ private struct OfflineUnlockView: View {
     @ObservedObject var model: RivuneAppModel
 
     var body: some View {
-        NavigationView {
+        RivuneSingleColumnNavigation {
             VStack(spacing: 18) {
                 Image(systemName: "lock.fill").font(.largeTitle)
                 Text("Unlock \(profile.name)").font(.title2.bold())
@@ -885,7 +905,7 @@ private struct ProfilesView: View {
     private let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 20)]
 
     var body: some View {
-        NavigationView {
+        RivuneSingleColumnNavigation {
             ScrollView {
                 VStack(alignment: .leading, spacing: 30) {
                     HStack {
@@ -1344,7 +1364,7 @@ private struct LibraryView: View {
 
     private var homeContent: some View {
         GeometryReader { proxy in
-            NavigationView {
+            RivuneSingleColumnNavigation {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 32) {
                         LibraryHeader(
@@ -1429,7 +1449,7 @@ private struct SearchTabView: View {
     private let columns = [GridItem(.adaptive(minimum: 140, maximum: 190), spacing: 18)]
 
     var body: some View {
-        NavigationView {
+        RivuneSingleColumnNavigation {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     LibraryHeader(compact: true, switchProfile: model.chooseAnotherProfile, settings: settings, disconnect: disconnect)
@@ -1479,7 +1499,7 @@ private struct PersonalLibraryTabView: View {
     private let columns = [GridItem(.adaptive(minimum: 140, maximum: 190), spacing: 18)]
 
     var body: some View {
-        NavigationView {
+        RivuneSingleColumnNavigation {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     LibraryHeader(compact: true, switchProfile: model.chooseAnotherProfile, settings: settings, disconnect: disconnect)
@@ -1516,7 +1536,7 @@ private struct CalendarTabView: View {
     let disconnect: () -> Void
 
     var body: some View {
-        NavigationView {
+        RivuneSingleColumnNavigation {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     LibraryHeader(compact: true, switchProfile: model.chooseAnotherProfile, settings: settings, disconnect: disconnect)
