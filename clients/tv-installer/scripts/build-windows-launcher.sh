@@ -22,6 +22,7 @@ trap 'rm -rf "$build_root"' EXIT HUP INT TERM
 
 CGO_ENABLED=0 GOOS=windows GOARCH=386 go build \
   -trimpath \
+  -buildvcs=false \
   -ldflags "-s -w -X main.x64Executable=$x64_target -X main.arm64Executable=$arm64_target" \
   -o "$build_root/launcher.exe" \
   ./cmd/windows-launcher

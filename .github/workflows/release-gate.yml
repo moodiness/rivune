@@ -490,10 +490,10 @@ jobs:
             -p:IncludeAllContentForSelfExtract=true `
             -p:SelfContained=true `
             -p:WindowsAppSDKSelfContained=true `
-            -p:Version=1.12.1 `
-            -p:AssemblyVersion=1.12.1.0 `
-            -p:FileVersion=1.12.1.0 `
-            -p:InformationalVersion=1.12.1 `
+            -p:Version=1.12.2 `
+            -p:AssemblyVersion=1.12.2.0 `
+            -p:FileVersion=1.12.2.0 `
+            -p:InformationalVersion=1.12.2 `
             -p:IncludeSourceRevisionInInformationalVersion=false
           if ($LASTEXITCODE -ne 0) { throw "Windows $env:PLATFORM portable publish failed." }
 
@@ -525,7 +525,7 @@ jobs:
             if ($null -ne $reader) { $reader.Dispose() } else { $stream.Dispose() }
           }
           $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($executable)
-          if ($version.FileVersion -ne '1.12.1.0' -or $version.ProductVersion -ne '1.12.1') {
+          if ($version.FileVersion -ne '1.12.2.0' -or $version.ProductVersion -ne '1.12.2') {
             throw "Portable executable version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
           }
           if ((Get-AuthenticodeSignature -FilePath $executable).Status -ne 'NotSigned') {
@@ -558,10 +558,10 @@ jobs:
             -p:IncludeAllContentForSelfExtract=true `
             -p:SelfContained=true `
             -p:WindowsAppSDKSelfContained=true `
-            -p:Version=1.12.1 `
-            -p:AssemblyVersion=1.12.1.0 `
-            -p:FileVersion=1.12.1.0 `
-            -p:InformationalVersion=1.12.1 `
+            -p:Version=1.12.2 `
+            -p:AssemblyVersion=1.12.2.0 `
+            -p:FileVersion=1.12.2.0 `
+            -p:InformationalVersion=1.12.2 `
             -p:IncludeSourceRevisionInInformationalVersion=false
           if ($LASTEXITCODE -ne 0) { throw 'ARM64 setup payload publish failed.' }
           $arm64Files = @(Get-ChildItem -LiteralPath $arm64Publish -File -Recurse | Where-Object { $_.Extension -ne '.pdb' })
@@ -586,10 +586,10 @@ jobs:
           $bootstrapperProject = Join-Path $env:GITHUB_WORKSPACE 'clients/windows/Rivune.Bootstrapper/Rivune.Bootstrapper.csproj'
           $bootstrapperPublish = Join-Path $env:RUNNER_TEMP 'rivune-setup-bootstrapper'
           & dotnet publish $bootstrapperProject --configuration Release --runtime win-x86 --output $bootstrapperPublish --nologo `
-            -p:Version=1.12.1 `
-            -p:AssemblyVersion=1.12.1.0 `
-            -p:FileVersion=1.12.1.0 `
-            -p:InformationalVersion=1.12.1 `
+            -p:Version=1.12.2 `
+            -p:AssemblyVersion=1.12.2.0 `
+            -p:FileVersion=1.12.2.0 `
+            -p:InformationalVersion=1.12.2 `
             -p:IncludeSourceRevisionInInformationalVersion=false
           if ($LASTEXITCODE -ne 0) { throw 'Windows setup bootstrapper publish failed.' }
           $bootstrapperFiles = @(Get-ChildItem -LiteralPath $bootstrapperPublish -File -Recurse | Where-Object { $_.Extension -ne '.pdb' })

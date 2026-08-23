@@ -1,6 +1,6 @@
 {
   "id": "io.rivune.app.webos",
-  "version": "1.12.1",
+  "version": "1.12.2",
   "vendor": "Rivune",
   "type": "web",
   "main": "index.html",
