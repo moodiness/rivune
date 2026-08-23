@@ -1,4 +1,4 @@
-# Rivune v1.12.1
+# Rivune v1.12.2
 
 ## Highlights
 
@@ -8,6 +8,7 @@
 - `rivune-update.json` schema 3 records the universal Windows bundle plus the exact size and SHA-256 of each embedded architecture executable, allowing Windows updates to verify both layers before replacement.
 - Apple clients keep media, profile, library, search, calendar, and offline flows in single-column navigation instead of opening an unintended sidebar.
 - Windows localization now handles synchronous UI property callbacks without recursive writes.
+- Release validation now rebuilds the universal Windows TV installer without checkout-state metadata, so candidate and publication artifacts compare byte-for-byte.
 
 ## Installation
 
@@ -20,17 +21,18 @@
 
 ## Upgrade notes
 
-- Existing operators can set `RIVUNE_VERSION=1.12.1`, pull, and recreate Rivune. Fresh Compose deployments default to the immutable `1.12.1` image tag.
+- Existing operators can set `RIVUNE_VERSION=1.12.2`, pull, and recreate Rivune. Fresh Compose deployments default to the immutable `1.12.2` image tag.
+- `v1.12.1` was never published as a GitHub Release; v1.12.2 supersedes that failed candidate.
 - The release contains exactly twelve assets: eight application packages, `rivune-update.json`, the shared TV runtime, and the two universal TV installer companions.
-- Schema 3 is a clean update-contract cutover. Clients from v1.12.0 cannot consume the new automatic-update metadata; install v1.12.1 once from the exact GitHub Release, after which automatic checks use the universal contract.
+- Schema 3 is a clean update-contract cutover. Clients from v1.12.0 cannot consume the new automatic-update metadata; install v1.12.2 once from the exact GitHub Release, after which automatic checks use the universal contract.
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.12.1`
+- `ghcr.io/moodiness/rivune:1.12.2`
 - `ghcr.io/moodiness/rivune:1.12`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 - Provenance and SBOM attestations are published for both runnable platforms.
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.12.0...v1.12.1
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.12.0...v1.12.2
