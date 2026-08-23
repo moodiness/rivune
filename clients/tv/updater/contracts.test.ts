@@ -11,6 +11,12 @@ import {
 
 const assetNames = [
   "Rivune-Android.apk",
+  "Rivune-TV-Installer-Linux-arm64.zip",
+  "Rivune-TV-Installer-Linux-x64.zip",
+  "Rivune-TV-Installer-Windows-arm64.exe",
+  "Rivune-TV-Installer-Windows-x64.exe",
+  "Rivune-TV-Installer-macOS-arm64.zip",
+  "Rivune-TV-Installer-macOS-x64.zip",
   "Rivune-Tizen.wgt",
   "Rivune-TV-runtime.json",
   "Rivune-arm64.exe",
@@ -36,8 +42,8 @@ function release(version = "2.0.0") {
       id: index + 1,
       name,
       state: "uploaded",
-      size: name === "Rivune-TV-runtime.json" ? 4096 : 8192 + index,
-      digest: `sha256:${String((index % 9) + 1).repeat(64)}`,
+      size: name === "Rivune-TV-runtime.json" ? 4096 : name === "rivune-update.json" ? 8202 : 8192 + index,
+      digest: `sha256:${(name === "Rivune-TV-runtime.json" ? "3" : name === "rivune-update.json" ? "2" : String((index % 9) + 1)).repeat(64)}`,
       url: `https://api.github.com/repos/moodiness/rivune/releases/assets/${index + 1}`,
       browser_download_url: `https://github.com/moodiness/rivune/releases/download/${tag}/${name}`,
     })),

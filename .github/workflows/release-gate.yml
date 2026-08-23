@@ -14,6 +14,54 @@ env:
   DOCKER_BUILD_RECORD_UPLOAD: "false"
 
 jobs:
+  conventional-history:
+    name: Conventional PR and commit history
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require semantic-release Angular headers
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9][a-z0-9._/-]*\))?(!)?: .+$'
+          valid_header() { [[ "$1" =~ ${pattern} ]]; }
+          valid_header 'feat(tv): add installer companion'
+          if valid_header 'Add installer companion'; then
+            echo 'Conventional header negative fixture unexpectedly passed.' >&2
+            exit 1
+          fi
+          if [[ "${EVENT_NAME}" == pull_request ]] && ! valid_header "${PR_TITLE}"; then
+            echo "Pull request title is not semantic-release compatible: ${PR_TITLE}" >&2
+            exit 1
+          fi
+          range="${HEAD_SHA}^..${HEAD_SHA}"
+          if [[ -n "${BASE_SHA}" ]] && git cat-file -e "${BASE_SHA}^{commit}"; then
+            range="${BASE_SHA}..${HEAD_SHA}"
+          fi
+          mapfile -t subjects < <(git log --no-merges --format='%s' "${range}")
+          if (( ${#subjects[@]} == 0 )); then
+            parent_count="$(git show -s --format='%P' "${HEAD_SHA}" | wc -w)"
+            if (( parent_count < 2 )); then
+              echo "No contributor commit was found in ${range}." >&2
+              exit 1
+            fi
+          fi
+          for subject in "${subjects[@]}"; do
+            if ! valid_header "${subject}"; then
+              echo "Commit is not semantic-release compatible: ${subject}" >&2
+              exit 1
+            fi
+          done
+
   backend:
     name: Backend tests
     runs-on: ubuntu-latest
@@ -498,10 +546,38 @@ jobs:
             fi
           done
 
+  tv-installer:
+    name: TV installer companion
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: clients/tv-installer/go.mod
+          cache: false
+      - name: Test and build cross-platform TV installer companions
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd clients/tv-installer && go test ./...)
+          version="$(jq -er '.version | select(type == "string" and test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))' clients/tv/package.json)"
+          clients/tv-installer/scripts/build-release.sh "${version}" tv-installer-assets
+          expected_files="$(printf '%s\n' Rivune-TV-Installer-Windows-x64.exe Rivune-TV-Installer-Windows-arm64.exe Rivune-TV-Installer-macOS-x64.zip Rivune-TV-Installer-macOS-arm64.zip Rivune-TV-Installer-Linux-x64.zip Rivune-TV-Installer-Linux-arm64.zip | sort)"
+          actual_files="$(find tv-installer-assets -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+          [[ "${actual_files}" == "${expected_files}" ]]
+          unzip -p tv-installer-assets/Rivune-TV-Installer-Linux-x64.zip Rivune-TV-Installer-Linux-x64 > /tmp/rivune-tv-installer
+          chmod 0755 /tmp/rivune-tv-installer
+          [[ "$(/tmp/rivune-tv-installer --version)" == "${version}" ]]
+
   required-checks:
     name: Required checks
     if: ${{ always() }}
     needs:
+      - conventional-history
       - backend
       - server-windows
       - frontend
@@ -512,6 +588,7 @@ jobs:
       - container
       - container-arm64
       - tv-client
+      - tv-installer
     runs-on: ubuntu-latest
     steps:
       - name: Require every project check

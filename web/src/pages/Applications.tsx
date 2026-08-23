@@ -28,6 +28,15 @@ const sha256Pattern = /^sha256:([0-9a-f]{64})$/;
 const repositoryURL = "https://github.com/moodiness/rivune";
 const semverTagPattern = /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const maximumReleaseResponseBytes = 512 * 1024;
+const installerAssetNames = [
+  "Rivune-TV-Installer-Windows-x64.exe",
+  "Rivune-TV-Installer-Windows-arm64.exe",
+  "Rivune-TV-Installer-macOS-x64.zip",
+  "Rivune-TV-Installer-macOS-arm64.zip",
+  "Rivune-TV-Installer-Linux-x64.zip",
+  "Rivune-TV-Installer-Linux-arm64.zip",
+] as const;
+type InstallerAssetName = typeof installerAssetNames[number];
 
 type AssetName =
   | "Rivune-Android.apk"
@@ -148,8 +157,21 @@ const assetSpecs: AssetSpec[] = [
 ];
 
 const releaseManifestName = "rivune-update.json";
-const auxiliaryReleaseAssetNames = [releaseManifestName, "Rivune-TV-runtime.json"] as const;
+const auxiliaryReleaseAssetNames = [releaseManifestName, "Rivune-TV-runtime.json", ...installerAssetNames] as const;
 const expectedReleaseAssetNames: readonly string[] = [...assetSpecs.map((asset) => asset.name), ...auxiliaryReleaseAssetNames];
+const legacyReleaseAssetNames: readonly string[] = [
+  ...assetSpecs.filter((asset) => asset.name !== "Rivune-webOS.ipk" && asset.name !== "Rivune-Tizen.wgt").map((asset) => asset.name),
+  releaseManifestName,
+];
+
+function supportsTVInstaller(tagName: string): boolean {
+  const [major, minor] = tagName.slice(1).split(".").map(Number);
+  return major > 1 || major === 1 && minor >= 12;
+}
+
+function expectedAssetsForRelease(tagName: string): readonly string[] {
+  return supportsTVInstaller(tagName) ? expectedReleaseAssetNames : legacyReleaseAssetNames;
+}
 
 type UserAgentData = {
   platform?: string;
@@ -212,14 +234,16 @@ function validRelease(value: unknown): value is Release {
     release.name !== release.tag_name || release.draft !== false || release.prerelease !== false ||
     typeof release.published_at !== "string" || Number.isNaN(Date.parse(release.published_at)) ||
     release.html_url !== `https://github.com/moodiness/rivune/releases/tag/${release.tag_name}` ||
-    !Array.isArray(release.assets) || release.assets.length !== expectedReleaseAssetNames.length
+    !Array.isArray(release.assets)
   ) return false;
 
+  const expectedAssetNames = expectedAssetsForRelease(release.tag_name);
+  if (release.assets.length !== expectedAssetNames.length) return false;
   const assets = new Map<string, ReleaseAsset>();
   for (const candidate of release.assets) {
     if (typeof candidate !== "object" || candidate === null) return false;
     const asset = candidate as Partial<ReleaseAsset>;
-    if (typeof asset.name !== "string" || !expectedReleaseAssetNames.includes(asset.name) || assets.has(asset.name)) return false;
+    if (typeof asset.name !== "string" || !expectedAssetNames.includes(asset.name) || assets.has(asset.name)) return false;
     if (
       asset.state !== "uploaded" ||
       typeof asset.size !== "number" || !Number.isSafeInteger(asset.size) || asset.size <= 0 ||
@@ -228,7 +252,7 @@ function validRelease(value: unknown): value is Release {
     ) return false;
     assets.set(asset.name, asset as ReleaseAsset);
   }
-  return assets.size === expectedReleaseAssetNames.length;
+  return assets.size === expectedAssetNames.length;
 }
 
 async function loadLatestRelease(signal: AbortSignal): Promise<Release> {
@@ -326,6 +350,7 @@ function ReleaseCard({ asset, spec, recommended, signingGuideAvailable }: { asse
     </div>}
     {signingGuideAvailable && spec.signature === "unsigned" && spec.name.endsWith(".ipa") && <a className="applications-card__signing-guide" href="#apple-signing"><KeyRound size={13} /> {t("applications.card.signLocally")}</a>}
 
+    {(spec.name === "Rivune-webOS.ipk" || spec.name === "Rivune-Tizen.wgt") && <a className="applications-card__signing-guide" href="#tv-installer"><Cable size={13} /> {t("applications.card.installWithCompanion")}</a>}
     <div className="applications-card__digest">
       <div>
         <span>SHA-256</span>
@@ -432,6 +457,79 @@ function AppleSigningGuide({ tagName }: { tagName: string }) {
   </section>;
 }
 
+async function tvInstallerRecommendation(): Promise<InstallerAssetName> {
+  const navigatorWithHints = navigator as Navigator & { userAgentData?: UserAgentData };
+  const userAgent = navigator.userAgent.toLowerCase();
+  let platform = (navigatorWithHints.userAgentData?.platform ?? navigator.platform).toLowerCase();
+  let architecture = "";
+  try {
+    const values = await navigatorWithHints.userAgentData?.getHighEntropyValues?.(["architecture", "platform"]);
+    platform = values?.platform?.toLowerCase() ?? platform;
+    architecture = values?.architecture?.toLowerCase() ?? "";
+  } catch {
+    // Client hints are optional; the user-agent fallback remains available.
+  }
+  const arm = architecture.includes("arm") || /arm64|aarch64/.test(userAgent) || /arm/.test(platform);
+  if (/win/.test(platform) || /windows/.test(userAgent)) return arm ? "Rivune-TV-Installer-Windows-arm64.exe" : "Rivune-TV-Installer-Windows-x64.exe";
+  if (/mac/.test(platform) || /macintosh/.test(userAgent)) return arm ? "Rivune-TV-Installer-macOS-arm64.zip" : "Rivune-TV-Installer-macOS-x64.zip";
+  return arm ? "Rivune-TV-Installer-Linux-arm64.zip" : "Rivune-TV-Installer-Linux-x64.zip";
+}
+
+function TVInstallerGuide({ release }: { release: Release }) {
+  const [platform, setPlatform] = useState<"webos" | "tizen">("webos");
+  const [recommendedName, setRecommendedName] = useState<InstallerAssetName>("Rivune-TV-Installer-Linux-x64.zip");
+  useEffect(() => {
+    let active = true;
+    void tvInstallerRecommendation().then((name) => { if (active) setRecommendedName(name); });
+    return () => { active = false; };
+  }, []);
+  const byName = new Map(release.assets.map((asset) => [asset.name, asset]));
+  const installer = byName.get(recommendedName)!;
+  const digest = installer.digest.replace("sha256:", "");
+  const [copied, setCopied] = useState(false);
+
+  async function copyDigest() {
+    try {
+      await navigator.clipboard.writeText(digest);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  return <section className="applications-tv-installer" id="tv-installer" aria-labelledby="tv-installer-title">
+    <div className="applications-tv-installer__intro">
+      <span className="applications-kicker">{t("applications.tvInstaller.eyebrow")}</span>
+      <h2 id="tv-installer-title">{t("applications.tvInstaller.title")}</h2>
+      <p>{t("applications.tvInstaller.body")}</p>
+      <div className="applications-platform-tabs" role="tablist" aria-label={t("applications.tvInstaller.platform")}>
+        <button type="button" role="tab" aria-selected={platform === "webos"} className={platform === "webos" ? "is-active" : ""} onClick={() => setPlatform("webos")}>LG webOS</button>
+        <button type="button" role="tab" aria-selected={platform === "tizen"} className={platform === "tizen" ? "is-active" : ""} onClick={() => setPlatform("tizen")}>Samsung Tizen</button>
+      </div>
+    </div>
+    <ol className="applications-tv-installer__steps">
+      <li><span><Download size={21} /></span><div><strong>{t("applications.tvInstaller.step.download.title")}</strong><p>{t("applications.tvInstaller.step.download.body")}</p></div></li>
+      <li><span><Cable size={21} /></span><div><strong>{t(`applications.tvInstaller.step.${platform}.title`)}</strong><p>{t(`applications.tvInstaller.step.${platform}.body`)}</p></div></li>
+      <li><span><ShieldCheck size={21} /></span><div><strong>{t("applications.tvInstaller.step.install.title")}</strong><p>{t("applications.tvInstaller.step.install.body")}</p></div></li>
+    </ol>
+    <div className="applications-tv-installer__download">
+      <div><span>{t("applications.tvInstaller.recommended")}</span><strong>{recommendedName}</strong><small>{formatSize(installer.size)}</small></div>
+      <a className="button button--primary" href={installer.browser_download_url}><Download size={17} /> {t("applications.tvInstaller.download")}</a>
+      <button type="button" onClick={() => void copyDigest()}><Copy size={15} /> {t(copied ? "applications.card.copied" : "applications.tvInstaller.copyDigest")}</button>
+      <code>{digest}</code>
+    </div>
+    <details className="applications-tv-installer__alternatives">
+      <summary>{t("applications.tvInstaller.otherPlatforms")}</summary>
+      <div>{installerAssetNames.map((name) => {
+        const asset = byName.get(name)!;
+        return <a key={name} href={asset.browser_download_url}><span>{name}</span><small>{formatSize(asset.size)}</small></a>;
+      })}</div>
+    </details>
+    <aside className="applications-tv-installer__privacy"><KeyRound size={22} /><div><strong>{t("applications.tvInstaller.privacyTitle")}</strong><p>{t("applications.tvInstaller.privacyBody")}</p></div></aside>
+  </section>;
+}
+
 export function ApplicationsPage() {
   const [activeLocale, setActiveLocale] = useState<Locale>(locale === "fr" || locale === "fr-CA" ? "fr" : "en");
   const [release, setRelease] = useState<Release | null>(null);
@@ -466,7 +564,10 @@ export function ApplicationsPage() {
     if (!release) return [];
     const byName = new Map(release.assets.map((asset) => [asset.name, asset]));
     return assetSpecs
-      .map((spec, index) => ({ spec, asset: byName.get(spec.name)!, index, recommended: recommendation.assets.includes(spec.name) }))
+      .flatMap((spec, index) => {
+        const asset = byName.get(spec.name);
+        return asset ? [{ spec, asset, index, recommended: recommendation.assets.includes(spec.name) }] : [];
+      })
       .sort((left, right) => Number(right.recommended) - Number(left.recommended) || left.index - right.index);
   }, [recommendation.assets, release]);
 
@@ -532,6 +633,7 @@ export function ApplicationsPage() {
         {assets.map(({ asset, spec, recommended }) => <ReleaseCard key={spec.name} asset={asset} spec={spec} recommended={recommended} signingGuideAvailable={supportsLocalSigningGuide(release.tag_name)} />)}
       </section>
 
+      {supportsTVInstaller(release.tag_name) && <TVInstallerGuide release={release} />}
       {supportsLocalSigningGuide(release.tag_name) && <AppleSigningGuide tagName={release.tag_name} />}
     </>}
 
