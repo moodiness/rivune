@@ -8,8 +8,7 @@ const assets = [
   "Rivune-tvOS-unsigned.ipa",
   "Rivune-visionOS-unsigned.ipa",
   "Rivune-macOS.dmg",
-  "Rivune-x64.exe",
-  "Rivune-arm64.exe",
+  "Rivune-Windows.exe",
   "Rivune-webOS.ipk",
   "Rivune-Tizen.wgt",
 ].map((name, index) => ({
@@ -20,12 +19,8 @@ const assets = [
   browser_download_url: `https://github.com/moodiness/rivune/releases/download/${tag}/${name}`,
 }));
 const installerAssets = [
-  "Rivune-TV-Installer-Windows-x64.exe",
-  "Rivune-TV-Installer-Windows-arm64.exe",
-  "Rivune-TV-Installer-macOS-x64.zip",
-  "Rivune-TV-Installer-macOS-arm64.zip",
-  "Rivune-TV-Installer-Linux-x64.zip",
-  "Rivune-TV-Installer-Linux-arm64.zip",
+  "Rivune-TV-Installer-Windows.exe",
+  "Rivune-TV-Installer-macOS.dmg",
 ].map((name, index) => ({
   name,
   state: "uploaded",
@@ -60,26 +55,7 @@ const release = {
     },
   ],
 };
-const legacyTag = "v1.11.4";
-const legacyAssetNames = new Set([
-  "Rivune-Android.apk",
-  "Rivune-iOS-unsigned.ipa",
-  "Rivune-tvOS-unsigned.ipa",
-  "Rivune-visionOS-unsigned.ipa",
-  "Rivune-macOS.dmg",
-  "Rivune-x64.exe",
-  "Rivune-arm64.exe",
-  "rivune-update.json",
-]);
-const legacyRelease = {
-  ...release,
-  tag_name: legacyTag,
-  name: legacyTag,
-  html_url: `https://github.com/moodiness/rivune/releases/tag/${legacyTag}`,
-  assets: release.assets
-    .filter((asset) => legacyAssetNames.has(asset.name))
-    .map((asset) => ({ ...asset, browser_download_url: asset.browser_download_url.replace(tag, legacyTag) })),
-};
+
 
 async function serveRelease(page: Page) {
   await page.route(releaseEndpoint, (route) => route.fulfill({
@@ -106,12 +82,14 @@ test("lists exact stable assets, fingerprints, warnings, and QR links without bo
   await expect(page.getByRole("heading", { name: "Rivune on every screen." })).toBeVisible();
   await expect(page.getByText("Latest stable release")).toBeVisible();
   await expect(page.getByText(tag, { exact: true })).toBeVisible();
-  await expect(page.locator(".applications-card")).toHaveCount(9);
+  await expect(page.locator(".applications-card")).toHaveCount(8);
   await expect(page.locator(`[data-asset="Rivune-Android.apk"] code`)).toHaveText("1".repeat(64));
   await expect(page.locator(`[data-asset="Rivune-iOS-unsigned.ipa"]`)).toContainText("cannot be installed as downloaded");
   await expect(page.locator(`[data-asset="Rivune-webOS.ipk"]`).getByRole("link", { name: "Install with TV companion" })).toHaveAttribute("href", "#tv-installer");
   await expect(page.locator(`[data-asset="Rivune-Tizen.wgt"]`).getByRole("link", { name: "Install with TV companion" })).toHaveAttribute("href", "#tv-installer");
-  await expect(page.locator(`[data-asset="Rivune-x64.exe"]`)).toContainText("SmartScreen");
+  await expect(page.locator(`[data-asset="Rivune-Windows.exe"]`)).toContainText("SmartScreen");
+  await expect(page.locator(`[data-asset="Rivune-Windows.exe"]`)).toContainText("install or portable");
+  await expect(page.locator(`[data-asset="Rivune-Windows.exe"]`)).toContainText("desktop shortcut off by default");
   await expect(page.locator(`[data-asset="Rivune-iOS-unsigned.ipa"]`).getByRole("link", { name: "Sign and install locally" })).toHaveAttribute("href", "#apple-signing");
   await expect(page.locator(`[data-asset="Rivune-tvOS-unsigned.ipa"]`).getByRole("link", { name: "Sign and install locally" })).toBeVisible();
   await expect(page.locator(`[data-asset="Rivune-visionOS-unsigned.ipa"]`).getByRole("link", { name: "Sign and install locally" })).toBeVisible();
@@ -126,28 +104,15 @@ test("lists exact stable assets, fingerprints, warnings, and QR links without bo
   expect(backendRequests).toBe(0);
   const installer = page.locator("#tv-installer");
   await expect(installer.getByRole("heading", { name: "Install from your computer, without sending it your secrets." })).toBeVisible();
-  await installer.getByText("Other operating systems and architectures").click();
-  await expect(installer.getByRole("link", { name: /Rivune-TV-Installer-macOS-arm64\.zip/ })).toHaveAttribute("href", installerAssets[3].browser_download_url);
+  await installer.getByText("Other operating systems").click();
+  await expect(installer.getByRole("link", { name: /Rivune-TV-Installer-macOS\.dmg/ })).toHaveAttribute("href", installerAssets[1].browser_download_url);
   await expect(installer.getByRole("link", { name: "Download TV installer" })).toHaveAttribute("href", installerAssets[0].browser_download_url);
   await installer.getByRole("tab", { name: "Samsung Tizen" }).click();
   await expect(installer).toContainText("Prepare Tizen Studio");
   await expect(installer).toContainText("Samsung credentials remain in Tizen Studio");
 });
 
-test("keeps the public page usable before the first TV-installer release", async ({ page }) => {
-  await page.route(releaseEndpoint, (route) => route.fulfill({
-    status: 200,
-    contentType: "application/json",
-    body: JSON.stringify(legacyRelease),
-  }));
 
-  await page.goto("/apps");
-
-  await expect(page.getByText(legacyTag, { exact: true })).toBeVisible();
-  await expect(page.locator(".applications-card")).toHaveCount(7);
-  await expect(page.locator("#tv-installer")).toHaveCount(0);
-  await expect(page.locator(`[data-asset="Rivune-Android.apk"] a`, { hasText: "Download" })).toHaveAttribute("href", legacyRelease.assets[0].browser_download_url);
-});
 
 test("localizes the page in French and generates an exact local Apple install command", async ({ page }) => {
   await serveRelease(page);
@@ -159,6 +124,7 @@ test("localizes the page in French and generates an exact local Apple install co
   await expect(page.getByRole("heading", { name: "Rivune sur tous vos écrans." })).toBeVisible();
   await expect(page.getByText("Dernière release stable")).toBeVisible();
   await expect(page.locator(`[data-asset="Rivune-iOS-unsigned.ipa"]`)).toContainText("Signer et installer localement");
+  await expect(page.locator(`[data-asset="Rivune-Windows.exe"]`)).toContainText("installation ou portable");
   await expect(page.getByRole("heading", { name: "De Xcode à votre écran, sans partager une seule clé." })).toBeVisible();
   await expect(page.getByText("Vos identifiants restent en local")).toBeVisible();
 
@@ -179,7 +145,7 @@ test("localizes the page in French and generates an exact local Apple install co
   await expect(page).toHaveURL(/lang=en/);
 });
 
-test("recommends the detected Windows ARM64 executable", async ({ page }) => {
+test("recommends the universal Windows executable without architecture detection", async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "platform", { configurable: true, get: () => "Win32" });
     Object.defineProperty(navigator, "userAgent", { configurable: true, get: () => "Mozilla/5.0 (Windows NT 10.0; ARM64) AppleWebKit/537.36 Chrome/140 Safari/537.36" });
@@ -188,9 +154,9 @@ test("recommends the detected Windows ARM64 executable", async ({ page }) => {
 
   await page.goto("/apps");
 
-  await expect(page.getByText("Detected:").locator("..")).toContainText("Windows on ARM64");
-  await expect(page.locator(`[data-asset="Rivune-arm64.exe"]`)).toHaveClass(/is-recommended/);
-  await expect(page.locator(`[data-asset="Rivune-arm64.exe"]`)).toContainText("Recommended");
+  await expect(page.getByText("Detected:").locator("..")).toContainText("Windows PC");
+  await expect(page.locator(`[data-asset="Rivune-Windows.exe"]`)).toHaveClass(/is-recommended/);
+  await expect(page.locator(`[data-asset="Rivune-Windows.exe"]`)).toContainText("Recommended");
 });
 
 test("rejects release metadata containing an unexpected asset", async ({ page }) => {
@@ -233,6 +199,6 @@ test("rejects failed metadata and retries a validated response", async ({ page }
   unavailable = false;
   await page.getByRole("button", { name: "Try again" }).click();
 
-  await expect(page.locator(".applications-card")).toHaveCount(9);
+  await expect(page.locator(".applications-card")).toHaveCount(8);
   expect(requests).toBeGreaterThanOrEqual(2);
 });
