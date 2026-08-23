@@ -75,11 +75,11 @@ The current solo-maintainer policy uses `moodiness` as release reviewer and perm
 
 ## Published artifacts
 
-A stable release contains exactly 17 assets:
+A stable release contains exactly 12 assets:
 
-- nine application packages: Android, iOS, tvOS, visionOS, macOS, Windows x64/ARM64, webOS, and Tizen;
+- eight application packages: Android, iOS, tvOS, visionOS, macOS, one universal Windows setup, webOS, and Tizen;
 - `rivune-update.json` and the shared TV runtime;
-- six TV-installer companions for Windows, macOS, and Linux on x64/ARM64.
+- two universal TV-installer companions: one Windows EXE and one macOS DMG.
 
 The OCI index at `ghcr.io/moodiness/rivune` contains only `linux/amd64` and `linux/arm64`, with provenance and SBOM attestations. Stable releases move the exact version, `major.minor`, `major`, and `latest`; prereleases move only their exact tag. Historical releases retain their original layouts.
 
@@ -90,7 +90,7 @@ docker buildx imagetools inspect "${image}"
 gh release view "${tag}" --json assets --jq '.assets[] | [.name,.digest] | @tsv'
 ```
 
-Confirm the annotated tag, curated notes, 17 assets, two runnable OCI platforms, and two attestation manifests. Verify the APK with `apksigner verify --verbose --print-certs`; both Windows executables must report `NotSigned` from `Get-AuthenticodeSignature`.
+Confirm the annotated tag, curated notes, 12 assets, two runnable OCI platforms, and two attestation manifests. Verify the APK with `apksigner verify --verbose --print-certs`; the universal Windows setup must report `NotSigned` from `Get-AuthenticodeSignature`.
 
 ## Failure and retry
 
