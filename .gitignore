@@ -26,6 +26,9 @@ clients/apple/.build/
 clients/apple/.build-*/
 clients/apple/**/build/
 clients/apple/**/.build/
+clients/tv/node_modules/
+clients/tv/dist/
+clients/tv/*.tsbuildinfo
 
 clients/windows/**/bin/
 clients/windows/**/obj/

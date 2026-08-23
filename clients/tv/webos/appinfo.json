@@ -1,0 +1,18 @@
+{
+  "id": "io.rivune.app.webos",
+  "version": "1.12.0",
+  "vendor": "Rivune",
+  "type": "web",
+  "main": "index.html",
+  "title": "Rivune",
+  "appDescription": "Rivune self-hosted media client for LG webOS TV",
+  "icon": "icon.png",
+  "largeIcon": "largeIcon.png",
+  "bgImage": "background.png",
+  "splashBackground": "splash.png",
+  "splashColor": "#000000",
+  "backgroundColor": "#000000",
+  "resolution": "1920x1080",
+  "disableBackHistoryAPI": true,
+  "handlesRelaunch": true
+}

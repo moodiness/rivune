@@ -1,24 +1,21 @@
-# Rivune v1.11.5
+# Rivune v1.12.0
 
 ## Highlights
 
-- Rivune's native Android, iPhone, iPad, Apple TV, Apple Vision Pro, Mac, and Windows interfaces are now available in French, Spanish, German, Italian, and Brazilian Portuguese, with English as the fallback.
-- Android adds a device-local **App language** setting with **System**, English, French, Spanish, German, Italian, and Portuguese (Brazil) choices. Selecting a language recreates the activity so the complete phone, tablet, and TV interface updates immediately.
-- Apple clients use the language selected by iOS, iPadOS, tvOS, visionOS, or macOS. The same localization catalog is embedded in every Apple target, including playback controls, accessibility labels, settings, offline playback, diagnostics presentation, and update status.
-- Windows follows the effective profile interface language, then the connected server language, then the Windows UI language. Changing the profile setting refreshes the current native interface without restarting Rivune.
-- Server-provided media titles, collection names, profile names, provider data, and error details remain unchanged. Only Rivune-owned interface copy is translated.
-- Translation catalogs preserve all formatting placeholders and keep unsupported locales on the complete English interface rather than mixing partial translations.
+- Rivune now ships dedicated packaged clients for compatible LG webOS and Samsung Tizen televisions. They are TV applications, not wrappers around the server frontend.
+- Both TV clients use the protocol-v20 TV scope for self-hosted server selection, device-code pairing, `profileContext` browsing, and playback source resolution.
+- A remote-first interface supports directional-pad navigation, and playback uses each platform's native media stack.
+- The release adds `Rivune-webOS.ipk`, `Rivune-Tizen.wgt`, and a shared `Rivune-TV-runtime.json` payload without changing established Android, Apple, Windows, or `rivune-update.json` asset names.
+- Android, Apple, and Windows device pairing now survives application relaunches and retryable refresh failures. Active native pairings are migrated and remain refreshable until the user disconnects or an administrator revokes the session or device.
 
-## Supported interface languages
+## TV installation
 
-- English
-- French
-- Spanish
-- German
-- Italian
-- Portuguese (Brazil)
+- Install `Rivune-webOS.ipk` on a compatible LG television through LG Developer Mode tooling.
+- `Rivune-Tizen.wgt` is published unsigned. Sign it locally with an appropriate Samsung/Tizen certificate profile before installing it on a compatible Samsung television.
+- Neither packaged client contains a hosted Rivune account or fixed catalogue. On first run, select or enter the self-hosted Rivune server and complete device-code pairing.
+- After the first install, both TV clients check the latest stable GitHub Release, validate `rivune-update.json`, verify the separate runtime payload by its declared size and SHA-256, and activate it on restart. A failed cached-runtime startup rolls back to the packaged runtime.
 
-## Application installation
+## Other application installation
 
 - Download `Rivune-x64.exe` on x64 Windows or `Rivune-arm64.exe` on ARM64 Windows. Windows 10 build 19041 or newer is required. The unsigned executables may trigger SmartScreen; verify the matching GitHub Release URL and asset SHA-256.
 - `Rivune-iOS-unsigned.ipa`, `Rivune-tvOS-unsigned.ipa`, and `Rivune-visionOS-unsigned.ipa` must be re-signed with an identity and provisioning profile authorized for the destination device. Stock devices cannot install them as downloaded.
@@ -27,18 +24,16 @@
 
 ## Upgrade notes
 
-- This patch release adds no database migration. The current schema remains unchanged from v1.11.0.
-- Existing operators can set `RIVUNE_VERSION=1.11.5`, pull, and recreate Rivune. Fresh Compose deployments now default to the immutable `1.11.5` image tag.
-- The Android app-language choice is stored only in the app's private preferences. Apple uses platform language selection. Windows uses existing effective profile and discovery settings; no new credential or permission is introduced.
-- GitHub publishes exactly eight release assets: `Rivune-Android.apk`, the three unsigned IPA files, `Rivune-macOS.dmg`, `rivune-update.json`, `Rivune-x64.exe`, and `Rivune-arm64.exe`.
+- Existing operators can set `RIVUNE_VERSION=1.12.0`, pull, and recreate Rivune. Fresh Compose deployments now default to the immutable `1.12.0` image tag.
+- GitHub publishes exactly eleven release assets: `Rivune-Android.apk`, `Rivune-iOS-unsigned.ipa`, `Rivune-tvOS-unsigned.ipa`, `Rivune-visionOS-unsigned.ipa`, `Rivune-macOS.dmg`, `rivune-update.json`, `Rivune-x64.exe`, `Rivune-arm64.exe`, `Rivune-webOS.ipk`, `Rivune-Tizen.wgt`, and `Rivune-TV-runtime.json`. The manifest remains the authoritative contract; the runtime file is the verified implementation payload.
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.11.5`
-- `ghcr.io/moodiness/rivune:1.11`
+- `ghcr.io/moodiness/rivune:1.12.0`
+- `ghcr.io/moodiness/rivune:1.12`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 - Provenance and SBOM attestations are published for both runnable platforms.
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.11.4...v1.11.5
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.11.5...v1.12.0

@@ -185,6 +185,79 @@ jobs:
           retention-days: 7
           compression-level: 0
           overwrite: false
+
+  tv-assets:
+    name: Validate packaged TV release assets
+    if: needs.authorize.outputs.authorized == 'true'
+    needs:
+      - authorize
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_name: tv-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out the approved main commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          persist-credentials: false
+      - name: Download candidate TV release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: tv-release-assets-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: tv-release-assets
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: clients/tv/package-lock.json
+      - name: Install TV client dependencies
+        working-directory: clients/tv
+        run: npm ci
+      - name: Rebuild and verify immutable TV release assets
+        env:
+          RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(jq -er '.version | select(type == "string" and test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))' clients/tv/package.json)"
+          release_version="${RELEASE_TAG#v}"
+          release_version="${release_version%%+*}"
+          release_version="${release_version%%-*}"
+          if [[ "${release_version}" != "${package_version}" ]]; then
+            echo "TV client version ${package_version} does not match release core version ${release_version}." >&2
+            exit 1
+          fi
+          expected_files="$(printf '%s\n' Rivune-Tizen.wgt Rivune-TV-runtime.json Rivune-webOS.ipk | sort)"
+          actual_files="$(find tv-release-assets -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+          if [[ "${actual_files}" != "${expected_files}" ]]; then
+            echo 'Candidate artifact does not contain the exact TV release asset set.' >&2
+            exit 1
+          fi
+          npm --prefix clients/tv run build:platforms
+          for asset in Rivune-webOS.ipk Rivune-Tizen.wgt Rivune-TV-runtime.json; do
+            size="$(stat -c %s "tv-release-assets/${asset}")"
+            if (( size <= 0 || size > 268435456 )); then
+              echo "${asset} size is invalid: ${size} bytes." >&2
+              exit 1
+            fi
+            cmp "clients/tv/dist/packages/${asset}" "tv-release-assets/${asset}"
+          done
+      - name: Upload validated immutable TV release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tv-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tv-release-assets/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+
   windows-asset:
     name: Build unsigned Windows release assets
     if: needs.authorize.outputs.authorized == 'true'
@@ -621,6 +694,7 @@ jobs:
       - build-assets
       - apple-assets
       - sign-android
+      - tv-assets
     runs-on: ubuntu-latest
     outputs:
       artifact_name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}
@@ -649,6 +723,11 @@ jobs:
         with:
           name: ${{ needs.apple-assets.outputs.artifact_name }}
           path: release-assets
+      - name: Download immutable packaged TV release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.tv-assets.outputs.artifact_name }}
+          path: release-assets
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -673,6 +752,9 @@ jobs:
           RIVUNE_RELEASE_TVOS_ASSET_NAME: Rivune-tvOS-unsigned.ipa
           RIVUNE_RELEASE_VISIONOS_ASSET_NAME: Rivune-visionOS-unsigned.ipa
           RIVUNE_RELEASE_MACOS_ASSET_NAME: Rivune-macOS.dmg
+          RIVUNE_RELEASE_WEBOS_ASSET_NAME: Rivune-webOS.ipk
+          RIVUNE_RELEASE_TIZEN_ASSET_NAME: Rivune-Tizen.wgt
+          RIVUNE_RELEASE_TV_RUNTIME_ASSET_NAME: Rivune-TV-runtime.json
         shell: bash
         run: |
           set -euo pipefail
@@ -686,6 +768,9 @@ jobs:
             RIVUNE_RELEASE_TVOS_ASSET_NAME \
             RIVUNE_RELEASE_VISIONOS_ASSET_NAME \
             RIVUNE_RELEASE_MACOS_ASSET_NAME \
+            RIVUNE_RELEASE_WEBOS_ASSET_NAME \
+            RIVUNE_RELEASE_TIZEN_ASSET_NAME \
+            RIVUNE_RELEASE_TV_RUNTIME_ASSET_NAME \
             RIVUNE_RELEASE_WINDOWS_X64_ASSET_NAME \
             RIVUNE_RELEASE_WINDOWS_ARM64_ASSET_NAME \
             RIVUNE_RELEASE_URL \
@@ -705,6 +790,9 @@ jobs:
           tvos_asset_url="$(release_asset_url "${RIVUNE_RELEASE_TVOS_ASSET_NAME}")"
           visionos_asset_url="$(release_asset_url "${RIVUNE_RELEASE_VISIONOS_ASSET_NAME}")"
           macos_asset_url="$(release_asset_url "${RIVUNE_RELEASE_MACOS_ASSET_NAME}")"
+          webos_asset_url="$(release_asset_url "${RIVUNE_RELEASE_WEBOS_ASSET_NAME}")"
+          tizen_asset_url="$(release_asset_url "${RIVUNE_RELEASE_TIZEN_ASSET_NAME}")"
+          tv_runtime_asset_url="$(release_asset_url "${RIVUNE_RELEASE_TV_RUNTIME_ASSET_NAME}")"
           (
             cd clients/update
             go run . generate \
@@ -713,6 +801,9 @@ jobs:
               --tvos-archive "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_TVOS_ASSET_NAME}" \
               --visionos-archive "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_VISIONOS_ASSET_NAME}" \
               --macos-disk-image "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_MACOS_ASSET_NAME}" \
+              --webos-package "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_WEBOS_ASSET_NAME}" \
+              --tizen-package "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_TIZEN_ASSET_NAME}" \
+              --tv-runtime "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_TV_RUNTIME_ASSET_NAME}" \
               --output "${GITHUB_WORKSPACE}/release-assets/rivune-update.json" \
               --channel "${RIVUNE_RELEASE_CHANNEL}" \
               --tag-name "${RELEASE_TAG}" \
@@ -723,6 +814,9 @@ jobs:
               --tvos-archive-url "${tvos_asset_url}" \
               --visionos-archive-url "${visionos_asset_url}" \
               --macos-disk-image-url "${macos_asset_url}" \
+              --webos-package-url "${webos_asset_url}" \
+              --tizen-package-url "${tizen_asset_url}" \
+              --tv-runtime-url "${tv_runtime_asset_url}" \
               --application-id io.rivune.app \
               --build-version "${RIVUNE_RELEASE_VERSION_CODE}" \
               --signing-certificate-sha256 "${RIVUNE_RELEASE_SIGNING_CERT_SHA256}" \
@@ -736,6 +830,9 @@ jobs:
               --tvos-archive "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_TVOS_ASSET_NAME}" \
               --visionos-archive "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_VISIONOS_ASSET_NAME}" \
               --macos-disk-image "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_MACOS_ASSET_NAME}" \
+              --webos-package "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_WEBOS_ASSET_NAME}" \
+              --tizen-package "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_TIZEN_ASSET_NAME}" \
+              --tv-runtime "${GITHUB_WORKSPACE}/release-assets/${RIVUNE_RELEASE_TV_RUNTIME_ASSET_NAME}" \
               --channel "${RIVUNE_RELEASE_CHANNEL}" \
               --tag-name "${RELEASE_TAG}" \
               --release-url "${RIVUNE_RELEASE_URL}" \
@@ -744,6 +841,9 @@ jobs:
               --tvos-archive-url "${tvos_asset_url}" \
               --visionos-archive-url "${visionos_asset_url}" \
               --macos-disk-image-url "${macos_asset_url}" \
+              --webos-package-url "${webos_asset_url}" \
+              --tizen-package-url "${tizen_asset_url}" \
+              --tv-runtime-url "${tv_runtime_asset_url}" \
               --application-id io.rivune.app \
               --build-version "${RIVUNE_RELEASE_VERSION_CODE}" \
               --signing-certificate-sha256 "${RIVUNE_RELEASE_SIGNING_CERT_SHA256}" \
@@ -876,7 +976,10 @@ jobs:
           macos_asset_name='Rivune-macOS.dmg'
           windows_x64_asset_name='Rivune-x64.exe'
           windows_arm64_asset_name='Rivune-arm64.exe'
-          expected_files="$(printf '%s\n' rivune-update.json "${asset_name}" "${ios_asset_name}" "${tvos_asset_name}" "${visionos_asset_name}" "${macos_asset_name}" "${windows_x64_asset_name}" "${windows_arm64_asset_name}" | sort)"
+          webos_asset_name='Rivune-webOS.ipk'
+          tizen_asset_name='Rivune-Tizen.wgt'
+          tv_runtime_asset_name='Rivune-TV-runtime.json'
+          expected_files="$(printf '%s\n' rivune-update.json "${asset_name}" "${ios_asset_name}" "${tvos_asset_name}" "${visionos_asset_name}" "${macos_asset_name}" "${windows_x64_asset_name}" "${windows_arm64_asset_name}" "${webos_asset_name}" "${tizen_asset_name}" "${tv_runtime_asset_name}" | sort)"
           actual_files="$(find release-assets -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
           if [[ "${actual_files}" != "${expected_files}" ]]; then
             echo "Immutable artifact does not contain the exact release asset set." >&2
@@ -896,6 +999,13 @@ jobs:
               exit 1
             fi
           done
+          for tv_asset in "${webos_asset_name}" "${tizen_asset_name}" "${tv_runtime_asset_name}"; do
+            tv_size="$(stat -c %s "release-assets/${tv_asset}")"
+            if (( tv_size <= 0 || tv_size > 268435456 )); then
+              echo "${tv_asset} size is invalid: ${tv_size} bytes." >&2
+              exit 1
+            fi
+          done
           if [[ "${RELEASE_STABLE}" == true ]]; then
             expected_channel=stable
           else
@@ -909,6 +1019,9 @@ jobs:
           expected_macos_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${macos_asset_name}"
           expected_windows_x64_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_x64_asset_name}"
           expected_windows_arm64_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_arm64_asset_name}"
+          expected_webos_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${webos_asset_name}"
+          expected_tizen_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${tizen_asset_name}"
+          expected_tv_runtime_asset_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${tv_runtime_asset_name}"
           (
             cd clients/update
             go run . validate \
@@ -917,6 +1030,9 @@ jobs:
               --tvos-archive "${GITHUB_WORKSPACE}/release-assets/${tvos_asset_name}" \
               --visionos-archive "${GITHUB_WORKSPACE}/release-assets/${visionos_asset_name}" \
               --macos-disk-image "${GITHUB_WORKSPACE}/release-assets/${macos_asset_name}" \
+              --webos-package "${GITHUB_WORKSPACE}/release-assets/${webos_asset_name}" \
+              --tizen-package "${GITHUB_WORKSPACE}/release-assets/${tizen_asset_name}" \
+              --tv-runtime "${GITHUB_WORKSPACE}/release-assets/${tv_runtime_asset_name}" \
               --channel "${expected_channel}" \
               --tag-name "${RELEASE_TAG}" \
               --release-url "${expected_release_url}" \
@@ -925,6 +1041,9 @@ jobs:
               --tvos-archive-url "${expected_tvos_asset_url}" \
               --visionos-archive-url "${expected_visionos_asset_url}" \
               --macos-disk-image-url "${expected_macos_asset_url}" \
+              --webos-package-url "${expected_webos_asset_url}" \
+              --tizen-package-url "${expected_tizen_asset_url}" \
+              --tv-runtime-url "${expected_tv_runtime_asset_url}" \
               --application-id io.rivune.app \
               --build-version "$(jq -er '.packages.android.buildVersion' "${GITHUB_WORKSPACE}/release-assets/rivune-update.json")" \
               --signing-certificate-sha256 "$(jq -er '.packages.android.signingCertificateSha256' "${GITHUB_WORKSPACE}/release-assets/rivune-update.json")" \
@@ -1132,6 +1251,9 @@ jobs:
             local macos_name='Rivune-macOS.dmg'
             local windows_x64_name='Rivune-x64.exe'
             local windows_arm64_name='Rivune-arm64.exe'
+            local webos_name='Rivune-webOS.ipk'
+            local tizen_name='Rivune-Tizen.wgt'
+            local tv_runtime_name='Rivune-TV-runtime.json'
             local -a expected_names=(
               rivune-update.json
               "${apk_name}"
@@ -1141,6 +1263,9 @@ jobs:
               "${macos_name}"
               "${windows_x64_name}"
               "${windows_arm64_name}"
+              "${webos_name}"
+              "${tizen_name}"
+              "${tv_runtime_name}"
             )
             local -A seen=()
 
@@ -1161,7 +1286,7 @@ jobs:
                 return 1
               fi
               case "${release_asset_name}" in
-                rivune-update.json|"${apk_name}"|"${ios_name}"|"${tvos_name}"|"${visionos_name}"|"${macos_name}"|"${windows_x64_name}"|"${windows_arm64_name}") ;;
+                rivune-update.json|"${apk_name}"|"${ios_name}"|"${tvos_name}"|"${visionos_name}"|"${macos_name}"|"${windows_x64_name}"|"${windows_arm64_name}"|"${webos_name}"|"${tizen_name}"|"${tv_runtime_name}") ;;
                 *)
                   echo "The partial GitHub Release contains an unexpected asset: ${release_asset_name}" >&2
                   return 1
@@ -1222,6 +1347,7 @@ jobs:
                 "${ios_name}"|"${tvos_name}"|"${visionos_name}") content_type='application/octet-stream' ;;
                 "${macos_name}") content_type='application/x-apple-diskimage' ;;
                 "${windows_x64_name}"|"${windows_arm64_name}") content_type='application/vnd.microsoft.portable-executable' ;;
+                "${webos_name}"|"${tizen_name}"|"${tv_runtime_name}") content_type='application/octet-stream' ;;
               esac
               upload_release_asset "release-assets/${release_asset_name}" "${content_type}"
             done
@@ -1269,8 +1395,11 @@ jobs:
             local macos_name='Rivune-macOS.dmg'
             local windows_x64_name='Rivune-x64.exe'
             local windows_arm64_name='Rivune-arm64.exe'
+            local webos_name='Rivune-webOS.ipk'
+            local tizen_name='Rivune-Tizen.wgt'
+            local tv_runtime_name='Rivune-TV-runtime.json'
             local expected_assets actual_assets expected_channel expected_release_url expected_apk_url expected_ios_url expected_tvos_url expected_visionos_url expected_macos_url expected_windows_x64_url expected_windows_arm64_url
-            expected_assets="$(printf '%s\n' rivune-update.json "${apk_name}" "${ios_name}" "${tvos_name}" "${visionos_name}" "${macos_name}" "${windows_x64_name}" "${windows_arm64_name}" | sort)"
+            expected_assets="$(printf '%s\n' rivune-update.json "${apk_name}" "${ios_name}" "${tvos_name}" "${visionos_name}" "${macos_name}" "${windows_x64_name}" "${windows_arm64_name}" "${webos_name}" "${tizen_name}" "${tv_runtime_name}" | sort)"
             actual_assets="$(jq -r '.assets[].name' <<<"${release_json}" | sort)"
             if [[ "${actual_assets}" != "${expected_assets}" ]]; then
               echo "The GitHub Release asset set is incomplete or contains unexpected files." >&2
@@ -1321,7 +1450,10 @@ jobs:
               "${visionos_name}" \
               "${macos_name}" \
               "${windows_x64_name}" \
-              "${windows_arm64_name}"; do
+              "${windows_arm64_name}" \
+              "${webos_name}" \
+              "${tizen_name}" \
+              "${tv_runtime_name}"; do
               adopted_asset_sha="$(sha256sum "adopted-release-assets/${trusted_asset}" | cut -d ' ' -f1)"
               trusted_asset_sha="$(sha256sum "release-assets/${trusted_asset}" | cut -d ' ' -f1)"
               if [[ "${adopted_asset_sha}" != "${trusted_asset_sha}" ]]; then
@@ -1343,6 +1475,9 @@ jobs:
             expected_macos_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${macos_name}"
             expected_windows_x64_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_x64_name}"
             expected_windows_arm64_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${windows_arm64_name}"
+            expected_webos_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${webos_name}"
+            expected_tizen_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${tizen_name}"
+            expected_tv_runtime_url="https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${tv_runtime_name}"
             (
               cd clients/update
               go run . validate \
@@ -1351,6 +1486,9 @@ jobs:
                 --tvos-archive "${GITHUB_WORKSPACE}/adopted-release-assets/${tvos_name}" \
                 --visionos-archive "${GITHUB_WORKSPACE}/adopted-release-assets/${visionos_name}" \
                 --macos-disk-image "${GITHUB_WORKSPACE}/adopted-release-assets/${macos_name}" \
+                --webos-package "${GITHUB_WORKSPACE}/adopted-release-assets/${webos_name}" \
+                --tizen-package "${GITHUB_WORKSPACE}/adopted-release-assets/${tizen_name}" \
+                --tv-runtime "${GITHUB_WORKSPACE}/adopted-release-assets/${tv_runtime_name}" \
                 --channel "${expected_channel}" \
                 --tag-name "${RELEASE_TAG}" \
                 --release-url "${expected_release_url}" \
@@ -1359,6 +1497,9 @@ jobs:
                 --tvos-archive-url "${expected_tvos_url}" \
                 --visionos-archive-url "${expected_visionos_url}" \
                 --macos-disk-image-url "${expected_macos_url}" \
+                --webos-package-url "${expected_webos_url}" \
+                --tizen-package-url "${expected_tizen_url}" \
+                --tv-runtime-url "${expected_tv_runtime_url}" \
                 --windows-x64-executable "${GITHUB_WORKSPACE}/adopted-release-assets/${windows_x64_name}" \
                 --windows-x64-executable-url "${expected_windows_x64_url}" \
                 --windows-arm64-executable "${GITHUB_WORKSPACE}/adopted-release-assets/${windows_arm64_name}" \
@@ -1477,9 +1618,9 @@ jobs:
           if ! asset_fingerprint="$(jq -ce '
             .assets as $assets |
             if (($assets | type) == "array" and
-                ($assets | length) == 8 and
-                ([$assets[].name] | sort) == ["Rivune-Android.apk", "Rivune-arm64.exe", "Rivune-iOS-unsigned.ipa", "Rivune-macOS.dmg", "Rivune-tvOS-unsigned.ipa", "Rivune-visionOS-unsigned.ipa", "Rivune-x64.exe", "rivune-update.json"] and
-                ([ $assets[].id ] | unique | length) == 8 and
+                ($assets | length) == 11 and
+                ([$assets[].name] | sort) == ["Rivune-Android.apk", "Rivune-TV-runtime.json", "Rivune-Tizen.wgt", "Rivune-arm64.exe", "Rivune-iOS-unsigned.ipa", "Rivune-macOS.dmg", "Rivune-tvOS-unsigned.ipa", "Rivune-visionOS-unsigned.ipa", "Rivune-webOS.ipk", "Rivune-x64.exe", "rivune-update.json"] and
+                ([ $assets[].id ] | unique | length) == 11 and
                 all($assets[];
                   (.id | type) == "number" and .id > 0 and .id == (.id | floor) and
                   (.name | type) == "string" and
@@ -1670,9 +1811,9 @@ jobs:
           set -euo pipefail
           if ! expected_asset_fingerprint="$(jq -ce '
             if (type == "array" and
-                length == 8 and
-                (map(.name) | sort) == ["Rivune-Android.apk", "Rivune-arm64.exe", "Rivune-iOS-unsigned.ipa", "Rivune-macOS.dmg", "Rivune-tvOS-unsigned.ipa", "Rivune-visionOS-unsigned.ipa", "Rivune-x64.exe", "rivune-update.json"] and
-                (map(.id) | unique | length) == 8 and
+                length == 11 and
+                (map(.name) | sort) == ["Rivune-Android.apk", "Rivune-TV-runtime.json", "Rivune-Tizen.wgt", "Rivune-arm64.exe", "Rivune-iOS-unsigned.ipa", "Rivune-macOS.dmg", "Rivune-tvOS-unsigned.ipa", "Rivune-visionOS-unsigned.ipa", "Rivune-webOS.ipk", "Rivune-x64.exe", "rivune-update.json"] and
+                (map(.id) | unique | length) == 11 and
                 all(.[];
                   type == "object" and
                   keys == ["digest", "id", "name", "size"] and
@@ -1742,7 +1883,7 @@ jobs:
             echo "The prepared GitHub Release does not record the effective OCI image digest exactly once." >&2
             exit 1
           fi
-          expected_assets="$(printf '%s\n' rivune-update.json Rivune-Android.apk Rivune-iOS-unsigned.ipa Rivune-tvOS-unsigned.ipa Rivune-visionOS-unsigned.ipa Rivune-macOS.dmg Rivune-x64.exe Rivune-arm64.exe | sort)"
+          expected_assets="$(printf '%s\n' rivune-update.json Rivune-Android.apk Rivune-iOS-unsigned.ipa Rivune-tvOS-unsigned.ipa Rivune-visionOS-unsigned.ipa Rivune-macOS.dmg Rivune-x64.exe Rivune-arm64.exe Rivune-webOS.ipk Rivune-Tizen.wgt Rivune-TV-runtime.json | sort)"
           actual_assets="$(jq -r '.assets[].name' <<<"${release}" | sort)"
           if [[ "${actual_assets}" != "${expected_assets}" ]]; then
             echo "The prepared GitHub Release asset set is incomplete or contains unexpected files." >&2
@@ -1771,9 +1912,9 @@ jobs:
           set -euo pipefail
           if ! expected_asset_fingerprint="$(jq -ce '
             if (type == "array" and
-                length == 8 and
-                (map(.name) | sort) == ["Rivune-Android.apk", "Rivune-arm64.exe", "Rivune-iOS-unsigned.ipa", "Rivune-macOS.dmg", "Rivune-tvOS-unsigned.ipa", "Rivune-visionOS-unsigned.ipa", "Rivune-x64.exe", "rivune-update.json"] and
-                (map(.id) | unique | length) == 8 and
+                length == 11 and
+                (map(.name) | sort) == ["Rivune-Android.apk", "Rivune-TV-runtime.json", "Rivune-Tizen.wgt", "Rivune-arm64.exe", "Rivune-iOS-unsigned.ipa", "Rivune-macOS.dmg", "Rivune-tvOS-unsigned.ipa", "Rivune-visionOS-unsigned.ipa", "Rivune-webOS.ipk", "Rivune-x64.exe", "rivune-update.json"] and
+                (map(.id) | unique | length) == 11 and
                 all(.[];
                   type == "object" and
                   keys == ["digest", "id", "name", "size"] and
@@ -1914,7 +2055,7 @@ jobs:
             echo "Final published release metadata does not match the authorized release." >&2
             exit 1
           fi
-          expected_assets="$(printf '%s\n' rivune-update.json Rivune-Android.apk Rivune-iOS-unsigned.ipa Rivune-tvOS-unsigned.ipa Rivune-visionOS-unsigned.ipa Rivune-macOS.dmg Rivune-x64.exe Rivune-arm64.exe | sort)"
+          expected_assets="$(printf '%s\n' rivune-update.json Rivune-Android.apk Rivune-iOS-unsigned.ipa Rivune-tvOS-unsigned.ipa Rivune-visionOS-unsigned.ipa Rivune-macOS.dmg Rivune-x64.exe Rivune-arm64.exe Rivune-webOS.ipk Rivune-Tizen.wgt Rivune-TV-runtime.json | sort)"
           actual_assets="$(jq -r '.assets[].name' <<<"${final_release}" | sort)"
           if [[ "${actual_assets}" != "${expected_assets}" ]]; then
             echo "Final published release asset set is incomplete or contains unexpected files." >&2

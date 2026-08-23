@@ -138,6 +138,8 @@ public sealed class AuthenticationBoundaryTests
 
         Assert.Equal((int)HttpStatusCode.ServiceUnavailable, exception.StatusCode);
         Assert.Equal("old-access", store.Credentials?.Credentials.AccessToken);
+        using var relaunched = CreateClient(handler, store);
+        Assert.True(await relaunched.RestoreSessionAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -157,6 +159,8 @@ public sealed class AuthenticationBoundaryTests
 
         Assert.Equal("invalid_refresh_token", exception.Code);
         Assert.Null(store.Credentials);
+        using var relaunched = CreateClient(handler, store);
+        Assert.False(await relaunched.RestoreSessionAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]

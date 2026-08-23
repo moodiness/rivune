@@ -458,6 +458,46 @@ jobs:
             VERSION=ci-${{ github.sha }}
           cache-from: type=gha,scope=rivune-container
 
+  tv-client:
+    name: Packaged TV clients
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: clients/tv/package-lock.json
+      - name: Install TV client dependencies
+        working-directory: clients/tv
+        run: npm ci
+      - name: Type-check and test TV clients
+        working-directory: clients/tv
+        run: npm run typecheck && npm test
+      - name: Build and verify packaged TV clients
+        working-directory: clients/tv
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build:platforms
+          expected_files="$(printf '%s\n' Rivune-Tizen.wgt Rivune-TV-runtime.json Rivune-webOS.ipk | sort)"
+          actual_files="$(find dist/packages -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+          if [[ "${actual_files}" != "${expected_files}" ]]; then
+            echo 'TV packaging must produce exactly Rivune-webOS.ipk, Rivune-Tizen.wgt, and Rivune-TV-runtime.json.' >&2
+            exit 1
+          fi
+          for asset in Rivune-webOS.ipk Rivune-Tizen.wgt Rivune-TV-runtime.json; do
+            size="$(stat -c %s "dist/packages/${asset}")"
+            if (( size <= 0 || size > 268435456 )); then
+              echo "${asset} size is invalid: ${size} bytes." >&2
+              exit 1
+            fi
+          done
+
   required-checks:
     name: Required checks
     if: ${{ always() }}
@@ -471,6 +511,7 @@ jobs:
       - windows-client
       - container
       - container-arm64
+      - tv-client
     runs-on: ubuntu-latest
     steps:
       - name: Require every project check

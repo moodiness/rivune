@@ -1,6 +1,9 @@
 name: Publish applications page
 
 on:
+  release:
+    types:
+      - published
   push:
     branches:
       - main
@@ -42,6 +45,32 @@ jobs:
         env:
           RIVUNE_PUBLIC_APPS_BUILD: "1"
         run: npm run build
+      - name: Mirror latest stable TV update assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release="$(gh api "repos/${REPOSITORY}/releases/latest")"
+          tag="$(jq -er '.tag_name | select(type == "string" and test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))' <<<"${release}")"
+          version="${tag#v}"
+          if jq -ne --arg version "${version}" '($version | split(".") | map(tonumber)) < [1, 12, 0]' >/dev/null; then
+            echo "Latest stable release ${tag} predates TV runtime updates; no mirror is required."
+            exit 0
+          fi
+          target="server/internal/webui/dist/tv-runtime/${tag}"
+          mkdir -p "${target}"
+          for asset_name in rivune-update.json Rivune-TV-runtime.json; do
+            asset_id="$(jq -er '[.assets[] | select(.name == $name and .state == "uploaded" and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")))] | select(length == 1) | .[0].id' --arg name "${asset_name}" <<<"${release}")"
+            gh api --header 'Accept: application/octet-stream' "repos/${REPOSITORY}/releases/assets/${asset_id}" > "${target}/${asset_name}"
+            expected="$(jq -er '[.assets[] | select(.id == ($id | tonumber))] | select(length == 1) | .[0].digest' --arg id "${asset_id}" <<<"${release}")"
+            actual="sha256:$(sha256sum "${target}/${asset_name}" | cut -d ' ' -f1)"
+            if [[ "${actual}" != "${expected}" ]]; then
+              echo "Mirrored ${asset_name} differs from the GitHub release digest." >&2
+              exit 1
+            fi
+          done
       - name: Configure GitHub Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
       - name: Upload GitHub Pages artifact

@@ -286,7 +286,7 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error
 		scope = AuthorizationScopeGlobalAdministrator
 		sessionCategory = nil
 	}
-	tokens, err := s.createSession(ctx, tx, userID, deviceID, scope, sessionCategory, now)
+	tokens, err := s.createSession(ctx, tx, userID, deviceID, scope, sessionCategory, now, now.Add(s.refreshTTL))
 	if err != nil {
 		return TokenPair{}, err
 	}
@@ -1371,6 +1371,10 @@ func (s *Service) clearNativeProfileCompatibilitySessions(ctx context.Context, n
 }
 
 func (s *Service) issueTokens(now time.Time) (TokenPair, []byte, []byte, error) {
+	return s.issueTokensUntil(now, now.Add(s.refreshTTL))
+}
+
+func (s *Service) issueTokensUntil(now, refreshExpiresAt time.Time) (TokenPair, []byte, []byte, error) {
 	accessToken, accessHash, err := newToken(accessTokenPrefix)
 	if err != nil {
 		return TokenPair{}, nil, nil, err
@@ -1383,8 +1387,15 @@ func (s *Service) issueTokens(now time.Time) (TokenPair, []byte, []byte, error) 
 		AccessToken:      accessToken,
 		AccessExpiresAt:  now.Add(s.accessTTL),
 		RefreshToken:     refreshToken,
-		RefreshExpiresAt: now.Add(s.refreshTTL),
+		RefreshExpiresAt: refreshExpiresAt,
 	}, accessHash, refreshHash, nil
+}
+
+// Paired device sessions remain refreshable until the user disconnects or an
+// administrator revokes their session or device. Access tokens still expire
+// normally, and every refresh rotates the single-use refresh token.
+func pairedDeviceSessionExpiry() time.Time {
+	return time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
 }
 
 func upsertDevice(ctx context.Context, tx pgx.Tx, userID, role string, input LoginInput) (string, *category.CategoryRef, error) {
@@ -1508,13 +1519,13 @@ func (s *Service) createSession(
 	userID, deviceID string,
 	scope AuthorizationScope,
 	sessionCategory *category.CategoryRef,
-	now time.Time,
+	now, refreshExpiresAt time.Time,
 ) (TokenPair, error) {
 	var categoryID any
 	if sessionCategory != nil {
 		categoryID = sessionCategory.ID
 	}
-	tokens, accessHash, refreshHash, err := s.issueTokens(now)
+	tokens, accessHash, refreshHash, err := s.issueTokensUntil(now, refreshExpiresAt)
 	if err != nil {
 		return TokenPair{}, err
 	}

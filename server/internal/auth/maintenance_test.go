@@ -25,11 +25,25 @@ func TestAuthenticationCleanupPredicatesPreserveRefreshActiveSessions(t *testing
 	}
 }
 
+func TestAuthenticationCleanupBoundsConsumedRefreshHistory(t *testing.T) {
+	query := normalizedSQL(cleanupConsumedRefreshTokensSQL)
+	for _, predicate := range []string{
+		"WHERE consumed_at <= now() - interval '30 days'",
+		"ORDER BY consumed_at, token_hash LIMIT $1 FOR UPDATE SKIP LOCKED",
+		"DELETE FROM auth_refresh_tokens token USING expired WHERE token.token_hash = expired.token_hash",
+	} {
+		if !strings.Contains(query, predicate) {
+			t.Fatalf("consumed refresh token cleanup lacks %q: %s", predicate, query)
+		}
+	}
+}
+
 func TestAuthenticationCleanupDeletesAreBoundedAndSkipLocked(t *testing.T) {
 	for name, query := range map[string]string{
-		"notifications":  cleanupExpiredNotificationsSQL,
-		"sessions":       cleanupExpiredSessionsSQL,
-		"orphan devices": cleanupOrphanDevicesSQL,
+		"notifications":         cleanupExpiredNotificationsSQL,
+		"refresh token history": cleanupConsumedRefreshTokensSQL,
+		"sessions":              cleanupExpiredSessionsSQL,
+		"orphan devices":        cleanupOrphanDevicesSQL,
 	} {
 		normalized := normalizedSQL(query)
 		if !strings.Contains(normalized, "LIMIT $1") || !strings.Contains(normalized, "FOR UPDATE") || !strings.Contains(normalized, "SKIP LOCKED") {

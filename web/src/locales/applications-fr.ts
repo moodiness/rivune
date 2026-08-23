@@ -2,7 +2,7 @@ import type { TranslationCatalog } from "../i18n";
 
 export const applicationsFr = {
   "applications.meta.title": "Applications Rivune",
-  "applications.meta.description": "Téléchargez les applications Rivune vérifiées pour Android, Apple et Windows.",
+  "applications.meta.description": "Téléchargez les applications Rivune vérifiées pour Android, Apple, Windows, LG webOS et Samsung Tizen.",
   "applications.header.open": "Ouvrir Rivune",
   "applications.header.source": "Code source",
   "applications.header.language": "Langue",
@@ -12,6 +12,8 @@ export const applicationsFr = {
   "applications.hero.detected": "Détecté :",
   "applications.device.detecting": "Détection de cet appareil…",
   "applications.device.android": "Appareil Android",
+  "applications.device.webos": "Téléviseur LG webOS",
+  "applications.device.tizen": "Téléviseur Samsung Tizen",
   "applications.device.appleTV": "Apple TV",
   "applications.device.vision": "Apple Vision Pro",
   "applications.device.ios": "iPhone ou iPad",
@@ -44,6 +46,10 @@ export const applicationsFr = {
   "applications.card.copied": "Copié",
   "applications.asset.android.detail": "Téléphone · tablette · Android TV · APK universel",
   "applications.asset.android.warning": "Android peut vous demander d’autoriser l’installation depuis ce navigateur. Gardez cette autorisation temporaire et installez uniquement l’APK Rivune vérifié.",
+  "applications.asset.webos.detail": "LG webOS 4.0 ou version ultérieure · IPK non signé",
+  "applications.asset.webos.warning": "Cet IPK n’est pas signé et ne s’installe ni depuis le LG Content Store ni directement depuis ce navigateur. Activez l’application LG Developer Mode et sa session, puis installez-le depuis un ordinateur avec webOS Dev Manager ou la CLI webOS (ares-install).",
+  "applications.asset.tizen.detail": "Téléviseur Samsung Tizen · WGT non signé",
+  "applications.asset.tizen.warning": "Ce WGT n’est pas signé et ne peut pas être installé tel quel. Aucun profil de certificat n’est inclus. Récupérez le code de cette release, exécutez npm --prefix clients/tv ci puis npm --prefix clients/tv run build, configurez un profil de sécurité Tizen nommé avec des certificats Samsung d’auteur et de distributeur valides pour votre téléviseur, puis exécutez node clients/tv/tizen/package.mjs --profile PROFILE et installez le WGT signé avec Tizen Studio ou SDB après avoir activé le mode développeur du téléviseur.",
   "applications.asset.ios.detail": "iOS 15 ou version ultérieure · arm64",
   "applications.asset.ios.warning": "Cette archive n’est pas signée et ne peut pas être installée telle quelle. Signez-la localement avec Xcode et votre propre équipe Apple Developer.",
   "applications.asset.tvos.detail": "tvOS 15 ou version ultérieure · arm64",

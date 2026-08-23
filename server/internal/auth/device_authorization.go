@@ -784,7 +784,7 @@ func (s *Service) ExchangeDeviceAuthorization(ctx context.Context, deviceCode st
 		return TokenPair{}, err
 	}
 	tokens, err := s.createSession(
-		ctx, tx, *approvedUserID, deviceID, AuthorizationScopeCategory, deviceCategory, now,
+		ctx, tx, *approvedUserID, deviceID, AuthorizationScopeCategory, deviceCategory, now, pairedDeviceSessionExpiry(),
 	)
 	if err != nil {
 		return TokenPair{}, err

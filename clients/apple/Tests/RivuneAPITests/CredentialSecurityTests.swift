@@ -173,6 +173,69 @@ final class CredentialSecurityTests: XCTestCase {
         XCTAssertNil(stored)
     }
 
+    func testTransientRefreshFailurePreservesCredentialsForRelaunch() async throws {
+        let server = URL(string: "https://refresh-unavailable.test")!
+        let tokens = fixtureToken()
+        let store = IssuerScopedCredentialStore()
+        try await store.save(StoredCredentials(tokens: tokens, profileContext: nil), for: server)
+        let client = try RivuneAPIClient(
+            serverURL: server,
+            transport: ControlledAuthTransport(tokens: tokens, refreshStatus: 503),
+            credentialStore: store
+        )
+        let restored = try await client.restoreSession()
+        XCTAssertTrue(restored)
+
+        do {
+            _ = try await client.refreshSession()
+            XCTFail("A transient refresh failure must be surfaced")
+        } catch RivuneAPIError.server(let status, _, _) {
+            XCTAssertEqual(status, 503)
+        }
+
+        let retained = try await store.load(for: server)
+        XCTAssertEqual(retained?.tokens, tokens)
+        let relaunched = try RivuneAPIClient(
+            serverURL: server,
+            transport: ControlledAuthTransport(tokens: tokens),
+            credentialStore: store
+        )
+        let restoredAfterRelaunch = try await relaunched.restoreSession()
+        XCTAssertTrue(restoredAfterRelaunch)
+    }
+
+    func testInvalidRefreshTokenClearsCredentialsForRelaunch() async throws {
+        let server = URL(string: "https://refresh-expired.test")!
+        let tokens = fixtureToken()
+        let store = IssuerScopedCredentialStore()
+        try await store.save(StoredCredentials(tokens: tokens, profileContext: nil), for: server)
+        let client = try RivuneAPIClient(
+            serverURL: server,
+            transport: ControlledAuthTransport(tokens: tokens, refreshStatus: 401),
+            credentialStore: store
+        )
+        let restored = try await client.restoreSession()
+        XCTAssertTrue(restored)
+
+        do {
+            _ = try await client.refreshSession()
+            XCTFail("An invalid refresh token must be rejected")
+        } catch RivuneAPIError.server(let status, let code, _) {
+            XCTAssertEqual(status, 401)
+            XCTAssertEqual(code, "invalid_refresh_token")
+        }
+
+        let cleared = try await store.load(for: server)
+        XCTAssertNil(cleared)
+        let relaunched = try RivuneAPIClient(
+            serverURL: server,
+            transport: ControlledAuthTransport(tokens: tokens),
+            credentialStore: store
+        )
+        let restoredAfterRelaunch = try await relaunched.restoreSession()
+        XCTAssertFalse(restoredAfterRelaunch)
+    }
+
     func testAuthenticatedRequestCannotReplayAcrossLogoutAndReplacementLogin() async throws {
         let server = URL(string: "https://generation-boundary.test")!
         let accountA = fixtureToken()
@@ -799,6 +862,7 @@ private actor ControlledAuthTransport: HTTPTransport {
     private let tokens: TokenPair
     private let delayedPaths: Set<String>
     private let logoutStatus: Int
+    private let refreshStatus: Int
     private var requestedPaths: [String] = []
     private var authorizationHeaders: [String: String] = [:]
     private var requestWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
@@ -806,10 +870,16 @@ private actor ControlledAuthTransport: HTTPTransport {
         String: CheckedContinuation<(Data, HTTPURLResponse), Error>
     ] = [:]
 
-    init(tokens: TokenPair, delayedPaths: Set<String> = [], logoutStatus: Int = 204) {
+    init(
+        tokens: TokenPair,
+        delayedPaths: Set<String> = [],
+        logoutStatus: Int = 204,
+        refreshStatus: Int = 200
+    ) {
         self.tokens = tokens
         self.delayedPaths = delayedPaths
         self.logoutStatus = logoutStatus
+        self.refreshStatus = refreshStatus
     }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
@@ -862,6 +932,11 @@ private actor ControlledAuthTransport: HTTPTransport {
             body = logoutStatus == 204
                 ? Data()
                 : Data(#"{"error":{"code":"logout_failed","message":"revocation failed"}}"#.utf8)
+        case "/api/v1/auth/refresh" where refreshStatus != 200:
+            status = refreshStatus
+            body = refreshStatus == 401
+                ? Data(#"{"error":{"code":"invalid_refresh_token","message":"Expired"}}"#.utf8)
+                : Data(#"{"error":{"code":"unavailable","message":"Unavailable"}}"#.utf8)
         default:
             status = 200
             body = encodedTokens()

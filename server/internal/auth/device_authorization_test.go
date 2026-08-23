@@ -41,6 +41,13 @@ func TestDeviceUserCodeFormattingAndNormalization(t *testing.T) {
 	}
 }
 
+func TestPairedDeviceSessionExpiryRequiresExplicitRevocation(t *testing.T) {
+	want := time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
+	if got := pairedDeviceSessionExpiry(); !got.Equal(want) {
+		t.Fatalf("paired device session expiry = %s, want %s", got, want)
+	}
+}
+
 func TestAdministratorAuthorityRequiresGlobalPasswordScope(t *testing.T) {
 	categoryID := "category-id"
 	global := Principal{Role: "admin", AuthorizationScope: AuthorizationScopeGlobalAdministrator}
@@ -415,6 +422,9 @@ func TestApproveDeviceAuthorizationSerializesManagedProfileCategoryMoves(t *test
 		assertNoJellyfinIssuanceDeadlock(t, exchanged.err)
 		if exchanged.tokens.SessionID == "" || exchanged.tokens.DeviceID == "" {
 			t.Fatalf("native exchange returned incomplete tokens: %+v", exchanged.tokens)
+		}
+		if !exchanged.tokens.RefreshExpiresAt.Equal(pairedDeviceSessionExpiry()) {
+			t.Fatalf("native exchange refresh expiry = %s, want durable pairing expiry %s", exchanged.tokens.RefreshExpiresAt, pairedDeviceSessionExpiry())
 		}
 		if err := <-approvalResult; err != nil && !errors.Is(err, ErrInvalidUserCode) {
 			assertNoJellyfinIssuanceDeadlock(t, err)

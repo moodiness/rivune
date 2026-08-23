@@ -1,0 +1,32 @@
+{
+  "name": "@rivune/tv",
+  "version": "1.12.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm run build:runtime",
+    "build:runtime": "vite build --config vite.runtime.config.ts && vite build --config vite.bootstrap.config.ts && node scripts/build-runtime.mjs",
+    "build:webos": "npm run build && node webos/package.mjs",
+    "build:tizen": "npm run build && node tizen/package.mjs",
+    "build:platforms": "npm run build && node webos/package.mjs && node tizen/package.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "react": "19.1.1",
+    "react-dom": "19.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-legacy": "8.2.3",
+    "@vitejs/plugin-react": "6.0.5",
+    "core-js": "3.50.0",
+    "jsdom": "27.4.0",
+    "terser": "5.46.0",
+    "typescript": "7.0.2",
+    "vite": "8.2.1",
+    "vitest": "4.1.11"
+  }
+}
