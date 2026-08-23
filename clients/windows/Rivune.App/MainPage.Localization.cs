@@ -10,12 +10,6 @@ namespace Rivune.App;
 
 public sealed partial class MainPage
 {
-    private sealed class LocalizedPropertyState
-    {
-        internal string? Key;
-        internal string? Rendered;
-    }
-
     private sealed class LocalizedElementState
     {
         internal Dictionary<DependencyProperty, LocalizedPropertyState> Properties { get; } = [];
@@ -25,10 +19,14 @@ public sealed partial class MainPage
 
     private void LocalizeVisualTree(DependencyObject root)
     {
-        RegisterLocalizableProperties(root);
-        var count = VisualTreeHelper.GetChildrenCount(root);
-        for (var index = 0; index < count; index++)
-            LocalizeVisualTree(VisualTreeHelper.GetChild(root, index));
+        var pending = new Stack<DependencyObject>();
+        pending.Push(root);
+        while (pending.TryPop(out var element))
+        {
+            RegisterLocalizableProperties(element);
+            for (var index = VisualTreeHelper.GetChildrenCount(element) - 1; index >= 0; index--)
+                pending.Push(VisualTreeHelper.GetChild(element, index));
+        }
     }
 
     private void RegisterLocalizableProperties(DependencyObject element)
@@ -91,20 +89,8 @@ public sealed partial class MainPage
         ApplyLocalizedProperty(state, read, write);
     }
 
-    private void ApplyLocalizedProperty(LocalizedPropertyState state, Func<string?> read, Action<string> write)
-    {
-        var current = read();
-        if (!string.Equals(current, state.Rendered, StringComparison.Ordinal))
-        {
-            state.Key = current is not null && WindowsLocalization.ContainsKey(current) ? current : null;
-            state.Rendered = null;
-        }
-        if (state.Key is null) return;
-
-        var translated = UiText(state.Key);
-        state.Rendered = translated;
-        if (!string.Equals(current, translated, StringComparison.Ordinal)) write(translated);
-    }
+    private void ApplyLocalizedProperty(LocalizedPropertyState state, Func<string?> read, Action<string> write) =>
+        state.Apply(read, write, WindowsLocalization.ContainsKey, UiText);
 
     private void LocalizeDialog(ContentDialog dialog)
     {
