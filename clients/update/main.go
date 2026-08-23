@@ -64,8 +64,7 @@ func runGenerate(arguments []string) error {
 		{"webos-package", options.webosPackage},
 		{"tizen-package", options.tizenPackage},
 		{"tv-runtime", options.tvRuntime},
-		{"windows-x64-executable", options.windowsX64Executable},
-		{"windows-arm64-executable", options.windowsArm64Executable},
+		{"windows-executable", options.windowsExecutable},
 		{"output", options.output},
 		{"channel", options.channel},
 		{"tag-name", options.tagName},
@@ -82,8 +81,7 @@ func runGenerate(arguments []string) error {
 		{"application-id", options.applicationID},
 		{"build-version", options.buildVersion},
 		{"signing-certificate-sha256", options.signingCertificateSHA256},
-		{"windows-x64-executable-url", options.windowsX64ExecutableURL},
-		{"windows-arm64-executable-url", options.windowsArm64ExecutableURL},
+		{"windows-executable-url", options.windowsExecutableURL},
 	}
 	for _, option := range required {
 		if option.value == "" {
@@ -106,8 +104,7 @@ func addGenerateFlags(flags *flag.FlagSet, options *generateOptions) {
 	flags.StringVar(&options.webosPackage, "webos-package", "", "path to the unsigned universal webOS IPK")
 	flags.StringVar(&options.tizenPackage, "tizen-package", "", "path to the unsigned universal Tizen WGT")
 	flags.StringVar(&options.tvRuntime, "tv-runtime", "", "path to the shared webOS/Tizen runtime JSON")
-	flags.StringVar(&options.windowsX64Executable, "windows-x64-executable", "", "path to the Windows x64 executable")
-	flags.StringVar(&options.windowsArm64Executable, "windows-arm64-executable", "", "path to the Windows ARM64 executable")
+	flags.StringVar(&options.windowsExecutable, "windows-executable", "", "path to the universal self-extracting Windows executable")
 	flags.StringVar(&options.output, "output", "", "path for the generated global manifest")
 	flags.StringVar(&options.channel, "channel", "", "release channel: stable or prerelease")
 	flags.StringVar(&options.tagName, "tag-name", "", "release tag including the v prefix")
@@ -124,8 +121,7 @@ func addGenerateFlags(flags *flag.FlagSet, options *generateOptions) {
 	flags.StringVar(&options.applicationID, "application-id", "", "Android application ID")
 	flags.StringVar(&options.buildVersion, "build-version", "", "positive Android versionCode")
 	flags.StringVar(&options.signingCertificateSHA256, "signing-certificate-sha256", "", "lowercase Android signing certificate SHA-256")
-	flags.StringVar(&options.windowsX64ExecutableURL, "windows-x64-executable-url", "", "exact HTTPS Windows x64 executable release asset URL")
-	flags.StringVar(&options.windowsArm64ExecutableURL, "windows-arm64-executable-url", "", "exact HTTPS Windows ARM64 executable release asset URL")
+	flags.StringVar(&options.windowsExecutableURL, "windows-executable-url", "", "exact HTTPS universal Windows executable release asset URL")
 }
 
 func writeManifest(output string, manifest map[string]any) error {
@@ -186,17 +182,11 @@ func runValidate(arguments []string) error {
 			return fmt.Errorf("--%s is required", required.name)
 		}
 	}
-	if options.windowsX64Executable == "" {
-		return fmt.Errorf("--windows-x64-executable is required")
+	if options.windowsExecutable == "" {
+		return fmt.Errorf("--windows-executable is required")
 	}
-	if options.windowsArm64Executable == "" {
-		return fmt.Errorf("--windows-arm64-executable is required")
-	}
-	if options.windowsX64ExecutableURL == "" {
-		return fmt.Errorf("--windows-x64-executable-url is required")
-	}
-	if options.windowsArm64ExecutableURL == "" {
-		return fmt.Errorf("--windows-arm64-executable-url is required")
+	if options.windowsExecutableURL == "" {
+		return fmt.Errorf("--windows-executable-url is required")
 	}
 	return validateManifestFile(flags.Arg(0), options)
 }
@@ -210,8 +200,7 @@ func addValidateFlags(flags *flag.FlagSet, options *validateOptions) {
 	flags.StringVar(&options.webosPackage, "webos-package", "", "webOS IPK whose file name, size, and SHA-256 must match")
 	flags.StringVar(&options.tizenPackage, "tizen-package", "", "Tizen WGT whose file name, size, and SHA-256 must match")
 	flags.StringVar(&options.tvRuntime, "tv-runtime", "", "TV runtime whose file name, size, and SHA-256 must match")
-	flags.StringVar(&options.windowsX64Executable, "windows-x64-executable", "", "Windows x64 executable whose file name, size, and SHA-256 must match")
-	flags.StringVar(&options.windowsArm64Executable, "windows-arm64-executable", "", "Windows ARM64 executable whose file name, size, and SHA-256 must match")
+	flags.StringVar(&options.windowsExecutable, "windows-executable", "", "universal Windows executable whose embedded payloads, size, and SHA-256 must match")
 	flags.StringVar(&options.channel, "channel", "", "expected release channel")
 	flags.StringVar(&options.tagName, "tag-name", "", "expected release tag")
 	flags.StringVar(&options.publishedAt, "published-at", "", "expected RFC3339 publication timestamp")
@@ -227,8 +216,7 @@ func addValidateFlags(flags *flag.FlagSet, options *validateOptions) {
 	flags.StringVar(&options.applicationID, "application-id", "", "expected Android application ID")
 	flags.StringVar(&options.buildVersion, "build-version", "", "expected Android versionCode")
 	flags.StringVar(&options.signingCertificateSHA256, "signing-certificate-sha256", "", "expected Android signing certificate SHA-256")
-	flags.StringVar(&options.windowsX64ExecutableURL, "windows-x64-executable-url", "", "expected Windows x64 executable URL")
-	flags.StringVar(&options.windowsArm64ExecutableURL, "windows-arm64-executable-url", "", "expected Windows ARM64 executable URL")
+	flags.StringVar(&options.windowsExecutableURL, "windows-executable-url", "", "expected universal Windows executable URL")
 }
 
 func printUsage(output *os.File) {
@@ -238,11 +226,11 @@ func printUsage(output *os.File) {
 }
 
 func printGenerateUsage(output anyWriter) {
-	fmt.Fprintln(output, "Usage: go run . generate --apk <path> --ios-archive <path> --tvos-archive <path> --visionos-archive <path> --macos-disk-image <path> --webos-package <path> --tizen-package <path> --tv-runtime <path> --windows-x64-executable <path> --windows-arm64-executable <path> --output <path> --channel <channel> --tag-name <tag> --published-at <timestamp> --release-url <url> --apk-url <url> --ios-archive-url <url> --tvos-archive-url <url> --visionos-archive-url <url> --macos-disk-image-url <url> --webos-package-url <url> --tizen-package-url <url> --tv-runtime-url <url> --application-id <id> --build-version <version> --signing-certificate-sha256 <digest> --windows-x64-executable-url <url> --windows-arm64-executable-url <url>")
+	fmt.Fprintln(output, "Usage: go run . generate --apk <path> --ios-archive <path> --tvos-archive <path> --visionos-archive <path> --macos-disk-image <path> --webos-package <path> --tizen-package <path> --tv-runtime <path> --windows-executable <path> --output <path> --channel <channel> --tag-name <tag> --published-at <timestamp> --release-url <url> --apk-url <url> --ios-archive-url <url> --tvos-archive-url <url> --visionos-archive-url <url> --macos-disk-image-url <url> --webos-package-url <url> --tizen-package-url <url> --tv-runtime-url <url> --application-id <id> --build-version <version> --signing-certificate-sha256 <digest> --windows-executable-url <url>")
 }
 
 func printValidateUsage(output anyWriter) {
-	fmt.Fprintln(output, "Usage: go run . validate --apk <path> --ios-archive <path> --tvos-archive <path> --visionos-archive <path> --macos-disk-image <path> --webos-package <path> --tizen-package <path> --tv-runtime <path> --windows-x64-executable <path> --windows-arm64-executable <path> --ios-archive-url <url> --tvos-archive-url <url> --visionos-archive-url <url> --macos-disk-image-url <url> --webos-package-url <url> --tizen-package-url <url> --tv-runtime-url <url> --windows-x64-executable-url <url> --windows-arm64-executable-url <url> [expected-value options] <global-manifest>")
+	fmt.Fprintln(output, "Usage: go run . validate --apk <path> --ios-archive <path> --tvos-archive <path> --visionos-archive <path> --macos-disk-image <path> --webos-package <path> --tizen-package <path> --tv-runtime <path> --windows-executable <path> --ios-archive-url <url> --tvos-archive-url <url> --visionos-archive-url <url> --macos-disk-image-url <url> --webos-package-url <url> --tizen-package-url <url> --tv-runtime-url <url> --windows-executable-url <url> [expected-value options] <global-manifest>")
 }
 
 type anyWriter interface {

@@ -338,7 +338,7 @@ enum RivuneAppleUpdateManifestParser {
         }
 
         let package = manifest.packages.package(for: platform)
-        guard manifest.schemaVersion == 2,
+        guard manifest.schemaVersion == 3,
               let latest = RivuneSemanticVersion(manifest.version),
               manifest.channel == (latest.prerelease.isEmpty ? "stable" : "prerelease"),
               manifest.tagName == "v\(manifest.version)",

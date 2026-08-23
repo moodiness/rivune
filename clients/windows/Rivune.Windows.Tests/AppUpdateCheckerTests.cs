@@ -1,4 +1,5 @@
 using System.Net;
+using System.IO.Compression;
 using System.Text;
 using System.Security.Cryptography;
 using System.Runtime.InteropServices;
@@ -10,6 +11,8 @@ namespace Rivune.Windows.Tests;
 public sealed class AppUpdateCheckerTests
 {
     private const string PackageSha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    private const string X64ExecutableSha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    private const string Arm64ExecutableSha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     private static readonly Uri ManifestUri = new("https://github.com/moodiness/rivune/releases/latest/download/rivune-update.json");
 
     [Theory]
@@ -57,13 +60,16 @@ public sealed class AppUpdateCheckerTests
         Assert.Equal("1.7.2", result.LatestVersion);
         Assert.Equal(DateTimeOffset.Parse("2026-08-14T12:34:56Z"), result.PublishedAt);
         Assert.Equal(new Uri("https://github.com/moodiness/rivune/releases/tag/v1.7.2"), result.ReleaseUri);
-        Assert.Equal(new Uri("https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-x64.exe"), result.Package.Uri);
+        Assert.Equal(new Uri("https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-Windows.exe"), result.Package.Uri);
         Assert.Equal("exe", result.Package.Format);
-        Assert.Equal(new[] { "x64" }, result.Package.Architectures);
+        Assert.Equal(new[] { "arm64", "x64" }, result.Package.Architectures);
         Assert.Equal("10.0.19041.0", result.Package.MinimumOsVersion);
-        Assert.Equal("Rivune-x64.exe", result.Package.FileName);
+        Assert.Equal("Rivune-Windows.exe", result.Package.FileName);
         Assert.Equal(123456L, result.Package.Size);
         Assert.Equal(PackageSha256, result.Package.Sha256);
+        Assert.Equal("Rivune-x64.exe", result.Package.ExecutableFileName);
+        Assert.Equal(345678L, result.Package.ExecutableSize);
+        Assert.Equal(X64ExecutableSha256, result.Package.ExecutableSha256);
         Assert.Equal(available, result.IsUpdateAvailable);
         Assert.Equal(new[] { ManifestUri }, handler.RequestUris);
         Assert.Equal("application/json", handler.Accepts.Single());
@@ -81,10 +87,11 @@ public sealed class AppUpdateCheckerTests
             Architecture.Arm64,
             TestContext.Current.CancellationToken);
 
-        Assert.Equal(new Uri("https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-arm64.exe"), result.Package.Uri);
-        Assert.Equal(new[] { "arm64" }, result.Package.Architectures);
-        Assert.Equal("Rivune-arm64.exe", result.Package.FileName);
-        Assert.Equal(234567L, result.Package.Size);
+        Assert.Equal(new Uri("https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-Windows.exe"), result.Package.Uri);
+        Assert.Equal(new[] { "arm64", "x64" }, result.Package.Architectures);
+        Assert.Equal("Rivune-arm64.exe", result.Package.ExecutableFileName);
+        Assert.Equal(456789L, result.Package.ExecutableSize);
+        Assert.Equal(Arm64ExecutableSha256, result.Package.ExecutableSha256);
     }
 
     [Theory]
@@ -107,12 +114,12 @@ public sealed class AppUpdateCheckerTests
     }
 
     [Theory]
-    [InlineData("\"architectures\":[\"arm64\"]", "\"architectures\":[\"x64\"]")]
     [InlineData("\"fileName\":\"Rivune-arm64.exe\"", "\"fileName\":\"Rivune-x64.exe\"")]
-    [InlineData("/Rivune-arm64.exe\"", "/Rivune-x64.exe\"")]
-    public async Task RejectsWrongArm64PackageMetadata(string expected, string replacement)
+    [InlineData("\"size\":456789", "\"size\":0")]
+    [InlineData(Arm64ExecutableSha256, "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC")]
+    public async Task RejectsWrongArm64ExecutableMetadata(string expected, string replacement)
     {
-        var armPackageStart = Manifest().IndexOf("\"windowsArm64\"", StringComparison.Ordinal);
+        var armPackageStart = Manifest().IndexOf("\"arm64\":{", StringComparison.Ordinal);
         var invalid = Manifest();
         var metadataIndex = invalid.IndexOf(expected, armPackageStart, StringComparison.Ordinal);
         Assert.True(metadataIndex >= armPackageStart);
@@ -175,28 +182,27 @@ public sealed class AppUpdateCheckerTests
     }
 
     [Theory]
-    [InlineData("\"schemaVersion\":2", "\"schemaVersion\":1")]
-    [InlineData("\"schemaVersion\":2", "\"schemaVersion\":2.0")]
+    [InlineData("\"schemaVersion\":3", "\"schemaVersion\":1")]
+    [InlineData("\"schemaVersion\":3", "\"schemaVersion\":3.0")]
     [InlineData("\"format\":\"exe\"", "\"format\":\"zip\"")]
     [InlineData("\"minimumOsVersion\":\"10.0.19041.0\"", "\"minimumOsVersion\":\"10.0.0.0\"")]
-    [InlineData("\"architectures\":[\"x64\"]", "\"architectures\":[\"arm64\"]")]
-    [InlineData("\"architectures\":[\"x64\"]", "\"architectures\":[\"x64\",\"arm64\"]")]
+    [InlineData("\"architectures\":[\"arm64\",\"x64\"]", "\"architectures\":[\"x64\",\"arm64\"]")]
     [InlineData("\"size\":123456", "\"size\":0")]
     [InlineData("\"size\":123456", "\"size\":2147483648")]
     [InlineData("\"size\":123456", "\"size\":123.0")]
     [InlineData("\"channel\":\"stable\"", "\"channel\":\"prerelease\"")]
     [InlineData("\"publishedAt\":\"2026-08-14T12:34:56Z\"", "\"publishedAt\":\"not-a-timestamp\"")]
     [InlineData("\"tagName\":\"v1.7.2\"", "\"tagName\":\"v1.7.3\"")]
-    [InlineData("\"fileName\":\"Rivune-x64.exe\"", "\"fileName\":\"other.exe\"")]
+    [InlineData("\"fileName\":\"Rivune-Windows.exe\"", "\"fileName\":\"other.exe\"")]
     public async Task RejectsInvalidGlobalOrWindowsContract(string expected, string replacement)
     {
         await AssertInvalidManifestAsync(Manifest().Replace(expected, replacement, StringComparison.Ordinal));
     }
 
     [Fact]
-    public async Task RejectsManifestWithoutWindowsX64Package()
+    public async Task RejectsManifestWithoutWindowsPackage()
     {
-        var invalid = Manifest().Replace("\"windowsX64\":{", "\"other\":{", StringComparison.Ordinal);
+        var invalid = Manifest().Replace("\"windows\":{", "\"other\":{", StringComparison.Ordinal);
 
         await AssertInvalidManifestAsync(invalid);
     }
@@ -213,14 +219,14 @@ public sealed class AppUpdateCheckerTests
     }
 
     [Theory]
-    [InlineData("https://evil.example/Rivune-x64.exe")]
-    [InlineData("http://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-x64.exe")]
-    [InlineData("https://github.com/moodiness/rivune/releases/download/v1.7.3/Rivune-x64.exe")]
-    [InlineData("https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-x64.exe?download=1")]
+    [InlineData("https://evil.example/Rivune-Windows.exe")]
+    [InlineData("http://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-Windows.exe")]
+    [InlineData("https://github.com/moodiness/rivune/releases/download/v1.7.3/Rivune-Windows.exe")]
+    [InlineData("https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-Windows.exe?download=1")]
     public async Task RejectsUntrustedPackageUrl(string packageUrl)
     {
         var invalid = Manifest().Replace(
-            "https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-x64.exe",
+            "https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-Windows.exe",
             packageUrl,
             StringComparison.Ordinal);
 
@@ -240,8 +246,8 @@ public sealed class AppUpdateCheckerTests
     public async Task RejectsDuplicateManifestFields()
     {
         await AssertInvalidManifestAsync(Manifest().Replace(
-            "\"schemaVersion\":2",
-            "\"schemaVersion\":2,\"schemaVersion\":2",
+            "\"schemaVersion\":3",
+            "\"schemaVersion\":3,\"schemaVersion\":3",
             StringComparison.Ordinal));
     }
 
@@ -249,7 +255,7 @@ public sealed class AppUpdateCheckerTests
     public async Task AcceptsFutureFieldsAndPackages()
     {
         var manifest = Manifest()
-            .Replace("\"schemaVersion\":2", "\"schemaVersion\":2,\"futureRoot\":true", StringComparison.Ordinal)
+            .Replace("\"schemaVersion\":3", "\"schemaVersion\":3,\"futureRoot\":true", StringComparison.Ordinal)
             .Replace("\"android\":{", "\"futurePlatform\":{},\"android\":{", StringComparison.Ordinal)
             .Replace("\"format\":\"exe\"", "\"format\":\"exe\",\"futureWindowsField\":true", StringComparison.Ordinal);
         using var client = new HttpClient(new SequenceHandler(Response(HttpStatusCode.OK, manifest)));
@@ -293,6 +299,39 @@ public sealed class AppUpdateCheckerTests
         Assert.Equal(contents, destination.ToArray());
         Assert.Equal(new[] { PackageUri, assetUri }, handler.RequestUris);
         Assert.All(handler.Accepts, accept => Assert.Equal("application/octet-stream", accept));
+    }
+
+    [Fact]
+    public async Task ExtractsOnlySelectedExecutableFromVerifiedBundle()
+    {
+        var x64 = Encoding.UTF8.GetBytes("x64 executable payload");
+        var arm64 = Encoding.UTF8.GetBytes("arm64 executable payload");
+        var bundle = Bundle(x64, arm64, Encoding.UTF8.GetBytes("uninstaller payload"));
+        var root = Path.Combine(Path.GetTempPath(), "Rivune", "bundle-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var bundlePath = Path.Combine(root, "Rivune-Windows.exe");
+        var destination = Path.Combine(root, "Rivune.exe");
+        await File.WriteAllBytesAsync(bundlePath, bundle, TestContext.Current.CancellationToken);
+        var package = new WindowsUpdatePackage(
+            PackageUri,
+            "exe",
+            ["arm64", "x64"],
+            "10.0.19041.0",
+            "Rivune-Windows.exe",
+            bundle.LongLength,
+            Convert.ToHexStringLower(SHA256.HashData(bundle)),
+            "Rivune-x64.exe",
+            x64.LongLength,
+            Convert.ToHexStringLower(SHA256.HashData(x64)));
+        try
+        {
+            await AppUpdateChecker.ExtractExecutableAsync(package, bundlePath, destination, TestContext.Current.CancellationToken);
+            Assert.Equal(x64, await File.ReadAllBytesAsync(destination, TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Theory]
@@ -412,6 +451,7 @@ public sealed class AppUpdateCheckerTests
     }
 
     [Theory]
+    [InlineData("Rivune.exe")]
     [InlineData("Rivune-x64.exe")]
     [InlineData("Rivune-arm64.exe")]
     public void ParsesExactPortableApplyArguments(string fileName)
@@ -466,6 +506,9 @@ public sealed class AppUpdateCheckerTests
     }
 
     [Theory]
+    [InlineData("Rivune.exe", "Rivune-x64.exe")]
+    [InlineData("Rivune-x64.exe", "Rivune.exe")]
+    [InlineData("Rivune-arm64.exe", "Rivune.exe")]
     [InlineData("Rivune-x64.exe", "Rivune-arm64.exe")]
     [InlineData("Rivune-arm64.exe", "Rivune-x64.exe")]
     [InlineData("Rivune-x64.exe", "other.exe")]
@@ -501,6 +544,7 @@ public sealed class AppUpdateCheckerTests
     }
 
     [Theory]
+    [InlineData("Rivune.exe")]
     [InlineData("Rivune-x64.exe")]
     [InlineData("Rivune-arm64.exe")]
     public void PreparesQuotedHandoffWithoutChangingCurrentExecutable(string fileName)
@@ -635,7 +679,7 @@ public sealed class AppUpdateCheckerTests
 
     private static string Manifest() => $$"""
         {
-          "schemaVersion":2,
+          "schemaVersion":3,
           "channel":"stable",
           "version":"1.7.2",
           "tagName":"v1.7.2",
@@ -654,38 +698,56 @@ public sealed class AppUpdateCheckerTests
               "size":654321,
               "sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
             },
-            "windowsX64":{
+            "windows":{
               "format":"exe",
-              "architectures":["x64"],
+              "architectures":["arm64","x64"],
               "minimumOsVersion":"10.0.19041.0",
-              "fileName":"Rivune-x64.exe",
-              "url":"https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-x64.exe",
+              "fileName":"Rivune-Windows.exe",
+              "url":"https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-Windows.exe",
               "size":123456,
-              "sha256":"{{PackageSha256}}"
-            },
-            "windowsArm64":{
-              "format":"exe",
-              "architectures":["arm64"],
-              "minimumOsVersion":"10.0.19041.0",
-              "fileName":"Rivune-arm64.exe",
-              "url":"https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-arm64.exe",
-              "size":234567,
-              "sha256":"{{PackageSha256}}"
+              "sha256":"{{PackageSha256}}",
+              "executables":{
+                "x64":{"fileName":"Rivune-x64.exe","size":345678,"sha256":"{{X64ExecutableSha256}}"},
+                "arm64":{"fileName":"Rivune-arm64.exe","size":456789,"sha256":"{{Arm64ExecutableSha256}}"}
+              }
             }
           }
         }
         """;
 
-    private static readonly Uri PackageUri = new("https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-x64.exe");
+    private static readonly Uri PackageUri = new("https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-Windows.exe");
 
     private static WindowsUpdatePackage Package(byte[] contents, long? size = null, string? sha256 = null) => new(
         PackageUri,
         "exe",
-        ["x64"],
+        ["arm64", "x64"],
         "10.0.19041.0",
-        "Rivune-x64.exe",
+        "Rivune-Windows.exe",
         size ?? contents.LongLength,
-        sha256 ?? Convert.ToHexStringLower(SHA256.HashData(contents)));
+        sha256 ?? Convert.ToHexStringLower(SHA256.HashData(contents)),
+        "Rivune-x64.exe",
+        1,
+        X64ExecutableSha256);
+
+    private static byte[] Bundle(byte[] x64, byte[] arm64, byte[]? uninstaller = null)
+    {
+        using var output = new MemoryStream();
+        using (var archive = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach (var (name, contents) in new[]
+                     {
+                         ("Rivune-x64.exe", x64),
+                         ("Rivune-arm64.exe", arm64),
+                         ("Rivune-Uninstall.exe", uninstaller ?? Encoding.UTF8.GetBytes("uninstaller payload")),
+                     })
+            {
+                var entry = archive.CreateEntry(name, CompressionLevel.Optimal);
+                using var stream = entry.Open();
+                stream.Write(contents);
+            }
+        }
+        return output.ToArray();
+    }
 
     private static ResponseSpec Response(HttpStatusCode statusCode, string body = "", Uri? location = null) =>
         new(statusCode, Encoding.UTF8.GetBytes(body), location, false);

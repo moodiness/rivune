@@ -54,7 +54,7 @@ internal object AppUpdateManifestParser {
         } catch (error: Exception) {
             throw InvalidUpdateManifest("The update manifest is not valid JSON")
         }
-        if (root.requiredInt("schemaVersion") != 2) throw InvalidUpdateManifest("Unsupported update manifest schema")
+        if (root.requiredInt("schemaVersion") != 3) throw InvalidUpdateManifest("Unsupported update manifest schema")
         val channel = root.requiredString("channel")
         if (channel != "stable" && channel != "prerelease") throw InvalidUpdateManifest("Invalid release channel")
         val version = root.requiredString("version")

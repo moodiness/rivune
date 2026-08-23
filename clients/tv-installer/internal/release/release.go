@@ -17,19 +17,15 @@ import (
 )
 
 const (
-	Repository                      = "moodiness/rivune"
-	WebOSPackageName                = "Rivune-webOS.ipk"
-	TizenPackageName                = "Rivune-Tizen.wgt"
-	ManifestName                    = "rivune-update.json"
-	WindowsX64InstallerName         = "Rivune-TV-Installer-Windows-x64.exe"
-	WindowsARM64InstallerName       = "Rivune-TV-Installer-Windows-arm64.exe"
-	MacOSX64InstallerName           = "Rivune-TV-Installer-macOS-x64.zip"
-	MacOSARM64InstallerName         = "Rivune-TV-Installer-macOS-arm64.zip"
-	LinuxX64InstallerName           = "Rivune-TV-Installer-Linux-x64.zip"
-	LinuxARM64InstallerName         = "Rivune-TV-Installer-Linux-arm64.zip"
-	maximumMetadataBytes      int64 = 512 * 1024
-	maximumManifestBytes      int64 = 256 * 1024
-	maximumPackageBytes       int64 = 256 * 1024 * 1024
+	Repository                 = "moodiness/rivune"
+	WebOSPackageName           = "Rivune-webOS.ipk"
+	TizenPackageName           = "Rivune-Tizen.wgt"
+	ManifestName               = "rivune-update.json"
+	WindowsInstallerName       = "Rivune-TV-Installer-Windows.exe"
+	MacOSInstallerName         = "Rivune-TV-Installer-macOS.dmg"
+	maximumMetadataBytes int64 = 512 * 1024
+	maximumManifestBytes int64 = 256 * 1024
+	maximumPackageBytes  int64 = 256 * 1024 * 1024
 )
 
 var (
@@ -37,21 +33,16 @@ var (
 	hexDigestPattern   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	ExpectedAssetNames = []string{
 		"Rivune-Android.apk",
-		LinuxARM64InstallerName,
-		LinuxX64InstallerName,
-		MacOSARM64InstallerName,
-		MacOSX64InstallerName,
-		WindowsARM64InstallerName,
-		WindowsX64InstallerName,
+		MacOSInstallerName,
+		WindowsInstallerName,
 		"Rivune-TV-runtime.json",
 		TizenPackageName,
-		"Rivune-arm64.exe",
+		"Rivune-Windows.exe",
 		"Rivune-iOS-unsigned.ipa",
 		"Rivune-macOS.dmg",
 		"Rivune-tvOS-unsigned.ipa",
 		"Rivune-visionOS-unsigned.ipa",
 		WebOSPackageName,
-		"Rivune-x64.exe",
 		ManifestName,
 	}
 )
@@ -170,7 +161,7 @@ func (client *Client) Latest(ctx context.Context) (Release, error) {
 	}
 	version := strings.TrimPrefix(github.TagName, "v")
 	manifestPublishedAt, publishedAtError := time.Parse(time.RFC3339Nano, manifest.PublishedAt)
-	if manifest.SchemaVersion != 2 || manifest.Channel != "stable" || manifest.Version != version || manifest.TagName != github.TagName || publishedAtError != nil || manifestPublishedAt.After(time.Now().Add(5*time.Minute)) || manifest.ReleaseURL != github.HTMLURL {
+	if manifest.SchemaVersion != 3 || manifest.Channel != "stable" || manifest.Version != version || manifest.TagName != github.TagName || publishedAtError != nil || manifestPublishedAt.After(time.Now().Add(5*time.Minute)) || manifest.ReleaseURL != github.HTMLURL {
 		return Release{}, errors.New("update manifest release identity is invalid")
 	}
 	webOS, err := client.parseTVPackage(manifest.Packages["webos"], assets[WebOSPackageName], github.TagName, "webos")
