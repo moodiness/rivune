@@ -12,21 +12,16 @@ const publishedAtPattern = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{
 
 const expectedAssetNames = [
   "Rivune-Android.apk",
-  "Rivune-TV-Installer-Linux-arm64.zip",
-  "Rivune-TV-Installer-Linux-x64.zip",
-  "Rivune-TV-Installer-Windows-arm64.exe",
-  "Rivune-TV-Installer-Windows-x64.exe",
-  "Rivune-TV-Installer-macOS-arm64.zip",
-  "Rivune-TV-Installer-macOS-x64.zip",
+  "Rivune-TV-Installer-Windows.exe",
+  "Rivune-TV-Installer-macOS.dmg",
   "Rivune-Tizen.wgt",
   "Rivune-TV-runtime.json",
-  "Rivune-arm64.exe",
+  "Rivune-Windows.exe",
   "Rivune-iOS-unsigned.ipa",
   "Rivune-macOS.dmg",
   "Rivune-tvOS-unsigned.ipa",
   "Rivune-visionOS-unsigned.ipa",
   "Rivune-webOS.ipk",
-  "Rivune-x64.exe",
   "rivune-update.json",
 ] as const;
 
@@ -206,7 +201,7 @@ function exactStringArray(value: unknown, expected: readonly string[], context: 
 export function parseUpdateManifest(value: unknown, release: AvailableRelease, platform: RivuneRuntimePlatform): RuntimeRelease {
   const manifest = record(value, "update manifest");
   exactKeys(manifest, ["schemaVersion", "channel", "version", "tagName", "publishedAt", "releaseUrl", "packages"], "update manifest");
-  if (manifest.schemaVersion !== 2 || manifest.channel !== "stable" || manifest.version !== release.version || manifest.tagName !== release.tagName) {
+  if (manifest.schemaVersion !== 3 || manifest.channel !== "stable" || manifest.version !== release.version || manifest.tagName !== release.tagName) {
     throw new Error("The update manifest release identity is invalid.");
   }
   const publishedAt = requiredString(manifest, "publishedAt", "update manifest");
@@ -215,7 +210,7 @@ export function parseUpdateManifest(value: unknown, release: AvailableRelease, p
     throw new Error("The update manifest release URL is invalid.");
   }
   const packages = record(manifest.packages, "update manifest packages");
-  exactKeys(packages, ["android", "ios", "tvos", "visionos", "macos", "webos", "tizen", "tvRuntime", "windowsX64", "windowsArm64"], "update manifest packages");
+  exactKeys(packages, ["android", "ios", "tvos", "visionos", "macos", "webos", "tizen", "tvRuntime", "windows"], "update manifest packages");
 
   const platformPackage = record(packages[platform], `update manifest ${platform} package`);
   exactKeys(platformPackage, ["format", "architectures", "minimumOsVersion", "applicationId", "signature", "fileName", "url", "size", "sha256"], `update manifest ${platform} package`);

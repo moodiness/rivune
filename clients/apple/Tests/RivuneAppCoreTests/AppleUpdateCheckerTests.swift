@@ -181,7 +181,7 @@ final class AppleUpdateCheckerTests: XCTestCase {
             ]
         }
         return [
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "channel": version.contains("-") ? "prerelease" : "stable",
             "version": version,
             "tagName": "v\(version)",

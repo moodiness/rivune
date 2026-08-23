@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Globalization;
+using System.IO.Compression;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -15,7 +16,10 @@ internal sealed record WindowsUpdatePackage(
     string MinimumOsVersion,
     string FileName,
     long Size,
-    string Sha256);
+    string Sha256,
+    string ExecutableFileName,
+    long ExecutableSize,
+    string ExecutableSha256);
 
 internal sealed record AppUpdateCheckResult(
     string CurrentVersion,
@@ -45,6 +49,89 @@ internal static partial class AppUpdateChecker
         Stream destination,
         CancellationToken cancellationToken = default) =>
         DownloadPackageAsync(SharedPackageClient, package, destination, cancellationToken);
+
+    internal static async Task ExtractExecutableAsync(
+        WindowsUpdatePackage package,
+        string bundlePath,
+        string destinationPath,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(package);
+        ArgumentException.ThrowIfNullOrWhiteSpace(bundlePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
+        if (File.Exists(destinationPath))
+            throw new InvalidOperationException("The update extraction destination already exists.");
+
+        await using var bundleStream = new FileStream(
+            bundlePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            81920,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        if (bundleStream.Length != package.Size)
+            throw new InvalidOperationException("The downloaded Windows executable size changed before extraction.");
+        var bundleDigest = Convert.ToHexStringLower(
+            await SHA256.HashDataAsync(bundleStream, cancellationToken).ConfigureAwait(false));
+        if (!bundleDigest.Equals(package.Sha256, StringComparison.Ordinal))
+            throw new InvalidOperationException("The downloaded Windows executable SHA-256 changed before extraction.");
+        bundleStream.Position = 0;
+
+        using var archive = new ZipArchive(bundleStream, ZipArchiveMode.Read, leaveOpen: true);
+        var expectedEntries = new HashSet<string>(["Rivune-x64.exe", "Rivune-arm64.exe", "Rivune-Uninstall.exe"], StringComparer.Ordinal);
+        if (archive.Entries.Count != expectedEntries.Count)
+            throw new InvalidOperationException("The downloaded Windows executable has an invalid embedded payload.");
+        ZipArchiveEntry? selected = null;
+        foreach (var entry in archive.Entries)
+        {
+            if (entry.FullName != entry.Name || !expectedEntries.Remove(entry.FullName) || entry.Length <= 0 || entry.Length > MaximumPackageBytes)
+                throw new InvalidOperationException("The downloaded Windows executable has an invalid embedded payload.");
+            if (entry.FullName.Equals(package.ExecutableFileName, StringComparison.Ordinal)) selected = entry;
+        }
+        if (expectedEntries.Count != 0 || selected is null || selected.Length != package.ExecutableSize)
+            throw new InvalidOperationException("The downloaded Windows executable has no matching architecture payload.");
+
+        try
+        {
+            await using var input = selected.Open();
+            await using var output = new FileStream(
+                destinationPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                81920,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            var buffer = ArrayPool<byte>.Shared.Rent(81920);
+            long total = 0;
+            try
+            {
+                while (true)
+                {
+                    var read = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken).ConfigureAwait(false);
+                    if (read == 0) break;
+                    if (total + read > package.ExecutableSize)
+                        throw new InvalidOperationException("The embedded Windows executable is larger than declared.");
+                    hash.AppendData(buffer, 0, read);
+                    await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                    total += read;
+                }
+                if (total != package.ExecutableSize ||
+                    !Convert.ToHexStringLower(hash.GetHashAndReset()).Equals(package.ExecutableSha256, StringComparison.Ordinal))
+                    throw new InvalidOperationException("The embedded Windows executable does not match its manifest size and SHA-256.");
+                await output.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+        catch
+        {
+            try { File.Delete(destinationPath); } catch { }
+            throw;
+        }
+    }
 
     internal static bool AutomaticCheckIsDue(DateTimeOffset? lastSuccessfulCheck, DateTimeOffset now) =>
         lastSuccessfulCheck is null || lastSuccessfulCheck > now || now - lastSuccessfulCheck >= AutomaticCheckInterval;
@@ -90,10 +177,10 @@ internal static partial class AppUpdateChecker
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(client);
-        var (packageName, architecture, fileName) = processArchitecture switch
+        var (architecture, executableFileName) = processArchitecture switch
         {
-            Architecture.X64 => ("windowsX64", "x64", "Rivune-x64.exe"),
-            Architecture.Arm64 => ("windowsArm64", "arm64", "Rivune-arm64.exe"),
+            Architecture.X64 => ("x64", "Rivune-x64.exe"),
+            Architecture.Arm64 => ("arm64", "Rivune-arm64.exe"),
             _ => throw new InvalidOperationException(
                 $"Rivune updates do not support the current process architecture ({processArchitecture})."),
         };
@@ -122,7 +209,7 @@ internal static partial class AppUpdateChecker
             RequireProperties(root, "manifest",
                 "schemaVersion", "channel", "version", "tagName", "publishedAt", "releaseUrl", "packages");
             if (root.GetProperty("schemaVersion").ValueKind != JsonValueKind.Number ||
-                root.GetProperty("schemaVersion").GetRawText() != "2")
+                root.GetProperty("schemaVersion").GetRawText() != "3")
                 throw new InvalidOperationException("The Rivune update manifest schema is not supported.");
 
             var version = RequiredString(root, "version", "manifest");
@@ -150,14 +237,14 @@ internal static partial class AppUpdateChecker
                 "The Rivune update manifest release URL is not trusted.");
 
             var packages = root.GetProperty("packages");
-            RequireProperties(packages, "manifest packages", "android", packageName);
+            RequireProperties(packages, "manifest packages", "android", "windows");
             if (packages.GetProperty("android").ValueKind != JsonValueKind.Object)
                 throw new InvalidOperationException("The Rivune update manifest Android package is invalid.");
             var package = ParseWindowsPackage(
-                packages.GetProperty(packageName),
+                packages.GetProperty("windows"),
                 tagName,
                 architecture,
-                fileName);
+                executableFileName);
 
             return new AppUpdateCheckResult(
                 currentVersion,
@@ -178,52 +265,75 @@ internal static partial class AppUpdateChecker
         JsonElement package,
         string tagName,
         string expectedArchitecture,
-        string expectedFileName)
+        string expectedExecutableFileName)
     {
         RequireProperties(package, "Windows package",
-            "format", "architectures", "minimumOsVersion", "fileName", "url", "size", "sha256");
+            "format", "architectures", "minimumOsVersion", "fileName", "url", "size", "sha256", "executables");
         RequireExactString(package, "format", "exe", "The Windows update package format is invalid.");
         RequireExactString(package, "minimumOsVersion", "10.0.19041.0", "The Windows update minimum OS version is invalid.");
 
         var architectures = package.GetProperty("architectures");
         if (architectures.ValueKind != JsonValueKind.Array ||
-            architectures.GetArrayLength() != 1 ||
-            architectures[0].ValueKind != JsonValueKind.String ||
-            architectures[0].GetString() != expectedArchitecture)
+            architectures.GetArrayLength() != 2 ||
+            architectures[0].ValueKind != JsonValueKind.String || architectures[0].GetString() != "arm64" ||
+            architectures[1].ValueKind != JsonValueKind.String || architectures[1].GetString() != "x64")
         {
             throw new InvalidOperationException("The Windows update package architectures are invalid.");
         }
 
-        if (!RequiredString(package, "fileName", "Windows package").Equals(expectedFileName, StringComparison.Ordinal))
+        const string packageFileName = "Rivune-Windows.exe";
+        if (!RequiredString(package, "fileName", "Windows package").Equals(packageFileName, StringComparison.Ordinal))
             throw new InvalidOperationException("The Windows update package file name is invalid.");
 
-        var expectedPackageUrl = $"https://github.com/moodiness/rivune/releases/download/{tagName}/{expectedFileName}";
+        var expectedPackageUrl = $"https://github.com/moodiness/rivune/releases/download/{tagName}/{packageFileName}";
         var packageUri = RequireExactUri(
             RequiredString(package, "url", "Windows package"),
             expectedPackageUrl,
             "The Windows update package URL is not trusted.");
+        var size = RequiredPositiveSize(package, "size", "Windows package");
+        var sha256 = RequiredSha256(package, "sha256", "Windows package");
 
-        var sizeElement = package.GetProperty("size");
-        if (sizeElement.ValueKind != JsonValueKind.Number ||
-            !PositiveIntegerPattern().IsMatch(sizeElement.GetRawText()) ||
-            !sizeElement.TryGetInt64(out var size) ||
-            size is <= 0 or > MaximumPackageBytes)
-        {
-            throw new InvalidOperationException("The Windows update package size is invalid.");
-        }
-
-        var sha256 = RequiredString(package, "sha256", "Windows package");
-        if (!Sha256Pattern().IsMatch(sha256))
-            throw new InvalidOperationException("The Windows update package SHA-256 is invalid.");
+        var executables = package.GetProperty("executables");
+        RequireProperties(executables, "Windows executables", "x64", "arm64");
+        var executable = executables.GetProperty(expectedArchitecture);
+        RequireProperties(executable, $"Windows {expectedArchitecture} executable", "fileName", "size", "sha256");
+        if (!RequiredString(executable, "fileName", "Windows executable").Equals(expectedExecutableFileName, StringComparison.Ordinal))
+            throw new InvalidOperationException("The Windows update executable file name is invalid.");
+        var executableSize = RequiredPositiveSize(executable, "size", "Windows executable");
+        var executableSha256 = RequiredSha256(executable, "sha256", "Windows executable");
 
         return new WindowsUpdatePackage(
             packageUri,
             "exe",
-            [expectedArchitecture],
+            ["arm64", "x64"],
             "10.0.19041.0",
-            expectedFileName,
+            packageFileName,
             size,
-            sha256);
+            sha256,
+            expectedExecutableFileName,
+            executableSize,
+            executableSha256);
+    }
+
+    private static long RequiredPositiveSize(JsonElement value, string name, string context)
+    {
+        var element = value.GetProperty(name);
+        if (element.ValueKind != JsonValueKind.Number ||
+            !PositiveIntegerPattern().IsMatch(element.GetRawText()) ||
+            !element.TryGetInt64(out var size) ||
+            size is <= 0 or > MaximumPackageBytes)
+        {
+            throw new InvalidOperationException($"The Rivune update {context} {name} is invalid.");
+        }
+        return size;
+    }
+
+    private static string RequiredSha256(JsonElement value, string name, string context)
+    {
+        var digest = RequiredString(value, name, context);
+        if (!Sha256Pattern().IsMatch(digest))
+            throw new InvalidOperationException($"The Rivune update {context} {name} is invalid.");
+        return digest;
     }
 
 

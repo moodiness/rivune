@@ -11,21 +11,16 @@ import {
 
 const assetNames = [
   "Rivune-Android.apk",
-  "Rivune-TV-Installer-Linux-arm64.zip",
-  "Rivune-TV-Installer-Linux-x64.zip",
-  "Rivune-TV-Installer-Windows-arm64.exe",
-  "Rivune-TV-Installer-Windows-x64.exe",
-  "Rivune-TV-Installer-macOS-arm64.zip",
-  "Rivune-TV-Installer-macOS-x64.zip",
+  "Rivune-TV-Installer-Windows.exe",
+  "Rivune-TV-Installer-macOS.dmg",
   "Rivune-Tizen.wgt",
   "Rivune-TV-runtime.json",
-  "Rivune-arm64.exe",
+  "Rivune-Windows.exe",
   "Rivune-iOS-unsigned.ipa",
   "Rivune-macOS.dmg",
   "Rivune-tvOS-unsigned.ipa",
   "Rivune-visionOS-unsigned.ipa",
   "Rivune-webOS.ipk",
-  "Rivune-x64.exe",
   "rivune-update.json",
 ];
 
@@ -106,14 +101,14 @@ describe("GitHub TV release validation", () => {
     const checked = parseLatestRelease(release(), "1.12.0", "webos");
     if (!checked.updateAvailable) throw new Error("Expected an available update fixture.");
     const manifest = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       channel: "stable",
       version: "2.0.0",
       tagName: "v2.0.0",
       publishedAt: "2026-08-23T12:00:00Z",
       releaseUrl: "https://github.com/moodiness/rivune/releases/tag/v2.0.0",
       packages: {
-        android: {}, ios: {}, tvos: {}, visionos: {}, macos: {}, windowsX64: {}, windowsArm64: {},
+        android: {}, ios: {}, tvos: {}, visionos: {}, macos: {}, windows: {},
         webos: {
           format: "ipk", architectures: ["universal"], minimumOsVersion: "4.0", applicationId: "io.rivune.app.webos",
           signature: "unsigned", fileName: "Rivune-webOS.ipk", url: "https://github.com/moodiness/rivune/releases/download/v2.0.0/Rivune-webOS.ipk",

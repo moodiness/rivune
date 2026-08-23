@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,7 +16,7 @@ import (
 )
 
 const (
-	schemaVersion          = 2
+	schemaVersion          = 3
 	androidApplicationID   = "io.rivune.app"
 	githubReleaseURLPrefix = "https://github.com/moodiness/rivune/releases"
 	androidAssetFileName   = "Rivune-Android.apk"
@@ -26,6 +27,10 @@ const (
 	webosAssetFileName     = "Rivune-webOS.ipk"
 	tizenAssetFileName     = "Rivune-Tizen.wgt"
 	tvRuntimeAssetFileName = "Rivune-TV-runtime.json"
+	windowsAssetFileName   = "Rivune-Windows.exe"
+	windowsX64Name         = "Rivune-x64.exe"
+	windowsArm64Name       = "Rivune-arm64.exe"
+	windowsUninstallerName = "Rivune-Uninstall.exe"
 	maxAndroidPackageSize  = int64(512 * 1024 * 1024)
 	maxApplePackageSize    = int64(512 * 1024 * 1024)
 	maxTVPackageSize       = int64(512 * 1024 * 1024)
@@ -42,64 +47,60 @@ var (
 )
 
 type generateOptions struct {
-	apk                       string
-	iosArchive                string
-	tvosArchive               string
-	visionosArchive           string
-	macosDiskImage            string
-	webosPackage              string
-	tizenPackage              string
-	tvRuntime                 string
-	windowsX64Executable      string
-	windowsArm64Executable    string
-	output                    string
-	channel                   string
-	tagName                   string
-	publishedAt               string
-	releaseURL                string
-	apkURL                    string
-	iosArchiveURL             string
-	tvosArchiveURL            string
-	visionosArchiveURL        string
-	macosDiskImageURL         string
-	webosPackageURL           string
-	tizenPackageURL           string
-	tvRuntimeURL              string
-	applicationID             string
-	buildVersion              string
-	signingCertificateSHA256  string
-	windowsX64ExecutableURL   string
-	windowsArm64ExecutableURL string
+	apk                      string
+	iosArchive               string
+	tvosArchive              string
+	visionosArchive          string
+	macosDiskImage           string
+	webosPackage             string
+	tizenPackage             string
+	tvRuntime                string
+	windowsExecutable        string
+	output                   string
+	channel                  string
+	tagName                  string
+	publishedAt              string
+	releaseURL               string
+	apkURL                   string
+	iosArchiveURL            string
+	tvosArchiveURL           string
+	visionosArchiveURL       string
+	macosDiskImageURL        string
+	webosPackageURL          string
+	tizenPackageURL          string
+	tvRuntimeURL             string
+	applicationID            string
+	buildVersion             string
+	signingCertificateSHA256 string
+	windowsExecutableURL     string
 }
 
 type validateOptions struct {
-	apk                       string
-	iosArchive                string
-	tvosArchive               string
-	visionosArchive           string
-	macosDiskImage            string
-	webosPackage              string
-	tizenPackage              string
-	tvRuntime                 string
-	windowsX64Executable      string
-	windowsArm64Executable    string
-	channel                   string
-	tagName                   string
-	publishedAt               string
-	releaseURL                string
-	apkURL                    string
-	iosArchiveURL             string
-	tvosArchiveURL            string
-	visionosArchiveURL        string
-	macosDiskImageURL         string
-	webosPackageURL           string
-	tizenPackageURL           string
-	tvRuntimeURL              string
-	applicationID             string
-	buildVersion              string
-	signingCertificateSHA256  string
-	windowsX64ExecutableURL   string
-	windowsArm64ExecutableURL string
+	apk                      string
+	iosArchive               string
+	tvosArchive              string
+	visionosArchive          string
+	macosDiskImage           string
+	webosPackage             string
+	tizenPackage             string
+	tvRuntime                string
+	windowsExecutable        string
+	channel                  string
+	tagName                  string
+	publishedAt              string
+	releaseURL               string
+	apkURL                   string
+	iosArchiveURL            string
+	tvosArchiveURL           string
+	visionosArchiveURL       string
+	macosDiskImageURL        string
+	webosPackageURL          string
+	tizenPackageURL          string
+	tvRuntimeURL             string
+	applicationID            string
+	buildVersion             string
+	signingCertificateSHA256 string
+	windowsExecutableURL     string
 }
 
 func buildManifest(options generateOptions) (map[string]any, error) {
@@ -135,11 +136,7 @@ func buildManifest(options generateOptions) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	windowsX64Size, windowsX64Digest, err := assetMetadata(options.windowsX64Executable, "Windows x64 executable", maxWindowsPackageSize)
-	if err != nil {
-		return nil, err
-	}
-	windowsArm64Size, windowsArm64Digest, err := assetMetadata(options.windowsArm64Executable, "Windows ARM64 executable", maxWindowsPackageSize)
+	windowsSize, windowsDigest, windowsExecutables, err := windowsBundleMetadata(options.windowsExecutable)
 	if err != nil {
 		return nil, err
 	}
@@ -171,25 +168,19 @@ func buildManifest(options generateOptions) (map[string]any, error) {
 			"webos":     tvPackage("ipk", "4.0", "io.rivune.app.webos", options.webosPackage, options.webosPackageURL, webosSize, webosDigest),
 			"tizen":     tvPackage("wgt", "5.5", "RivuneTV01.Rivune", options.tizenPackage, options.tizenPackageURL, tizenSize, tizenDigest),
 			"tvRuntime": runtimePackage(options.tvRuntime, options.tvRuntimeURL, tvRuntimeSize, tvRuntimeDigest),
-			"windowsX64": map[string]any{
+			"windows": map[string]any{
 				"format":           "exe",
-				"architectures":    []string{"x64"},
+				"architectures":    []string{"arm64", "x64"},
 				"minimumOsVersion": "10.0.19041.0",
 				"signature":        "unsigned",
-				"fileName":         filepath.Base(options.windowsX64Executable),
-				"url":              options.windowsX64ExecutableURL,
-				"size":             windowsX64Size,
-				"sha256":           windowsX64Digest,
-			},
-			"windowsArm64": map[string]any{
-				"format":           "exe",
-				"architectures":    []string{"arm64"},
-				"minimumOsVersion": "10.0.19041.0",
-				"signature":        "unsigned",
-				"fileName":         filepath.Base(options.windowsArm64Executable),
-				"url":              options.windowsArm64ExecutableURL,
-				"size":             windowsArm64Size,
-				"sha256":           windowsArm64Digest,
+				"fileName":         filepath.Base(options.windowsExecutable),
+				"url":              options.windowsExecutableURL,
+				"size":             windowsSize,
+				"sha256":           windowsDigest,
+				"executables": map[string]any{
+					"x64":   executablePackage(windowsX64Name, windowsExecutables[windowsX64Name]),
+					"arm64": executablePackage(windowsArm64Name, windowsExecutables[windowsArm64Name]),
+				},
 			},
 		},
 	}
@@ -197,6 +188,19 @@ func buildManifest(options generateOptions) (map[string]any, error) {
 		return nil, err
 	}
 	return manifest, nil
+}
+
+type entryMetadata struct {
+	size   int64
+	digest string
+}
+
+func executablePackage(fileName string, metadata entryMetadata) map[string]any {
+	return map[string]any{
+		"fileName": fileName,
+		"size":     metadata.size,
+		"sha256":   metadata.digest,
+	}
 }
 
 func applePackage(format string, architectures []string, minimumOSVersion, bundleIdentifier, path, url string, size int64, digest string) map[string]any {
@@ -351,7 +355,7 @@ func validateManifest(manifest any) error {
 	if err != nil {
 		return err
 	}
-	if err := rejectUnknownFields(packages, "manifest.packages", "android", "ios", "tvos", "visionos", "macos", "webos", "tizen", "tvRuntime", "windowsX64", "windowsArm64"); err != nil {
+	if err := rejectUnknownFields(packages, "manifest.packages", "android", "ios", "tvos", "visionos", "macos", "webos", "tizen", "tvRuntime", "windows"); err != nil {
 		return err
 	}
 	androidPackage, err := requiredPackage(packages, "android")
@@ -404,18 +408,11 @@ func validateManifest(manifest any) error {
 	if err := validateRuntimePackage(tvRuntimePackage, tagName, "manifest.packages.tvRuntime"); err != nil {
 		return err
 	}
-	windowsX64Package, err := requiredPackage(packages, "windowsX64")
+	windowsPackage, err := requiredPackage(packages, "windows")
 	if err != nil {
 		return err
 	}
-	if err := validateWindowsPackage(windowsX64Package, tagName, "manifest.packages.windowsX64", "x64", "Rivune-x64.exe"); err != nil {
-		return err
-	}
-	windowsArm64Package, err := requiredPackage(packages, "windowsArm64")
-	if err != nil {
-		return err
-	}
-	return validateWindowsPackage(windowsArm64Package, tagName, "manifest.packages.windowsArm64", "arm64", "Rivune-arm64.exe")
+	return validateWindowsPackage(windowsPackage, tagName, "manifest.packages.windows")
 }
 
 func requiredPackage(packages map[string]any, key string) (map[string]any, error) {
@@ -579,13 +576,8 @@ func validateRuntimePackage(packageObject map[string]any, tagName, context strin
 	return validateCommonPackageFields(packageObject, context, tagName, tvRuntimeAssetFileName, maxTVRuntimeSize)
 }
 
-func validateWindowsPackage(packageObject map[string]any, tagName, context, architecture, fileName string) error {
-	for _, obsoleteField := range []string{"identityName", "publisher", "packageVersion", "signingCertificateSha256"} {
-		if _, present := packageObject[obsoleteField]; present {
-			return fmt.Errorf("%s.%s is obsolete for portable executables", context, obsoleteField)
-		}
-	}
-	if err := rejectUnknownFields(packageObject, context, "format", "architectures", "minimumOsVersion", "signature", "fileName", "url", "size", "sha256"); err != nil {
+func validateWindowsPackage(packageObject map[string]any, tagName, context string) error {
+	if err := rejectUnknownFields(packageObject, context, "format", "architectures", "minimumOsVersion", "signature", "fileName", "url", "size", "sha256", "executables"); err != nil {
 		return err
 	}
 	if err := requireExactString(packageObject, "format", "exe", context); err != nil {
@@ -594,13 +586,45 @@ func validateWindowsPackage(packageObject map[string]any, tagName, context, arch
 	if err := requireExactString(packageObject, "signature", "unsigned", context); err != nil {
 		return err
 	}
-	if err := requireArchitectures(packageObject, []string{architecture}, context); err != nil {
+	if err := requireArchitectures(packageObject, []string{"arm64", "x64"}, context); err != nil {
 		return err
 	}
 	if err := requireExactString(packageObject, "minimumOsVersion", "10.0.19041.0", context); err != nil {
 		return err
 	}
-	return validateCommonPackageFields(packageObject, context, tagName, fileName, maxWindowsPackageSize)
+	executablesValue, err := required(packageObject, "executables", context)
+	if err != nil {
+		return err
+	}
+	executables, err := object(executablesValue, context+".executables")
+	if err != nil {
+		return err
+	}
+	if err := rejectUnknownFields(executables, context+".executables", "x64", "arm64"); err != nil {
+		return err
+	}
+	for architecture, fileName := range map[string]string{"x64": windowsX64Name, "arm64": windowsArm64Name} {
+		executable, err := requiredPackage(executables, architecture)
+		if err != nil {
+			return err
+		}
+		executableContext := context + ".executables." + architecture
+		if err := rejectUnknownFields(executable, executableContext, "fileName", "size", "sha256"); err != nil {
+			return err
+		}
+		if name, err := requiredString(executable, "fileName", executableContext); err != nil || name != fileName {
+			return fmt.Errorf("%s.fileName must be %s", executableContext, fileName)
+		}
+		if value, err := required(executable, "size", executableContext); err != nil {
+			return err
+		} else if err := validatePackageSize(value, maxWindowsPackageSize, executableContext+".size"); err != nil {
+			return err
+		}
+		if _, err := sha256Field(executable, "sha256", executableContext); err != nil {
+			return err
+		}
+	}
+	return validateCommonPackageFields(packageObject, context, tagName, windowsAssetFileName, maxWindowsPackageSize)
 }
 
 func validateCommonPackageFields(packageObject map[string]any, context, tagName, expectedFileName string, maximumSize int64) error {
@@ -640,8 +664,7 @@ func validateExpectedValues(manifest any, options validateOptions) error {
 	macosPackage := packages["macos"].(map[string]any)
 	webosPackage := packages["webos"].(map[string]any)
 	tizenPackage := packages["tizen"].(map[string]any)
-	windowsX64Package := packages["windowsX64"].(map[string]any)
-	windowsArm64Package := packages["windowsArm64"].(map[string]any)
+	windowsPackage := packages["windows"].(map[string]any)
 	tvRuntimePackage := packages["tvRuntime"].(map[string]any)
 	expected := []struct {
 		actual any
@@ -662,8 +685,7 @@ func validateExpectedValues(manifest any, options validateOptions) error {
 		{macosPackage["url"], options.macosDiskImageURL, "macOS package URL"},
 		{webosPackage["url"], options.webosPackageURL, "webOS package URL"},
 		{tizenPackage["url"], options.tizenPackageURL, "Tizen package URL"},
-		{windowsX64Package["url"], options.windowsX64ExecutableURL, "Windows x64 executable URL"},
-		{windowsArm64Package["url"], options.windowsArm64ExecutableURL, "Windows ARM64 executable URL"},
+		{windowsPackage["url"], options.windowsExecutableURL, "Windows executable URL"},
 		{tvRuntimePackage["url"], options.tvRuntimeURL, "TV runtime URL"},
 	}
 	for _, item := range expected {
@@ -684,13 +706,26 @@ func validateExpectedValues(manifest any, options validateOptions) error {
 		{macosPackage, options.macosDiskImage, "macOS disk image", maxApplePackageSize},
 		{webosPackage, options.webosPackage, "webOS package", maxTVPackageSize},
 		{tizenPackage, options.tizenPackage, "Tizen package", maxTVPackageSize},
-		{windowsX64Package, options.windowsX64Executable, "Windows x64 executable", maxWindowsPackageSize},
-		{windowsArm64Package, options.windowsArm64Executable, "Windows ARM64 executable", maxWindowsPackageSize},
+		{windowsPackage, options.windowsExecutable, "Windows executable", maxWindowsPackageSize},
 		{tvRuntimePackage, options.tvRuntime, "TV runtime", maxTVRuntimeSize},
 	}
 	for _, asset := range assets {
 		if err := validateExpectedAsset(asset.packageObject, asset.path, asset.label, asset.maximumSize); err != nil {
 			return err
+		}
+	}
+	if options.windowsExecutable != "" {
+		_, _, executables, err := windowsBundleMetadata(options.windowsExecutable)
+		if err != nil {
+			return err
+		}
+		manifestExecutables := windowsPackage["executables"].(map[string]any)
+		for architecture, fileName := range map[string]string{"x64": windowsX64Name, "arm64": windowsArm64Name} {
+			entry := manifestExecutables[architecture].(map[string]any)
+			metadata := executables[fileName]
+			if entry["fileName"] != fileName || !exactInteger64(entry["size"], metadata.size) || entry["sha256"] != metadata.digest {
+				return fmt.Errorf("manifest Windows %s executable does not match the release archive", architecture)
+			}
 		}
 	}
 	return nil
@@ -737,6 +772,54 @@ func assetMetadata(assetPath, label string, maximumSize int64) (int64, string, e
 		return 0, "", err
 	}
 	return info.Size(), hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func windowsBundleMetadata(path string) (int64, string, map[string]entryMetadata, error) {
+	size, digest, err := assetMetadata(path, "Windows executable", maxWindowsPackageSize)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	archive, err := zip.OpenReader(path)
+	if err != nil {
+		return 0, "", nil, fmt.Errorf("Windows executable payload is not a valid ZIP overlay: %w", err)
+	}
+	defer archive.Close()
+	expected := map[string]bool{
+		windowsX64Name:         false,
+		windowsArm64Name:       false,
+		windowsUninstallerName: false,
+	}
+	if len(archive.File) != len(expected) {
+		return 0, "", nil, fmt.Errorf("Windows executable must embed exactly %s, %s, and %s", windowsX64Name, windowsArm64Name, windowsUninstallerName)
+	}
+	metadata := make(map[string]entryMetadata, len(expected))
+	for _, entry := range archive.File {
+		if _, ok := expected[entry.Name]; !ok || expected[entry.Name] || entry.FileInfo().IsDir() || !entry.FileInfo().Mode().IsRegular() {
+			return 0, "", nil, fmt.Errorf("Windows executable contains an unexpected or duplicate payload: %s", entry.Name)
+		}
+		if entry.Method != zip.Deflate || entry.UncompressedSize64 == 0 || entry.UncompressedSize64 > uint64(maxWindowsPackageSize) {
+			return 0, "", nil, fmt.Errorf("Windows executable payload %s has invalid compression or size", entry.Name)
+		}
+		expected[entry.Name] = true
+		reader, err := entry.Open()
+		if err != nil {
+			return 0, "", nil, err
+		}
+		hash := sha256.New()
+		entrySize, copyErr := io.Copy(hash, reader)
+		closeErr := reader.Close()
+		if copyErr != nil {
+			return 0, "", nil, copyErr
+		}
+		if closeErr != nil {
+			return 0, "", nil, closeErr
+		}
+		if entrySize != int64(entry.UncompressedSize64) {
+			return 0, "", nil, fmt.Errorf("Windows executable payload %s size does not match its ZIP header", entry.Name)
+		}
+		metadata[entry.Name] = entryMetadata{size: entrySize, digest: hex.EncodeToString(hash.Sum(nil))}
+	}
+	return size, digest, metadata, nil
 }
 func validatePackageSize(value any, maximum int64, context string) error {
 	size, ok := positiveInteger64(value)

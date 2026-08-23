@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,14 +13,17 @@ import (
 )
 
 const (
-	x64FixtureContents       = "Windows x64 executable fixture"
-	iosFixtureContents       = "unsigned iOS archive fixture"
-	tvosFixtureContents      = "unsigned tvOS archive fixture"
-	visionosFixtureContents  = "unsigned visionOS archive fixture"
-	macosFixtureContents     = "unsigned macOS disk image fixture"
-	webosFixtureContents     = "unsigned webOS IPK fixture"
-	tizenFixtureContents     = "unsigned Tizen WGT fixture"
-	tvRuntimeFixtureContents = "shared webOS and Tizen runtime fixture"
+	x64FixtureContents         = "Windows x64 executable fixture"
+	arm64FixtureContents       = "Windows ARM64 executable fixture"
+	launcherFixtureContents    = "Windows universal launcher fixture"
+	uninstallerFixtureContents = "Windows uninstaller fixture"
+	iosFixtureContents         = "unsigned iOS archive fixture"
+	tvosFixtureContents        = "unsigned tvOS archive fixture"
+	visionosFixtureContents    = "unsigned visionOS archive fixture"
+	macosFixtureContents       = "unsigned macOS disk image fixture"
+	webosFixtureContents       = "unsigned webOS IPK fixture"
+	tizenFixtureContents       = "unsigned Tizen WGT fixture"
+	tvRuntimeFixtureContents   = "shared webOS and Tizen runtime fixture"
 )
 
 func fixture(t *testing.T) (generateOptions, map[string]any) {
@@ -33,40 +37,73 @@ func fixture(t *testing.T) (generateOptions, map[string]any) {
 		return path
 	}
 	options := generateOptions{
-		apk:                       asset(androidAssetFileName, "signed apk fixture"),
-		iosArchive:                asset(iosAssetFileName, iosFixtureContents),
-		tvosArchive:               asset(tvosAssetFileName, tvosFixtureContents),
-		visionosArchive:           asset(visionosAssetFileName, visionosFixtureContents),
-		macosDiskImage:            asset(macosAssetFileName, macosFixtureContents),
-		webosPackage:              asset(webosAssetFileName, webosFixtureContents),
-		tizenPackage:              asset(tizenAssetFileName, tizenFixtureContents),
-		tvRuntime:                 asset(tvRuntimeAssetFileName, tvRuntimeFixtureContents),
-		windowsX64Executable:      asset("Rivune-x64.exe", x64FixtureContents),
-		windowsArm64Executable:    asset("Rivune-arm64.exe", "Windows ARM64 executable fixture"),
-		output:                    filepath.Join(directory, "rivune-update.json"),
-		channel:                   "stable",
-		tagName:                   "v1.12.0",
-		publishedAt:               "2026-08-14T12:34:56Z",
-		releaseURL:                "https://github.com/moodiness/rivune/releases/tag/v1.12.0",
-		apkURL:                    releaseAssetURL("v1.12.0", androidAssetFileName),
-		iosArchiveURL:             releaseAssetURL("v1.12.0", iosAssetFileName),
-		tvosArchiveURL:            releaseAssetURL("v1.12.0", tvosAssetFileName),
-		visionosArchiveURL:        releaseAssetURL("v1.12.0", visionosAssetFileName),
-		macosDiskImageURL:         releaseAssetURL("v1.12.0", macosAssetFileName),
-		webosPackageURL:           releaseAssetURL("v1.12.0", webosAssetFileName),
-		tizenPackageURL:           releaseAssetURL("v1.12.0", tizenAssetFileName),
-		tvRuntimeURL:              releaseAssetURL("v1.12.0", tvRuntimeAssetFileName),
-		applicationID:             androidApplicationID,
-		buildVersion:              "123",
-		signingCertificateSHA256:  repeatHex("ab", 32),
-		windowsX64ExecutableURL:   releaseAssetURL("v1.12.0", "Rivune-x64.exe"),
-		windowsArm64ExecutableURL: releaseAssetURL("v1.12.0", "Rivune-arm64.exe"),
+		apk:                      asset(androidAssetFileName, "signed apk fixture"),
+		iosArchive:               asset(iosAssetFileName, iosFixtureContents),
+		tvosArchive:              asset(tvosAssetFileName, tvosFixtureContents),
+		visionosArchive:          asset(visionosAssetFileName, visionosFixtureContents),
+		macosDiskImage:           asset(macosAssetFileName, macosFixtureContents),
+		webosPackage:             asset(webosAssetFileName, webosFixtureContents),
+		tizenPackage:             asset(tizenAssetFileName, tizenFixtureContents),
+		tvRuntime:                asset(tvRuntimeAssetFileName, tvRuntimeFixtureContents),
+		windowsExecutable:        windowsExecutableFixture(t, directory),
+		output:                   filepath.Join(directory, "rivune-update.json"),
+		channel:                  "stable",
+		tagName:                  "v1.12.0",
+		publishedAt:              "2026-08-14T12:34:56Z",
+		releaseURL:               "https://github.com/moodiness/rivune/releases/tag/v1.12.0",
+		apkURL:                   releaseAssetURL("v1.12.0", androidAssetFileName),
+		iosArchiveURL:            releaseAssetURL("v1.12.0", iosAssetFileName),
+		tvosArchiveURL:           releaseAssetURL("v1.12.0", tvosAssetFileName),
+		visionosArchiveURL:       releaseAssetURL("v1.12.0", visionosAssetFileName),
+		macosDiskImageURL:        releaseAssetURL("v1.12.0", macosAssetFileName),
+		webosPackageURL:          releaseAssetURL("v1.12.0", webosAssetFileName),
+		tizenPackageURL:          releaseAssetURL("v1.12.0", tizenAssetFileName),
+		tvRuntimeURL:             releaseAssetURL("v1.12.0", tvRuntimeAssetFileName),
+		applicationID:            androidApplicationID,
+		buildVersion:             "123",
+		signingCertificateSHA256: repeatHex("ab", 32),
+		windowsExecutableURL:     releaseAssetURL("v1.12.0", windowsAssetFileName),
 	}
 	manifest, err := buildManifest(options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return options, manifest
+}
+
+func windowsExecutableFixture(t *testing.T, directory string) string {
+	t.Helper()
+	path := filepath.Join(directory, windowsAssetFileName)
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte(launcherFixtureContents)); err != nil {
+		t.Fatal(err)
+	}
+	archive := zip.NewWriter(file)
+	archive.SetOffset(int64(len(launcherFixtureContents)))
+	for name, contents := range map[string]string{
+		windowsX64Name:         x64FixtureContents,
+		windowsArm64Name:       arm64FixtureContents,
+		windowsUninstallerName: uninstallerFixtureContents,
+	} {
+		header := &zip.FileHeader{Name: name, Method: zip.Deflate}
+		writer, createErr := archive.CreateHeader(header)
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		if _, writeErr := writer.Write([]byte(contents)); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func releaseAssetURL(tag, name string) string {
@@ -78,7 +115,7 @@ func assetDigest(contents string) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func TestGeneratesExactTenPackageContract(t *testing.T) {
+func TestGeneratesExactNinePackageContract(t *testing.T) {
 	options, manifest := fixture(t)
 	expectedRootFields := []string{"schemaVersion", "channel", "version", "tagName", "publishedAt", "releaseUrl", "packages"}
 	for _, field := range expectedRootFields {
@@ -86,7 +123,7 @@ func TestGeneratesExactTenPackageContract(t *testing.T) {
 			t.Fatalf("missing root field %q", field)
 		}
 	}
-	if len(manifest) != len(expectedRootFields) || manifest["schemaVersion"] != 2 || manifest["version"] != "1.12.0" {
+	if len(manifest) != len(expectedRootFields) || manifest["schemaVersion"] != 3 || manifest["version"] != "1.12.0" {
 		t.Fatalf("wrong root contract: %#v", manifest)
 	}
 	packages := manifest["packages"].(map[string]any)
@@ -104,13 +141,15 @@ func TestGeneratesExactTenPackageContract(t *testing.T) {
 		"webos":     expectedTVPackage("ipk", "4.0", "io.rivune.app.webos", webosAssetFileName, options.webosPackageURL, webosFixtureContents),
 		"tizen":     expectedTVPackage("wgt", "5.5", "RivuneTV01.Rivune", tizenAssetFileName, options.tizenPackageURL, tizenFixtureContents),
 		"tvRuntime": expectedTVRuntimePackage(options.tvRuntimeURL, tvRuntimeFixtureContents),
-		"windowsX64": {
-			"format": "exe", "architectures": []string{"x64"}, "minimumOsVersion": "10.0.19041.0", "signature": "unsigned",
-			"fileName": "Rivune-x64.exe", "url": options.windowsX64ExecutableURL, "size": int64(len(x64FixtureContents)), "sha256": assetDigest(x64FixtureContents),
-		},
-		"windowsArm64": {
-			"format": "exe", "architectures": []string{"arm64"}, "minimumOsVersion": "10.0.19041.0", "signature": "unsigned",
-			"fileName": "Rivune-arm64.exe", "url": options.windowsArm64ExecutableURL, "size": int64(len("Windows ARM64 executable fixture")), "sha256": assetDigest("Windows ARM64 executable fixture"),
+		"windows": {
+			"format": "exe", "architectures": []string{"arm64", "x64"}, "minimumOsVersion": "10.0.19041.0", "signature": "unsigned",
+			"fileName": windowsAssetFileName, "url": options.windowsExecutableURL,
+			"size":   manifest["packages"].(map[string]any)["windows"].(map[string]any)["size"],
+			"sha256": manifest["packages"].(map[string]any)["windows"].(map[string]any)["sha256"],
+			"executables": map[string]any{
+				"x64":   map[string]any{"fileName": windowsX64Name, "size": int64(len(x64FixtureContents)), "sha256": assetDigest(x64FixtureContents)},
+				"arm64": map[string]any{"fileName": windowsArm64Name, "size": int64(len(arm64FixtureContents)), "sha256": assetDigest(arm64FixtureContents)},
+			},
 		},
 	}
 	if len(packages) != len(expected) {
@@ -166,7 +205,7 @@ func TestRejectsUnknownRootPackageAndPlatformFields(t *testing.T) {
 			root["packages"].(map[string]any)["tvRuntime"].(map[string]any)["futureRuntimeField"] = true
 		},
 		func(root map[string]any) {
-			root["packages"].(map[string]any)["windowsX64"].(map[string]any)["futureWindowsField"] = true
+			root["packages"].(map[string]any)["windows"].(map[string]any)["futureWindowsField"] = true
 		},
 	}
 	for index, mutate := range mutations {
@@ -191,8 +230,7 @@ func TestPrereleaseChannelUsesSemverVersion(t *testing.T) {
 	options.webosPackageURL = releaseAssetURL(options.tagName, webosAssetFileName)
 	options.tizenPackageURL = releaseAssetURL(options.tagName, tizenAssetFileName)
 	options.tvRuntimeURL = releaseAssetURL(options.tagName, tvRuntimeAssetFileName)
-	options.windowsX64ExecutableURL = releaseAssetURL(options.tagName, "Rivune-x64.exe")
-	options.windowsArm64ExecutableURL = releaseAssetURL(options.tagName, "Rivune-arm64.exe")
+	options.windowsExecutableURL = releaseAssetURL(options.tagName, windowsAssetFileName)
 	manifest, err := buildManifest(options)
 	if err != nil {
 		t.Fatal(err)
@@ -211,7 +249,7 @@ func TestRejectsEachMissingRequiredRootAndPlatform(t *testing.T) {
 			assertInvalid(t, invalid)
 		})
 	}
-	for _, platform := range []string{"android", "ios", "tvos", "visionos", "macos", "webos", "tizen", "tvRuntime", "windowsX64", "windowsArm64"} {
+	for _, platform := range []string{"android", "ios", "tvos", "visionos", "macos", "webos", "tizen", "tvRuntime", "windows"} {
 		t.Run("platform_"+platform, func(t *testing.T) {
 			invalid := cloneManifest(t, manifest)
 			delete(invalid["packages"].(map[string]any), platform)
@@ -223,7 +261,7 @@ func TestRejectsEachMissingRequiredRootAndPlatform(t *testing.T) {
 func TestRejectsEachMissingRequiredKnownPackageField(t *testing.T) {
 	_, manifest := fixture(t)
 	packages := manifest["packages"].(map[string]any)
-	for _, platform := range []string{"android", "ios", "tvos", "visionos", "macos", "webos", "tizen", "tvRuntime", "windowsX64", "windowsArm64"} {
+	for _, platform := range []string{"android", "ios", "tvos", "visionos", "macos", "webos", "tizen", "tvRuntime", "windows"} {
 		for field := range packages[platform].(map[string]any) {
 			t.Run(platform+"_"+field, func(t *testing.T) {
 				invalid := cloneManifest(t, manifest)
@@ -234,13 +272,20 @@ func TestRejectsEachMissingRequiredKnownPackageField(t *testing.T) {
 	}
 }
 
-func TestRejectsObsoleteWindowsPackageFields(t *testing.T) {
+func TestRejectsInvalidWindowsExecutableContracts(t *testing.T) {
 	_, manifest := fixture(t)
-	for _, platform := range []string{"windowsX64", "windowsArm64"} {
-		for _, field := range []string{"identityName", "publisher", "packageVersion", "signingCertificateSha256"} {
-			t.Run(platform+"_"+field, func(t *testing.T) {
+	for _, architecture := range []string{"x64", "arm64"} {
+		t.Run(architecture+"_missing", func(t *testing.T) {
+			invalid := cloneManifest(t, manifest)
+			executables := invalid["packages"].(map[string]any)["windows"].(map[string]any)["executables"].(map[string]any)
+			delete(executables, architecture)
+			assertInvalid(t, invalid)
+		})
+		for _, field := range []string{"fileName", "size", "sha256"} {
+			t.Run(architecture+"_"+field, func(t *testing.T) {
 				invalid := cloneManifest(t, manifest)
-				invalid["packages"].(map[string]any)[platform].(map[string]any)[field] = "obsolete"
+				executable := invalid["packages"].(map[string]any)["windows"].(map[string]any)["executables"].(map[string]any)[architecture].(map[string]any)
+				delete(executable, field)
 				assertInvalid(t, invalid)
 			})
 		}
@@ -277,13 +322,10 @@ func TestRejectsWrongFixedPlatformContracts(t *testing.T) {
 		{"tizen", "signature", "signed"},
 		{"tvRuntime", "format", "zip"},
 		{"tvRuntime", "platforms", []string{"tizen", "webos"}},
-		{"windowsX64", "format", "zip"},
-		{"windowsX64", "architectures", []string{"arm64"}},
-		{"windowsX64", "minimumOsVersion", "10.0.17763.0"},
-		{"windowsX64", "signature", "signed"},
-		{"windowsArm64", "format", "zip"},
-		{"windowsArm64", "architectures", []string{"x64"}},
-		{"windowsArm64", "minimumOsVersion", "10.0.17763.0"},
+		{"windows", "format", "zip"},
+		{"windows", "architectures", []string{"x64"}},
+		{"windows", "minimumOsVersion", "10.0.17763.0"},
+		{"windows", "signature", "signed"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.platform+"_"+testCase.field, func(t *testing.T) {
@@ -308,8 +350,7 @@ func TestPackageSizeBoundaries(t *testing.T) {
 		{"webos", maxTVPackageSize},
 		{"tizen", maxTVPackageSize},
 		{"tvRuntime", maxTVRuntimeSize},
-		{"windowsX64", maxWindowsPackageSize},
-		{"windowsArm64", maxWindowsPackageSize},
+		{"windows", maxWindowsPackageSize},
 	}
 	setPackageSize := func(root map[string]any, platform string, size int64) {
 		packages := root["packages"].(map[string]any)
@@ -359,12 +400,9 @@ func TestRejectsUnsafeAndWrongTagAssetURLs(t *testing.T) {
 		{"tizen", "fileName", "../Rivune-Tizen.wgt"},
 		{"tvRuntime", "url", "https://evil.example/Rivune-TV-runtime.json"},
 		{"tvRuntime", "fileName", "../Rivune-TV-runtime.json"},
-		{"windowsX64", "url", "https://github.com/moodiness/rivune/releases/download/v1.12.1/Rivune-x64.exe"},
-		{"windowsX64", "url", "https://evil.example/Rivune-x64.exe"},
-		{"windowsX64", "fileName", "other.exe"},
-		{"windowsArm64", "url", "https://github.com/moodiness/rivune/releases/download/v1.12.1/Rivune-arm64.exe"},
-		{"windowsArm64", "url", "https://evil.example/Rivune-arm64.exe"},
-		{"windowsArm64", "fileName", "rivune-arm64.exe"},
+		{"windows", "url", "https://github.com/moodiness/rivune/releases/download/v1.12.1/Rivune-Windows.exe"},
+		{"windows", "url", "https://evil.example/Rivune-Windows.exe"},
+		{"windows", "fileName", "other.exe"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.platform+"_"+testCase.field, func(t *testing.T) {
@@ -404,10 +442,10 @@ func TestRejectsMalformedVersionBuildCertificateAndDigestFields(t *testing.T) {
 			root["packages"].(map[string]any)["tvRuntime"].(map[string]any)["sha256"] = strings.Repeat("F", 64)
 		},
 		func(root map[string]any) {
-			root["packages"].(map[string]any)["windowsX64"].(map[string]any)["sha256"] = strings.Repeat("F", 64)
+			root["packages"].(map[string]any)["windows"].(map[string]any)["sha256"] = strings.Repeat("F", 64)
 		},
 		func(root map[string]any) {
-			root["packages"].(map[string]any)["windowsArm64"].(map[string]any)["sha256"] = strings.Repeat("F", 64)
+			root["packages"].(map[string]any)["windows"].(map[string]any)["executables"].(map[string]any)["x64"].(map[string]any)["sha256"] = strings.Repeat("F", 64)
 		},
 	}
 	for index, mutate := range mutations {
@@ -425,8 +463,7 @@ func TestRejectsMismatchedLocalAssetMetadataAndExpectedFields(t *testing.T) {
 		apk: options.apk, iosArchive: options.iosArchive, tvosArchive: options.tvosArchive,
 		visionosArchive: options.visionosArchive, macosDiskImage: options.macosDiskImage,
 		webosPackage: options.webosPackage, tizenPackage: options.tizenPackage,
-		tvRuntime:            options.tvRuntime,
-		windowsX64Executable: options.windowsX64Executable, windowsArm64Executable: options.windowsArm64Executable,
+		tvRuntime: options.tvRuntime, windowsExecutable: options.windowsExecutable,
 		channel: options.channel, tagName: options.tagName, publishedAt: options.publishedAt,
 		releaseURL: options.releaseURL, apkURL: options.apkURL,
 		iosArchiveURL: options.iosArchiveURL, tvosArchiveURL: options.tvosArchiveURL,
@@ -435,7 +472,7 @@ func TestRejectsMismatchedLocalAssetMetadataAndExpectedFields(t *testing.T) {
 		tvRuntimeURL:  options.tvRuntimeURL,
 		applicationID: options.applicationID, buildVersion: options.buildVersion,
 		signingCertificateSHA256: options.signingCertificateSHA256,
-		windowsX64ExecutableURL:  options.windowsX64ExecutableURL, windowsArm64ExecutableURL: options.windowsArm64ExecutableURL,
+		windowsExecutableURL:     options.windowsExecutableURL,
 	}
 	if err := validateExpectedValues(manifest, validate); err != nil {
 		t.Fatal(err)
@@ -490,28 +527,16 @@ func TestRejectsMismatchedLocalAssetMetadataAndExpectedFields(t *testing.T) {
 		t.Fatal("mismatched expected TV runtime URL was accepted")
 	}
 	validate.tvRuntimeURL = ""
-	if err := os.WriteFile(options.windowsX64Executable, []byte("different Windows x64 executable"), 0o600); err != nil {
+	if err := os.WriteFile(options.windowsExecutable, []byte("different Windows executable"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := validateExpectedValues(manifest, validate); err == nil {
-		t.Fatal("mismatched local Windows x64 executable was accepted")
+		t.Fatal("mismatched local Windows executable was accepted")
 	}
-	validate.windowsX64Executable = ""
-	validate.windowsX64ExecutableURL = releaseAssetURL("v1.12.1", "Rivune-x64.exe")
+	validate.windowsExecutable = ""
+	validate.windowsExecutableURL = releaseAssetURL("v1.12.1", windowsAssetFileName)
 	if err := validateExpectedValues(manifest, validate); err == nil {
-		t.Fatal("mismatched expected Windows x64 executable URL was accepted")
-	}
-	validate.windowsX64ExecutableURL = ""
-	if err := os.WriteFile(options.windowsArm64Executable, []byte("different Windows ARM64 executable"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := validateExpectedValues(manifest, validate); err == nil {
-		t.Fatal("mismatched local Windows ARM64 executable was accepted")
-	}
-	validate.windowsArm64Executable = ""
-	validate.windowsArm64ExecutableURL = releaseAssetURL("v1.12.1", "Rivune-arm64.exe")
-	if err := validateExpectedValues(manifest, validate); err == nil {
-		t.Fatal("mismatched expected Windows ARM64 executable URL was accepted")
+		t.Fatal("mismatched expected Windows executable URL was accepted")
 	}
 }
 
@@ -526,8 +551,7 @@ func TestGenerateAndValidateGlobalManifest(t *testing.T) {
 		"--webos-package", options.webosPackage,
 		"--tizen-package", options.tizenPackage,
 		"--tv-runtime", options.tvRuntime,
-		"--windows-x64-executable", options.windowsX64Executable,
-		"--windows-arm64-executable", options.windowsArm64Executable,
+		"--windows-executable", options.windowsExecutable,
 		"--output", options.output,
 		"--channel", options.channel,
 		"--tag-name", options.tagName,
@@ -544,10 +568,9 @@ func TestGenerateAndValidateGlobalManifest(t *testing.T) {
 		"--application-id", options.applicationID,
 		"--build-version", options.buildVersion,
 		"--signing-certificate-sha256", options.signingCertificateSHA256,
-		"--windows-x64-executable-url", options.windowsX64ExecutableURL,
-		"--windows-arm64-executable-url", options.windowsArm64ExecutableURL,
+		"--windows-executable-url", options.windowsExecutableURL,
 	}
-	for _, flagName := range []string{"--ios-archive", "--ios-archive-url", "--tvos-archive", "--tvos-archive-url", "--visionos-archive", "--visionos-archive-url", "--macos-disk-image", "--macos-disk-image-url", "--webos-package", "--webos-package-url", "--tizen-package", "--tizen-package-url", "--tv-runtime", "--tv-runtime-url", "--windows-x64-executable", "--windows-x64-executable-url", "--windows-arm64-executable", "--windows-arm64-executable-url"} {
+	for _, flagName := range []string{"--ios-archive", "--ios-archive-url", "--tvos-archive", "--tvos-archive-url", "--visionos-archive", "--visionos-archive-url", "--macos-disk-image", "--macos-disk-image-url", "--webos-package", "--webos-package-url", "--tizen-package", "--tizen-package-url", "--tv-runtime", "--tv-runtime-url", "--windows-executable", "--windows-executable-url"} {
 		err := runGenerate(argumentsWithoutFlag(generateArguments, flagName))
 		if err == nil || !strings.Contains(err.Error(), flagName+" is required") {
 			t.Fatalf("generate without %s returned %v", flagName, err)
@@ -565,8 +588,7 @@ func TestGenerateAndValidateGlobalManifest(t *testing.T) {
 		"--webos-package", options.webosPackage,
 		"--tizen-package", options.tizenPackage,
 		"--tv-runtime", options.tvRuntime,
-		"--windows-x64-executable", options.windowsX64Executable,
-		"--windows-arm64-executable", options.windowsArm64Executable,
+		"--windows-executable", options.windowsExecutable,
 		"--channel", options.channel,
 		"--tag-name", options.tagName,
 		"--published-at", options.publishedAt,
@@ -582,11 +604,10 @@ func TestGenerateAndValidateGlobalManifest(t *testing.T) {
 		"--application-id", options.applicationID,
 		"--build-version", options.buildVersion,
 		"--signing-certificate-sha256", options.signingCertificateSHA256,
-		"--windows-x64-executable-url", options.windowsX64ExecutableURL,
-		"--windows-arm64-executable-url", options.windowsArm64ExecutableURL,
+		"--windows-executable-url", options.windowsExecutableURL,
 		options.output,
 	}
-	for _, flagName := range []string{"--ios-archive", "--ios-archive-url", "--tvos-archive", "--tvos-archive-url", "--visionos-archive", "--visionos-archive-url", "--macos-disk-image", "--macos-disk-image-url", "--webos-package", "--webos-package-url", "--tizen-package", "--tizen-package-url", "--tv-runtime", "--tv-runtime-url", "--windows-x64-executable", "--windows-x64-executable-url", "--windows-arm64-executable", "--windows-arm64-executable-url"} {
+	for _, flagName := range []string{"--ios-archive", "--ios-archive-url", "--tvos-archive", "--tvos-archive-url", "--visionos-archive", "--visionos-archive-url", "--macos-disk-image", "--macos-disk-image-url", "--webos-package", "--webos-package-url", "--tizen-package", "--tizen-package-url", "--tv-runtime", "--tv-runtime-url", "--windows-executable", "--windows-executable-url"} {
 		err := runValidate(argumentsWithoutFlag(validateArguments, flagName))
 		if err == nil || !strings.Contains(err.Error(), flagName+" is required") {
 			t.Fatalf("validate without %s returned %v", flagName, err)
@@ -598,14 +619,14 @@ func TestGenerateAndValidateGlobalManifest(t *testing.T) {
 }
 
 func TestRejectsDuplicateKeysAndMultipleDocuments(t *testing.T) {
-	if _, err := decodeManifest([]byte(`{"schemaVersion":2,"packages":{"android":{},"android":{}}}`)); err == nil {
+	if _, err := decodeManifest([]byte(`{"schemaVersion":3,"packages":{"android":{},"android":{}}}`)); err == nil {
 		t.Fatal("duplicate known package key was accepted")
 	}
-	if _, err := decodeManifest([]byte(`{"schemaVersion":2,"packages":{"webos":{},"webos":{}}}`)); err == nil {
+	if _, err := decodeManifest([]byte(`{"schemaVersion":3,"packages":{"webos":{},"webos":{}}}`)); err == nil {
 		t.Fatal("duplicate webOS package key was accepted")
 	}
-	if _, err := decodeManifest([]byte(`{"schemaVersion":2,"packages":{"tizen":{"url":"a","url":"b"}}}`)); err == nil {
-		t.Fatal("duplicate Tizen package field was accepted")
+	if _, err := decodeManifest([]byte(`{"schemaVersion":3,"packages":{"windows":{"url":"a","url":"b"}}}`)); err == nil {
+		t.Fatal("duplicate Windows package field was accepted")
 	}
 	if _, err := decodeManifest([]byte(`{} {}`)); err == nil {
 		t.Fatal("multiple JSON documents were accepted")

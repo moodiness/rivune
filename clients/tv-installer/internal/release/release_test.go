@@ -91,7 +91,7 @@ func (fixture *releaseFixture) refresh(t *testing.T) {
 	t.Helper()
 	webOS := fixture.packageValue("webos", WebOSPackageName, "ipk", "4.0", "io.rivune.app.webos")
 	tizen := fixture.packageValue("tizen", TizenPackageName, "wgt", "5.5", "RivuneTV01.Rivune")
-	manifest := map[string]any{"schemaVersion": 2, "channel": "stable", "version": "2.0.0", "tagName": "v2.0.0", "publishedAt": fixture.release.PublishedAt, "releaseUrl": fixture.release.HTMLURL, "packages": map[string]any{"android": map[string]any{}, "ios": map[string]any{}, "tvos": map[string]any{}, "visionos": map[string]any{}, "macos": map[string]any{}, "webos": webOS, "tizen": tizen, "tvRuntime": map[string]any{}, "windowsX64": map[string]any{}, "windowsArm64": map[string]any{}}}
+	manifest := map[string]any{"schemaVersion": 3, "channel": "stable", "version": "2.0.0", "tagName": "v2.0.0", "publishedAt": fixture.release.PublishedAt, "releaseUrl": fixture.release.HTMLURL, "packages": map[string]any{"android": map[string]any{}, "ios": map[string]any{}, "tvos": map[string]any{}, "visionos": map[string]any{}, "macos": map[string]any{}, "webos": webOS, "tizen": tizen, "tvRuntime": map[string]any{}, "windows": map[string]any{}}}
 	fixture.files[ManifestName], _ = json.Marshal(manifest)
 	for index := range fixture.release.Assets {
 		asset := &fixture.release.Assets[index]

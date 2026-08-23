@@ -214,7 +214,7 @@ public sealed partial class MainPage
             {
                 XamlRoot = XamlRoot,
                 Title = UiFormat("Rivune {0} is available", result.LatestVersion),
-                Content = UiFormat("You are using Rivune {0}. Download the unsigned portable {1} from the exact GitHub Release, verify its size, SHA-256, and ProductVersion, then close and restart Rivune to replace this executable? This does not provide an Authenticode publisher guarantee.", result.CurrentVersion, result.Package.FileName),
+                Content = UiFormat("You are using Rivune {0}. Download the unsigned Windows package {1} from the exact GitHub Release, verify the bundle and this computer’s embedded executable, then close and restart Rivune to replace the current executable? This does not provide an Authenticode publisher guarantee.", result.CurrentVersion, result.Package.FileName),
                 PrimaryButtonText = "Download update",
                 CloseButtonText = "Not now",
                 DefaultButton = ContentDialogButton.Primary,
@@ -227,7 +227,7 @@ public sealed partial class MainPage
             {
                 XamlRoot = XamlRoot,
                 Title = UiFormat("Downloading Rivune {0}", result.LatestVersion),
-                Content = UiFormat("Downloading {0} over HTTPS and verifying its exact size, SHA-256, and ProductVersion before any update is started.", result.Package.FileName),
+                Content = UiFormat("Downloading {0} over HTTPS and verifying its exact size, SHA-256, embedded executable, and ProductVersion before any update is started.", result.Package.FileName),
             };
             var downloadingOpened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             downloading.Opened += (_, _) => downloadingOpened.TrySetResult();
@@ -239,6 +239,7 @@ public sealed partial class MainPage
                 if (_closed) return;
                 throw new InvalidOperationException("The update progress dialog closed before the download started.");
             }
+            string? packagePath = null;
             string? updatePath = null;
             try
             {
@@ -251,9 +252,10 @@ public sealed partial class MainPage
                     "updates",
                     Guid.NewGuid().ToString("N"));
                 Directory.CreateDirectory(updateDirectory);
+                packagePath = Path.Combine(updateDirectory, result.Package.FileName);
                 updatePath = Path.Combine(updateDirectory, targetFileName);
                 await using (var destination = new FileStream(
-                                 updatePath,
+                                 packagePath,
                                  FileMode.CreateNew,
                                  FileAccess.Write,
                                  FileShare.None,
@@ -262,7 +264,10 @@ public sealed partial class MainPage
                 {
                     await AppUpdateChecker.DownloadPackageAsync(result.Package, destination, cancellation.Token);
                 }
+                await AppUpdateChecker.ExtractExecutableAsync(result.Package, packagePath, updatePath, cancellation.Token);
                 PortableAppUpdate.VerifyProductVersion(updatePath, result.LatestVersion);
+                await DeleteTemporaryUpdateAsync(packagePath);
+                packagePath = null;
 
                 HideDialog(downloading);
                 await downloadingOperation;
@@ -275,8 +280,8 @@ public sealed partial class MainPage
                     updatePath,
                     processPath,
                     Environment.ProcessId,
-                    result.Package.Size,
-                    result.Package.Sha256,
+                    result.Package.ExecutableSize,
+                    result.Package.ExecutableSha256,
                     result.LatestVersion);
                 App.MainWindow.Close();
                 return;
@@ -286,6 +291,7 @@ public sealed partial class MainPage
                 HideDialog(downloading);
                 await downloadingOperation;
                 await DeleteTemporaryUpdateAsync(updatePath);
+                await DeleteTemporaryUpdateAsync(packagePath);
                 if (!_closed)
                 {
                     var message = exception switch

@@ -35,7 +35,7 @@ class AppUpdateTest {
 
     @Test
     fun rejectsUnknownSchemaMissingAndroidEntryAndUnsafeUrls() {
-        assertFailsWith<InvalidUpdateManifest> { AppUpdateManifestParser.parse(validManifest().replace("\"schemaVersion\":2", "\"schemaVersion\":1")) }
+        assertFailsWith<InvalidUpdateManifest> { AppUpdateManifestParser.parse(validManifest().replace("\"schemaVersion\":3", "\"schemaVersion\":1")) }
         assertFailsWith<InvalidUpdateManifest> { AppUpdateManifestParser.parse(validManifest().replace("\"publishedAt\":\"2026-08-14T10:00:00Z\",", "")) }
         assertFailsWith<InvalidUpdateManifest> { AppUpdateManifestParser.parse(validManifest().replace("\"android\":{", "\"other\":{")) }
         assertFailsWith<InvalidUpdateManifest> { AppUpdateManifestParser.parse(validManifest().replace("https://github.com/moodiness/rivune/releases/download/v1.2.3/Rivune-Android.apk", "https://evil.example/Rivune-Android.apk")) }
@@ -165,7 +165,7 @@ class AppUpdateTest {
 
     private fun validManifest(extra: String = "") = """
         {
-          "schemaVersion":2,
+          "schemaVersion":3,
           "channel":"stable",
           "version":"1.2.3",
           "tagName":"v1.2.3",
