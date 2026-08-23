@@ -1,16 +1,16 @@
 <p align="center">
-  <img src="templates/unraid/rivune-icon.svg" alt="Rivune" width="120" height="120">
+  <img src="assets/rivune-mark.svg" alt="Rivune" width="120" height="120">
 </p>
 
 <h1 align="center">Rivune</h1>
 
 <p align="center"><strong>Your self-hosted media universe, on every screen.</strong></p>
 
-Rivune is an open-source media backend and responsive web app with no predefined catalogue or hosted account. It keeps authentication, profiles, collections, playback state, provider credentials, source URLs, and private request headers on the server selected by the operator.
+Rivune is an open-source media backend and responsive web app. It ships no catalogue or hosted account: authentication, profiles, playback state, provider credentials, source URLs, and private headers stay on the operator's server.
 
-## Install with Docker Compose
+## Quick start
 
-Requirements: Docker Engine with Compose v2, Bash, and OpenSSL. macOS additionally requires Homebrew Bash and GNU coreutils (`brew install bash coreutils`); `./rivune` selects them automatically. On a Linux host, use the root operator command; it creates a mode-0600 `.env` with five independent secrets and refuses to overwrite an existing path:
+Requirements: Docker Engine with Compose v2, Bash, and OpenSSL. macOS also needs Homebrew Bash and GNU coreutils.
 
 ```sh
 git clone https://github.com/moodiness/rivune.git
@@ -20,113 +20,47 @@ cd rivune
 ./rivune doctor
 ```
 
-Omit `--public-url` for a loopback-only installation. `--version` is required and accepts only an exact stable numeric release such as `1.12.0`; mutable image tags such as `latest` are rejected so a fresh install is reproducible. `./rivune help` lists explicit wrappers for lifecycle, logs, diagnostics, authenticated backup verification and restore, plus a host-supervised backup scheduler that verifies every archive through a disposable restore before retention pruning. The command always resolves the repository root before loading Compose or environment files.
+Omit `--public-url` for loopback-only use, then open [http://localhost:8080](http://localhost:8080). A public installation must use HTTPS through Pangolin/Newt or another reverse proxy targeting `rivune:8080` on the dedicated `rivune-edge` network. Never expose raw port 8080 publicly.
 
-On Windows PowerShell, run `.\scripts\create-env.ps1`, fill the generated private `.env`, then use `.\rivune.ps1 up`, `status`, `logs`, and `down`. The Windows wrapper pins the repository Compose inputs and, when `RIVUNE_DISCOVERY_URL` is non-empty, installs a limited per-user scheduled publisher backed by Windows DNS-SD; it stores only the public discovery metadata under `%LOCALAPPDATA%\Rivune\discovery`. The lower-level `./scripts/create-env.sh` path remains available on Unix hosts that need to customize `.env` before startup.
+On Windows, create `.env` with `./scripts/create-env.ps1`, then use `./rivune.ps1 up|status|logs|down`. Run `./rivune help` for lifecycle, backup, restore, and diagnostics commands. Keep `.env`, backup signing material, and every version of `RIVUNE_ENCRYPTION_KEYS` private and backed up separately.
 
-`RIVUNE_ENCRYPTION_KEYS` uses active-first `version:64-lowercase-hex` pairs with unique positive versions and unique, non-zero keys. Back up the generated keyring separately and securely. A database backup cannot recover encrypted integration credentials or profile tracking tokens without every matching key version.
+## Applications
 
-Open [http://localhost:8080](http://localhost:8080) for a loopback deployment. For a normal HTTPS installation, keep using `compose.yaml`, set `RIVUNE_PUBLIC_URL` to the public HTTPS origin, and put Rivune behind Pangolin/Newt or an operator-managed reverse proxy. The proxy must terminate TLS and target Rivune over HTTP on port `8080`; then open `RIVUNE_PUBLIC_URL`. Enter `RIVUNE_SETUP_TOKEN` to claim the instance and create the first administrator.
+The [applications page](https://moodiness.github.io/rivune/) provides current downloads and SHA-256 digests.
 
-On a physical phone, tablet, or TV, `localhost` means that device, not the machine running Rivune. For trusted-LAN HTTP access without a reverse proxy, set `RIVUNE_BIND_ADDRESS=0.0.0.0` and `RIVUNE_PUBLIC_URL=http://<server-private-IP>:8080`, restart the stack, then enter that same private-IP URL in the app. Rivune accepts cleartext origins only for loopback and literal private-network addresses; never expose this direct port to the public Internet because credentials and sessions are not encrypted.
+| Platform | Targets | Artifact |
+| --- | --- | --- |
+| Android | Phone, tablet, Android TV | Signed APK |
+| Apple | iPhone, iPad, Apple TV, Vision Pro, macOS | Unsigned IPA/DMG |
+| Windows | x64, ARM64 | Unsigned portable executable |
+| TV | LG webOS, Samsung Tizen | Unsigned IPK/WGT |
 
-Automatic discovery requires a non-loopback `RIVUNE_DISCOVERY_URL`. On Linux,
-`./rivune` enables the host-network mDNS sidecar. On macOS, it manages a
-per-user Bonjour LaunchAgent; on Windows, `.\rivune.ps1` manages a limited
-per-user Task Scheduler publisher using the built-in DNS-SD API. These host
-publishers avoid Docker Desktop multicast isolation. Use the platform wrapper's
-`up`/`down` commands rather than raw Compose when discovery is enabled.
-
-Global administrators can export and atomically merge a versioned profile archive through the documented API. It includes profile settings, explicitly assigned add-ons and collections, stable title identities, library/progress/favorite/user-data state, and tracking preferences, but never passwords, PINs, sessions, provider credentials, or assignment policy. Add-on transport URLs are intentionally portable and can contain tokens: store the downloaded JSON with credential-file permissions.
-
-## First-run configuration
-
-A new deployment needs no provider or media-tuning environment variables. In **Administration → Settings**:
-
-1. choose the timezone, Jellyfin compatibility, transcoding policy, storage quotas, bitrate ceiling, and hardware-acceleration mode;
-2. add only the provider integrations you use;
-3. verify the requested and active settings shown by the application.
-
-Integration responses expose configured status and update time only; Rivune never returns provider secret values. Provider changes are applied live. Hardware acceleration is restart-required: saving it persists the requested value, but the previous active value remains in force and `pending restart` remains visible until the service restarts and reconciles the request. Do not treat the requested mode as active before then.
-
-## Host deployment choices
-
-The provided Compose manifest is CPU-only by default and needs no GPU device. For optional AMD/Intel acceleration, set `RIVUNE_VIDEO_DEVICE` and `RIVUNE_VIDEO_GROUP_ID` in `.env`, then add the single supported overlay:
-
-```sh
-docker compose -f compose.yaml -f compose.amd-intel.yaml up -d
-```
-
-The base Compose file is a complete PostgreSQL 18 stack for Pangolin/Newt or another operator-managed proxy. It creates a database-only internal network and the dedicated `rivune-edge` network. Attach the proxy only to `rivune-edge` and target hostname `rivune`, port `8080`, over HTTP. For Pangolin, configure Newt on that network with those target values. The host port binds to loopback by default; `RIVUNE_BIND_ADDRESS=0.0.0.0` is the explicit trusted-LAN-only exception described above and is not used by a container proxy.
-
-For Unraid's XML template with an existing PostgreSQL server, TLS, a host port, and AMD/Intel GPU access are all opt-in. Prefer the same dedicated edge network and `Rivune:8080` target. If Newt cannot share that network, manually add an Unraid TCP Port mapping from container port `8080` to an unused host port such as `18080`; never forward it on the router.
-
-See [Production operations](docs/operations.md) for the complete Pangolin network configuration, optional PostgreSQL TLS, upgrades from legacy environment configuration, encryption-key rotation, GPU activation, and authenticated database backup, restore, and rollback.
+Apple device archives require local signing. Windows and macOS may show trust warnings. Verify the release URL and digest before running unsigned software.
 
 ## Development
 
-Backend requirements are Go 1.26.6 or newer in the 1.26 line and PostgreSQL 18. Frontend requirements are Node.js 22 and npm. Typed clients live under [`clients/`](clients/); the public contract is [`protocol/openapi.yaml`](protocol/openapi.yaml).
-
-The Android project includes the native Rivune application for phones, tablets, and Android TV plus the reusable `rivune-api` SDK. It supports HTTPS or trusted-local HTTP discovery, restored sessions, passwordless device pairing, category-scoped profiles and PINs, paginated collection browsing, encrypted local offline files for single-file HTTP sources, profile-local recommendations computed only from server-held metadata, Rivune-to-Rivune handoff and remote play/pause/position controls, and synchronized rooms with expiring join codes. HLS/DASH sources remain streaming-only; offline media is AES-256-GCM chunk-encrypted under a non-exportable Android Keystore key and excluded from Android backup and device transfer.
-
-The Apple project provides native SwiftUI applications for iPhone, iPad, Apple TV, Apple Vision Pro, and macOS plus the reusable `RivuneAPI` SDK. It supports HTTPS or trusted-local HTTP discovery, Keychain-protected issuer-scoped sessions, passwordless device pairing, profile selection and PINs, collection browsing, adaptive remote, touch, gaze, and pointer layouts, encrypted offline playback, local recommendations, cross-device handoff/control, and synchronized rooms. Offline media uses per-device Keychain key material with AES-256-GCM chunk authentication; the key is non-migrating and the encrypted archive is intentionally not a portable media copy.
-
-The Windows project includes a native responsive WinUI 3 application plus the reusable `Rivune.Windows` protocol-v20 client. It supports HTTPS or trusted-local HTTP discovery, passwordless device pairing, DPAPI-protected issuer-scoped sessions, profile avatars and PINs, Home/Search/Library/Calendar browsing, encrypted offline downloads for single-file HTTP sources, profile-local recommendations, collection and title details, profile settings with provenance, source filtering, same-origin guarded native HTTP/HLS playback, Rivune-to-Rivune handoff and remote controls, and synchronized rooms. Offline media is isolated by server and profile, AES-256-GCM authenticated in 1 MiB chunks, capped at 20 GiB, and encrypted under a random per-profile key protected by Windows DPAPI for the current user. HLS/DASH sources remain streaming-only. The player includes online and offline resume/completion, track selection, chapter markers, configurable intro/recap/outro skipping, next-episode playback, retry recovery, keyboard/gamepad navigation, and compact, desktop, TV, reduced-motion, and high-contrast layouts. Official Windows releases provide self-contained `Rivune-x64.exe` and `Rivune-arm64.exe` executables through GitHub Releases.
-
-The LG webOS and Samsung Tizen projects provide dedicated packaged TV clients rather than wrappers around the server frontend. Both use the protocol-v20 TV scope for self-hosted server selection, device-code pairing, `profileContext` browsing, and playback source resolution; their remote-first interface is designed for directional-pad navigation and hands playback to the platform-native media stack. Build both packages with `cd clients/tv && npm ci && npm run build:platforms`; outputs are `dist/packages/Rivune-webOS.ipk`, `dist/packages/Rivune-Tizen.wgt`, and the shared `dist/packages/Rivune-TV-runtime.json`. Install the webOS IPK with LG Developer Mode tooling such as `ares-install dist/packages/Rivune-webOS.ipk`. The published Tizen WGT is intentionally unsigned: configure an appropriate Samsung/Tizen certificate profile, run `node tizen/package.mjs --profile PROFILE`, then install the signed output with Tizen Studio or SDB on a TV with Developer Mode enabled. After the first install, both clients check the latest stable GitHub Release, validate `rivune-update.json`, verify the separate runtime asset's size and SHA-256, and activate the cached runtime on restart with automatic rollback to the packaged runtime if startup does not complete.
-
-The public applications page also offers a lightweight TV installer companion for Windows x64/ARM64, macOS x64/ARM64, and Linux x64/ARM64. The companion binds only to `127.0.0.1` behind a random session URL, validates the exact stable GitHub Release and `rivune-update.json`, verifies package sizes and SHA-256 values, and invokes tools without a shell. For webOS it uses the official `ares-setup-device`, `ares-novacom`, `ares-install`, and `ares-launch` commands. For Samsung it requires Tizen Studio and a named security profile already containing certificates valid for the target TV, signs the verified WGT locally, and uses `sdb`/`tizen` to install it. LG passphrases are neither stored nor sent to the public page; Samsung account credentials and private keys remain entirely within Tizen Studio.
-
-The Windows executables are portable, but local state is not stored beside them. The last server address, device-only preferences, and encrypted offline archives are kept under `%LOCALAPPDATA%\Rivune\`; offline archives are device/user-bound and are not portable backups. Session files under `%LOCALAPPDATA%\Rivune\credentials\` and offline keys under `%LOCALAPPDATA%\Rivune\offline-media\` are protected with Windows DPAPI for the current Windows user and normally cannot be restored under another account or Windows installation. After a migration, pair or sign in again and download media again. Profiles, library, progress, and other account data remain on the self-hosted Rivune server. The Windows client has no installer or Store package. Official Windows executables are unsigned. Automatic replacement accepts only the exact GitHub asset URL recorded by the release manifest and verifies the manifest `ProductVersion`, size, and SHA-256 before starting and again after staging; it cannot authenticate a publisher independently of GitHub. SmartScreen may warn. Keep the executable in a writable local folder because automatic replacement cannot update a read-only location such as a protected `Program Files` directory.
-
-### Direct application downloads
-
-The public [Rivune applications page](https://moodiness.github.io/rivune/) detects the current platform, links each stable GitHub Release asset directly, displays its byte-derived size and SHA-256 fingerprint, and recommends the matching local TV installer companion. It includes Android, iPhone/iPad, Apple TV, Apple Vision Pro, universal macOS, x64/ARM64 Windows, LG webOS, and Samsung Tizen builds. Application archives and all TV installer companion binaries are intentionally unsigned; verify the displayed SHA-256 and read the per-platform warning before running or installing them. The public page never receives signing credentials, TV addresses, passphrases, or private server data.
-
-### Android app
-
-Official Android releases provide a universal APK for phones, tablets, and Android TV. Beginning with v1.8.3, releases use the stable filename `Rivune-Android.apk`; the already-published v1.8.2 release retains `rivune-android-1.8.2.apk`. Download the APK from the matching [GitHub Release](https://github.com/moodiness/rivune/releases), compare its SHA-256 with the digest GitHub publishes for that asset, and complete Android's normal package-installation prompt. The public application ID is `io.rivune.app` and Android 8.0 or newer is required.
-
-Beginning with v1.12.0, each matching GitHub Release contains exactly seventeen assets: `Rivune-Android.apk`, `Rivune-iOS-unsigned.ipa`, `Rivune-tvOS-unsigned.ipa`, `Rivune-visionOS-unsigned.ipa`, `Rivune-macOS.dmg`, `rivune-update.json`, `Rivune-x64.exe`, `Rivune-arm64.exe`, `Rivune-webOS.ipk`, `Rivune-Tizen.wgt`, `Rivune-TV-runtime.json`, `Rivune-TV-Installer-Windows-x64.exe`, `Rivune-TV-Installer-Windows-arm64.exe`, `Rivune-TV-Installer-macOS-x64.zip`, `Rivune-TV-Installer-macOS-arm64.zip`, `Rivune-TV-Installer-Linux-x64.zip`, and `Rivune-TV-Installer-Linux-arm64.zip`. The runtime asset is an implementation payload, while `rivune-update.json` remains the authoritative application version, URL, size, and SHA-256 contract. The unsigned IPA files contain no Apple account, certificate, provisioning profile, or valid code signature; stock iOS, tvOS, and visionOS will not install them as downloaded. A recipient must sign the app with a provisioning identity authorized for that device, typically by rebuilding this open-source project with Xcode or by using lawful personal sideloading tooling. `Rivune-webOS.ipk` is installed through LG Developer Mode tooling; `Rivune-Tizen.wgt` remains unsigned until the local companion or an operator signs it with an appropriate Samsung/Tizen certificate profile.
-
-To build, provision, sign, and install a device app with an Apple account already configured in Xcode, connect the device, enable Developer Mode, and list its identifier with `xcrun devicectl list devices`. Then run, for example:
+Requirements: Go 1.26.6, PostgreSQL 18, Node.js 22, and the SDK for each native target. The HTTP contract is [`protocol/openapi.yaml`](protocol/openapi.yaml).
 
 ```sh
-clients/apple/Scripts/sign-and-install.sh \
-  --platform ios \
-  --team-id ABCDE12345 \
-  --bundle-id com.example.rivune \
-  --device-id 00008110-001234567890001E
+(cd server && go test ./...)
+(cd web && npm ci && npm run build)
+(cd clients/update && go test ./...)
+swift test --package-path clients/apple
+(cd clients/android && ./gradlew :rivune-api:testDebugUnitTest :app:testDebugUnitTest)
+(cd clients/windows && dotnet test Rivune.Windows.slnx --configuration Release --nologo)
+(cd clients/tv && npm ci && npm run typecheck && npm test)
+(cd clients/tv-installer && go test ./...)
 ```
 
-Use `--platform tvos` or `--platform visionos` with a unique reverse-DNS bundle identifier for those targets. The script passes the selected development team and bundle identifier directly to Xcode, lets automatic provisioning register the connected device when permitted, verifies the resulting signature and embedded provisioning profile, and installs with `devicectl`. It deliberately accepts no Apple password, private key, certificate, or provisioning profile: those remain in Xcode and the local macOS Keychain. `--dry-run` validates the arguments and prints the local commands without accessing an Apple account or device.
+## Documentation
 
-Android Settings keeps device-specific startup, preferred-player, motion, language, accent, frame-rate matching, picture-format, and Wi-Fi/Ethernet versus mobile-network quality choices local to the device. Preferred-player choices include asking every time, Rivune automatic (AndroidX Media3 first with an embedded mpv fallback for unsupported media), explicit Media3, explicit mpv, and detected external players. Profile controls display the effective Rivune server value and its provenance, support clearing a profile override to inherit the server policy, and cover resolution, direct play, automatic next episode, audio, subtitles, forced subtitles, and metadata language. The effective transcoding permission remains visible but read-only because only a global administrator may change that server policy. Internal episode playback exposes a one-shot Next action and starts the next episode after a natural end when the effective profile setting allows it; an external player continues only after returning an explicit completed result. About shows the connected server/build details and can copy or export a bounded in-memory diagnostic report through Android's document picker; the report excludes credentials, profile/media data, URL paths, queries, and raw exception text.
-
-```sh
-cd web && npm ci && npm run build
-cd ../server && go test ./...
-cd ../clients/update && go test ./...
-cd ../apple && swift test
-Scripts/test-sign-and-install.sh
-cd ../android && ./gradlew :rivune-api:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
-cd ../windows && dotnet test Rivune.Windows.slnx --configuration Release --nologo
-cd ../tv && npm ci && npm run typecheck && npm test && npm run build:platforms
-```
-
-## Security
-
-Report vulnerabilities through the private process in [`SECURITY.md`](SECURITY.md). Do not publish exploit details, credentials, private URLs, or user data in a public issue.
+- [Operations](docs/operations.md): HTTPS, discovery, upgrades, GPU, backup, and restore.
+- [Release process](docs/releasing.md): versioning, signing, publication, and retries.
+- [Design system](docs/design-system.md).
+- [Jellyfin compatibility evidence](docs/jellyfin-compatibility.md).
+- [Protocol compatibility](protocol/COMPATIBILITY.md).
+- [Security reporting](SECURITY.md).
 
 ## License
 
-The repository's server, web, Apple, Windows, API, documentation, and other
-separately distributed Rivune components are licensed under the
-[Apache License 2.0](LICENSE). General third-party notices are in
-[`NOTICE`](NOTICE).
-
-The Android application binary includes a GPLv3 native playback stack and is
-distributed under different combined-work terms. See
-[`clients/android/app/src/main/assets/legal/LICENSE.txt`](clients/android/app/src/main/assets/legal/LICENSE.txt) and
-[`clients/android/app/src/main/assets/legal/THIRD_PARTY_NOTICES.txt`](clients/android/app/src/main/assets/legal/THIRD_PARTY_NOTICES.txt)
-for the exact terms and attributions.
+Most Rivune code and documentation use the [Apache License 2.0](LICENSE); see [`NOTICE`](NOTICE) for third-party attributions. The Android binary includes a GPLv3 playback stack; its exact combined-work terms are bundled in the application.
