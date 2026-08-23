@@ -50,6 +50,38 @@ class AuthenticationLifecycleTest {
     }
 
     @Test
+    fun transientRefreshFailurePreservesCredentialsForRelaunch() = runBlocking {
+        lifecycleFixture(initialTokens = tokenPair("old")).use { fixture ->
+            fixture.client.discover()
+            assertTrue(fixture.client.restoreSession())
+            fixture.transport.refreshResponse = 503 to
+                """{"error":{"code":"unavailable","message":"Unavailable"}}"""
+
+            val failure = assertFailsWith<RivuneApiException.Server> { fixture.client.refreshSession() }
+
+            assertEquals(503, failure.status)
+            assertEquals("old-access", fixture.store.credentials?.tokens?.accessToken)
+            assertTrue(fixture.reconstructedClient().restoreSession())
+        }
+    }
+
+    @Test
+    fun invalidRefreshTokenClearsCredentialsForRelaunch() = runBlocking {
+        lifecycleFixture(initialTokens = tokenPair("old")).use { fixture ->
+            fixture.client.discover()
+            assertTrue(fixture.client.restoreSession())
+            fixture.transport.refreshResponse = 401 to
+                """{"error":{"code":"invalid_refresh_token","message":"Expired"}}"""
+
+            val failure = assertFailsWith<RivuneApiException.Server> { fixture.client.refreshSession() }
+
+            assertEquals("invalid_refresh_token", failure.code)
+            assertNull(fixture.store.credentials)
+            assertFalse(fixture.reconstructedClient().restoreSession())
+        }
+    }
+
+    @Test
     fun logoutDuringLoginRejectsLateResponseAndAllowsNewAuthentication() = runBlocking {
         lifecycleFixture().use { fixture ->
             fixture.client.discover()
@@ -414,6 +446,9 @@ private class BlockingAuthTransport : Interceptor {
     @Volatile
     var logoutFailure: IOException? = null
 
+    @Volatile
+    var refreshResponse: Pair<Int, String>? = null
+
 
     fun failNextCollectionsWithUnauthorized() {
         check(unauthorizedCollections.compareAndSet(0, 1)) { "A collection failure is already queued" }
@@ -458,12 +493,15 @@ private class BlockingAuthTransport : Interceptor {
         if (path == "/api/v1/auth/logout") logoutFailure?.let { throw it }
 
         val rejectCollections = path == "/api/v1/collections" && unauthorizedCollections.compareAndSet(1, 0)
+        val configuredRefresh = if (path == "/api/v1/auth/refresh") refreshResponse else null
         val status = when {
+            configuredRefresh != null -> configuredRefresh.first
             path == "/api/v1/profiles/selection" -> 204
             rejectCollections -> 401
             else -> 200
         }
         val body = when {
+            configuredRefresh != null -> configuredRefresh.second
             rejectCollections -> """{"error":{"code":"expired","message":"Expired"}}"""
             path == "/.well-known/rivune" -> DISCOVERY_JSON
             path == "/api/v1/auth/login" -> tokenJson("login-${loginCount.incrementAndGet()}")

@@ -1153,7 +1153,11 @@ class RivuneApiClient(
             setCredentials(refreshed, expectedGeneration)
             refreshed
         } catch (cause: Exception) {
-            clearCredentialsAfterRefreshFailure(expectedGeneration, refreshToken)
+            if (cause is RivuneApiException.Server &&
+                cause.status == 401 && cause.code == "invalid_refresh_token"
+            ) {
+                clearCredentialsAfterRefreshFailure(expectedGeneration, refreshToken)
+            }
             throw cause
         }
         if (requireProfileContext) {

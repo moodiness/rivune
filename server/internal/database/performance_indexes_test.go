@@ -34,6 +34,29 @@ func TestBackendHotpathMigrationDefinesCoveringIndexes(t *testing.T) {
 	}
 }
 
+func TestNativePairingPersistenceMigrationExtendsActiveSessionsAndDefinesCleanupIndex(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000078_consumed_refresh_token_cleanup.sql")
+	if err != nil {
+		t.Fatalf("read native pairing persistence migration: %v", err)
+	}
+	normalized := strings.Join(strings.Fields(string(contents)), " ")
+	for _, statement := range []string{
+		"SET refresh_expires_at = '9999-12-31 23:59:59+00'::timestamptz",
+		"session.authorization_scope = 'category'",
+		"session.revoked_at IS NULL",
+		"session.refresh_expires_at > now()",
+		"device.approved_at IS NOT NULL",
+		"device.platform IN ('android', 'android_tv', 'ios', 'tvos', 'visionos', 'macos', 'apple', 'windows')",
+		"SET expires_at = '9999-12-31 23:59:59+00'::timestamptz",
+		"token.consumed_at IS NULL",
+		"CREATE INDEX auth_refresh_tokens_consumed_cleanup_idx ON auth_refresh_tokens (consumed_at, token_hash) WHERE consumed_at IS NOT NULL;",
+	} {
+		if !strings.Contains(normalized, statement) {
+			t.Fatalf("native pairing persistence migration lacks %q: %s", statement, normalized)
+		}
+	}
+}
+
 func TestTrackingOutboxBoundsMigrationDefinesAdmissionIndexes(t *testing.T) {
 	contents, err := migrationFiles.ReadFile("migrations/000052_tracking_outbox_bounds.sql")
 	if err != nil {
@@ -270,6 +293,10 @@ func TestBackendHotpathIndexesAreSelectedByPostgres(t *testing.T) {
 		"expired refresh sessions": {
 			query: "SELECT id FROM auth_sessions WHERE revoked_at IS NULL AND refresh_expires_at <= now() ORDER BY refresh_expires_at, id LIMIT 500",
 			index: "auth_sessions_refresh_expiry_cleanup_idx",
+		},
+		"consumed refresh tokens": {
+			query: "SELECT token_hash FROM auth_refresh_tokens WHERE consumed_at <= now() - interval '30 days' ORDER BY consumed_at, token_hash LIMIT 500",
+			index: "auth_refresh_tokens_consumed_cleanup_idx",
 		},
 		"expired notifications": {
 			query: "SELECT id FROM auth_session_notifications WHERE expires_at <= now() ORDER BY expires_at, id LIMIT 500",

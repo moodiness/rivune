@@ -31,6 +31,8 @@ const maximumReleaseResponseBytes = 512 * 1024;
 
 type AssetName =
   | "Rivune-Android.apk"
+  | "Rivune-webOS.ipk"
+  | "Rivune-Tizen.wgt"
   | "Rivune-iOS-unsigned.ipa"
   | "Rivune-tvOS-unsigned.ipa"
   | "Rivune-visionOS-unsigned.ipa"
@@ -58,16 +60,16 @@ type Release = {
 
 type AssetSpec = {
   name: AssetName;
-  platform: "Android" | "iPhone & iPad" | "Apple TV" | "Apple Vision Pro" | "macOS" | "Windows";
+  platform: "Android" | "LG webOS" | "Samsung Tizen" | "iPhone & iPad" | "Apple TV" | "Apple Vision Pro" | "macOS" | "Windows";
   detailKey: Extract<TranslationKey, `applications.asset.${string}.detail`>;
-  signed: boolean;
+  signature: "signed" | "unsigned";
   warningKey: Extract<TranslationKey, `applications.asset.${string}.warning`>;
   icon: typeof Smartphone;
 };
 
 type DeviceRecommendation = {
   labelKey: Extract<TranslationKey, `applications.device.${string}`>;
-  assets: ReadonlySet<AssetName>;
+  assets: readonly AssetName[];
 };
 
 const assetSpecs: AssetSpec[] = [
@@ -75,15 +77,31 @@ const assetSpecs: AssetSpec[] = [
     name: "Rivune-Android.apk",
     platform: "Android",
     detailKey: "applications.asset.android.detail",
-    signed: true,
+    signature: "signed",
     warningKey: "applications.asset.android.warning",
     icon: Smartphone,
+  },
+  {
+    name: "Rivune-webOS.ipk",
+    platform: "LG webOS",
+    detailKey: "applications.asset.webos.detail",
+    signature: "unsigned",
+    warningKey: "applications.asset.webos.warning",
+    icon: Tv,
+  },
+  {
+    name: "Rivune-Tizen.wgt",
+    platform: "Samsung Tizen",
+    detailKey: "applications.asset.tizen.detail",
+    signature: "unsigned",
+    warningKey: "applications.asset.tizen.warning",
+    icon: Tv,
   },
   {
     name: "Rivune-iOS-unsigned.ipa",
     platform: "iPhone & iPad",
     detailKey: "applications.asset.ios.detail",
-    signed: false,
+    signature: "unsigned",
     warningKey: "applications.asset.ios.warning",
     icon: Smartphone,
   },
@@ -91,7 +109,7 @@ const assetSpecs: AssetSpec[] = [
     name: "Rivune-tvOS-unsigned.ipa",
     platform: "Apple TV",
     detailKey: "applications.asset.tvos.detail",
-    signed: false,
+    signature: "unsigned",
     warningKey: "applications.asset.tvos.warning",
     icon: Tv,
   },
@@ -99,7 +117,7 @@ const assetSpecs: AssetSpec[] = [
     name: "Rivune-visionOS-unsigned.ipa",
     platform: "Apple Vision Pro",
     detailKey: "applications.asset.visionos.detail",
-    signed: false,
+    signature: "unsigned",
     warningKey: "applications.asset.visionos.warning",
     icon: Monitor,
   },
@@ -107,7 +125,7 @@ const assetSpecs: AssetSpec[] = [
     name: "Rivune-macOS.dmg",
     platform: "macOS",
     detailKey: "applications.asset.macos.detail",
-    signed: false,
+    signature: "unsigned",
     warningKey: "applications.asset.macos.warning",
     icon: Monitor,
   },
@@ -115,7 +133,7 @@ const assetSpecs: AssetSpec[] = [
     name: "Rivune-x64.exe",
     platform: "Windows",
     detailKey: "applications.asset.windowsX64.detail",
-    signed: false,
+    signature: "unsigned",
     warningKey: "applications.asset.windows.warning",
     icon: Monitor,
   },
@@ -123,15 +141,15 @@ const assetSpecs: AssetSpec[] = [
     name: "Rivune-arm64.exe",
     platform: "Windows",
     detailKey: "applications.asset.windowsArm.detail",
-    signed: false,
+    signature: "unsigned",
     warningKey: "applications.asset.windows.warning",
     icon: Monitor,
   },
 ];
 
-const expectedAssetNames = new Set<AssetName>(assetSpecs.map((asset) => asset.name));
 const releaseManifestName = "rivune-update.json";
-const expectedReleaseAssetNames = new Set<string>([...expectedAssetNames, releaseManifestName]);
+const auxiliaryReleaseAssetNames = [releaseManifestName, "Rivune-TV-runtime.json"] as const;
+const expectedReleaseAssetNames: readonly string[] = [...assetSpecs.map((asset) => asset.name), ...auxiliaryReleaseAssetNames];
 
 type UserAgentData = {
   platform?: string;
@@ -153,31 +171,37 @@ async function deviceRecommendation(): Promise<DeviceRecommendation> {
     // Client hints are optional; the user-agent fallback remains available.
   }
 
+  if (/web0s|webos/i.test(userAgent) || /web0s|webos/i.test(platform)) {
+    return { labelKey: "applications.device.webos", assets: ["Rivune-webOS.ipk"] };
+  }
+  if (/tizen/i.test(userAgent) && /samsung|smart-tv/i.test(userAgent)) {
+    return { labelKey: "applications.device.tizen", assets: ["Rivune-Tizen.wgt"] };
+  }
   if (/android/i.test(userAgent) || /android/i.test(platform)) {
-    return { labelKey: "applications.device.android", assets: new Set(["Rivune-Android.apk"]) };
+    return { labelKey: "applications.device.android", assets: ["Rivune-Android.apk"] };
   }
   if (/appletv/i.test(userAgent)) {
-    return { labelKey: "applications.device.appleTV", assets: new Set(["Rivune-tvOS-unsigned.ipa"]) };
+    return { labelKey: "applications.device.appleTV", assets: ["Rivune-tvOS-unsigned.ipa"] };
   }
   if (/vision/i.test(userAgent) || /xr/i.test(platform)) {
-    return { labelKey: "applications.device.vision", assets: new Set(["Rivune-visionOS-unsigned.ipa"]) };
+    return { labelKey: "applications.device.vision", assets: ["Rivune-visionOS-unsigned.ipa"] };
   }
   if (/iphone|ipad|ipod/i.test(userAgent) || (/mac/i.test(platform) && navigator.maxTouchPoints > 1)) {
-    return { labelKey: "applications.device.ios", assets: new Set(["Rivune-iOS-unsigned.ipa"]) };
+    return { labelKey: "applications.device.ios", assets: ["Rivune-iOS-unsigned.ipa"] };
   }
   if (/mac/i.test(platform) || /macintosh/i.test(userAgent)) {
-    return { labelKey: "applications.device.mac", assets: new Set(["Rivune-macOS.dmg"]) };
+    return { labelKey: "applications.device.mac", assets: ["Rivune-macOS.dmg"] };
   }
   if (/win/i.test(platform) || /windows/i.test(userAgent)) {
     if (architecture.includes("arm") || /arm64/i.test(userAgent)) {
-      return { labelKey: "applications.device.windowsArm", assets: new Set(["Rivune-arm64.exe"]) };
+      return { labelKey: "applications.device.windowsArm", assets: ["Rivune-arm64.exe"] };
     }
     if (architecture === "x86" && bitness === "64" || /win64|x64|amd64/i.test(userAgent)) {
-      return { labelKey: "applications.device.windowsX64", assets: new Set(["Rivune-x64.exe"]) };
+      return { labelKey: "applications.device.windowsX64", assets: ["Rivune-x64.exe"] };
     }
-    return { labelKey: "applications.device.windowsUnknown", assets: new Set(["Rivune-x64.exe", "Rivune-arm64.exe"]) };
+    return { labelKey: "applications.device.windowsUnknown", assets: ["Rivune-x64.exe", "Rivune-arm64.exe"] };
   }
-  return { labelKey: "applications.device.unknown", assets: new Set() };
+  return { labelKey: "applications.device.unknown", assets: [] };
 }
 
 function validRelease(value: unknown): value is Release {
@@ -188,14 +212,14 @@ function validRelease(value: unknown): value is Release {
     release.name !== release.tag_name || release.draft !== false || release.prerelease !== false ||
     typeof release.published_at !== "string" || Number.isNaN(Date.parse(release.published_at)) ||
     release.html_url !== `https://github.com/moodiness/rivune/releases/tag/${release.tag_name}` ||
-    !Array.isArray(release.assets) || release.assets.length !== expectedReleaseAssetNames.size
+    !Array.isArray(release.assets) || release.assets.length !== expectedReleaseAssetNames.length
   ) return false;
 
   const assets = new Map<string, ReleaseAsset>();
   for (const candidate of release.assets) {
     if (typeof candidate !== "object" || candidate === null) return false;
     const asset = candidate as Partial<ReleaseAsset>;
-    if (typeof asset.name !== "string" || !expectedReleaseAssetNames.has(asset.name) || assets.has(asset.name)) return false;
+    if (typeof asset.name !== "string" || !expectedReleaseAssetNames.includes(asset.name) || assets.has(asset.name)) return false;
     if (
       asset.state !== "uploaded" ||
       typeof asset.size !== "number" || !Number.isSafeInteger(asset.size) || asset.size <= 0 ||
@@ -204,7 +228,7 @@ function validRelease(value: unknown): value is Release {
     ) return false;
     assets.set(asset.name, asset as ReleaseAsset);
   }
-  return assets.size === expectedReleaseAssetNames.size;
+  return assets.size === expectedReleaseAssetNames.length;
 }
 
 async function loadLatestRelease(signal: AbortSignal): Promise<Release> {
@@ -244,6 +268,11 @@ function supportsLocalSigningGuide(tagName: string): boolean {
   return major > 1 || major === 1 && minor >= 10;
 }
 
+const signatureLabelKeys = {
+  signed: "applications.card.signed",
+  unsigned: "applications.card.unsigned",
+} as const satisfies Record<AssetSpec["signature"], TranslationKey>;
+
 function ReleaseCard({ asset, spec, recommended, signingGuideAvailable }: { asset: ReleaseAsset; spec: AssetSpec; recommended: boolean; signingGuideAvailable: boolean }) {
   const [showQR, setShowQR] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -274,9 +303,9 @@ function ReleaseCard({ asset, spec, recommended, signingGuideAvailable }: { asse
 
     <div className="applications-card__facts" aria-label={t("applications.card.releaseDetails", { platform: spec.platform })}>
       <span>{formatSize(asset.size)}</span>
-      <span className={spec.signed ? "is-signed" : "is-unsigned"}>
-        {spec.signed ? <ShieldCheck size={15} /> : <ShieldAlert size={15} />}
-        {t(spec.signed ? "applications.card.signed" : "applications.card.unsigned")}
+      <span className={spec.signature === "signed" ? "is-signed" : "is-unsigned"}>
+        {spec.signature === "signed" ? <ShieldCheck size={15} /> : <ShieldAlert size={15} />}
+        {t(signatureLabelKeys[spec.signature])}
       </span>
     </div>
 
@@ -295,7 +324,7 @@ function ReleaseCard({ asset, spec, recommended, signingGuideAvailable }: { asse
       </div>
       <p>{t("applications.card.qrBody")}</p>
     </div>}
-    {signingGuideAvailable && !spec.signed && spec.name.endsWith(".ipa") && <a className="applications-card__signing-guide" href="#apple-signing"><KeyRound size={13} /> {t("applications.card.signLocally")}</a>}
+    {signingGuideAvailable && spec.signature === "unsigned" && spec.name.endsWith(".ipa") && <a className="applications-card__signing-guide" href="#apple-signing"><KeyRound size={13} /> {t("applications.card.signLocally")}</a>}
 
     <div className="applications-card__digest">
       <div>
@@ -406,7 +435,7 @@ function AppleSigningGuide({ tagName }: { tagName: string }) {
 export function ApplicationsPage() {
   const [activeLocale, setActiveLocale] = useState<Locale>(locale === "fr" || locale === "fr-CA" ? "fr" : "en");
   const [release, setRelease] = useState<Release | null>(null);
-  const [recommendation, setRecommendation] = useState<DeviceRecommendation>({ labelKey: "applications.device.detecting", assets: new Set() });
+  const [recommendation, setRecommendation] = useState<DeviceRecommendation>({ labelKey: "applications.device.detecting", assets: [] });
   const [failure, setFailure] = useState(false);
   const [generation, setGeneration] = useState(0);
 
@@ -437,7 +466,7 @@ export function ApplicationsPage() {
     if (!release) return [];
     const byName = new Map(release.assets.map((asset) => [asset.name, asset]));
     return assetSpecs
-      .map((spec, index) => ({ spec, asset: byName.get(spec.name)!, index, recommended: recommendation.assets.has(spec.name) }))
+      .map((spec, index) => ({ spec, asset: byName.get(spec.name)!, index, recommended: recommendation.assets.includes(spec.name) }))
       .sort((left, right) => Number(right.recommended) - Number(left.recommended) || left.index - right.index);
   }, [recommendation.assets, release]);
 

@@ -1442,7 +1442,10 @@ public actor RivuneAPIClient {
                refreshOperation?.refreshToken == refreshToken {
                 refreshOperation = nil
             }
-            if generation == authenticationGeneration,
+            if case RivuneAPIError.server(let status, let code, _) = error,
+               status == 401,
+               code == "invalid_refresh_token",
+               generation == authenticationGeneration,
                credentials?.refreshToken == refreshToken {
                 credentials = nil
                 loadedCredentials = true

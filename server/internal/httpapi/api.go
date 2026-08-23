@@ -718,6 +718,7 @@ func (a *API) Handler() http.Handler {
 	if a.demo != nil {
 		nativeHandler = a.demo.Handler(nativeHandler)
 	}
+	nativeHandler = tvCORS(nativeHandler)
 	routed := a.routeJellyfinCompatibility(a.middleware(nativeHandler))
 	if a.runtimeSettings == nil {
 		return routed

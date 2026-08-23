@@ -1476,7 +1476,7 @@ const coreEn = {
 
 const applicationsEn = {
   "applications.meta.title": "Rivune applications",
-  "applications.meta.description": "Download verified Rivune applications for Android, Apple, and Windows.",
+  "applications.meta.description": "Download verified Rivune applications for Android, Apple, Windows, LG webOS, and Samsung Tizen.",
   "applications.header.open": "Open Rivune",
   "applications.header.source": "Source code",
   "applications.header.language": "Language",
@@ -1486,6 +1486,8 @@ const applicationsEn = {
   "applications.hero.detected": "Detected:",
   "applications.device.detecting": "Detecting this device…",
   "applications.device.android": "Android device",
+  "applications.device.webos": "LG webOS TV",
+  "applications.device.tizen": "Samsung Tizen TV",
   "applications.device.appleTV": "Apple TV",
   "applications.device.vision": "Apple Vision Pro",
   "applications.device.ios": "iPhone or iPad",
@@ -1518,6 +1520,10 @@ const applicationsEn = {
   "applications.card.copied": "Copied",
   "applications.asset.android.detail": "Phone · tablet · Android TV · universal APK",
   "applications.asset.android.warning": "Android may ask you to allow app installs from this browser. Keep that permission temporary and install only the verified Rivune APK.",
+  "applications.asset.webos.detail": "LG webOS 4.0 or later · unsigned IPK",
+  "applications.asset.webos.warning": "This IPK is unsigned and is not installed from the LG Content Store or directly from this browser. Enable the LG Developer Mode app with an active session, then install it from a computer with webOS Dev Manager or webOS CLI (ares-install).",
+  "applications.asset.tizen.detail": "Samsung Tizen TV · unsigned WGT",
+  "applications.asset.tizen.warning": "This WGT is unsigned and cannot be installed as downloaded. No certificate profile is bundled. Check out this release, run npm --prefix clients/tv ci and npm --prefix clients/tv run build, configure a named Tizen security profile with valid Samsung author and distributor certificates for your TV, then run node clients/tv/tizen/package.mjs --profile PROFILE and install the signed WGT through Tizen Studio or SDB with TV Developer Mode enabled.",
   "applications.asset.ios.detail": "iOS 15 or later · arm64",
   "applications.asset.ios.warning": "This archive is unsigned and cannot be installed as downloaded. Sign it locally with Xcode and your own Apple Developer team.",
   "applications.asset.tvos.detail": "tvOS 15 or later · arm64",

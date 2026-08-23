@@ -28,6 +28,19 @@ const (
 		WHERE expires_at <= now()
 		  AND message IS NOT NULL
 	`
+	cleanupConsumedRefreshTokensSQL = `
+		WITH expired AS (
+			SELECT token_hash
+			FROM auth_refresh_tokens
+			WHERE consumed_at <= now() - interval '30 days'
+			ORDER BY consumed_at, token_hash
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED
+		)
+		DELETE FROM auth_refresh_tokens token
+		USING expired
+		WHERE token.token_hash = expired.token_hash
+	`
 	cleanupExpiredSessionsSQL = `
 		WITH candidates AS (
 			SELECT id, inactive_at
@@ -100,6 +113,9 @@ func (s *Service) Cleanup(ctx context.Context) error {
 	}
 	if _, err := s.pool.Exec(ctx, scrubExpiredNotificationBroadcastsSQL); err != nil {
 		cleanupErrors = append(cleanupErrors, fmt.Errorf("scrub expired notification broadcasts: %w", err))
+	}
+	if _, err := s.pool.Exec(ctx, cleanupConsumedRefreshTokensSQL, authenticationCleanupBatch); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("delete consumed refresh token history: %w", err))
 	}
 	if _, err := s.pool.Exec(ctx, cleanupExpiredSessionsSQL, authenticationCleanupBatch); err != nil {
 		cleanupErrors = append(cleanupErrors, fmt.Errorf("delete inactive authentication sessions: %w", err))

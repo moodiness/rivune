@@ -23,8 +23,13 @@ const (
 	tvosAssetFileName      = "Rivune-tvOS-unsigned.ipa"
 	visionosAssetFileName  = "Rivune-visionOS-unsigned.ipa"
 	macosAssetFileName     = "Rivune-macOS.dmg"
+	webosAssetFileName     = "Rivune-webOS.ipk"
+	tizenAssetFileName     = "Rivune-Tizen.wgt"
+	tvRuntimeAssetFileName = "Rivune-TV-runtime.json"
 	maxAndroidPackageSize  = int64(512 * 1024 * 1024)
 	maxApplePackageSize    = int64(512 * 1024 * 1024)
+	maxTVPackageSize       = int64(512 * 1024 * 1024)
+	maxTVRuntimeSize       = int64(16 * 1024 * 1024)
 	maxWindowsPackageSize  = int64(2*1024*1024*1024 - 1)
 )
 
@@ -42,6 +47,9 @@ type generateOptions struct {
 	tvosArchive               string
 	visionosArchive           string
 	macosDiskImage            string
+	webosPackage              string
+	tizenPackage              string
+	tvRuntime                 string
 	windowsX64Executable      string
 	windowsArm64Executable    string
 	output                    string
@@ -54,6 +62,9 @@ type generateOptions struct {
 	tvosArchiveURL            string
 	visionosArchiveURL        string
 	macosDiskImageURL         string
+	webosPackageURL           string
+	tizenPackageURL           string
+	tvRuntimeURL              string
 	applicationID             string
 	buildVersion              string
 	signingCertificateSHA256  string
@@ -67,6 +78,9 @@ type validateOptions struct {
 	tvosArchive               string
 	visionosArchive           string
 	macosDiskImage            string
+	webosPackage              string
+	tizenPackage              string
+	tvRuntime                 string
 	windowsX64Executable      string
 	windowsArm64Executable    string
 	channel                   string
@@ -78,6 +92,9 @@ type validateOptions struct {
 	tvosArchiveURL            string
 	visionosArchiveURL        string
 	macosDiskImageURL         string
+	webosPackageURL           string
+	tizenPackageURL           string
+	tvRuntimeURL              string
 	applicationID             string
 	buildVersion              string
 	signingCertificateSHA256  string
@@ -103,6 +120,18 @@ func buildManifest(options generateOptions) (map[string]any, error) {
 		return nil, err
 	}
 	macosSize, macosDigest, err := assetMetadata(options.macosDiskImage, "macOS disk image", maxApplePackageSize)
+	if err != nil {
+		return nil, err
+	}
+	webosSize, webosDigest, err := assetMetadata(options.webosPackage, "webOS package", maxTVPackageSize)
+	if err != nil {
+		return nil, err
+	}
+	tizenSize, tizenDigest, err := assetMetadata(options.tizenPackage, "Tizen package", maxTVPackageSize)
+	if err != nil {
+		return nil, err
+	}
+	tvRuntimeSize, tvRuntimeDigest, err := assetMetadata(options.tvRuntime, "TV runtime", maxTVRuntimeSize)
 	if err != nil {
 		return nil, err
 	}
@@ -135,10 +164,13 @@ func buildManifest(options generateOptions) (map[string]any, error) {
 				"size":                     apkSize,
 				"sha256":                   apkDigest,
 			},
-			"ios":      applePackage("ipa", []string{"arm64"}, "15.0", "io.rivune.app", options.iosArchive, options.iosArchiveURL, iosSize, iosDigest),
-			"tvos":     applePackage("ipa", []string{"arm64"}, "15.0", "io.rivune.app.tv", options.tvosArchive, options.tvosArchiveURL, tvosSize, tvosDigest),
-			"visionos": applePackage("ipa", []string{"arm64"}, "1.0", "io.rivune.app.vision", options.visionosArchive, options.visionosArchiveURL, visionosSize, visionosDigest),
-			"macos":    applePackage("dmg", []string{"arm64", "x64"}, "12.0", "io.rivune.app.mac", options.macosDiskImage, options.macosDiskImageURL, macosSize, macosDigest),
+			"ios":       applePackage("ipa", []string{"arm64"}, "15.0", "io.rivune.app", options.iosArchive, options.iosArchiveURL, iosSize, iosDigest),
+			"tvos":      applePackage("ipa", []string{"arm64"}, "15.0", "io.rivune.app.tv", options.tvosArchive, options.tvosArchiveURL, tvosSize, tvosDigest),
+			"visionos":  applePackage("ipa", []string{"arm64"}, "1.0", "io.rivune.app.vision", options.visionosArchive, options.visionosArchiveURL, visionosSize, visionosDigest),
+			"macos":     applePackage("dmg", []string{"arm64", "x64"}, "12.0", "io.rivune.app.mac", options.macosDiskImage, options.macosDiskImageURL, macosSize, macosDigest),
+			"webos":     tvPackage("ipk", "4.0", "io.rivune.app.webos", options.webosPackage, options.webosPackageURL, webosSize, webosDigest),
+			"tizen":     tvPackage("wgt", "5.5", "RivuneTV01.Rivune", options.tizenPackage, options.tizenPackageURL, tizenSize, tizenDigest),
+			"tvRuntime": runtimePackage(options.tvRuntime, options.tvRuntimeURL, tvRuntimeSize, tvRuntimeDigest),
 			"windowsX64": map[string]any{
 				"format":           "exe",
 				"architectures":    []string{"x64"},
@@ -178,6 +210,31 @@ func applePackage(format string, architectures []string, minimumOSVersion, bundl
 		"url":              url,
 		"size":             size,
 		"sha256":           digest,
+	}
+}
+
+func tvPackage(format, minimumOSVersion, applicationID, path, url string, size int64, digest string) map[string]any {
+	return map[string]any{
+		"format":           format,
+		"architectures":    []string{"universal"},
+		"minimumOsVersion": minimumOSVersion,
+		"applicationId":    applicationID,
+		"signature":        "unsigned",
+		"fileName":         filepath.Base(path),
+		"url":              url,
+		"size":             size,
+		"sha256":           digest,
+	}
+}
+
+func runtimePackage(path, url string, size int64, digest string) map[string]any {
+	return map[string]any{
+		"format":    "json",
+		"platforms": []string{"webos", "tizen"},
+		"fileName":  filepath.Base(path),
+		"url":       url,
+		"size":      size,
+		"sha256":    digest,
 	}
 }
 
@@ -273,6 +330,9 @@ func validateManifest(manifest any) error {
 	if err != nil {
 		return err
 	}
+	if err := rejectUnknownFields(root, "manifest", "schemaVersion", "channel", "version", "tagName", "publishedAt", "releaseUrl", "packages"); err != nil {
+		return err
+	}
 	if err := requireSchema(root, schemaVersion); err != nil {
 		return err
 	}
@@ -289,6 +349,9 @@ func validateManifest(manifest any) error {
 	}
 	packages, err := object(packagesValue, "manifest.packages")
 	if err != nil {
+		return err
+	}
+	if err := rejectUnknownFields(packages, "manifest.packages", "android", "ios", "tvos", "visionos", "macos", "webos", "tizen", "tvRuntime", "windowsX64", "windowsArm64"); err != nil {
 		return err
 	}
 	androidPackage, err := requiredPackage(packages, "android")
@@ -319,6 +382,27 @@ func validateManifest(manifest any) error {
 		if err := validateApplePackage(packageObject, tagName, "manifest.packages."+specification.key, specification.format, specification.architectures, specification.minimumOSVersion, specification.bundleIdentifier, specification.fileName); err != nil {
 			return err
 		}
+	}
+	webosPackage, err := requiredPackage(packages, "webos")
+	if err != nil {
+		return err
+	}
+	if err := validateTVPackage(webosPackage, tagName, "manifest.packages.webos", "ipk", "4.0", "io.rivune.app.webos", webosAssetFileName); err != nil {
+		return err
+	}
+	tizenPackage, err := requiredPackage(packages, "tizen")
+	if err != nil {
+		return err
+	}
+	if err := validateTVPackage(tizenPackage, tagName, "manifest.packages.tizen", "wgt", "5.5", "RivuneTV01.Rivune", tizenAssetFileName); err != nil {
+		return err
+	}
+	tvRuntimePackage, err := requiredPackage(packages, "tvRuntime")
+	if err != nil {
+		return err
+	}
+	if err := validateRuntimePackage(tvRuntimePackage, tagName, "manifest.packages.tvRuntime"); err != nil {
+		return err
 	}
 	windowsX64Package, err := requiredPackage(packages, "windowsX64")
 	if err != nil {
@@ -407,6 +491,9 @@ func validateChannelVersion(channel, version string) error {
 }
 
 func validateAndroidPackage(packageObject map[string]any, tagName, context string) error {
+	if err := rejectUnknownFields(packageObject, context, "format", "architectures", "minimumOsVersion", "applicationId", "buildVersion", "signature", "signingCertificateSha256", "fileName", "url", "size", "sha256"); err != nil {
+		return err
+	}
 	if err := requireExactString(packageObject, "format", "apk", context); err != nil {
 		return err
 	}
@@ -436,6 +523,9 @@ func validateAndroidPackage(packageObject map[string]any, tagName, context strin
 }
 
 func validateApplePackage(packageObject map[string]any, tagName, context, format string, architectures []string, minimumOSVersion, bundleIdentifier, fileName string) error {
+	if err := rejectUnknownFields(packageObject, context, "format", "architectures", "minimumOsVersion", "bundleIdentifier", "signature", "fileName", "url", "size", "sha256"); err != nil {
+		return err
+	}
 	if err := requireExactString(packageObject, "format", format, context); err != nil {
 		return err
 	}
@@ -454,11 +544,49 @@ func validateApplePackage(packageObject map[string]any, tagName, context, format
 	return validateCommonPackageFields(packageObject, context, tagName, fileName, maxApplePackageSize)
 }
 
+func validateTVPackage(packageObject map[string]any, tagName, context, format, minimumOSVersion, applicationID, fileName string) error {
+	if err := rejectUnknownFields(packageObject, context, "format", "architectures", "minimumOsVersion", "applicationId", "signature", "fileName", "url", "size", "sha256"); err != nil {
+		return err
+	}
+	if err := requireExactString(packageObject, "format", format, context); err != nil {
+		return err
+	}
+	if err := requireArchitectures(packageObject, []string{"universal"}, context); err != nil {
+		return err
+	}
+	if err := requireExactString(packageObject, "minimumOsVersion", minimumOSVersion, context); err != nil {
+		return err
+	}
+	if err := requireExactString(packageObject, "applicationId", applicationID, context); err != nil {
+		return err
+	}
+	if err := requireExactString(packageObject, "signature", "unsigned", context); err != nil {
+		return err
+	}
+	return validateCommonPackageFields(packageObject, context, tagName, fileName, maxTVPackageSize)
+}
+
+func validateRuntimePackage(packageObject map[string]any, tagName, context string) error {
+	if err := rejectUnknownFields(packageObject, context, "format", "platforms", "fileName", "url", "size", "sha256"); err != nil {
+		return err
+	}
+	if err := requireExactString(packageObject, "format", "json", context); err != nil {
+		return err
+	}
+	if err := requireStringArray(packageObject, "platforms", []string{"webos", "tizen"}, context); err != nil {
+		return err
+	}
+	return validateCommonPackageFields(packageObject, context, tagName, tvRuntimeAssetFileName, maxTVRuntimeSize)
+}
+
 func validateWindowsPackage(packageObject map[string]any, tagName, context, architecture, fileName string) error {
 	for _, obsoleteField := range []string{"identityName", "publisher", "packageVersion", "signingCertificateSha256"} {
 		if _, present := packageObject[obsoleteField]; present {
 			return fmt.Errorf("%s.%s is obsolete for portable executables", context, obsoleteField)
 		}
+	}
+	if err := rejectUnknownFields(packageObject, context, "format", "architectures", "minimumOsVersion", "signature", "fileName", "url", "size", "sha256"); err != nil {
+		return err
 	}
 	if err := requireExactString(packageObject, "format", "exe", context); err != nil {
 		return err
@@ -510,8 +638,11 @@ func validateExpectedValues(manifest any, options validateOptions) error {
 	tvosPackage := packages["tvos"].(map[string]any)
 	visionosPackage := packages["visionos"].(map[string]any)
 	macosPackage := packages["macos"].(map[string]any)
+	webosPackage := packages["webos"].(map[string]any)
+	tizenPackage := packages["tizen"].(map[string]any)
 	windowsX64Package := packages["windowsX64"].(map[string]any)
 	windowsArm64Package := packages["windowsArm64"].(map[string]any)
+	tvRuntimePackage := packages["tvRuntime"].(map[string]any)
 	expected := []struct {
 		actual any
 		value  string
@@ -529,8 +660,11 @@ func validateExpectedValues(manifest any, options validateOptions) error {
 		{tvosPackage["url"], options.tvosArchiveURL, "tvOS package URL"},
 		{visionosPackage["url"], options.visionosArchiveURL, "visionOS package URL"},
 		{macosPackage["url"], options.macosDiskImageURL, "macOS package URL"},
+		{webosPackage["url"], options.webosPackageURL, "webOS package URL"},
+		{tizenPackage["url"], options.tizenPackageURL, "Tizen package URL"},
 		{windowsX64Package["url"], options.windowsX64ExecutableURL, "Windows x64 executable URL"},
 		{windowsArm64Package["url"], options.windowsArm64ExecutableURL, "Windows ARM64 executable URL"},
+		{tvRuntimePackage["url"], options.tvRuntimeURL, "TV runtime URL"},
 	}
 	for _, item := range expected {
 		if item.value != "" && item.actual != item.value {
@@ -548,8 +682,11 @@ func validateExpectedValues(manifest any, options validateOptions) error {
 		{tvosPackage, options.tvosArchive, "tvOS archive", maxApplePackageSize},
 		{visionosPackage, options.visionosArchive, "visionOS archive", maxApplePackageSize},
 		{macosPackage, options.macosDiskImage, "macOS disk image", maxApplePackageSize},
+		{webosPackage, options.webosPackage, "webOS package", maxTVPackageSize},
+		{tizenPackage, options.tizenPackage, "Tizen package", maxTVPackageSize},
 		{windowsX64Package, options.windowsX64Executable, "Windows x64 executable", maxWindowsPackageSize},
 		{windowsArm64Package, options.windowsArm64Executable, "Windows ARM64 executable", maxWindowsPackageSize},
+		{tvRuntimePackage, options.tvRuntime, "TV runtime", maxTVRuntimeSize},
 	}
 	for _, asset := range assets {
 		if err := validateExpectedAsset(asset.packageObject, asset.path, asset.label, asset.maximumSize); err != nil {
@@ -655,6 +792,22 @@ func requireExactString(object map[string]any, key, expected, context string) er
 	return nil
 }
 
+func rejectUnknownFields(object map[string]any, context string, allowed ...string) error {
+	for field := range object {
+		known := false
+		for _, candidate := range allowed {
+			if field == candidate {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return fmt.Errorf("%s.%s is not allowed", context, field)
+		}
+	}
+	return nil
+}
+
 func requireArchitectures(object map[string]any, expected []string, context string) error {
 	value, err := required(object, "architectures", context)
 	if err != nil {
@@ -682,6 +835,38 @@ func requireArchitectures(object map[string]any, expected []string, context stri
 	for index := range expected {
 		if actual[index] != expected[index] {
 			return fmt.Errorf("%s.architectures must equal %v", context, expected)
+		}
+	}
+	return nil
+}
+
+func requireStringArray(object map[string]any, key string, expected []string, context string) error {
+	value, err := required(object, key, context)
+	if err != nil {
+		return err
+	}
+	var actual []string
+	switch entries := value.(type) {
+	case []any:
+		actual = make([]string, len(entries))
+		for index, entry := range entries {
+			text, ok := entry.(string)
+			if !ok {
+				return fmt.Errorf("%s.%s must contain strings", context, key)
+			}
+			actual[index] = text
+		}
+	case []string:
+		actual = entries
+	default:
+		return fmt.Errorf("%s.%s must be an array", context, key)
+	}
+	if len(actual) != len(expected) {
+		return fmt.Errorf("%s.%s must equal %v", context, key, expected)
+	}
+	for index := range expected {
+		if actual[index] != expected[index] {
+			return fmt.Errorf("%s.%s must equal %v", context, key, expected)
 		}
 	}
 	return nil

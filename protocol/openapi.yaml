@@ -2409,7 +2409,9 @@ paths:
       description: >
         Exchanges only the opaque deviceCode. The approved persisted device category determines
         the resulting category-scoped session, including when an administrator approved the device.
-        The exchange creates a new identity and returns a 409 error when the approving user already retains 50 devices.
+        The resulting rotating session remains refreshable until the user disconnects or an administrator
+        revokes the session or device. The exchange creates a new identity and returns a 409 error when
+        the approving user already retains 50 devices.
       operationId: exchangeDeviceAuthorization
       security: []
       requestBody:

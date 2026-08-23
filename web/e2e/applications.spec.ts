@@ -10,6 +10,8 @@ const assets = [
   "Rivune-macOS.dmg",
   "Rivune-x64.exe",
   "Rivune-arm64.exe",
+  "Rivune-webOS.ipk",
+  "Rivune-Tizen.wgt",
 ].map((name, index) => ({
   name,
   state: "uploaded",
@@ -26,6 +28,13 @@ const release = {
   draft: false,
   prerelease: false,
   assets: [
+    {
+      name: "Rivune-TV-runtime.json",
+      state: "uploaded",
+      size: 512 * 1024,
+      digest: `sha256:${"e".repeat(64)}`,
+      browser_download_url: `https://github.com/moodiness/rivune/releases/download/${tag}/Rivune-TV-runtime.json`,
+    },
     ...assets,
     {
       name: "rivune-update.json",
@@ -58,7 +67,7 @@ test("lists exact stable assets, fingerprints, warnings, and QR links without bo
   await expect(page.getByRole("heading", { name: "Rivune on every screen." })).toBeVisible();
   await expect(page.getByText("Latest stable release")).toBeVisible();
   await expect(page.getByText(tag, { exact: true })).toBeVisible();
-  await expect(page.locator(".applications-card")).toHaveCount(7);
+  await expect(page.locator(".applications-card")).toHaveCount(9);
   await expect(page.locator(`[data-asset="Rivune-Android.apk"] code`)).toHaveText("1".repeat(64));
   await expect(page.locator(`[data-asset="Rivune-iOS-unsigned.ipa"]`)).toContainText("cannot be installed as downloaded");
   await expect(page.locator(`[data-asset="Rivune-x64.exe"]`)).toContainText("SmartScreen");
@@ -160,6 +169,6 @@ test("rejects failed metadata and retries a validated response", async ({ page }
   unavailable = false;
   await page.getByRole("button", { name: "Try again" }).click();
 
-  await expect(page.locator(".applications-card")).toHaveCount(7);
+  await expect(page.locator(".applications-card")).toHaveCount(9);
   expect(requests).toBeGreaterThanOrEqual(2);
 });
