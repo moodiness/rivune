@@ -29,12 +29,8 @@ const repositoryURL = "https://github.com/moodiness/rivune";
 const semverTagPattern = /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const maximumReleaseResponseBytes = 512 * 1024;
 const installerAssetNames = [
-  "Rivune-TV-Installer-Windows-x64.exe",
-  "Rivune-TV-Installer-Windows-arm64.exe",
-  "Rivune-TV-Installer-macOS-x64.zip",
-  "Rivune-TV-Installer-macOS-arm64.zip",
-  "Rivune-TV-Installer-Linux-x64.zip",
-  "Rivune-TV-Installer-Linux-arm64.zip",
+  "Rivune-TV-Installer-Windows.exe",
+  "Rivune-TV-Installer-macOS.dmg",
 ] as const;
 type InstallerAssetName = typeof installerAssetNames[number];
 
@@ -46,8 +42,7 @@ type AssetName =
   | "Rivune-tvOS-unsigned.ipa"
   | "Rivune-visionOS-unsigned.ipa"
   | "Rivune-macOS.dmg"
-  | "Rivune-x64.exe"
-  | "Rivune-arm64.exe";
+  | "Rivune-Windows.exe";
 
 type ReleaseAsset = {
   name: string;
@@ -139,17 +134,9 @@ const assetSpecs: AssetSpec[] = [
     icon: Monitor,
   },
   {
-    name: "Rivune-x64.exe",
+    name: "Rivune-Windows.exe",
     platform: "Windows",
-    detailKey: "applications.asset.windowsX64.detail",
-    signature: "unsigned",
-    warningKey: "applications.asset.windows.warning",
-    icon: Monitor,
-  },
-  {
-    name: "Rivune-arm64.exe",
-    platform: "Windows",
-    detailKey: "applications.asset.windowsArm.detail",
+    detailKey: "applications.asset.windows.detail",
     signature: "unsigned",
     warningKey: "applications.asset.windows.warning",
     icon: Monitor,
@@ -159,19 +146,7 @@ const assetSpecs: AssetSpec[] = [
 const releaseManifestName = "rivune-update.json";
 const auxiliaryReleaseAssetNames = [releaseManifestName, "Rivune-TV-runtime.json", ...installerAssetNames] as const;
 const expectedReleaseAssetNames: readonly string[] = [...assetSpecs.map((asset) => asset.name), ...auxiliaryReleaseAssetNames];
-const legacyReleaseAssetNames: readonly string[] = [
-  ...assetSpecs.filter((asset) => asset.name !== "Rivune-webOS.ipk" && asset.name !== "Rivune-Tizen.wgt").map((asset) => asset.name),
-  releaseManifestName,
-];
 
-function supportsTVInstaller(tagName: string): boolean {
-  const [major, minor] = tagName.slice(1).split(".").map(Number);
-  return major > 1 || major === 1 && minor >= 12;
-}
-
-function expectedAssetsForRelease(tagName: string): readonly string[] {
-  return supportsTVInstaller(tagName) ? expectedReleaseAssetNames : legacyReleaseAssetNames;
-}
 
 type UserAgentData = {
   platform?: string;
@@ -182,13 +157,9 @@ async function deviceRecommendation(): Promise<DeviceRecommendation> {
   const navigatorWithHints = navigator as Navigator & { userAgentData?: UserAgentData };
   const userAgent = navigator.userAgent;
   let platform = navigatorWithHints.userAgentData?.platform ?? navigator.platform ?? "";
-  let architecture = "";
-  let bitness = "";
   try {
-    const values = await navigatorWithHints.userAgentData?.getHighEntropyValues?.(["architecture", "bitness", "platform"]);
+    const values = await navigatorWithHints.userAgentData?.getHighEntropyValues?.(["platform"]);
     platform = values?.platform ?? platform;
-    architecture = values?.architecture?.toLowerCase() ?? "";
-    bitness = values?.bitness ?? "";
   } catch {
     // Client hints are optional; the user-agent fallback remains available.
   }
@@ -215,13 +186,7 @@ async function deviceRecommendation(): Promise<DeviceRecommendation> {
     return { labelKey: "applications.device.mac", assets: ["Rivune-macOS.dmg"] };
   }
   if (/win/i.test(platform) || /windows/i.test(userAgent)) {
-    if (architecture.includes("arm") || /arm64/i.test(userAgent)) {
-      return { labelKey: "applications.device.windowsArm", assets: ["Rivune-arm64.exe"] };
-    }
-    if (architecture === "x86" && bitness === "64" || /win64|x64|amd64/i.test(userAgent)) {
-      return { labelKey: "applications.device.windowsX64", assets: ["Rivune-x64.exe"] };
-    }
-    return { labelKey: "applications.device.windowsUnknown", assets: ["Rivune-x64.exe", "Rivune-arm64.exe"] };
+    return { labelKey: "applications.device.windows", assets: ["Rivune-Windows.exe"] };
   }
   return { labelKey: "applications.device.unknown", assets: [] };
 }
@@ -237,7 +202,7 @@ function validRelease(value: unknown): value is Release {
     !Array.isArray(release.assets)
   ) return false;
 
-  const expectedAssetNames = expectedAssetsForRelease(release.tag_name);
+  const expectedAssetNames = expectedReleaseAssetNames;
   if (release.assets.length !== expectedAssetNames.length) return false;
   const assets = new Map<string, ReleaseAsset>();
   for (const candidate of release.assets) {
@@ -290,6 +255,11 @@ function formatSize(bytes: number): string {
 function supportsLocalSigningGuide(tagName: string): boolean {
   const [major, minor] = tagName.slice(1).split(".").map(Number);
   return major > 1 || major === 1 && minor >= 10;
+}
+
+function supportsTVInstaller(tagName: string): boolean {
+  const [major, minor] = tagName.slice(1).split(".").map(Number);
+  return major > 1 || major === 1 && minor >= 12;
 }
 
 const signatureLabelKeys = {
@@ -452,7 +422,6 @@ function AppleSigningGuide({ tagName }: { tagName: string }) {
         {!valid && <p>{t("applications.guide.invalid")}</p>}
       </div>
     </div>
-
     <aside className="applications-apple-guide__privacy"><KeyRound size={22} /><div><strong>{t("applications.guide.privacyTitle")}</strong><p>{t("applications.guide.privacyBody")}</p></div></aside>
   </section>;
 }
@@ -461,23 +430,19 @@ async function tvInstallerRecommendation(): Promise<InstallerAssetName> {
   const navigatorWithHints = navigator as Navigator & { userAgentData?: UserAgentData };
   const userAgent = navigator.userAgent.toLowerCase();
   let platform = (navigatorWithHints.userAgentData?.platform ?? navigator.platform).toLowerCase();
-  let architecture = "";
   try {
-    const values = await navigatorWithHints.userAgentData?.getHighEntropyValues?.(["architecture", "platform"]);
+    const values = await navigatorWithHints.userAgentData?.getHighEntropyValues?.(["platform"]);
     platform = values?.platform?.toLowerCase() ?? platform;
-    architecture = values?.architecture?.toLowerCase() ?? "";
   } catch {
     // Client hints are optional; the user-agent fallback remains available.
   }
-  const arm = architecture.includes("arm") || /arm64|aarch64/.test(userAgent) || /arm/.test(platform);
-  if (/win/.test(platform) || /windows/.test(userAgent)) return arm ? "Rivune-TV-Installer-Windows-arm64.exe" : "Rivune-TV-Installer-Windows-x64.exe";
-  if (/mac/.test(platform) || /macintosh/.test(userAgent)) return arm ? "Rivune-TV-Installer-macOS-arm64.zip" : "Rivune-TV-Installer-macOS-x64.zip";
-  return arm ? "Rivune-TV-Installer-Linux-arm64.zip" : "Rivune-TV-Installer-Linux-x64.zip";
+  if (/mac/.test(platform) || /macintosh/.test(userAgent)) return "Rivune-TV-Installer-macOS.dmg";
+  return "Rivune-TV-Installer-Windows.exe";
 }
 
 function TVInstallerGuide({ release }: { release: Release }) {
   const [platform, setPlatform] = useState<"webos" | "tizen">("webos");
-  const [recommendedName, setRecommendedName] = useState<InstallerAssetName>("Rivune-TV-Installer-Linux-x64.zip");
+  const [recommendedName, setRecommendedName] = useState<InstallerAssetName>("Rivune-TV-Installer-Windows.exe");
   useEffect(() => {
     let active = true;
     void tvInstallerRecommendation().then((name) => { if (active) setRecommendedName(name); });
