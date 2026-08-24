@@ -5,7 +5,7 @@ The supported deployment is [`compose.yaml`](../compose.yaml) with PostgreSQL 18
 ## Install and diagnose
 
 ```sh
-./rivune setup --public-url https://media.example.com --version 1.12.3
+./rivune setup --public-url https://media.example.com --version 1.12.4
 ./rivune up
 ./rivune status
 ./rivune logs rivune
@@ -41,7 +41,7 @@ Unraid should use the same dedicated edge network and an existing PostgreSQL 18 
 Before upgrading, create and verify an authenticated backup, record its printed backup ID outside the backup repository, set an exact released `RIVUNE_VERSION`, then recreate only Rivune:
 
 ```sh
-target_version=1.12.3
+target_version=1.12.4
 backup="backups/rivune-before-${target_version}.dump"
 COMPOSE_FILE=compose.yaml ./scripts/postgres-backup.sh "${backup}"
 ./scripts/postgres-verify-backup.sh --expect-backup-id '<recorded ID>' "${backup}"
