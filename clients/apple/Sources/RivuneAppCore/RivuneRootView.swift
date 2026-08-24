@@ -38,8 +38,12 @@ public struct RivuneRootView: View {
             .transition(.opacity)
             if let presentation = model.minimizedPlaybackPresentation {
                 RivuneMiniPlayerView(presentation: presentation, model: model)
+#if os(macOS)
+                    .frame(width: 440, height: 247.5)
+#else
                     .frame(maxWidth: 340)
                     .aspectRatio(16 / 9, contentMode: .fit)
+#endif
                     .padding(.horizontal, 16)
                     .padding(.bottom, 92)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -119,19 +123,41 @@ private enum RivunePalette {
     }
     static let secondary = Color.white.opacity(0.68)
 }
-private struct RivuneGlassButtonModifier: ViewModifier {
+struct RivuneGlassButtonModifier: ViewModifier {
     let prominent: Bool
 
     @ViewBuilder
     func body(content: Content) -> some View {
-#if os(visionOS)
+#if os(macOS)
+        if #available(macOS 26.0, *) {
+            if prominent {
+                content
+                    .buttonStyle(.glassProminent)
+                    .tint(.clear)
+                    .foregroundStyle(.white)
+            } else {
+                content
+                    .buttonStyle(.glass)
+                    .tint(.clear)
+                    .foregroundStyle(.white)
+            }
+        } else if prominent {
+            content
+                .buttonStyle(.borderedProminent)
+                .foregroundStyle(.white)
+        } else {
+            content
+                .buttonStyle(.bordered)
+                .foregroundStyle(.white)
+        }
+#elseif os(visionOS)
         if prominent {
             content.buttonStyle(.borderedProminent)
         } else {
             content.buttonStyle(.bordered)
         }
 #else
-        if #available(iOS 26.0, tvOS 26.0, macOS 26.0, *) {
+        if #available(iOS 26.0, tvOS 26.0, *) {
             if prominent {
                 content.buttonStyle(.glassProminent)
             } else {
@@ -146,9 +172,65 @@ private struct RivuneGlassButtonModifier: ViewModifier {
     }
 }
 
-private extension View {
+struct RivuneCircularButtonShapeModifier: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+#if os(macOS)
+        if #available(macOS 14.0, *) {
+            content.buttonBorderShape(.circle)
+        } else {
+            content
+        }
+#else
+        content
+#endif
+    }
+}
+
+struct RivunePageWidthModifier: ViewModifier {
+    let compactMaximum: CGFloat
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+#if os(macOS)
+        content.frame(maxWidth: .infinity, alignment: .leading)
+#else
+        content
+            .frame(maxWidth: compactMaximum, alignment: .leading)
+            .frame(maxWidth: .infinity)
+#endif
+    }
+}
+
+struct RivunePrimaryTabInsetsModifier: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+#if os(macOS)
+        content
+            .padding(.horizontal, 28)
+            .padding(.bottom, 28)
+            .padding(.top, 88)
+#else
+        content.padding(28)
+#endif
+    }
+}
+
+extension View {
     func rivuneGlassButton(prominent: Bool = false) -> some View {
         modifier(RivuneGlassButtonModifier(prominent: prominent))
+    }
+
+    func rivuneCircularButton() -> some View {
+        modifier(RivuneCircularButtonShapeModifier())
+    }
+
+    func rivunePageWidth(_ compactMaximum: CGFloat) -> some View {
+        modifier(RivunePageWidthModifier(compactMaximum: compactMaximum))
+    }
+
+    func rivunePrimaryTabInsets() -> some View {
+        modifier(RivunePrimaryTabInsetsModifier())
     }
 
     func rivuneDestructiveButton() -> some View {
@@ -156,6 +238,7 @@ private extension View {
             .foregroundStyle(.red)
     }
 }
+
 
 struct RivuneSingleColumnNavigation<Content: View>: View {
     private let content: Content
@@ -285,6 +368,10 @@ private struct OfflineUnlockView: View {
                 Image(systemName: "lock.fill").font(.largeTitle)
                 Text("Unlock \(profile.name)").font(.title2.bold())
                 SecureField("Profile PIN", text: $pin)
+                    .onChange(of: pin) { value in
+                        let normalized = String(value.filter(\.isNumber).prefix(8))
+                        if normalized != value { pin = normalized }
+                    }
 #if os(tvOS)
                     .textFieldStyle(.plain).padding(.horizontal, 16).frame(minHeight: 54)
                     .background(RivunePalette.raised, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
@@ -302,11 +389,11 @@ private struct OfflineUnlockView: View {
                         model.unlockOfflineProfile(profile, pin: normalized)
                         if model.offlineAccessUnlocked { pin = "" }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .rivuneGlassButton(prominent: true)
                     .disabled(pin.filter(\.isNumber).count < 4)
                 }
             }
-            .padding(28).frame(maxWidth: 480)
+            .padding(32).frame(maxWidth: 480, maxHeight: .infinity)
         }
     }
 }
@@ -444,7 +531,7 @@ private struct ServerView: View {
                     offlineProfileButton(profile)
                 }
                 if model.offlineAccessUnlocked {
-                    Button("Lock offline access") { model.lockOffline() }.buttonStyle(.bordered)
+                    Button("Lock offline access") { model.lockOffline() }.rivuneGlassButton()
                 }
                 FailureText(failure: model.offlineUnlockFailure)
             }
@@ -527,10 +614,10 @@ private struct UpdateStatusCard: View {
                     .foregroundStyle(RivunePalette.secondary)
 #if os(tvOS)
                     Button("View release QR code") { televisionUpdate = update }
-                        .buttonStyle(.borderedProminent)
+                        .rivuneGlassButton(prominent: true)
 #else
                     Button("Open release") { openURL(update.releaseURL) }
-                        .buttonStyle(.borderedProminent)
+                        .rivuneGlassButton(prominent: true)
 #endif
                 }
                 .padding(18)
@@ -541,7 +628,7 @@ private struct UpdateStatusCard: View {
                     Label("The update check failed.", systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.yellow)
                     Spacer()
-                    Button("Try again") { model.checkForUpdates() }.buttonStyle(.bordered)
+                    Button("Try again") { model.checkForUpdates() }.rivuneGlassButton()
                 }
                 .padding(18)
                 .background(RivunePalette.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -902,59 +989,32 @@ private struct ProfilesView: View {
     @State private var pin = ""
     @State private var confirmDisconnect = false
 
-    private let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 20)]
+    private let columns = [GridItem(.adaptive(minimum: 150, maximum: 190), spacing: 18)]
 
     var body: some View {
         RivuneSingleColumnNavigation {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 30) {
-                    HStack {
-                        Brand(compact: true)
-                        Spacer()
-                        Button(role: .destructive) { confirmDisconnect = true } label: {
-                            Label("Disconnect", systemImage: "rectangle.portrait.and.arrow.right")
-                        }
-                        .rivuneDestructiveButton()
+            if let profile = pendingProfile {
+                PinView(
+                    profile: profile,
+                    imageData: model.profileAvatarData[profile.id],
+                    pin: $pin,
+                    failure: model.failure,
+                    busy: model.isBusy,
+                    cancel: {
+                        pin = ""
+                        pendingProfile = nil
+                        model.clearFailure()
+                    },
+                    submit: {
+                        let normalized = String(pin.filter(\.isNumber).prefix(8))
+                        guard normalized.count >= 4 else { return }
+                        pin = normalized
+                        model.selectProfile(profile, pin: normalized)
                     }
-                    ScreenHeading(
-                        eyebrow: model.serverName,
-                        title: "Who’s watching?",
-                        bodyText: "Choose a profile to continue. Availability and PIN rules come from your server."
-                    )
-                    FailureText(failure: model.failure)
-                    LazyVGrid(columns: columns, alignment: .leading, spacing: 20) {
-                        ForEach(model.profiles) { profile in
-                            ProfileButton(profile: profile, imageData: model.profileAvatarData[profile.id]) {
-                                select(profile)
-                            }
-                            .disabled(model.isBusy || !profile.accessible)
-                        }
-                    }
-                }
-                .padding(28)
-                .frame(maxWidth: 1120)
-                .frame(maxWidth: .infinity)
+                )
+            } else {
+                profileContent
             }
-        }
-        .sheet(item: $pendingProfile) { profile in
-            PinView(
-                profile: profile,
-                imageData: model.profileAvatarData[profile.id],
-                pin: $pin,
-                failure: model.failure,
-                busy: model.isBusy,
-                cancel: {
-                    pin = ""
-                    pendingProfile = nil
-                    model.clearFailure()
-                },
-                submit: {
-                    let normalized = String(pin.filter(\.isNumber).prefix(8))
-                    guard normalized.count >= 4 else { return }
-                    pin = normalized
-                    model.selectProfile(profile, pin: normalized)
-                }
-            )
         }
         .onChange(of: model.destination) { destination in
             if destination != .profiles {
@@ -965,6 +1025,38 @@ private struct ProfilesView: View {
         .confirmationDialog("Disconnect from \(model.serverName)?", isPresented: $confirmDisconnect) {
             Button("Disconnect", role: .destructive, action: model.disconnect)
             Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    private var profileContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 26) {
+                HStack {
+                    Brand(compact: true)
+                    Spacer()
+                    Button(role: .destructive) { confirmDisconnect = true } label: {
+                        Label("Disconnect", systemImage: "rectangle.portrait.and.arrow.right")
+                    }
+                    .rivuneGlassButton()
+                    .tint(.red)
+                }
+                ScreenHeading(
+                    eyebrow: model.serverName,
+                    title: "Who’s watching?",
+                    bodyText: "Choose a profile to continue. Availability and PIN rules come from your server."
+                )
+                FailureText(failure: model.failure)
+                LazyVGrid(columns: columns, alignment: .leading, spacing: 18) {
+                    ForEach(model.profiles) { profile in
+                        ProfileButton(profile: profile, imageData: model.profileAvatarData[profile.id]) {
+                            select(profile)
+                        }
+                        .disabled(model.isBusy || !profile.accessible)
+                    }
+                }
+            }
+            .padding(28)
+            .rivunePageWidth(980)
         }
     }
 
@@ -984,11 +1076,14 @@ private struct ProfileButton: View {
     let imageData: Data?
     let action: () -> Void
 
+    private let avatarSize: CGFloat = 124
+    private let verticalPadding: CGFloat = 18
+
     var body: some View {
         Button(action: action) {
             VStack(spacing: 12) {
                 ProfileAvatarImage(profile: profile, imageData: imageData)
-                    .frame(width: 124, height: 124)
+                    .frame(width: avatarSize, height: avatarSize)
                     .clipShape(Circle())
                     .overlay(alignment: .bottomTrailing) {
                         if profile.hasPin {
@@ -1008,7 +1103,7 @@ private struct ProfileButton: View {
                 }
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 18)
+            .padding(.vertical, verticalPadding)
             .foregroundStyle(.white)
             .background(RivunePalette.surface, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
@@ -1188,6 +1283,11 @@ private struct PinView: View {
     private var canSubmit: Bool { pin.count >= 4 && pin.count <= 8 && !busy }
 
     var body: some View {
+        compactContent
+    }
+
+
+    private var compactContent: some View {
         ZStack {
             LinearGradient(
                 colors: [RivunePalette.raised, Color.black],
@@ -1198,101 +1298,105 @@ private struct PinView: View {
 
             GeometryReader { proxy in
                 ScrollView {
-                VStack(spacing: 20) {
-                    ProfileAvatarImage(profile: profile, imageData: imageData)
-                        .frame(width: 72, height: 72)
-                        .clipShape(Circle())
-                        .overlay { Circle().stroke(Color.white.opacity(0.12), lineWidth: 1) }
+                    VStack(spacing: 20) {
+                        ProfileAvatarImage(profile: profile, imageData: imageData)
+                            .frame(width: 72, height: 72)
+                            .clipShape(Circle())
+                            .overlay { Circle().stroke(Color.white.opacity(0.12), lineWidth: 1) }
 
-                    VStack(spacing: 7) {
-                        Text("Enter PIN")
-                            .font(.title2.bold())
-                        Text("Unlock \(profile.name) with the 4–8 digit PIN.")
-                            .font(.callout)
-                            .foregroundStyle(RivunePalette.secondary)
-                            .multilineTextAlignment(.center)
-                    }
-
-                    ZStack {
-                        HStack(spacing: 10) {
-                            ForEach(0..<8, id: \.self) { index in
-                                Circle()
-                                    .fill(index < pin.count ? RivunePalette.accent : Color.white.opacity(0.14))
-                                    .frame(width: index < 4 ? 15 : 11, height: index < 4 ? 15 : 11)
-                                    .overlay { Circle().stroke(Color.white.opacity(index < pin.count ? 0 : 0.20), lineWidth: 1) }
-                            }
+                        VStack(spacing: 7) {
+                            Text("Enter PIN").font(.title2.bold())
+                            Text("Unlock \(profile.name) with the 4–8 digit PIN.")
+                                .font(.callout)
+                                .foregroundStyle(RivunePalette.secondary)
+                                .multilineTextAlignment(.center)
                         }
-                        SecureField("PIN", text: $pin)
-                            .focused($pinFocused)
-                            .textFieldStyle(.plain)
-                            .foregroundStyle(.clear)
-                            .tint(.clear)
-                            .opacity(0.02)
+
+                        ZStack {
+                            HStack(spacing: 10) {
+                                ForEach(0..<8, id: \.self) { index in
+                                    Circle()
+                                        .fill(index < pin.count ? RivunePalette.accent : Color.white.opacity(0.14))
+                                        .frame(width: index < 4 ? 15 : 11, height: index < 4 ? 15 : 11)
+                                        .overlay { Circle().stroke(Color.white.opacity(index < pin.count ? 0 : 0.20), lineWidth: 1) }
+                                }
+                            }
+                            SecureField("PIN", text: $pin)
+                                .focused($pinFocused)
+                                .textFieldStyle(.plain)
+                                .foregroundStyle(.clear)
+                                .tint(.clear)
+                                .opacity(0.02)
 #if os(iOS) || os(visionOS)
-                            .keyboardType(.numberPad)
-                            .textContentType(.oneTimeCode)
+                                .keyboardType(.numberPad)
+                                .textContentType(.oneTimeCode)
 #endif
-                            .onChange(of: pin) { value in
-                                let normalized = String(value.filter(\.isNumber).prefix(8))
-                                if normalized != value { pin = normalized }
-                                if normalized.count == 8 && !busy { submit() }
-                            }
-                            .onSubmit { if canSubmit { submit() } }
-                    }
-                    .frame(maxWidth: 360, minHeight: 64)
-                    .padding(.horizontal, 20)
-                    .background(RivunePalette.surface.opacity(0.94), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .stroke(failure == nil ? Color.white.opacity(0.12) : Color.red.opacity(0.85), lineWidth: 1)
-                    }
-                    .contentShape(Rectangle())
-#if !os(tvOS)
-                    .onTapGesture { pinFocused = true }
-#endif
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("PIN")
-                    .accessibilityValue(rivuneLocalizedFormat("%d digits entered", pin.count))
-
-                    if let failure {
-                        Label(rivuneLocalized(failure.localizedDescription), systemImage: "exclamationmark.triangle.fill")
-                            .font(.callout)
-                            .foregroundStyle(Color.red.opacity(0.94))
-                            .multilineTextAlignment(.center)
-                    } else {
-                        Text(pin.isEmpty ? rivuneLocalized("Enter at least 4 digits") : rivuneLocalizedFormat("%d of 8 digits", pin.count))
-                            .font(.caption)
-                            .foregroundStyle(RivunePalette.secondary)
-                    }
-
-                    HStack(spacing: 12) {
-                        Button("Cancel", role: .cancel, action: cancel)
-                            .rivuneGlassButton()
-                            .disabled(busy)
-                        Button(action: submit) {
-                            HStack(spacing: 8) {
-                                if busy { ProgressView() }
-                                Text(rivuneLocalized(busy ? "Unlocking…" : "Unlock")).fontWeight(.semibold)
-                                if !busy { Image(systemName: "lock.open.fill") }
-                            }
-                            .frame(minWidth: 112)
+                                .onChange(of: pin, perform: normalizePIN)
+                                .onSubmit { if canSubmit { submit() } }
                         }
-                        .rivuneGlassButton(prominent: true)
-                        .disabled(!canSubmit)
+                        .frame(maxWidth: 360, minHeight: 64)
+                        .padding(.horizontal, 20)
+                        .background(RivunePalette.surface.opacity(0.94), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(failure == nil ? Color.white.opacity(0.12) : Color.red.opacity(0.85), lineWidth: 1)
+                        }
+                        .contentShape(Rectangle())
+#if !os(tvOS)
+                        .onTapGesture { pinFocused = true }
+#endif
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("PIN")
+                        .accessibilityValue(rivuneLocalizedFormat("%d digits entered", pin.count))
+
+                        pinStatus
+
+                        HStack(spacing: 12) {
+                            Button("Cancel", role: .cancel, action: cancel)
+                                .rivuneGlassButton()
+                                .disabled(busy)
+                            Button(action: submit) {
+                                HStack(spacing: 8) {
+                                    if busy { ProgressView() }
+                                    Text(rivuneLocalized(busy ? "Unlocking…" : "Unlock")).fontWeight(.semibold)
+                                    if !busy { Image(systemName: "lock.open.fill") }
+                                }
+                                .frame(minWidth: 112)
+                            }
+                            .rivuneGlassButton(prominent: true)
+                            .disabled(!canSubmit)
+                        }
                     }
-                }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 26)
-                .frame(maxWidth: 520)
-                .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 26)
+                    .frame(maxWidth: 520)
+                    .frame(maxWidth: .infinity)
                     .frame(minHeight: proxy.size.height, alignment: .center)
-            }
+                }
             }
         }
         .preferredColorScheme(.dark)
-        .onAppear {
-            DispatchQueue.main.async { pinFocused = true }
+        .onAppear { DispatchQueue.main.async { pinFocused = true } }
+    }
+
+    @ViewBuilder
+    private var pinStatus: some View {
+        if let failure {
+            Label(rivuneLocalized(failure.localizedDescription), systemImage: "exclamationmark.triangle.fill")
+                .font(.callout)
+                .foregroundStyle(Color.red.opacity(0.94))
+                .multilineTextAlignment(.center)
+        } else {
+            Text(pin.isEmpty ? rivuneLocalized("Enter at least 4 digits") : rivuneLocalizedFormat("%d of 8 digits", pin.count))
+                .font(.caption)
+                .foregroundStyle(RivunePalette.secondary)
         }
+    }
+
+    private func normalizePIN(_ value: String) {
+        let normalized = String(value.filter(\.isNumber).prefix(8))
+        if normalized != value { pin = normalized }
+        if normalized.count == 8 && !busy { submit() }
     }
 }
 
@@ -1302,31 +1406,94 @@ private struct LibraryView: View {
     @State private var showAppearanceSettings = false
 
     var body: some View {
-        tabContent
+        content
             .tint(RivunePalette.accent)
-        .confirmationDialog("Disconnect from \(model.serverName)?", isPresented: $confirmDisconnect) {
-            Button("Disconnect", role: .destructive, action: model.disconnect)
-            Button("Cancel", role: .cancel) {}
+            .confirmationDialog("Disconnect from \(model.serverName)?", isPresented: $confirmDisconnect) {
+                Button("Disconnect", role: .destructive, action: model.disconnect)
+                Button("Cancel", role: .cancel) {}
+            }
+            .folderPresentation(
+                item: Binding(
+                    get: { model.openedFolder },
+                    set: { if $0 == nil { model.closeFolder() } }
+                ),
+                onDismiss: model.closeFolder
+            ) { _ in
+                FolderView(model: model)
+            }
+            .onChange(of: model.destination) { destination in
+                if destination != .library { showAppearanceSettings = false }
+            }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+#if os(macOS)
+        let showsPrimaryNavigation = !showAppearanceSettings
+            && model.openedFolder == nil
+            && model.mediaDetail == nil
+            && model.mediaFailure == nil
+            && !model.mediaLoading
+            && model.playbackPresentation == nil
+        ZStack(alignment: .top) {
+            macOSSelectedTab
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if showsPrimaryNavigation {
+                MacLibraryDock(
+                    model: model,
+                    settings: { showAppearanceSettings = true },
+                    switchProfile: model.chooseAnotherProfile,
+                    disconnect: { confirmDisconnect = true }
+                )
+                .padding(.top, 12)
+                .padding(.horizontal, 20)
+                .zIndex(10)
+            }
         }
-        .folderPresentation(
-            item: Binding(
-                get: { model.openedFolder },
-                set: { if $0 == nil { model.closeFolder() } }
-            ),
-            onDismiss: model.closeFolder
-        ) { _ in
-            FolderView(model: model)
-        }
-        .sheet(isPresented: $showAppearanceSettings) {
-            AppearanceSettingsView(model: model)
-        }
-        .sheet(isPresented: Binding(
-            get: { model.mediaLoading || model.mediaDetail != nil || model.mediaFailure != nil },
-            set: { if !$0 { model.closeMedia() } }
-        )) {
+#else
+        tabContent
+#endif
+    }
+
+#if os(macOS)
+    @ViewBuilder
+    private var macOSSelectedTab: some View {
+        if let presentation = model.playbackPresentation {
+            RivuneInternalPlayerView(presentation: presentation, model: model)
+        } else if showAppearanceSettings {
+            AppearanceSettingsView(model: model) {
+                showAppearanceSettings = false
+            }
+        } else if model.mediaLoading || model.mediaDetail != nil || model.mediaFailure != nil {
             RivuneMediaDetailView(model: model)
+        } else if model.openedFolder != nil {
+            FolderView(model: model)
+        } else {
+            switch model.selectedTab {
+            case .home:
+                homeContent
+            case .search:
+                SearchTabView(
+                    model: model,
+                    settings: { showAppearanceSettings = true },
+                    disconnect: { confirmDisconnect = true }
+                )
+            case .library:
+                PersonalLibraryTabView(
+                    model: model,
+                    settings: { showAppearanceSettings = true },
+                    disconnect: { confirmDisconnect = true }
+                )
+            case .calendar:
+                CalendarTabView(
+                    model: model,
+                    settings: { showAppearanceSettings = true },
+                    disconnect: { confirmDisconnect = true }
+                )
+            }
         }
     }
+#endif
 
     private var tabContent: some View {
         TabView(
@@ -1367,6 +1534,7 @@ private struct LibraryView: View {
             RivuneSingleColumnNavigation {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 32) {
+#if !os(macOS)
                         LibraryHeader(
                             compact: proxy.size.width < 620,
                             switchProfile: model.chooseAnotherProfile,
@@ -1378,11 +1546,12 @@ private struct LibraryView: View {
                             title: "Home",
                             bodyText: model.collections.isEmpty && !model.isBusy ? "Your server has no visible collections for this profile." : nil
                         )
+#endif
                         if !model.heroItems.isEmpty {
                             HomeHeroCarousel(
                                 items: model.heroItems,
                                 model: model,
-                                height: min(max(proxy.size.width * 9 / 21, 220), 420)
+                                height: homeHeroHeight(for: proxy.size.width)
                             )
                         }
                         if !model.continueWatchingItems.isEmpty {
@@ -1418,14 +1587,148 @@ private struct LibraryView: View {
                             )
                         }
                     }
+#if os(macOS)
+                    .padding(.horizontal, proxy.size.width < 620 ? 20 : 28)
+                    .padding(.bottom, proxy.size.width < 620 ? 20 : 28)
+#else
                     .padding(proxy.size.width < 620 ? 20 : 28)
-                    .frame(maxWidth: 1320)
-                    .frame(maxWidth: .infinity)
+#endif
+                    .rivunePageWidth(1320)
                 }
             }
         }
     }
 }
+
+#if os(macOS)
+private struct MacDockControlModifier: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 14.0, *) {
+            content
+                .buttonStyle(.plain)
+                .focusEffectDisabled()
+        } else {
+            content
+                .buttonStyle(.plain)
+        }
+    }
+}
+
+private struct MacDockGlassCapsuleModifier: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content
+                .glassEffect(.clear.interactive(), in: Capsule())
+        } else {
+            content
+        }
+    }
+}
+
+private struct MacLibraryDock: View {
+    @ObservedObject var model: RivuneAppModel
+    let settings: () -> Void
+    let switchProfile: () -> Void
+    let disconnect: () -> Void
+
+    @ViewBuilder
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            GlassEffectContainer(spacing: 8) {
+                dockContent
+            }
+        } else {
+            dockContent
+        }
+    }
+
+    private var dockContent: some View {
+        HStack(spacing: 8) {
+            dockButton(.home, title: "Home", systemImage: "house.fill")
+            dockButton(.search, title: "Search", systemImage: "magnifyingglass")
+            dockButton(.library, title: "Library", systemImage: "rectangle.stack.fill")
+            dockButton(.calendar, title: "Calendar", systemImage: "calendar")
+            accountMenu
+        }
+    }
+
+    private func dockButton(_ tab: RivuneViewerTab, title: String, systemImage: String) -> some View {
+        let selected = model.selectedTab == tab
+        return Button {
+            if !selected { model.selectTab(tab) }
+        } label: {
+            dockLabel(title: title, systemImage: systemImage, selected: selected)
+        }
+        .modifier(MacDockControlModifier())
+        .help(rivuneLocalized(title))
+        .accessibilityLabel(rivuneLocalized(title))
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func dockLabel(title: String, systemImage: String, selected: Bool) -> some View {
+        Label(rivuneLocalized(title), systemImage: systemImage)
+            .font(.system(size: 13, weight: selected ? .bold : .semibold))
+            .foregroundStyle(selected ? Color.white : Color.white.opacity(0.78))
+            .padding(.horizontal, 14)
+            .frame(height: 40)
+            .contentShape(Capsule())
+            .modifier(MacDockGlassCapsuleModifier())
+    }
+
+    private var accountMenu: some View {
+        profileMenu
+            .modifier(MacDockControlModifier())
+    }
+
+    private var profileMenu: some View {
+        Menu {
+            Button(action: settings) {
+                Label("Settings", systemImage: "gearshape.fill")
+            }
+            Button(action: switchProfile) {
+                Label("Switch profile", systemImage: "person.2.fill")
+            }
+            Divider()
+            Button(role: .destructive, action: disconnect) {
+                Label("Disconnect", systemImage: "rectangle.portrait.and.arrow.right")
+            }
+        } label: {
+            accountLabel
+                .fixedSize()
+                .frame(minWidth: 56, minHeight: 40)
+                .modifier(MacDockGlassCapsuleModifier())
+        }
+        .help(model.activeProfile?.name ?? rivuneLocalized("Account"))
+        .accessibilityLabel(model.activeProfile?.name ?? rivuneLocalized("Account"))
+    }
+
+    private var accountLabel: some View {
+        HStack(spacing: 6) {
+            Group {
+                if let profile = model.activeProfile {
+                    ProfileAvatarImage(profile: profile, imageData: model.profileAvatarData[profile.id])
+                        .frame(width: 32, height: 32)
+                        .clipShape(Circle())
+                } else {
+                    Image(systemName: "person.crop.circle")
+                        .font(.title3)
+                        .frame(width: 32, height: 32)
+                }
+            }
+            Image(systemName: "chevron.down")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(Color.white.opacity(0.72))
+        }
+        .foregroundStyle(Color.white.opacity(0.88))
+        .padding(.leading, 4)
+        .padding(.trailing, 10)
+        .frame(height: 40)
+        .contentShape(Capsule())
+    }
+}
+#endif
 private struct EqualNativeTabLabel: View {
     let title: String
     let systemImage: String
@@ -1446,13 +1749,19 @@ private struct SearchTabView: View {
     let settings: () -> Void
     let disconnect: () -> Void
 
+#if os(macOS)
+    private let columns = [GridItem(.adaptive(minimum: 172, maximum: 220), spacing: 22)]
+#else
     private let columns = [GridItem(.adaptive(minimum: 140, maximum: 190), spacing: 18)]
+#endif
 
     var body: some View {
         RivuneSingleColumnNavigation {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
+#if !os(macOS)
                     LibraryHeader(compact: true, switchProfile: model.chooseAnotherProfile, settings: settings, disconnect: disconnect)
+#endif
                     ScreenHeading(eyebrow: model.serverName, title: "Search", bodyText: "Search every compatible catalog connected to your server.")
                     HStack(spacing: 12) {
                         TextField("Movies, series, anime…", text: $model.searchQuery)
@@ -1467,6 +1776,9 @@ private struct SearchTabView: View {
                         .rivuneGlassButton(prominent: true)
                         .disabled(model.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
+#if os(macOS)
+                    .frame(maxWidth: 760, alignment: .leading)
+#endif
                     TabStatus(model: model, empty: model.searchItems.isEmpty && !model.searchQuery.isEmpty ? "No matching titles." : nil)
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 24) {
                         ForEach(model.searchItems) { item in
@@ -1475,17 +1787,16 @@ private struct SearchTabView: View {
                                     title: item.title,
                                     subtitle: item.releaseInfo,
                                     mediaType: item.mediaType,
-                                    landscape: item.mediaType == "tv",
-                                    imageURL: (item.mediaType == "tv" ? item.backgroundUrl ?? item.posterUrl : item.posterUrl ?? item.backgroundUrl).flatMap(model.resolvedResourceURL)
+                                    landscape: false,
+                                    imageURL: (item.posterUrl ?? item.backgroundUrl).flatMap(model.resolvedResourceURL)
                                 )
                             }
                             .buttonStyle(.plain)
                         }
                     }
                 }
-                .padding(28)
-                .frame(maxWidth: 1200)
-                .frame(maxWidth: .infinity)
+                .rivunePrimaryTabInsets()
+                .rivunePageWidth(1200)
             }
         }
     }
@@ -1496,13 +1807,19 @@ private struct PersonalLibraryTabView: View {
     let settings: () -> Void
     let disconnect: () -> Void
 
+#if os(macOS)
+    private let columns = [GridItem(.adaptive(minimum: 172, maximum: 220), spacing: 22)]
+#else
     private let columns = [GridItem(.adaptive(minimum: 140, maximum: 190), spacing: 18)]
+#endif
 
     var body: some View {
         RivuneSingleColumnNavigation {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
+#if !os(macOS)
                     LibraryHeader(compact: true, switchProfile: model.chooseAnotherProfile, settings: settings, disconnect: disconnect)
+#endif
                     ScreenHeading(eyebrow: model.serverName, title: "Library", bodyText: "Titles saved to this profile.")
                     TabStatus(model: model, empty: model.libraryItems.isEmpty ? "Your library is empty." : nil)
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 24) {
@@ -1512,8 +1829,8 @@ private struct PersonalLibraryTabView: View {
                                     title: item.title ?? rivuneLocalized("Untitled"),
                                     subtitle: item.releaseInfo,
                                     mediaType: item.mediaType.rawValue,
-                                    landscape: item.mediaType == .tv,
-                                    imageURL: (item.mediaType == .tv ? item.backgroundUrl ?? item.posterUrl : item.posterUrl ?? item.backgroundUrl).flatMap(model.resolvedResourceURL)
+                                    landscape: false,
+                                    imageURL: (item.posterUrl ?? item.backgroundUrl).flatMap(model.resolvedResourceURL)
                                 )
                             }
                             .buttonStyle(.plain)
@@ -1522,9 +1839,8 @@ private struct PersonalLibraryTabView: View {
                         }
                     }
                 }
-                .padding(28)
-                .frame(maxWidth: 1200)
-                .frame(maxWidth: .infinity)
+                .rivunePrimaryTabInsets()
+                .rivunePageWidth(1200)
             }
         }
     }
@@ -1535,14 +1851,22 @@ private struct CalendarTabView: View {
     let settings: () -> Void
     let disconnect: () -> Void
 
+#if os(macOS)
+    private let columns = [GridItem(.adaptive(minimum: 360, maximum: 520), spacing: 16)]
+#else
+    private let columns = [GridItem(.flexible())]
+#endif
+
     var body: some View {
         RivuneSingleColumnNavigation {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
+#if !os(macOS)
                     LibraryHeader(compact: true, switchProfile: model.chooseAnotherProfile, settings: settings, disconnect: disconnect)
+#endif
                     ScreenHeading(eyebrow: model.serverName, title: "Calendar", bodyText: "Upcoming movies and episodes from your library.")
                     TabStatus(model: model, empty: model.calendarEvents.isEmpty ? "No releases in this date range." : nil)
-                    LazyVStack(spacing: 12) {
+                    LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
                         ForEach(model.calendarEvents) { event in
                             Button { model.openMedia(event) } label: {
                                 HStack(spacing: 16) {
@@ -1574,9 +1898,8 @@ private struct CalendarTabView: View {
                         }
                     }
                 }
-                .padding(28)
-                .frame(maxWidth: 920)
-                .frame(maxWidth: .infinity)
+                .rivunePrimaryTabInsets()
+                .rivunePageWidth(920)
             }
         }
     }
@@ -1683,11 +2006,11 @@ private struct LibraryHeader: View {
                     Button(action: settings) {
                         Label("Settings", systemImage: "gearshape.fill")
                     }
-                    .buttonStyle(.bordered)
+                    .rivuneGlassButton()
                     Button(action: switchProfile) {
                         Label("Switch profile", systemImage: "person.2.fill")
                     }
-                    .buttonStyle(.bordered)
+                    .rivuneGlassButton()
                     Button(role: .destructive, action: disconnect) {
                         Label("Disconnect", systemImage: "rectangle.portrait.and.arrow.right")
                     }
@@ -1701,6 +2024,7 @@ private struct LibraryHeader: View {
 
 private struct AppearanceSettingsView: View {
     @ObservedObject var model: RivuneAppModel
+    var close: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @State private var diagnosticStatus: String?
@@ -1723,7 +2047,10 @@ private struct AppearanceSettingsView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     HStack {
                         Spacer()
-                        Button("Done") { dismiss() }.buttonStyle(.bordered)
+                        Button("Done") {
+                            if let close { close() } else { dismiss() }
+                        }
+                        .rivuneGlassButton()
                     }
                     ScreenHeading(
                         eyebrow: "Device",
@@ -1744,7 +2071,7 @@ private struct AppearanceSettingsView: View {
                             Label(rivuneLocalized(failure.localizedDescription), systemImage: "exclamationmark.triangle.fill")
                                 .foregroundStyle(.yellow)
                             Button("Try again", action: model.loadProfileSettings)
-                                .buttonStyle(.borderedProminent)
+                                .rivuneGlassButton(prominent: true)
                                 .disabled(model.settingsLoading)
                         }
                         .padding(16)
@@ -1863,7 +2190,7 @@ private struct AppearanceSettingsView: View {
                                 Label("Check now", systemImage: "arrow.triangle.2.circlepath")
                             }
                         }
-                        .buttonStyle(.bordered)
+                        .rivuneGlassButton()
                         .disabled(model.updateState == .checking)
                     }
 
@@ -1876,7 +2203,7 @@ private struct AppearanceSettingsView: View {
                             diagnosticPreviewPresented = true
                             model.recordDiagnosticExport(succeeded: true)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .rivuneGlassButton(prominent: true)
 #else
 #if os(iOS) || os(visionOS)
                         Button("Copy diagnostics") {
@@ -1886,13 +2213,13 @@ private struct AppearanceSettingsView: View {
                                 ? "Diagnostics copied locally for 60 seconds. Universal Clipboard is disabled."
                                 : "Diagnostics could not be copied."
                         }
-                        .buttonStyle(.bordered)
+                        .rivuneGlassButton()
 #endif
                         Button("Export logs") {
                             diagnosticDocument = RivuneDiagnosticTextDocument(report: model.diagnosticReport())
                             diagnosticExporterPresented = true
                         }
-                        .buttonStyle(.borderedProminent)
+                        .rivuneGlassButton(prominent: true)
 #endif
                         if let diagnosticStatus {
                             Text(rivuneLocalized(diagnosticStatus))
@@ -1967,10 +2294,10 @@ private struct AppearanceSettingsView: View {
                     .foregroundStyle(RivunePalette.secondary)
 #if os(tvOS)
                 Button("View release QR code") { televisionUpdate = update }
-                    .buttonStyle(.borderedProminent)
+                    .rivuneGlassButton(prominent: true)
 #else
                 Button("Open release") { openURL(update.releaseURL) }
-                    .buttonStyle(.borderedProminent)
+                    .rivuneGlassButton(prominent: true)
 #endif
             }
         case .failed:
@@ -2044,43 +2371,235 @@ private struct AppearanceSettingsView: View {
         HStack { Text(rivuneLocalized(title)).font(.headline); Spacer(); Text(rivuneLocalized(value)).foregroundStyle(RivunePalette.secondary).lineLimit(1) }
     }
 }
+private func homeHeroHeight(for viewportWidth: CGFloat) -> CGFloat {
+#if os(macOS)
+    let horizontalInset: CGFloat = viewportWidth < 620 ? 40 : 56
+    let renderedWidth = max(viewportWidth - horizontalInset, 0)
+    return renderedWidth * 9 / 21
+#else
+    return min(max(viewportWidth * 9 / 21, 220), 420)
+#endif
+}
+
 private struct HomeHeroCarousel: View {
     let items: [RivuneHeroItem]
     @ObservedObject var model: RivuneAppModel
     let height: CGFloat
     @State private var selection = 0
+    @State private var lastDragEndedAt = Date.distantPast
 
+    @ViewBuilder
     var body: some View {
+#if os(macOS)
+        macOSCarousel
+#else
         TabView(selection: $selection) {
             ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                 Button { model.openMedia(item.target) } label: {
-                    ZStack(alignment: .bottomLeading) {
-                        AsyncImage(url: item.backgroundUrl.flatMap(model.resolvedResourceURL)) { phase in
-                            if let image = phase.image { image.resizable().scaledToFill() }
-                            else { RivunePalette.surface }
-                        }
-                        .frame(height: height).clipped()
-                        LinearGradient(colors: [.clear, .black.opacity(0.94)], startPoint: .center, endPoint: .bottom)
-                        VStack(alignment: .leading, spacing: 12) {
-                            if let logo = item.logoUrl {
-                                AsyncImage(url: model.resolvedResourceURL(logo)) { phase in
-                                    if let image = phase.image { image.resizable().scaledToFit() } else { Color.clear }
-                                }.frame(maxWidth: 300, maxHeight: 100, alignment: .leading)
-                            } else {
-                                Text(item.title).font(.largeTitle.bold()).lineLimit(2)
-                            }
-                            if let releaseInfo = item.releaseInfo { Text(releaseInfo).foregroundStyle(RivunePalette.secondary) }
-                            Label("View details", systemImage: "info.circle.fill").font(.headline)
-                        }.padding(30)
-                    }
+                    heroSlide(item, showsDetailsButton: false)
                 }
                 .buttonStyle(.plain)
                 .tag(index)
             }
         }
-        .heroTabStyle(showIndicators: items.count > 1)
+        .heroTabStyle(showIndicators: false)
         .frame(height: height)
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .onChange(of: items.map(\.id)) { _ in clampSelection() }
+#endif
+    }
+
+    private func heroSlide(_ item: RivuneHeroItem, showsDetailsButton: Bool) -> some View {
+        ZStack {
+            Color.black
+            AsyncImage(url: item.backgroundUrl.flatMap(model.resolvedResourceURL)) { phase in
+                if let image = phase.image {
+                    image.resizable().scaledToFill()
+                } else {
+                    RivunePalette.surface
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
+            LinearGradient(
+                colors: [.black.opacity(0.88), .black.opacity(0.46), .clear],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            LinearGradient(colors: [.clear, .black.opacity(0.82)], startPoint: .center, endPoint: .bottom)
+        }
+#if os(macOS)
+        .onTapGesture {
+            guard Date().timeIntervalSince(lastDragEndedAt) > 0.25 else { return }
+            model.openMedia(item.target)
+        }
+#endif
+        .frame(maxWidth: .infinity, minHeight: height, maxHeight: height)
+        .overlay(alignment: .bottomLeading) {
+            HStack(alignment: .bottom, spacing: 16) {
+                VStack(alignment: .leading, spacing: 12) {
+                    heroIdentity(item)
+                    if let releaseInfo = item.releaseInfo, !releaseInfo.isEmpty {
+                        Text(releaseInfo).foregroundStyle(Color.white.opacity(0.78))
+                    }
+                    if showsDetailsButton {
+                        heroDetailsButton(item)
+                    } else {
+                        Label("View details", systemImage: "info.circle.fill")
+                            .font(.headline)
+                    }
+                }
+                .foregroundStyle(.white)
+                .padding(30)
+                .frame(maxWidth: 520, alignment: .leading)
+                Spacer(minLength: 0)
+#if os(macOS)
+                if showsDetailsButton && items.count > 1 { heroControls }
+#endif
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .zIndex(1)
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder
+    private func heroDetailsButton(_ item: RivuneHeroItem) -> some View {
+#if os(macOS)
+        if #available(macOS 26.0, *) {
+            Button { model.openMedia(item.target) } label: {
+                Label("View details", systemImage: "info.circle.fill")
+                    .font(.headline)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+            .glassEffect(.clear.interactive(), in: Capsule())
+            .accessibilityLabel(rivuneLocalizedFormat("View details for %@", item.title))
+        } else {
+            Button { model.openMedia(item.target) } label: {
+                Label("View details", systemImage: "info.circle.fill")
+                    .font(.headline)
+            }
+            .buttonStyle(.bordered)
+            .tint(Color.white.opacity(0.18))
+            .foregroundStyle(.white)
+            .accessibilityLabel(rivuneLocalizedFormat("View details for %@", item.title))
+        }
+#else
+        Button { model.openMedia(item.target) } label: {
+            Label("View details", systemImage: "info.circle.fill")
+                .font(.headline)
+        }
+        .rivuneGlassButton()
+        .accessibilityLabel(rivuneLocalizedFormat("View details for %@", item.title))
+#endif
+    }
+
+    @ViewBuilder
+    private func heroIdentity(_ item: RivuneHeroItem) -> some View {
+        if let logo = item.logoUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !logo.isEmpty,
+           let logoURL = model.resolvedResourceURL(logo) {
+            AsyncImage(url: logoURL) { phase in
+                if let image = phase.image {
+                    image.resizable().scaledToFit()
+                } else {
+                    heroTitle(item.title)
+                }
+            }
+            .frame(maxWidth: 300, maxHeight: 100, alignment: .leading)
+        } else {
+            heroTitle(item.title)
+        }
+    }
+
+    private func heroTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.largeTitle.bold())
+            .lineLimit(2)
+    }
+
+
+#if os(macOS)
+    private var macOSCarousel: some View {
+        ZStack {
+            if items.indices.contains(selection) {
+                heroSlide(items[selection], showsDetailsButton: true)
+                    .id(items[selection].id)
+                    .transition(.opacity)
+            }
+        }
+        .frame(height: height)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .highPriorityGesture(
+            DragGesture(minimumDistance: 12)
+                .onEnded { value in
+                    guard abs(value.translation.width) > abs(value.translation.height),
+                          abs(value.translation.width) >= 44 else { return }
+                    lastDragEndedAt = Date()
+                    move(by: value.translation.width < 0 ? 1 : -1)
+                }
+        )
+        .accessibilityLabel(items.indices.contains(selection)
+            ? rivuneLocalizedFormat("Featured title %d of %d: %@", selection + 1, items.count, items[selection].title)
+            : rivuneLocalized("Featured titles"))
+        .onChange(of: items.map(\.id)) { _ in clampSelection() }
+    }
+
+    private var heroControls: some View {
+        HStack(spacing: 9) {
+            heroArrow(systemImage: "chevron.left", label: "Previous title") { move(by: -1) }
+            HStack(spacing: 7) {
+                ForEach(items.indices, id: \.self) { index in
+                    Button { select(index) } label: {
+                        Capsule()
+                            .fill(index == selection ? Color.white : Color.white.opacity(0.48))
+                            .frame(width: index == selection ? 30 : 7, height: 7)
+                            .animation(.easeInOut(duration: 0.20), value: selection)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(rivuneLocalizedFormat("Show %@, title %d of %d", items[index].title, index + 1, items.count))
+                    .accessibilityAddTraits(index == selection ? .isSelected : [])
+                }
+            }
+            heroArrow(systemImage: "chevron.right", label: "Next title") { move(by: 1) }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay { Capsule().stroke(Color.white.opacity(0.14), lineWidth: 1) }
+        .padding(.trailing, 22)
+        .padding(.bottom, 22)
+    }
+
+    private func heroArrow(systemImage: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 15, weight: .bold))
+                .frame(width: 30, height: 30)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white)
+        .contentShape(Circle())
+        .accessibilityLabel(rivuneLocalized(label))
+    }
+
+    private func move(by offset: Int) {
+        guard !items.isEmpty else { return }
+        select((selection + offset + items.count) % items.count)
+    }
+
+    private func select(_ index: Int) {
+        withAnimation(.easeInOut(duration: 0.28)) { selection = index }
+    }
+#endif
+
+    private func clampSelection() {
+        if selection >= items.count { selection = 0 }
     }
 }
 
@@ -2158,7 +2677,8 @@ private struct RecommendationSection: View {
                                 Text(item.target.title).font(.subheadline.weight(.semibold)).lineLimit(1).frame(width: width, alignment: .leading)
                                 Text(item.reason).font(.caption).foregroundStyle(RivunePalette.secondary).lineLimit(2).frame(width: width, alignment: .leading)
                             }
-                        }.buttonStyle(.plain)
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -2249,10 +2769,18 @@ private struct CollectionOverviewView: View {
     let collection: Collection
     @ObservedObject var model: RivuneAppModel
 
+#if os(macOS)
+    private let posterColumns = [GridItem(.adaptive(minimum: 180, maximum: 230), spacing: 22)]
+    private let landscapeColumns = [GridItem(.adaptive(minimum: 280, maximum: 360), spacing: 22)]
+#else
     private let posterColumns = [GridItem(.adaptive(minimum: 150, maximum: 190), spacing: 18)]
     private let landscapeColumns = [GridItem(.adaptive(minimum: 240, maximum: 300), spacing: 18)]
+#endif
 
     var body: some View {
+#if os(macOS)
+                    Spacer(minLength: 0)
+#endif
         ZStack {
             RivuneBackground()
             ScrollView {
@@ -2281,12 +2809,12 @@ private struct CollectionOverviewView: View {
                             .buttonStyle(.card)
 #endif
                             .disabled(folder.id == nil)
+                            .opacity(folder.id == nil ? 0.48 : 1)
                         }
                     }
                 }
                 .padding(28)
-                .frame(maxWidth: 1200)
-                .frame(maxWidth: .infinity)
+                .rivunePageWidth(1200)
             }
         }
     }
@@ -2301,11 +2829,19 @@ private func collectionUsesLandscapeTiles(_ collection: Collection) -> Bool {
 }
 
 private func tileWidth(for shape: CollectionTileShape) -> CGFloat {
+#if os(macOS)
+    switch shape {
+    case .poster: return 184
+    case .landscape: return 300
+    case .square: return 200
+    }
+#else
     switch shape {
     case .poster: return 128
     case .landscape: return 220
     case .square: return 146
     }
+#endif
 }
 
 private func responsiveTileWidth(for shape: CollectionTileShape, availableWidth: CGFloat) -> CGFloat {
@@ -2314,6 +2850,13 @@ private func responsiveTileWidth(for shape: CollectionTileShape, availableWidth:
     case .poster: return min(max(availableWidth / 6.2, 170), 220)
     case .landscape: return min(max(availableWidth / 4.4, 240), 320)
     case .square: return min(max(availableWidth / 5.4, 190), 250)
+    }
+#elseif os(macOS)
+    // Keep home artwork compact as the window grows; wide windows reveal more items.
+    switch shape {
+    case .poster: return min(max(availableWidth / 10.0, 120), 148)
+    case .landscape: return min(max(availableWidth / 6.6, 190), 240)
+    case .square: return min(max(availableWidth / 8.5, 135), 170)
     }
 #else
     switch shape {
@@ -2377,9 +2920,15 @@ private struct FolderTile: View {
 private struct FolderView: View {
     @ObservedObject var model: RivuneAppModel
     @State private var mediaFilter: String?
+    @State private var selectedSourceID: UUID?
 
+#if os(macOS)
+    private let posterColumns = [GridItem(.adaptive(minimum: 180, maximum: 230), spacing: 22)]
+    private let landscapeColumns = [GridItem(.adaptive(minimum: 280, maximum: 360), spacing: 22)]
+#else
     private let posterColumns = [GridItem(.adaptive(minimum: 140, maximum: 190), spacing: 18)]
     private let landscapeColumns = [GridItem(.adaptive(minimum: 240, maximum: 300), spacing: 18)]
+#endif
 
     var body: some View {
         ZStack {
@@ -2387,69 +2936,15 @@ private struct FolderView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     HStack {
-                        Button(action: model.closeFolder) {
-                            Label("Library", systemImage: "chevron.left")
+                        Button(action: navigateBack) {
+                            Label(backLabel, systemImage: "chevron.left")
+                                .foregroundStyle(.white)
                         }
                         .rivuneGlassButton()
                         Spacer()
                     }
                     if let opened = model.openedFolder {
-                        ScreenHeading(
-                            eyebrow: model.serverName,
-                            title: opened.folder.title,
-                            bodyText: opened.items?.isEmpty == true ? "This folder contains no visible titles." : nil
-                        )
-                        if model.isBusy && opened.items == nil {
-                            HStack(spacing: 12) {
-                                ProgressView()
-                                Text("Loading titles…")
-                            }
-                            .foregroundStyle(RivunePalette.secondary)
-                        }
-                        FailureText(failure: model.failure)
-                        if let items = opened.items {
-                            let supportsMediaFilter = opened.folder.sources.contains {
-                                $0.tmdb?.mediaType == .both
-                            }
-                            if supportsMediaFilter {
-                                HStack(spacing: 10) {
-                                    MediaFilterButton(title: "All", systemImage: "rectangle.stack.fill", selected: mediaFilter == nil) {
-                                        mediaFilter = nil
-                                    }
-                                    MediaFilterButton(title: "Movies", systemImage: "film.fill", selected: mediaFilter == "movie") {
-                                        mediaFilter = "movie"
-                                    }
-                                    MediaFilterButton(title: "Series", systemImage: "tv.fill", selected: mediaFilter == "series") {
-                                        mediaFilter = "series"
-                                    }
-                                }
-                            }
-                            let visibleItems = mediaFilter.map { filter in items.filter { $0.mediaType == filter } } ?? items
-                            let folderLandscape = opened.folder.tileShape == .landscape
-                            LazyVGrid(columns: folderLandscape ? landscapeColumns : posterColumns, alignment: .leading, spacing: 24) {
-                                ForEach(visibleItems) { item in
-                                    let landscape = folderLandscape || item.mediaType == "tv"
-                                    let artwork = landscape ? item.backgroundUrl ?? item.posterUrl : item.posterUrl ?? item.backgroundUrl
-                                    Button { model.openMedia(item) } label: {
-                                        CollectionItemTile(
-                                            item: item,
-                                            imageURL: artwork.flatMap(model.resolvedResourceURL),
-                                            landscape: landscape
-                                        )
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                            if opened.hasMore {
-                                Button(action: model.loadMoreFolderItems) {
-                                    if model.isBusy { ProgressView() }
-                                    else { Label("Load more", systemImage: "arrow.down.circle") }
-                                }
-                                .rivuneGlassButton(prominent: true)
-                                .disabled(model.isBusy)
-                                .frame(maxWidth: .infinity)
-                            }
-                        }
+                        folderContents(opened)
                         if !opened.errors.isEmpty {
                             Label("Some collection sources were unavailable.", systemImage: "exclamationmark.triangle")
                                 .font(.footnote)
@@ -2458,18 +2953,270 @@ private struct FolderView: View {
                     }
                 }
                 .padding(28)
-                .frame(maxWidth: 1200)
-                .frame(maxWidth: .infinity)
+                .rivunePageWidth(1200)
             }
         }
-        .onChange(of: model.openedFolder?.id) { _ in mediaFilter = nil }
+        .onChange(of: model.openedFolder?.id) { _ in
+            mediaFilter = nil
+            selectedSourceID = nil
+        }
+        .onChange(of: model.openedFolder?.folder.sourceView) { sourceView in
+            mediaFilter = nil
+            selectedSourceID = sourceView == .categories
+                ? model.openedFolder.flatMap { $0.folder.sources.compactMap(\.id).first }
+                : nil
+        }
+        .onChange(of: model.openedFolder.map { $0.folder.sources.compactMap(\.id) } ?? []) { sourceIDs in
+            guard model.openedFolder?.folder.sourceView == .categories else { return }
+            if selectedSourceID == nil || !sourceIDs.contains(selectedSourceID!) {
+                selectedSourceID = sourceIDs.first
+            }
+        }
+#if !os(macOS)
         .sheet(isPresented: Binding(
             get: { model.mediaLoading || model.mediaDetail != nil || model.mediaFailure != nil },
             set: { if !$0 { model.closeMedia() } }
         )) {
             RivuneMediaDetailView(model: model)
+                .rivuneMacOSSheetSize(minWidth: 960, idealWidth: 1120, minHeight: 680, idealHeight: 780)
+        }
+#endif
+    }
+
+    @ViewBuilder
+    private func folderContents(_ opened: OpenedCollectionFolder) -> some View {
+        let sources = opened.folder.sources.filter { $0.id != nil }
+        let sourceView = sources.count > 1 ? opened.folder.sourceView ?? .merged : .merged
+        let effectiveSourceID = sourceView == .categories
+            ? selectedSourceID ?? sources.first?.id
+            : selectedSourceID
+        let browsingSourceFolders = sourceView == .folders && effectiveSourceID == nil
+        let scopedItems = opened.items?.filter { item in
+            guard let effectiveSourceID else { return true }
+            return item.sources.contains { $0.id == effectiveSourceID }
+        }
+
+        ScreenHeading(
+            eyebrow: model.serverName,
+            title: effectiveSourceID.flatMap { id in sources.first { $0.id == id }.map(collectionSourceLabel) }
+                ?? opened.folder.title,
+            bodyText: !browsingSourceFolders && scopedItems?.isEmpty == true ? "This folder contains no visible titles." : nil
+        )
+        if model.isBusy && opened.items == nil {
+            HStack(spacing: 12) {
+                ProgressView()
+                Text("Loading titles…")
+            }
+            .foregroundStyle(RivunePalette.secondary)
+        }
+        FailureText(failure: model.failure)
+        if let items = opened.items {
+            if sourceView == .categories {
+                HStack(spacing: 10) {
+                    ForEach(sources) { source in
+                        MediaFilterButton(
+                            title: collectionSourceLabel(source),
+                            systemImage: collectionSourceSystemImage(source),
+                            selected: source.id == effectiveSourceID
+                        ) {
+                            selectedSourceID = source.id
+                            mediaFilter = nil
+                        }
+                    }
+                }
+            }
+
+            if browsingSourceFolders {
+                sourceFolderGrid(sources: sources, opened: opened, items: items)
+            } else {
+                let supportsMediaFilter = sourcesSupportingFilter(
+                    effectiveSourceID.flatMap { id in sources.first { $0.id == id }.map { [$0] } } ?? sources,
+                    items: scopedItems ?? []
+                )
+                if supportsMediaFilter {
+                    HStack(spacing: 10) {
+                        MediaFilterButton(title: "All", systemImage: "rectangle.stack.fill", selected: mediaFilter == nil) {
+                            mediaFilter = nil
+                        }
+                        MediaFilterButton(title: "Movies", systemImage: "film.fill", selected: mediaFilter == "movie") {
+                            mediaFilter = "movie"
+                        }
+                        MediaFilterButton(title: "Series", systemImage: "tv.fill", selected: mediaFilter == "series") {
+                            mediaFilter = "series"
+                        }
+                    }
+                }
+                mediaGrid(items: scopedItems ?? [], tileShape: opened.folder.tileShape)
+            }
+            if opened.hasMore {
+                Button(action: model.loadMoreFolderItems) {
+                    if model.isBusy { ProgressView() }
+                    else { Label("Load more", systemImage: "arrow.down.circle") }
+                }
+                .rivuneGlassButton(prominent: true)
+                .disabled(model.isBusy)
+                .frame(maxWidth: .infinity)
+            }
         }
     }
+
+    private func sourceFolderGrid(
+        sources: [CollectionSource],
+        opened: OpenedCollectionFolder,
+        items: [CollectionItem]
+    ) -> some View {
+        let landscape = opened.folder.tileShape == .landscape
+        return LazyVGrid(columns: landscape ? landscapeColumns : posterColumns, alignment: .leading, spacing: 24) {
+            ForEach(sources) { source in
+                let sourceItems = items.filter { item in item.sources.contains { $0.id == source.id } }
+                let posterKey = source.id?.uuidString.lowercased()
+                let artwork = posterKey.flatMap { opened.sourcePosterUrls?[$0] }
+                    ?? sourceItems.compactMap { $0.posterUrl ?? $0.backgroundUrl }.first
+                Button {
+                    selectedSourceID = source.id
+                    mediaFilter = nil
+                } label: {
+                    SourceFolderTile(
+                        title: collectionSourceLabel(source),
+                        imageURL: artwork.flatMap(model.resolvedResourceURL),
+                        landscape: landscape
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func mediaGrid(items: [CollectionItem], tileShape: CollectionTileShape) -> some View {
+        let visibleItems = mediaFilter.map { filter in
+            items.filter { filter == "series" ? ["series", "tv"].contains($0.mediaType) : $0.mediaType == filter }
+        } ?? items
+        let movies = visibleItems.filter { $0.mediaType == "movie" }
+        let series = visibleItems.filter { ["series", "tv"].contains($0.mediaType) }
+        let other = visibleItems.filter { $0.mediaType != "movie" && !["series", "tv"].contains($0.mediaType) }
+
+        if mediaFilter == nil, !movies.isEmpty, !series.isEmpty {
+            mediaSection(title: "Movies", items: movies, tileShape: tileShape)
+            mediaSection(title: "Series", items: series, tileShape: tileShape)
+            if !other.isEmpty { mediaTileGrid(items: other, tileShape: tileShape) }
+        } else {
+            mediaTileGrid(items: visibleItems, tileShape: tileShape)
+        }
+    }
+
+    private func mediaSection(title: String, items: [CollectionItem], tileShape: CollectionTileShape) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(rivuneLocalized(title))
+                .font(.title2.bold())
+                .accessibilityAddTraits(.isHeader)
+            mediaTileGrid(items: items, tileShape: tileShape)
+        }
+    }
+
+    private func mediaTileGrid(items: [CollectionItem], tileShape: CollectionTileShape) -> some View {
+        let folderLandscape = tileShape == .landscape
+        return LazyVGrid(columns: folderLandscape ? landscapeColumns : posterColumns, alignment: .leading, spacing: 24) {
+            ForEach(items) { item in
+                let artwork = folderLandscape ? item.backgroundUrl ?? item.posterUrl : item.posterUrl ?? item.backgroundUrl
+                Button { model.openMedia(item) } label: {
+                    CollectionItemTile(
+                        item: item,
+                        imageURL: artwork.flatMap(model.resolvedResourceURL),
+                        tileShape: tileShape
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var backLabel: String {
+        guard let opened = model.openedFolder,
+              opened.folder.sourceView == .folders,
+              selectedSourceID != nil else { return rivuneLocalized("Library") }
+        return opened.folder.title
+    }
+
+    private func navigateBack() {
+        if model.openedFolder?.folder.sourceView == .folders, selectedSourceID != nil {
+            selectedSourceID = nil
+            mediaFilter = nil
+        } else {
+            model.closeFolder()
+        }
+    }
+}
+
+private struct SourceFolderTile: View {
+    let title: String
+    let imageURL: URL?
+    let landscape: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            AsyncImage(url: imageURL) { phase in
+                if let image = phase.image {
+                    image.resizable().scaledToFill()
+                } else {
+                    ZStack {
+                        LinearGradient(
+                            colors: [RivunePalette.raised, RivunePalette.surface],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                        Image(systemName: "folder.fill")
+                            .font(.system(size: 32))
+                            .foregroundStyle(RivunePalette.secondary)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .aspectRatio(landscape ? 16.0 / 9.0 : 2.0 / 3.0, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .center)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private let canonicalMovieSourceTitles: Set<String> = ["movie", "movies", "film", "films"]
+private let canonicalSeriesSourceTitles: Set<String> = ["series", "tv", "show", "shows", "tv show", "tv shows", "série", "séries"]
+
+private func collectionSourceMediaType(_ source: CollectionSource) -> String? {
+    if let mediaType = source.tmdb?.mediaType.rawValue { return mediaType }
+    if let mediaType = source.trakt?.mediaType.rawValue { return mediaType }
+    if let mediaType = source.mdblist?.mediaType.rawValue { return mediaType }
+    return source.addonCatalog?.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+}
+
+private func collectionSourceLabel(_ source: CollectionSource) -> String {
+    let mediaType = collectionSourceMediaType(source)
+    let normalizedTitle = source.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if mediaType == "movie", canonicalMovieSourceTitles.contains(normalizedTitle) { return rivuneLocalized("Movies") }
+    if mediaType.map({ ["series", "tv"].contains($0) }) == true,
+       canonicalSeriesSourceTitles.contains(normalizedTitle) { return rivuneLocalized("Series") }
+    return source.title
+}
+
+private func collectionSourceSystemImage(_ source: CollectionSource) -> String {
+    let mediaType = collectionSourceMediaType(source)
+    let normalizedTitle = source.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if mediaType == "movie" || canonicalMovieSourceTitles.contains(normalizedTitle) { return "film.fill" }
+    if mediaType.map({ ["series", "tv"].contains($0) }) == true
+        || canonicalSeriesSourceTitles.contains(normalizedTitle) { return "tv.fill" }
+    return "rectangle.stack.fill"
+}
+
+private func sourcesSupportingFilter(_ sources: [CollectionSource], items: [CollectionItem]) -> Bool {
+    if sources.contains(where: { collectionSourceMediaType($0) == "both" }) { return true }
+    let sourceTypes = Set(sources.compactMap(collectionSourceMediaType))
+    let itemTypes = Set(items.map(\.mediaType))
+    return sourceTypes.contains("movie") && !sourceTypes.isDisjoint(with: ["series", "tv"])
+        || itemTypes.contains("movie") && !itemTypes.isDisjoint(with: ["series", "tv"])
 }
 
 private struct MediaFilterButton: View {
@@ -2483,7 +3230,6 @@ private struct MediaFilterButton: View {
             Label(rivuneLocalized(title), systemImage: systemImage)
         }
         .rivuneGlassButton(prominent: selected)
-        .tint(selected ? RivunePalette.accent : .clear)
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
@@ -2491,7 +3237,7 @@ private struct MediaFilterButton: View {
 private struct CollectionItemTile: View {
     let item: CollectionItem
     let imageURL: URL?
-    let landscape: Bool
+    let tileShape: CollectionTileShape
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -2501,14 +3247,14 @@ private struct CollectionItemTile: View {
                 } else {
                     ZStack {
                         RivunePalette.surface
-                        Image(systemName: item.mediaType == "series" ? "tv" : "film")
+                        Image(systemName: ["series", "tv"].contains(item.mediaType) ? "tv" : "film")
                             .font(.system(size: 30))
                             .foregroundStyle(RivunePalette.secondary)
                     }
                 }
             }
             .frame(maxWidth: .infinity)
-            .aspectRatio(landscape ? 16.0 / 9.0 : 2.0 / 3.0, contentMode: .fit)
+            .aspectRatio(tileAspectRatio, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             Text(item.title)
                 .font(.subheadline.weight(.semibold))
@@ -2522,19 +3268,43 @@ private struct CollectionItemTile: View {
         }
         .accessibilityElement(children: .combine)
     }
+
+    private var tileAspectRatio: CGFloat {
+        switch tileShape {
+        case .poster: return 2.0 / 3.0
+        case .landscape: return 16.0 / 9.0
+        case .square: return 1
+        }
+    }
 }
 
-private extension View {
+extension View {
     @ViewBuilder
     func folderPresentation<Content: View>(
         item: Binding<OpenedCollectionFolder?>,
         onDismiss: @escaping () -> Void,
         @ViewBuilder content: @escaping (OpenedCollectionFolder) -> Content
     ) -> some View {
-#if os(tvOS)
+#if os(macOS)
+        self
+#elseif os(tvOS)
         fullScreenCover(item: item, onDismiss: onDismiss, content: content)
 #else
         sheet(item: item, onDismiss: onDismiss, content: content)
+#endif
+    }
+
+    @ViewBuilder
+    func rivuneMacOSSheetSize(
+        minWidth: CGFloat,
+        idealWidth: CGFloat,
+        minHeight: CGFloat,
+        idealHeight: CGFloat
+    ) -> some View {
+#if os(macOS)
+        frame(minWidth: minWidth, idealWidth: idealWidth, minHeight: minHeight, idealHeight: idealHeight)
+#else
+        self
 #endif
     }
 
