@@ -6,8 +6,27 @@ import UIKit
 import AppKit
 #endif
 
+public enum RivuneInterfaceFamily: Equatable, Sendable {
+    case touch
+    case desktop
+    case television
+    case spatial
+}
+
+private struct RivuneInterfaceFamilyKey: EnvironmentKey {
+    static let defaultValue = RivuneInterfaceFamily.touch
+}
+
+private extension EnvironmentValues {
+    var rivuneInterfaceFamily: RivuneInterfaceFamily {
+        get { self[RivuneInterfaceFamilyKey.self] }
+        set { self[RivuneInterfaceFamilyKey.self] = newValue }
+    }
+}
+
 @MainActor
 public struct RivuneRootView: View {
+    private let interfaceFamily: RivuneInterfaceFamily
     @StateObject private var model: RivuneAppModel
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openURL) private var openURL
@@ -16,12 +35,14 @@ public struct RivuneRootView: View {
     @State private var televisionUpdate: RivuneAppleUpdate?
 #endif
 
-    public init(model: RivuneAppModel) {
+    public init(model: RivuneAppModel, interfaceFamily: RivuneInterfaceFamily) {
         _model = StateObject(wrappedValue: model)
+        self.interfaceFamily = interfaceFamily
     }
 
-    public init() {
+    public init(interfaceFamily: RivuneInterfaceFamily) {
         _model = StateObject(wrappedValue: RivuneAppModel())
+        self.interfaceFamily = interfaceFamily
     }
 
     public var body: some View {
@@ -53,6 +74,7 @@ public struct RivuneRootView: View {
         .tint(RivunePalette.color(for: model.accent))
         .accentColor(RivunePalette.color(for: model.accent))
         .preferredColorScheme(.dark)
+        .environment(\.rivuneInterfaceFamily, interfaceFamily)
         .task { model.start() }
         .onChange(of: scenePhase) { phase in
             if phase != .active { model.handleSceneBackground() }
@@ -240,7 +262,17 @@ extension View {
 }
 
 
-struct RivuneSingleColumnNavigation<Content: View>: View {
+enum RivuneNavigationPresentation: Equatable {
+    case stack
+    case desktop
+}
+
+func rivuneNavigationPresentation(for interfaceFamily: RivuneInterfaceFamily) -> RivuneNavigationPresentation {
+    interfaceFamily == .desktop ? .desktop : .stack
+}
+
+struct RivunePlatformNavigation<Content: View>: View {
+    @Environment(\.rivuneInterfaceFamily) private var interfaceFamily
     private let content: Content
 
     init(@ViewBuilder content: () -> Content) {
@@ -248,16 +280,28 @@ struct RivuneSingleColumnNavigation<Content: View>: View {
     }
 
     @ViewBuilder var body: some View {
-#if os(macOS)
-        if #available(macOS 13.0, *) {
-            NavigationStack { content }
+        if rivuneNavigationPresentation(for: interfaceFamily) == .desktop {
+            if #available(iOS 16.0, macOS 13.0, tvOS 16.0, *) {
+                NavigationStack { content }
+            } else {
+                legacyNavigation
+            }
         } else {
-            NavigationView { content }
+            stackNavigation
         }
+    }
+
+    @ViewBuilder private var stackNavigation: some View {
+#if os(macOS)
+        NavigationView { content }
 #else
         NavigationView { content }
             .navigationViewStyle(.stack)
 #endif
+    }
+
+    @ViewBuilder private var legacyNavigation: some View {
+        NavigationView { content }
     }
 }
 
@@ -363,7 +407,7 @@ private struct OfflineUnlockView: View {
     @ObservedObject var model: RivuneAppModel
 
     var body: some View {
-        RivuneSingleColumnNavigation {
+        RivunePlatformNavigation {
             VStack(spacing: 18) {
                 Image(systemName: "lock.fill").font(.largeTitle)
                 Text("Unlock \(profile.name)").font(.title2.bold())
@@ -992,7 +1036,7 @@ private struct ProfilesView: View {
     private let columns = [GridItem(.adaptive(minimum: 150, maximum: 190), spacing: 18)]
 
     var body: some View {
-        RivuneSingleColumnNavigation {
+        RivunePlatformNavigation {
             if let profile = pendingProfile {
                 PinView(
                     profile: profile,
@@ -1531,7 +1575,7 @@ private struct LibraryView: View {
 
     private var homeContent: some View {
         GeometryReader { proxy in
-            RivuneSingleColumnNavigation {
+            RivunePlatformNavigation {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 32) {
 #if !os(macOS)
@@ -1756,7 +1800,7 @@ private struct SearchTabView: View {
 #endif
 
     var body: some View {
-        RivuneSingleColumnNavigation {
+        RivunePlatformNavigation {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
 #if !os(macOS)
@@ -1823,7 +1867,7 @@ private struct PersonalLibraryTabView: View {
 #endif
 
     var body: some View {
-        RivuneSingleColumnNavigation {
+        RivunePlatformNavigation {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
 #if !os(macOS)
@@ -1898,7 +1942,7 @@ private struct CalendarTabView: View {
 #endif
 
     var body: some View {
-        RivuneSingleColumnNavigation {
+        RivunePlatformNavigation {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
 #if !os(macOS)

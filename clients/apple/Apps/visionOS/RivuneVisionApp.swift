@@ -5,7 +5,7 @@ import RivuneAppCore
 struct RivuneVisionApp: App {
     var body: some Scene {
         WindowGroup {
-            RivuneRootView()
+            RivuneRootView(interfaceFamily: .spatial)
         }
         .defaultSize(width: 1280, height: 800)
     }

@@ -5,7 +5,7 @@ import RivuneAppCore
 struct RivuneTVApp: App {
     var body: some Scene {
         WindowGroup {
-            RivuneRootView()
+            RivuneRootView(interfaceFamily: .television)
         }
     }
 }

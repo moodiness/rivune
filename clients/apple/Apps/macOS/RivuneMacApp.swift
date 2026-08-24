@@ -10,7 +10,7 @@ struct RivuneMacApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RivuneRootView()
+            RivuneRootView(interfaceFamily: .desktop)
                 .frame(minWidth: 760, idealWidth: 1120, minHeight: 680, idealHeight: 760)
         }
         .windowStyle(.hiddenTitleBar)

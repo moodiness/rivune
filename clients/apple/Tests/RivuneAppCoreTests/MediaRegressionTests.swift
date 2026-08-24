@@ -8,6 +8,13 @@ import RivuneAPI
 
 @MainActor
 final class MediaRegressionTests: XCTestCase {
+    func testEachPlatformOwnsItsNavigationShell() {
+        XCTAssertEqual(rivuneNavigationPresentation(for: .touch), .stack)
+        XCTAssertEqual(rivuneNavigationPresentation(for: .desktop), .desktop)
+        XCTAssertEqual(rivuneNavigationPresentation(for: .television), .stack)
+        XCTAssertEqual(rivuneNavigationPresentation(for: .spatial), .stack)
+    }
+
     func testSeriesProgressHydrationChunksMoreThanOneHundredEpisodes() async throws {
         let episodeIDs = (1...101).map(episodeID)
         let transport = MediaRegressionTransport(episodeIDs: episodeIDs)
