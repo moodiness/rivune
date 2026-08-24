@@ -50,7 +50,7 @@ public struct RivuneRootView: View {
             RivuneBackground()
             Group {
                 switch model.destination {
-                case .server: ServerView(model: model)
+                case .server: serverView
                 case .pairing: PairingView(model: model)
                 case .profiles: ProfilesView(model: model)
                 case .library: LibraryView(model: model)
@@ -125,7 +125,20 @@ public struct RivuneRootView: View {
         }
 #endif
     }
+    @ViewBuilder
+    private var serverView: some View {
+#if os(tvOS)
+        if interfaceFamily == .television {
+            RivuneTelevisionServerView(model: model)
+        } else {
+            ServerView(model: model)
+        }
+#else
+        ServerView(model: model)
+#endif
+    }
 }
+
 
 private enum RivunePalette {
     static let canvas = Color.black
