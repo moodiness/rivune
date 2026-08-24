@@ -1,13 +1,13 @@
-# Rivune v1.12.3
+# Rivune v1.12.4
 
 ## Highlights
 
-- Apple clients now use a redesigned native browsing experience with a compact macOS dock, adaptive collection layouts, cinematic media and season pages, source-provider filters, and integrated playback controls.
-- macOS can open compatible streams in an installed video application, while Windows discovers VLC, mpv, MPC-HC, MPC-BE, PotPlayer, Kodi, and Plex and exposes the same external-player fallback beside internal playback.
-- Marking a series watched or unwatched on Apple now updates every episode across every season. Series and episode rails on macOS drag continuously with bounded momentum instead of snapping one card at a time.
-- Apple collection folders preserve source-specific artwork and configured merged, category, or folder layouts. Offline downloads identify the active source and report upstream HTTP failures instead of a generic cancellation.
-- Apple media presentation, profiles, PIN entry, settings, sheets, and player chrome now stay within responsive single-column surfaces across supported Apple form factors.
-- Debug macOS clients persist authenticated sessions in an isolated local credential store, including protocol-required nullable token and category fields.
+- Apple clients preserve the complete series progress snapshot when opening and closing an episode, hydrate series longer than 100 episodes in bounded batches, and retain successful watched updates when a later batch conflicts.
+- Apple search now paginates every compatible catalog, the personal library supports pagination and movie, series, and live-TV filters, and the calendar can move between months without leaving its tab.
+- Native Apple playback exposes the next episode for manual or automatic continuation and applies intro, recap, and outro markers consistently across AVPlayer and MPV playback.
+- macOS external playback preserves encoded paths and signed query parameters, handles installed applications whose paths contain spaces, and prevents horizontal rail drags from opening a card accidentally.
+- Browser tabs now coordinate rotated access and refresh tokens without logging out a peer or replaying a failed request under a different session.
+- Container migration checks wait for the real PostgreSQL process and an authenticated SQL query before exercising clean installation, one-version upgrade, and idempotency.
 
 ## Installation
 
@@ -20,17 +20,18 @@
 
 ## Upgrade notes
 
-- Existing operators can set `RIVUNE_VERSION=1.12.3`, pull, and recreate Rivune. Fresh Compose deployments default to the immutable `1.12.3` image tag.
+- Existing operators can set `RIVUNE_VERSION=1.12.4`, pull, and recreate Rivune. Fresh Compose deployments default to the immutable `1.12.4` image tag.
+- This patch has no protocol or storage-schema cutover; existing v1.12.3 installations can update directly.
 - The release contains exactly twelve assets: eight application packages, `rivune-update.json`, the shared TV runtime, and the two universal TV installer companions.
 - Clients upgrading from v1.12.0 still require one manual installation from the exact GitHub Release before automatic updates can consume the schema 3 universal package contract.
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.12.3`
+- `ghcr.io/moodiness/rivune:1.12.4`
 - `ghcr.io/moodiness/rivune:1.12`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 - Provenance and SBOM attestations are published for both runnable platforms.
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.12.2...v1.12.3
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.12.3...v1.12.4

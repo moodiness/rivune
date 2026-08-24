@@ -125,6 +125,7 @@
 "Leave" = "Esci";
 "Library" = "Libreria";
 "Listening" = "In ascolto";
+"Live TV" = "TV in diretta";
 "Load more" = "Carica altro";
 "Loading details…" = "Caricamento dettagli…";
 "Loading profile settings…" = "Caricamento impostazioni profilo…";
@@ -162,6 +163,8 @@
 "NAVIGATION" = "NAVIGAZIONE";
 "Nearby Rivune servers will appear here. This can take a few seconds." = "I server Rivune nelle vicinanze appariranno qui. Potrebbero essere necessari alcuni secondi.";
 "Nearby servers" = "Server nelle vicinanze";
+"Next episode" = "Episodio successivo";
+"Next month" = "Mese successivo";
 "No" = "No";
 "No accessible profile is available for this device." = "Nessun profilo accessibile disponibile per questo dispositivo.";
 "No alternate audio tracks" = "Nessuna traccia audio alternativa";
@@ -199,6 +202,7 @@
 "Portuguese" = "Portoghese";
 "Prefer direct play" = "Preferisci riproduzione diretta";
 "Preferred player" = "Player preferito";
+"Previous month" = "Mese precedente";
 "Private diagnostics" = "Diagnostica privata";
 "Profile" = "Profilo";
 "Profile PIN" = "PIN del profilo";

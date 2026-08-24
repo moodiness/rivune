@@ -70,6 +70,60 @@ test("concurrent tabs share one refresh rotation without clearing the new sessio
   await secondPage.close();
 });
 
+test("a tab joining after peer rotation adopts the shared session without a second refresh", async ({ page, rivune }) => {
+  await page.goto("/");
+  const secondPage = await page.context().newPage();
+  await rivune.install(secondPage);
+  await secondPage.goto("/");
+  await Promise.all([page.waitForLoadState("networkidle"), secondPage.waitForLoadState("networkidle")]);
+
+  for (const candidate of [page, secondPage]) {
+    await candidate.evaluate(({ accessToken, refreshToken }) => {
+      sessionStorage.setItem("rivune.access", accessToken);
+      localStorage.setItem("rivune.access", accessToken);
+      localStorage.setItem("rivune.refresh", refreshToken);
+      localStorage.setItem("rivune.session", "session-1");
+    }, { accessToken: expiredAccessToken, refreshToken: initialRefreshToken });
+  }
+
+  let refreshCalls = 0;
+  const handleRefresh = async (route: Route) => {
+    refreshCalls++;
+    expect(route.request().postDataJSON()).toEqual({ refreshToken: initialRefreshToken });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        tokenType: "Bearer",
+        accessToken: rotatedAccessToken,
+        accessTokenExpiresAt: "2099-01-01T00:05:00Z",
+        refreshToken: rotatedRefreshToken,
+        refreshTokenExpiresAt: "2099-01-01T01:00:00Z",
+        sessionId: "session-1",
+        deviceId: "fixture-device",
+        authorizationScope: "global_admin",
+        category: null,
+      }),
+    });
+  };
+  await page.route("**/api/v1/auth/refresh", handleRefresh);
+  await secondPage.route("**/api/v1/auth/refresh", handleRefresh);
+
+  await expect(page.evaluate(() => import("/src/api.ts").then(({ api }) => api.restore()))).resolves.toBe(true);
+  await expect(secondPage.evaluate(() => import("/src/api.ts").then(({ api }) => api.restore()))).resolves.toBe(true);
+
+  expect(refreshCalls).toBe(1);
+  await expect.poll(() => secondPage.evaluate(() => ({
+    sessionAccess: sessionStorage.getItem("rivune.access"),
+    sharedRefresh: localStorage.getItem("rivune.refresh"),
+  }))).toEqual({
+    sessionAccess: rotatedAccessToken,
+    sharedRefresh: rotatedRefreshToken,
+  });
+
+  await secondPage.close();
+});
+
 test("a failed request is not replayed under a session opened in another tab", async ({ page, rivune }) => {
   await page.goto("/");
   const secondPage = await page.context().newPage();

@@ -22,13 +22,16 @@ trap cleanup EXIT
 
 wait_for_postgres() {
   for _ in $(seq 1 60); do
-    if docker exec "${POSTGRES}" pg_isready -U rivune -d rivune >/dev/null 2>&1; then
+    if docker exec "${POSTGRES}" sh -ceu 'test "$(cat /proc/1/comm)" = postgres' >/dev/null 2>&1 &&
+      docker exec -e PGPASSWORD="${PASSWORD}" "${POSTGRES}" \
+        psql --host postgres --username rivune --dbname rivune --tuples-only --no-align \
+        --command 'SELECT 1;' | grep -qx 1; then
       return
     fi
     sleep 1
   done
   docker logs "${POSTGRES}"
-  echo "PostgreSQL did not become ready" >&2
+  echo "PostgreSQL final server did not become queryable" >&2
   return 1
 }
 

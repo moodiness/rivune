@@ -632,7 +632,7 @@ struct RivuneMediaDetailView: View {
 }
 
 #if os(macOS)
-private final class RivuneHorizontalRailDragController: ObservableObject {
+final class RivuneHorizontalRailDragController: ObservableObject {
     private enum Axis: Equatable {
         case horizontal
         case vertical
@@ -650,11 +650,7 @@ private final class RivuneHorizontalRailDragController: ObservableObject {
     }
 
     func dragChanged(_ value: DragGesture.Value) {
-        if axis == nil {
-            axis = abs(value.translation.width) > abs(value.translation.height) ? .horizontal : .vertical
-            suppressesClicks = true
-            clearClickSuppression?.cancel()
-        }
+        registerDrag(translation: value.translation)
 
         guard axis == .horizontal, let scrollView else { return }
         if dragStartX == nil {
@@ -664,10 +660,21 @@ private final class RivuneHorizontalRailDragController: ObservableObject {
         scroll(to: dragStartX - value.translation.width, in: scrollView)
     }
 
+    func registerDrag(translation: CGSize) {
+        guard axis == nil else { return }
+        axis = abs(translation.width) > abs(translation.height) ? .horizontal : .vertical
+        suppressesClicks = true
+        clearClickSuppression?.cancel()
+    }
+
     func dragEnded(_ value: DragGesture.Value) {
+        endDrag(predictedEndTranslation: value.predictedEndTranslation)
+    }
+
+    func endDrag(predictedEndTranslation: CGSize) {
         if axis == .horizontal, let scrollView, let dragStartX {
             let targetX = constrainedX(
-                dragStartX - value.predictedEndTranslation.width,
+                dragStartX - predictedEndTranslation.width,
                 in: scrollView
             )
             let targetOrigin = CGPoint(x: targetX, y: scrollView.contentView.bounds.origin.y)
@@ -1000,6 +1007,7 @@ private struct RivunePlayerChrome<Options: View>: View {
     let seekBackward: () -> Void
     let togglePlayback: () -> Void
     let seekForward: () -> Void
+    let nextEpisode: (() -> Void)?
     let scrubbingChanged: (Bool) -> Void
     let options: Options
 
@@ -1014,6 +1022,7 @@ private struct RivunePlayerChrome<Options: View>: View {
         seekBackward: @escaping () -> Void,
         togglePlayback: @escaping () -> Void,
         seekForward: @escaping () -> Void,
+        nextEpisode: (() -> Void)? = nil,
         scrubbingChanged: @escaping (Bool) -> Void,
         @ViewBuilder options: () -> Options
     ) {
@@ -1027,6 +1036,7 @@ private struct RivunePlayerChrome<Options: View>: View {
         self.seekBackward = seekBackward
         self.togglePlayback = togglePlayback
         self.seekForward = seekForward
+        self.nextEpisode = nextEpisode
         self.scrubbingChanged = scrubbingChanged
         self.options = options()
     }
@@ -1064,6 +1074,9 @@ private struct RivunePlayerChrome<Options: View>: View {
                 .rivuneGlassButton()
                 .accessibilityLabel(rivuneLocalized(playing ? "Pause" : "Play"))
                 transportButton(systemImage: "goforward.10", label: "Forward 10 seconds", action: seekForward)
+                if let nextEpisode {
+                    transportButton(systemImage: "forward.end.fill", label: "Next episode", action: nextEpisode)
+                }
             }
 
             Spacer()
@@ -1265,6 +1278,7 @@ private struct RivuneNativeInternalPlayerView: View {
                     seekBackward: { seek(by: -10) },
                     togglePlayback: togglePlayback,
                     seekForward: { seek(by: 10) },
+                    nextEpisode: activePresentation.nextEpisode == nil ? nil : playNextEpisode,
                     scrubbingChanged: { editing in
                         scrubbing = editing
                         if !editing {
@@ -1438,7 +1452,8 @@ private struct RivuneNativeInternalPlayerView: View {
         .onDisappear { controlsTask?.cancel(); if !finished && !handoffToMPV { finish(completed: false) } }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
             guard notification.object as? AVPlayerItem === player.currentItem else { return }
-            finish(completed: true)
+            if activePresentation.nextEpisode != nil && model.autoplayNextEpisode { playNextEpisode() }
+            else { finish(completed: true) }
         }
     }
 
@@ -1652,6 +1667,17 @@ private struct RivuneNativeInternalPlayerView: View {
         return hours > 0 ? String(format: "%d:%02d:%02d", hours, seconds / 60 % 60, seconds % 60) : String(format: "%02d:%02d", seconds / 60, seconds % 60)
     }
 
+    private func playNextEpisode() {
+        guard !finished, activePresentation.nextEpisode != nil else { return }
+        finished = true
+        controlsTask?.cancel()
+        let rawDuration = player.currentItem?.duration.seconds ?? Double(activePresentation.durationSeconds ?? 0)
+        let finalDuration = Int(rawDuration.isFinite ? rawDuration : Double(activePresentation.durationSeconds ?? 0))
+        let finalPosition = Int(player.currentTime().seconds.isFinite ? player.currentTime().seconds : position)
+        player.pause()
+        model.playNextEpisode(position: finalPosition, duration: max(finalDuration, finalPosition))
+    }
+
     private func finish(completed: Bool) {
         guard !finished else { return }
         finished = true
@@ -1729,6 +1755,7 @@ private struct RivuneMPVInternalPlayerView: View {
                     seekBackward: { seek(by: -10) },
                     togglePlayback: togglePlayback,
                     seekForward: { seek(by: 10) },
+                    nextEpisode: activePresentation.nextEpisode == nil ? nil : playNextEpisode,
                     scrubbingChanged: { editing in
                         scrubbing = editing
                         if !editing { scheduleControlsHide() }
@@ -1874,7 +1901,10 @@ private struct RivuneMPVInternalPlayerView: View {
         .onReceive(player.$failureMessage.compactMap { $0 }) { failureMessage = $0; controlsVisible = true; model.recordPlaybackFailure() }
         .onChange(of: model.pendingPlaybackCommands.first?.id) { _ in applyRemoteCommand() }
         .onChange(of: model.activePlaybackRoom?.version) { _ in applyRoomState() }
-        .onReceive(player.$ended.filter { $0 }) { _ in finish(completed: true) }
+        .onReceive(player.$ended.filter { $0 }) { _ in
+            if activePresentation.nextEpisode != nil && model.autoplayNextEpisode { playNextEpisode() }
+            else { finish(completed: true) }
+        }
         .onDisappear {
             controlsTask?.cancel()
             player.shutdown()
@@ -2012,6 +2042,17 @@ private struct RivuneMPVInternalPlayerView: View {
         model.minimizePlayback(position: Int(player.position), duration: max(Int(player.duration), Int(player.position)))
     }
 
+    private func playNextEpisode() {
+        guard !finished, activePresentation.nextEpisode != nil else { return }
+        finished = true
+        controlsTask?.cancel()
+        player.pause()
+        model.playNextEpisode(
+            position: Int(player.position),
+            duration: max(Int(player.duration), Int(player.position))
+        )
+    }
+
     private func finish(completed: Bool) {
         guard !finished else { return }
         finished = true
@@ -2108,6 +2149,11 @@ private struct RivuneNativeMiniPlayerView: View {
                 HStack {
                     Text(presentation.title).font(.caption.weight(.semibold)).lineLimit(1)
                     Spacer()
+                    if presentation.nextEpisode != nil {
+                        Button { playNextEpisode() } label: { Image(systemName: "forward.end.fill").font(.title3) }
+                            .rivuneMiniPlayerControl()
+                            .accessibilityLabel(rivuneLocalized("Next episode"))
+                    }
                     Button { finish(completed: false) } label: { Image(systemName: "xmark") }
                         .rivuneMiniPlayerControl()
                         .accessibilityLabel("Close player")
@@ -2168,7 +2214,8 @@ private struct RivuneNativeMiniPlayerView: View {
         .onChange(of: model.activePlaybackRoom?.version) { _ in applyRoomState() }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
             guard notification.object as? AVPlayerItem === player.currentItem else { return }
-            finish(completed: true)
+            if presentation.nextEpisode != nil && model.autoplayNextEpisode { playNextEpisode() }
+            else { finish(completed: true) }
         }
         .onDisappear {
             if !handoff && !finished { finish(completed: false) }
@@ -2229,6 +2276,13 @@ private struct RivuneNativeMiniPlayerView: View {
         }
         model.updateCoordinationPlayback(position: position, duration: duration, playing: playing)
     }
+    private func playNextEpisode() {
+        guard !finished, presentation.nextEpisode != nil else { return }
+        finished = true
+        player.pause()
+        model.playNextMinimizedEpisode(position: Int(position), duration: max(Int(duration), Int(position)))
+    }
+
 
     private func restore() {
         guard !finished else { return }
@@ -2263,6 +2317,11 @@ private struct RivuneMPVMiniPlayerView: View {
                     Text(presentation.title).font(.caption.weight(.semibold)).lineLimit(1)
                     Text("MPV").font(.system(size: 8, weight: .bold)).padding(.horizontal, 5).padding(.vertical, 2).background(.ultraThinMaterial, in: Capsule())
                     Spacer()
+                    if presentation.nextEpisode != nil {
+                        Button { playNextEpisode() } label: { Image(systemName: "forward.end.fill").font(.title3) }
+                            .rivuneMiniPlayerControl()
+                            .accessibilityLabel(rivuneLocalized("Next episode"))
+                    }
                     Button { finish(completed: false) } label: { Image(systemName: "xmark") }
                         .rivuneMiniPlayerControl()
                         .accessibilityLabel("Close player")
@@ -2314,7 +2373,10 @@ private struct RivuneMPVMiniPlayerView: View {
         .onChange(of: model.pendingPlaybackCommands.first?.id) { _ in applyRemoteCommand() }
         .onChange(of: model.activePlaybackRoom?.version) { _ in applyRoomState() }
         .onReceive(player.$failureMessage.compactMap { $0 }) { failureMessage = $0; model.recordPlaybackFailure() }
-        .onReceive(player.$ended.filter { $0 }) { _ in finish(completed: true) }
+        .onReceive(player.$ended.filter { $0 }) { _ in
+            if presentation.nextEpisode != nil && model.autoplayNextEpisode { playNextEpisode() }
+            else { finish(completed: true) }
+        }
         .onDisappear {
             player.shutdown()
             if !handoff && !finished { finish(completed: false) }
@@ -2346,6 +2408,16 @@ private struct RivuneMPVMiniPlayerView: View {
         }
         model.updateCoordinationPlayback(position: target, duration: player.duration, playing: room.state == "playing")
     }
+    private func playNextEpisode() {
+        guard !finished, presentation.nextEpisode != nil else { return }
+        finished = true
+        player.pause()
+        model.playNextMinimizedEpisode(
+            position: Int(player.position),
+            duration: max(Int(player.duration), Int(player.position))
+        )
+    }
+
 
     private func restore() {
         guard !finished else { return }
@@ -2519,7 +2591,25 @@ private struct RivuneExternalApplicationPicker: View {
     }
 }
 
-private struct RivuneExternalApplication: Identifiable {
+struct RivuneExternalApplication: Identifiable {
+    private static let knownBundleIDs = [
+        "com.colliderli.iina",
+        "org.videolan.vlc",
+        "io.mpv",
+        "com.firecore.infuse",
+        "com.firecore.infuse.mac",
+        "com.apple.QuickTimePlayerX",
+        "com.movist.Movist",
+        "com.movist.MovistPro",
+    ]
+    private static let browserBundleIDs: Set<String> = [
+        "com.apple.Safari", "com.google.Chrome", "org.mozilla.firefox",
+        "com.microsoft.edgemac", "com.brave.Browser", "company.thebrowser.Browser",
+        "com.operasoftware.Opera", "com.vivaldi.Vivaldi",
+    ]
+    private static let videoNameFragments = ["iina", "vlc", "mpv", "infuse", "quicktime", "movist", "elmedia", "optimus", "mplayer", "plex"]
+    private static let knownApplicationNames = ["IINA.app", "VLC.app", "mpv.app", "Infuse.app", "Movist.app", "Movist Pro.app", "Elmedia Player.app"]
+
     let url: URL
     let name: String
     let bundleIdentifier: String?
@@ -2539,23 +2629,6 @@ private struct RivuneExternalApplication: Identifiable {
 
     static func discover(for streamURL: URL) -> [Self] {
         let workspace = NSWorkspace.shared
-        let knownBundleIDs = [
-            "com.colliderli.iina",
-            "org.videolan.vlc",
-            "io.mpv",
-            "com.firecore.infuse",
-            "com.firecore.infuse.mac",
-            "com.apple.QuickTimePlayerX",
-            "com.movist.Movist",
-            "com.movist.MovistPro",
-        ]
-        let browserBundleIDs: Set<String> = [
-            "com.apple.Safari", "com.google.Chrome", "org.mozilla.firefox",
-            "com.microsoft.edgemac", "com.brave.Browser", "company.thebrowser.Browser",
-            "com.operasoftware.Opera", "com.vivaldi.Vivaldi",
-        ]
-        let videoNameFragments = ["iina", "vlc", "mpv", "infuse", "quicktime", "movist", "elmedia", "optimus", "mplayer", "plex"]
-        let knownApplicationNames = ["IINA.app", "VLC.app", "mpv.app", "Infuse.app", "Movist.app", "Movist Pro.app", "Elmedia Player.app"]
         var candidates = knownBundleIDs.compactMap { workspace.urlForApplication(withBundleIdentifier: $0) }
         let applicationDirectories = FileManager.default.urls(for: .applicationDirectory, in: .allDomainsMask)
         for directory in applicationDirectories {
@@ -2565,13 +2638,20 @@ private struct RivuneExternalApplication: Identifiable {
             })
         }
         candidates.append(contentsOf: workspace.urlsForApplications(toOpen: streamURL))
+        return rankedCandidates(candidates)
+    }
 
+    static func rankedCandidates(
+        _ candidates: [URL],
+        mainBundleURL: URL = Bundle.main.bundleURL,
+        mainBundleIdentifier: String? = Bundle.main.bundleIdentifier
+    ) -> [Self] {
         var seen = Set<String>()
         return candidates.compactMap { applicationURL -> Self? in
             let application = Self(url: applicationURL)
             guard seen.insert(application.id).inserted,
-                  application.bundleIdentifier != Bundle.main.bundleIdentifier,
-                  application.url.standardizedFileURL != Bundle.main.bundleURL.standardizedFileURL,
+                  application.bundleIdentifier != mainBundleIdentifier,
+                  application.url.standardizedFileURL != mainBundleURL.standardizedFileURL,
                   !browserBundleIDs.contains(application.bundleIdentifier ?? "") else { return nil }
             let normalizedName = application.name.lowercased()
             let recognized = application.bundleIdentifier.map { knownBundleIDs.contains($0) } == true
