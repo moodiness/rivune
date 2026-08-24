@@ -100,7 +100,7 @@ struct RivuneMediaDetailView: View {
 #endif
 
     private var presentationContent: some View {
-        RivuneSingleColumnNavigation {
+        RivunePlatformNavigation {
             detailStateContent
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
