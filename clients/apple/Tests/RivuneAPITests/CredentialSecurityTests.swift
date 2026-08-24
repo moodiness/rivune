@@ -6,6 +6,68 @@ import XCTest
 @testable import RivuneAPI
 
 final class CredentialSecurityTests: XCTestCase {
+    func testStoredCredentialsRoundTripPreservesRequiredNulls() throws {
+        let categoryToken = TokenPair(
+            tokenType: "Bearer",
+            accessToken: "access",
+            accessTokenExpiresAt: "2026-08-03T12:15:00Z",
+            refreshToken: "refresh",
+            refreshTokenExpiresAt: "2026-09-03T12:00:00Z",
+            sessionId: UUID(uuidString: "22222222-2222-4222-8222-222222222222")!,
+            deviceId: UUID(uuidString: "33333333-3333-4333-8333-333333333333")!,
+            authorizationScope: .category,
+            category: CategoryRef(
+                id: UUID(uuidString: "44444444-4444-4444-8444-444444444444")!,
+                name: "Family",
+                color: nil,
+                icon: nil
+            )
+        )
+        let credentials = StoredCredentials(tokens: categoryToken, profileContext: "context")
+
+        let data = try JSONEncoder().encode(credentials)
+        let decoded = try JSONDecoder().decode(StoredCredentials.self, from: data)
+
+        XCTAssertEqual(decoded, credentials)
+
+        let administratorCredentials = StoredCredentials(tokens: fixtureToken(), profileContext: nil)
+        let administratorData = try JSONEncoder().encode(administratorCredentials)
+        XCTAssertEqual(
+            try JSONDecoder().decode(StoredCredentials.self, from: administratorData),
+            administratorCredentials
+        )
+    }
+
+#if DEBUG && os(macOS)
+    func testDebugFileCredentialStoreRoundTripsWithPrivatePermissionsAndRemovesInvalidData() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let issuer = URL(string: "http://192.168.1.20:8080")!
+        let credentials = StoredCredentials(tokens: fixtureToken(), profileContext: "profile-context")
+        let store = DebugFileCredentialStore(directory: directory)
+
+        try await store.save(credentials, for: issuer)
+        let restored = try await store.load(for: issuer)
+        XCTAssertEqual(restored, credentials)
+
+        let files = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        )
+        XCTAssertEqual(files.count, 1)
+        let directoryAttributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+        let fileAttributes = try FileManager.default.attributesOfItem(atPath: files[0].path)
+        XCTAssertEqual((directoryAttributes[.posixPermissions] as? NSNumber)?.intValue, 0o700)
+        XCTAssertEqual((fileAttributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+
+        try Data("invalid".utf8).write(to: files[0], options: .atomic)
+        let invalidRestore = try await store.load(for: issuer)
+        XCTAssertNil(invalidRestore)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: files[0].path))
+    }
+#endif
+
     func testCredentialsFromServerAAreNeitherAttachedNorRefreshedAgainstServerB() async throws {
         let serverA = URL(string: "https://server-a.test")!
         let serverB = URL(string: "https://server-b.test")!

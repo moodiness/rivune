@@ -1,14 +1,13 @@
-# Rivune v1.12.2
+# Rivune v1.12.3
 
 ## Highlights
 
-- Windows now ships as one `Rivune-Windows.exe` for x64 and ARM64. The setup detects the PC architecture and offers either a per-user installation or a portable extraction.
-- Per-user installation adds Start Menu and Windows uninstall integration without administrator access. The desktop shortcut remains optional and disabled by default; settings, cache, and sessions stay in Windows AppData in both modes.
-- The local TV installer companion is consolidated into one universal Windows EXE and one universal macOS DMG. The public Linux companion downloads are removed.
-- `rivune-update.json` schema 3 records the universal Windows bundle plus the exact size and SHA-256 of each embedded architecture executable, allowing Windows updates to verify both layers before replacement.
-- Apple clients keep media, profile, library, search, calendar, and offline flows in single-column navigation instead of opening an unintended sidebar.
-- Windows localization now handles synchronous UI property callbacks without recursive writes.
-- Release validation now rebuilds the universal Windows TV installer without checkout-state metadata, so candidate and publication artifacts compare byte-for-byte.
+- Apple clients now use a redesigned native browsing experience with a compact macOS dock, adaptive collection layouts, cinematic media and season pages, source-provider filters, and integrated playback controls.
+- macOS can open compatible streams in an installed video application, while Windows discovers VLC, mpv, MPC-HC, MPC-BE, PotPlayer, Kodi, and Plex and exposes the same external-player fallback beside internal playback.
+- Marking a series watched or unwatched on Apple now updates every episode across every season. Series and episode rails on macOS drag continuously with bounded momentum instead of snapping one card at a time.
+- Apple collection folders preserve source-specific artwork and configured merged, category, or folder layouts. Offline downloads identify the active source and report upstream HTTP failures instead of a generic cancellation.
+- Apple media presentation, profiles, PIN entry, settings, sheets, and player chrome now stay within responsive single-column surfaces across supported Apple form factors.
+- Debug macOS clients persist authenticated sessions in an isolated local credential store, including protocol-required nullable token and category fields.
 
 ## Installation
 
@@ -21,18 +20,17 @@
 
 ## Upgrade notes
 
-- Existing operators can set `RIVUNE_VERSION=1.12.2`, pull, and recreate Rivune. Fresh Compose deployments default to the immutable `1.12.2` image tag.
-- `v1.12.1` was never published as a GitHub Release; v1.12.2 supersedes that failed candidate.
+- Existing operators can set `RIVUNE_VERSION=1.12.3`, pull, and recreate Rivune. Fresh Compose deployments default to the immutable `1.12.3` image tag.
 - The release contains exactly twelve assets: eight application packages, `rivune-update.json`, the shared TV runtime, and the two universal TV installer companions.
-- Schema 3 is a clean update-contract cutover. Clients from v1.12.0 cannot consume the new automatic-update metadata; install v1.12.2 once from the exact GitHub Release, after which automatic checks use the universal contract.
+- Clients upgrading from v1.12.0 still require one manual installation from the exact GitHub Release before automatic updates can consume the schema 3 universal package contract.
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.12.2`
+- `ghcr.io/moodiness/rivune:1.12.3`
 - `ghcr.io/moodiness/rivune:1.12`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 - Provenance and SBOM attestations are published for both runnable platforms.
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.12.0...v1.12.2
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.12.2...v1.12.3

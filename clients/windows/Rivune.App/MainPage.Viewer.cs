@@ -2893,6 +2893,8 @@ public sealed partial class MainPage
         SourceBanner.IsOpen = false;
         PlaySourceButton.IsEnabled = false;
         PlaySourceButton.Visibility = Visibility.Collapsed;
+        ExternalSourceButton.IsEnabled = false;
+        ExternalSourceButton.Visibility = Visibility.Collapsed;
         OpenSourcePicker();
         try
         {

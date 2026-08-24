@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using Microsoft.Win32;
 using System.Globalization;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
@@ -37,6 +39,21 @@ public sealed partial class MainPage
     private bool _autoStartNextEpisode;
     private Guid? _preferredSourceAddonId;
     private readonly HashSet<int> _autoSkippedMarkerIndexes = [];
+    private Task<IReadOnlyList<ExternalPlayerApp>>? _externalPlayersTask;
+
+    private sealed record ExternalPlayerApp(string Name, string ExecutablePath);
+    private sealed record ExternalPlayerSpec(string Name, string[] ExecutableNames, string[] RelativePaths);
+
+    private static readonly ExternalPlayerSpec[] ExternalPlayerSpecs =
+    [
+        new("VLC media player", ["vlc.exe"], [@"VideoLAN\VLC\vlc.exe", @"Programs\VideoLAN\VLC\vlc.exe"]),
+        new("mpv", ["mpv.exe"], [@"mpv\mpv.exe", @"Programs\mpv\mpv.exe", @"scoop\apps\mpv\current\mpv.exe"]),
+        new("MPC-HC", ["mpc-hc64.exe", "mpc-hc.exe"], [@"MPC-HC\mpc-hc64.exe", @"MPC-HC\mpc-hc.exe", @"K-Lite Codec Pack\MPC-HC64\mpc-hc64.exe"]),
+        new("MPC-BE", ["mpc-be64.exe", "mpc-be.exe"], [@"MPC-BE x64\mpc-be64.exe", @"MPC-BE\mpc-be64.exe", @"MPC-BE\mpc-be.exe"]),
+        new("PotPlayer", ["PotPlayerMini64.exe", "PotPlayerMini.exe"], [@"DAUM\PotPlayer\PotPlayerMini64.exe", @"DAUM\PotPlayer\PotPlayerMini.exe"]),
+        new("Kodi", ["kodi.exe"], [@"Kodi\kodi.exe", @"Programs\Kodi\kodi.exe"]),
+        new("Plex", ["Plex.exe", "Plex HTPC.exe", "PlexMediaPlayer.exe"], [@"Plex\Plex\Plex.exe", @"Plex\Plex HTPC\Plex HTPC.exe", @"Plex Media Player\PlexMediaPlayer.exe"]),
+    ];
 
     private void UpdateSourceOptions(IReadOnlyList<PlaybackSourceOption> options)
     {
@@ -77,6 +94,8 @@ public sealed partial class MainPage
         var downloading = _offlineDownloadTask is { IsCompleted: false };
         PlaySourceButton.IsEnabled = false;
         PlaySourceButton.Visibility = Visibility.Collapsed;
+        ExternalSourceButton.IsEnabled = false;
+        ExternalSourceButton.Visibility = Visibility.Collapsed;
         DownloadSourceButton.IsEnabled = downloading;
         DownloadSourceButton.Visibility = downloading ? Visibility.Visible : Visibility.Collapsed;
         var filtered = addonId is null ? _sourceOptions : _sourceOptions.Where(value => value.AddonId == addonId).ToArray();
@@ -89,6 +108,163 @@ public sealed partial class MainPage
             Control target = filtered.Count > 0 ? SourceList : RefreshSourcesButton;
             target.Focus(FocusState.Programmatic);
         });
+    }
+
+    private static bool SupportsExternalPlayer(PlaybackSourceOption source) =>
+        source.Mode != PlaybackMode.Youtube &&
+        (source.Protocol.Equals("http", StringComparison.OrdinalIgnoreCase) ||
+         source.Protocol.Equals("hls", StringComparison.OrdinalIgnoreCase) ||
+         source.Protocol.Equals("dash", StringComparison.OrdinalIgnoreCase));
+
+    private async void ExternalSource_Click(object sender, RoutedEventArgs e)
+    {
+        var selectedSource = _state.SelectedSource;
+        var client = _state.Client;
+        if (selectedSource is null || client is null || !SupportsExternalPlayer(selectedSource)) return;
+
+        IReadOnlyList<ExternalPlayerApp> players;
+        try
+        {
+            players = await Task.Run(DetectExternalPlayers);
+        }
+        catch (Exception exception)
+        {
+            SetSourceFailure(exception);
+            return;
+        }
+        if (players.Count == 0)
+        {
+            SourceStatus.Text = "No supported external video player is installed.";
+            SourceBanner.Severity = InfoBarSeverity.Informational;
+            SourceBanner.Message = "Install VLC, mpv, MPC-HC/MPC-BE, PotPlayer, Kodi, or Plex, then try again.";
+            SourceBanner.IsOpen = true;
+            await ShowDialogAsync(new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "No external video player found",
+                Content = "Install VLC, mpv, MPC-HC/MPC-BE, PotPlayer, Kodi, or Plex, then try again.",
+                CloseButtonText = "Close",
+            });
+            return;
+        }
+
+        var player = await ChooseAsync("Choose an external player", players, value => value.Name);
+        if (player is null || !ReferenceEquals(_state.SelectedSource, selectedSource) || !ReferenceEquals(_state.Client, client)) return;
+
+        var generation = _state.Transition(AppPhase.Sources);
+        PlaySourceButton.IsEnabled = false;
+        ExternalSourceButton.IsEnabled = false;
+        DownloadSourceButton.IsEnabled = false;
+        SourceProgress.IsActive = true;
+        SourceStatus.Text = UiFormat("Opening {0}…", player.Name);
+        SourceBanner.IsOpen = false;
+        PlaybackSession? session = null;
+        try
+        {
+            var progress = _tracksProgress ? await client.GetPlaybackProgressAsync(_progressTitleId, _state.Token) : null;
+            var startSeconds = progress is null
+                ? (int?)null
+                : PlaybackProgressPolicy.StartSeconds(progress.PositionSeconds, progress.Completed);
+            await client.PreparePlaybackAsync(
+                selectedSource.SourceRef,
+                startSeconds,
+                _state.Token,
+                externalPlayer: true);
+            if (!_state.IsCurrent(generation) || !ReferenceEquals(_state.SelectedSource, selectedSource)) return;
+            session = await client.ResolvePlaybackAsync(
+                selectedSource.SourceRef,
+                _progressTitleId.ToString("D"),
+                startSeconds: startSeconds,
+                cancellationToken: _state.Token,
+                externalPlayer: true);
+            if (!_state.IsCurrent(generation) || !ReferenceEquals(_state.SelectedSource, selectedSource)) return;
+
+            var resolved = session.Sources.FirstOrDefault(value =>
+                value.Id == session.SelectedSourceId && value.Compatible && value.Url is not null)
+                ?? throw new InvalidOperationException("The resolved source has no URL for an external player.");
+            var uri = client.ResolveResponseResourceUrl(resolved.Url!);
+            if (!File.Exists(player.ExecutablePath))
+                throw new InvalidOperationException($"{player.Name} is no longer installed at the detected location.");
+            var startInfo = new ProcessStartInfo(player.ExecutablePath) { UseShellExecute = false };
+            startInfo.ArgumentList.Add(uri.AbsoluteUri);
+            using var process = Process.Start(startInfo)
+                ?? throw new InvalidOperationException($"Windows could not start {player.Name}.");
+            SourceStatus.Text = UiFormat("Opened in {0}.", player.Name);
+            SourceBanner.Severity = InfoBarSeverity.Success;
+            SourceBanner.Message = UiFormat("Playback was handed off to {0}.", player.Name);
+            SourceBanner.IsOpen = true;
+        }
+        catch (OperationCanceledException) { }
+        catch (RivuneServerException exception) when (exception.Code == "playback_source_expired" && _state.IsCurrent(generation))
+        {
+            await RefreshExpiredSourcesAsync();
+        }
+        catch (Exception exception)
+        {
+            if (_state.IsCurrent(generation)) SetSourceFailure(exception);
+        }
+        finally
+        {
+            if (session is not null)
+            {
+                try { await client.StopPlaybackAsync(session.Id, CancellationToken.None); }
+                catch { }
+            }
+            if (_state.IsCurrent(generation))
+            {
+                SourceProgress.IsActive = false;
+                PlaySourceButton.IsEnabled = _state.Preparation is not null;
+                ExternalSourceButton.IsEnabled = SupportsExternalPlayer(selectedSource);
+                DownloadSourceButton.IsEnabled = _state.Preparation is not null;
+            }
+        }
+    }
+
+    private static IReadOnlyList<ExternalPlayerApp> DetectExternalPlayers()
+    {
+        var roots = new[]
+        {
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        }.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var pathDirectories = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var players = new List<ExternalPlayerApp>();
+        foreach (var spec in ExternalPlayerSpecs)
+        {
+            var executable = FindRegisteredExecutable(spec.ExecutableNames)
+                ?? spec.RelativePaths.SelectMany(relative => roots.Select(root => Path.Combine(root, relative))).FirstOrDefault(File.Exists)
+                ?? spec.ExecutableNames.SelectMany(name => pathDirectories.Select(directory => Path.Combine(directory, name))).FirstOrDefault(File.Exists);
+            if (executable is not null) players.Add(new ExternalPlayerApp(spec.Name, Path.GetFullPath(executable)));
+        }
+        return players;
+    }
+
+    private static string? FindRegisteredExecutable(IReadOnlyList<string> executableNames)
+    {
+        foreach (var name in executableNames)
+        {
+            foreach (var hive in new[] { RegistryHive.CurrentUser, RegistryHive.LocalMachine })
+            {
+                foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+                {
+                    try
+                    {
+                        using var baseKey = RegistryKey.OpenBaseKey(hive, view);
+                        using var key = baseKey.OpenSubKey($@"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{name}");
+                        if (key?.GetValue(null) is string value)
+                        {
+                            var path = Environment.ExpandEnvironmentVariables(value).Trim().Trim('"');
+                            if (File.Exists(path)) return path;
+                        }
+                    }
+                    catch (Exception exception) when (exception is UnauthorizedAccessException or IOException or PlatformNotSupportedException or System.Security.SecurityException) { }
+                }
+            }
+        }
+        return null;
     }
 
     private static IReadOnlyList<(Guid AddonId, string Label)> SourceAddonFilters(IReadOnlyList<PlaybackSourceOption> options)
@@ -148,6 +324,8 @@ public sealed partial class MainPage
         SourceBanner.IsOpen = false;
         SourceProgress.IsActive = true;
         PlaySourceButton.IsEnabled = false;
+        ExternalSourceButton.IsEnabled = false;
+        ExternalSourceButton.Visibility = Visibility.Collapsed;
         var downloading = _offlineDownloadTask is { IsCompleted: false };
         DownloadSourceButton.IsEnabled = downloading;
         DownloadSourceButton.Visibility = downloading ? Visibility.Visible : Visibility.Collapsed;

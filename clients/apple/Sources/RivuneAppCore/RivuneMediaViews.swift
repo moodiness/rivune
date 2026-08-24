@@ -4,6 +4,8 @@ import Combine
 import SwiftUI
 #if canImport(AppKit)
 import AppKit
+import QuartzCore
+import UniformTypeIdentifiers
 #endif
 import RivuneAPI
 
@@ -13,42 +15,36 @@ struct RivuneMediaDetailView: View {
     @Environment(\.openURL) private var openURL
     @State private var showJoinRoom = false
     @State private var roomCode = ""
+#if os(macOS)
+    @StateObject private var seasonRailDrag = RivuneHorizontalRailDragController()
+    @StateObject private var episodeRailDrag = RivuneHorizontalRailDragController()
+#endif
 
     var body: some View {
-        RivuneSingleColumnNavigation {
-            ZStack {
-                Color.black.ignoresSafeArea()
-                if let season = model.selectedSeason {
-                    seasonContent(season)
-                } else if let detail = model.mediaDetail {
-                    detailContent(detail)
-                } else if model.mediaLoading {
-                    ProgressView("Loading details…")
-                } else {
-                    failureContent
-                }
+        Group {
+#if os(macOS)
+            if model.showPlaybackSources {
+                macOSDetailAndSources
+            } else {
+                presentationContent
             }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button(rivuneLocalized(model.canNavigateBackFromMedia ? "Back" : "Close")) {
-                        if model.selectedSeason != nil { model.closeSeason() }
-                        else if model.canNavigateBackFromMedia { model.closeMedia() }
-                        else { model.closeMedia(); dismiss() }
-                    }
-                }
+#else
+            if model.showPlaybackSources {
+                RivunePlaybackSourcesView(model: model)
+            } else {
+                presentationContent
             }
+#endif
         }
-        .preferredColorScheme(.dark)
-        .sheet(isPresented: Binding(
-            get: { model.showPlaybackSources },
-            set: { if !$0 { model.closePlaybackSources() } }
-        )) { RivunePlaybackSourcesView(model: model) }
+#if !os(macOS)
         .mediaPlayerPresentation(item: Binding(
             get: { model.playbackPresentation },
             set: { _ in }
         )) { presentation in
             RivuneInternalPlayerView(presentation: presentation, model: model)
         }
+#endif
+        .preferredColorScheme(.dark)
 #if os(iOS) || os(visionOS)
         .sheet(isPresented: Binding(
             get: { model.externalPlaybackURL != nil },
@@ -57,38 +53,139 @@ struct RivuneMediaDetailView: View {
             if let url = model.externalPlaybackURL { RivuneExternalPlaybackSheet(url: url) }
         }
 #elseif os(macOS)
-        .onChange(of: model.externalPlaybackURL) { url in
-            if let url { NSWorkspace.shared.open(url); model.clearExternalPlaybackURL() }
+        .sheet(isPresented: Binding(
+            get: { model.externalPlaybackURL != nil },
+            set: { if !$0 { model.clearExternalPlaybackURL() } }
+        )) {
+            if let url = model.externalPlaybackURL {
+                RivuneExternalApplicationPicker(
+                    url: url,
+                    cancel: model.clearExternalPlaybackURL,
+                    opened: model.clearExternalPlaybackURL
+                )
+            }
         }
 #endif
     }
 
-    private func detailContent(_ detail: RivuneMediaDetail) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                hero(detail)
-                actionRow(detail)
-                if model.playbackCoordinationAvailable { coordinationControls }
-                if let tagline = tagline(detail)?.nilIfEmpty {
-                    Text(tagline).font(.headline).foregroundStyle(Color.white.opacity(0.72))
-                }
-                if let overview = overview(detail)?.nilIfEmpty {
-                    Text(overview)
-                        .foregroundStyle(Color.white.opacity(0.82))
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                genres(detail)
-                if let series = detail.series { seasons(series) }
-                cast(detail.movie?.cast ?? detail.series?.cast ?? detail.parentSeries?.cast ?? [])
-                if let failure = model.mediaFailure {
-                    Label(rivuneLocalized(failure.localizedDescription), systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red)
-                }
+#if os(macOS)
+    private var macOSDetailAndSources: some View {
+        GeometryReader { proxy in
+            let compact = proxy.size.width < 900
+            let margin: CGFloat = compact ? 12 : 24
+            let regularWidth = min(max(proxy.size.width * 0.365, 360), 440)
+            let panelWidth = compact ? min(360, max(proxy.size.width - margin * 2, 0)) : regularWidth
+            let panelHeight = min(max(proxy.size.height - margin * 2, 0), 720)
+
+            ZStack(alignment: .trailing) {
+                presentationContent
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .clipped()
+
+                RivunePlaybackSourcesView(model: model, panelMode: true)
+                    .frame(width: panelWidth, height: panelHeight)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                    }
+                    .shadow(color: .black.opacity(0.45), radius: 24, x: -8, y: 8)
+                    .padding(.trailing, margin)
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 16)
-            .frame(maxWidth: 1100, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .center)
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .background(Color.black)
+        }
+    }
+#endif
+
+    private var presentationContent: some View {
+        RivuneSingleColumnNavigation {
+            detailStateContent
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button(action: closePresentation) {
+#if os(macOS)
+                            Text(rivuneLocalized("Back"))
+                                .foregroundStyle(.primary)
+#else
+                            Text(rivuneLocalized(model.selectedSeason != nil || model.canNavigateBackFromMedia ? "Back" : "Close"))
+                                .foregroundStyle(.primary)
+#endif
+                        }
+                        .rivuneGlassButton()
+                    }
+                }
+        }
+    }
+
+    private var detailStateContent: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            if let season = model.selectedSeason {
+                seasonContent(season)
+            } else if let detail = model.mediaDetail {
+                detailContent(detail)
+            } else if model.mediaLoading {
+                ProgressView("Loading details…")
+            } else {
+                failureContent
+            }
+        }
+    }
+
+    private func closePresentation() {
+        if model.selectedSeason != nil {
+            model.closeSeason()
+        } else if model.canNavigateBackFromMedia {
+            model.closeMedia()
+        } else {
+            model.closeMedia()
+#if !os(macOS)
+            dismiss()
+#endif
+        }
+    }
+
+    private func detailContent(_ detail: RivuneMediaDetail) -> some View {
+        compactDetailContent(detail)
+    }
+
+    private func compactDetailContent(_ detail: RivuneMediaDetail) -> some View {
+        ZStack {
+            cinematicBackdrop(url: detailBackdropURL(detail))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    detailHeader(detail)
+                    actionRow(detail)
+                    if model.playbackCoordinationAvailable { coordinationControls }
+                    if let overview = overview(detail)?.nilIfEmpty {
+                        Text(overview)
+                            .font(.body)
+                            .foregroundStyle(Color.white.opacity(0.88))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: 780, alignment: .leading)
+                    }
+                    if let series = detail.series { seasons(series) }
+                    cast(detail.movie?.cast ?? detail.series?.cast ?? detail.parentSeries?.cast ?? [])
+                    if let failure = model.mediaFailure {
+                        Label(rivuneLocalized(failure.localizedDescription), systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                    }
+                }
+#if os(macOS)
+                .padding(.horizontal, 48)
+                .padding(.top, 112)
+                .padding(.bottom, 48)
+                .frame(maxWidth: 1080, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+#else
+                .padding(.horizontal, 20)
+                .padding(.vertical, 56)
+                .frame(maxWidth: 920, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+#endif
+            }
         }
     }
 
@@ -115,7 +212,7 @@ struct RivuneMediaDetailView: View {
                         Button("Stop \(device.name)", role: .destructive) { model.controlPlayback(on: device, command: "stop") }
                     }
                 } label: { Label(rivuneLocalized("Play on another device"), systemImage: "airplayvideo") }
-                .buttonStyle(.bordered)
+                .rivuneGlassButton()
 #endif
             }
             HStack {
@@ -128,10 +225,10 @@ struct RivuneMediaDetailView: View {
                         .font(.subheadline.monospaced()).textSelection(.enabled)
 #endif
                     Text(rivuneLocalizedFormat("%d watching", room.members.count)).foregroundStyle(.secondary)
-                    Button("Leave", action: model.leavePlaybackRoom).buttonStyle(.bordered)
+                    Button("Leave", action: model.leavePlaybackRoom).rivuneGlassButton()
                 } else {
-                    Button { model.createPlaybackRoom() } label: { Label("Start watch room", systemImage: "person.2.wave.2") }.buttonStyle(.bordered)
-                    Button("Join room") { showJoinRoom = true }.buttonStyle(.bordered)
+                    Button { model.createPlaybackRoom() } label: { Label("Start watch room", systemImage: "person.2.wave.2") }.rivuneGlassButton()
+                    Button("Join room") { showJoinRoom = true }.rivuneGlassButton()
                 }
             }
         }
@@ -142,82 +239,145 @@ struct RivuneMediaDetailView: View {
         }
     }
 
-    private func hero(_ detail: RivuneMediaDetail) -> some View {
-        let background = detail.movie?.backdropUrl ?? detail.series?.backdropUrl ?? detail.episode?.backdropUrl ?? detail.target.backgroundUrl
-        let poster = detail.movie?.posterUrl ?? detail.series?.posterUrl ?? detail.episode?.stillUrl ?? detail.target.posterUrl
-        return ZStack(alignment: .bottomLeading) {
-            AsyncImage(url: background.flatMap(model.resolvedResourceURL)) { phase in
-                if let image = phase.image { image.resizable().scaledToFill() }
-                else { Color.white.opacity(0.08) }
+    private func detailHeader(_ detail: RivuneMediaDetail) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(displayTitle(detail))
+#if os(macOS)
+                .font(.system(size: 42, weight: .bold))
+#else
+                .font(.largeTitle.bold())
+#endif
+                .lineLimit(3)
+            if let tagline = tagline(detail)?.nilIfEmpty {
+                Text(tagline)
+                    .font(.title3)
+                    .foregroundStyle(Color.white.opacity(0.78))
+                    .lineLimit(2)
             }
-            LinearGradient(colors: [.clear, .black.opacity(0.98)], startPoint: .center, endPoint: .bottom)
-            HStack(alignment: .bottom, spacing: 18) {
-                AsyncImage(url: poster.flatMap(model.resolvedResourceURL)) { phase in
-                    if let image = phase.image { image.resizable().scaledToFill() }
-                    else { Color.white.opacity(0.08) }
-                }
-                .frame(width: 104, height: detail.target.mediaType == "episode" ? 78 : 156)
-                .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(displayTitle(detail)).font(.largeTitle.bold()).lineLimit(3)
-                    if let subtitle = releaseLine(detail) {
-                        Text(subtitle).font(.subheadline.weight(.medium)).foregroundStyle(Color.white.opacity(0.76)).lineLimit(3)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if let subtitle = releaseLine(detail) {
+                Text(subtitle)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Color.white.opacity(0.80))
+                    .lineLimit(3)
             }
-            .padding(18)
+            let genreNames = detail.movie?.genres.map(\.name) ?? detail.series?.genres.map(\.name) ?? []
+            if !genreNames.isEmpty {
+                Text(genreNames.joined(separator: " · "))
+                    .foregroundStyle(Color.white.opacity(0.76))
+                    .lineLimit(2)
+            }
         }
-        .aspectRatio(16 / 8, contentMode: .fit)
-        .frame(maxWidth: .infinity)
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .frame(maxWidth: 820, alignment: .leading)
+    }
+
+    private func detailBackdropURL(_ detail: RivuneMediaDetail) -> URL? {
+        let value = detail.movie?.backdropUrl
+            ?? detail.series?.backdropUrl
+            ?? detail.episode?.backdropUrl
+            ?? detail.episode?.stillUrl
+            ?? detail.parentSeries?.backdropUrl
+            ?? detail.target.backgroundUrl
+            ?? detail.target.posterUrl
+        return value.flatMap(model.resolvedResourceURL)
+    }
+
+    private func seasonBackdropURL(_ season: Season) -> URL? {
+        let value = season.backdropUrl
+            ?? model.mediaDetail?.series?.backdropUrl
+            ?? model.mediaDetail?.parentSeries?.backdropUrl
+            ?? model.mediaDetail?.target.backgroundUrl
+            ?? season.posterUrl
+        return value.flatMap(model.resolvedResourceURL)
+    }
+
+    private func cinematicBackdrop(url: URL?) -> some View {
+        ZStack {
+            Color.black
+            AsyncImage(url: url) { phase in
+                if let image = phase.image {
+                    image
+                        .resizable()
+                        .scaledToFill()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
+                } else {
+                    Color.black
+                }
+            }
+#if os(macOS)
+            LinearGradient(
+                stops: [
+                    .init(color: .black.opacity(0.68), location: 0),
+                    .init(color: .black.opacity(0.58), location: 0.72),
+                    .init(color: .black.opacity(0.30), location: 1),
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.42)],
+                startPoint: .center,
+                endPoint: .bottom
+            )
+#else
+            Color.black.opacity(0.58)
+            LinearGradient(
+                colors: [.black.opacity(0.90), .black.opacity(0.52), .clear],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.78)],
+                startPoint: .center,
+                endPoint: .bottom
+            )
+#endif
+        }
+        .ignoresSafeArea()
     }
 
     private func actionRow(_ detail: RivuneMediaDetail) -> some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 240), spacing: 10)], alignment: .leading, spacing: 10) {
-            if detail.target.mediaType != "series" {
+            if detail.target.mediaType != "series", !model.automaticallyShowStreams {
                 Button(action: model.loadPlaybackSources) {
                     Label(rivuneLocalized(detail.progress?.positionSeconds ?? 0 > 0 ? "Resume" : "Play"), systemImage: "play.fill")
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, minHeight: 22, alignment: .center)
-                }.buttonStyle(.borderedProminent)
+                }.rivuneGlassButton(prominent: true)
             }
             if detail.target.mediaType != "episode" {
                 Button(action: model.toggleLibrary) {
                     Label(rivuneLocalized(detail.inLibrary ? "In library" : "Add to library"), systemImage: detail.inLibrary ? "checkmark" : "plus")
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
                         .frame(maxWidth: .infinity, minHeight: 22, alignment: .center)
-                }.buttonStyle(.bordered)
+                }.rivuneGlassButton()
             }
-            if detail.target.mediaType != "series" {
-                Button(action: model.toggleWatched) {
-                    Label(rivuneLocalized(detail.progress?.completed == true ? "Mark as unwatched" : "Mark as watched"), systemImage: detail.progress?.completed == true ? "eye.slash" : "checkmark.circle")
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .frame(maxWidth: .infinity, minHeight: 22, alignment: .center)
-                }.buttonStyle(.bordered)
-            }
+            Button(action: model.toggleWatched) {
+                let watched = detail.target.mediaType == "series"
+                    ? model.seriesEpisodesWatched == true
+                    : detail.progress?.completed == true
+                Label(rivuneLocalized(watched ? "Mark as unwatched" : "Mark as watched"), systemImage: watched ? "eye.slash" : "checkmark.circle")
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .frame(maxWidth: .infinity, minHeight: 22, alignment: .center)
+            }.rivuneGlassButton()
             if let trailer = detail.trailers.first, let url = trailerURL(trailer) {
                 Button { openURL(url) } label: {
                     Label("Trailer", systemImage: "play.rectangle")
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, minHeight: 22, alignment: .center)
-                }.buttonStyle(.bordered)
+                }.rivuneGlassButton()
             }
             if model.mediaActionLoading || model.mediaLoading { ProgressView() }
         }
         .disabled(model.mediaActionLoading)
     }
 
-    @ViewBuilder private func genres(_ detail: RivuneMediaDetail) -> some View {
-        let values = detail.movie?.genres ?? detail.series?.genres ?? []
-        if !values.isEmpty {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack { ForEach(values, id: \.id) { Text($0.name).padding(.horizontal, 12).padding(.vertical, 7).background(Color.white.opacity(0.10), in: Capsule()) } }
-            }
-        }
-    }
 
     @ViewBuilder private func seasons(_ series: Series) -> some View {
         if !series.seasons.isEmpty {
@@ -226,7 +386,12 @@ struct RivuneMediaDetailView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 14) {
                         ForEach(series.seasons) { season in
-                            Button { model.openSeason(season) } label: {
+                            Button {
+#if os(macOS)
+                                guard !seasonRailDrag.suppressesClicks else { return }
+#endif
+                                model.openSeason(season)
+                            } label: {
                                 VStack(alignment: .leading, spacing: 8) {
                                     AsyncImage(url: season.posterUrl.flatMap(model.resolvedResourceURL)) { phase in
                                         if let image = phase.image { image.resizable().scaledToFill() }
@@ -237,10 +402,17 @@ struct RivuneMediaDetailView: View {
                                     Text(season.name).font(.headline).lineLimit(1).frame(width: 126, alignment: .leading)
                                     Text(rivuneLocalizedFormat("%d episodes", season.episodeCount)).font(.caption).foregroundStyle(Color.white.opacity(0.64))
                                 }
-                            }.buttonStyle(.plain)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
+#if os(macOS)
+                    .rivuneHorizontalRailContent(seasonRailDrag)
+#endif
                 }
+#if os(macOS)
+                .rivuneHorizontalRailDrag(seasonRailDrag)
+#endif
             }
         }
     }
@@ -268,53 +440,167 @@ struct RivuneMediaDetailView: View {
         }
     }
 
+
     private func seasonContent(_ season: Season) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                Text(season.name).font(.largeTitle.bold())
-                HStack(spacing: 10) {
-                    Button(action: model.toggleWatched) {
-                        let watched = season.episodes.allSatisfy { model.episodeProgress[$0.id]?.completed == true }
-                        Label(rivuneLocalized(watched ? "Mark as unwatched" : "Mark as watched"), systemImage: watched ? "eye.slash" : "checkmark.circle")
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-                            .frame(minHeight: 22, alignment: .center)
-                    }.buttonStyle(.borderedProminent)
-                    if let trailer = model.seasonTrailers.first, let url = trailerURL(trailer) {
-                        Button { openURL(url) } label: { Label("Trailer", systemImage: "play.rectangle") }.buttonStyle(.bordered)
-                    }
-                    if model.mediaActionLoading { ProgressView() }
-                }
-                if !season.overview.isEmpty { Text(season.overview).foregroundStyle(Color.white.opacity(0.78)).frame(maxWidth: .infinity, alignment: .leading) }
-                ForEach(season.episodes) { episode in
-                    Button { model.openEpisode(episode) } label: {
-                        VStack(alignment: .leading, spacing: 0) {
-                            HStack(spacing: 16) {
-                                AsyncImage(url: (episode.stillUrl ?? episode.backdropUrl).flatMap(model.resolvedResourceURL)) { phase in
-                                    if let image = phase.image { image.resizable().scaledToFill() }
-                                    else { Color.white.opacity(0.08) }
-                                }
-                                .frame(width: 150, height: 84).clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                VStack(alignment: .leading, spacing: 6) {
-                                    Text(rivuneLocalizedFormat("%d. %@", episode.episodeNumber, episode.name)).font(.headline).lineLimit(2)
-                                    if let runtime = episode.runtimeMinutes { Text(rivuneLocalizedFormat("%d min", runtime)).font(.caption).foregroundStyle(Color.white.opacity(0.64)) }
-                                    Text(episode.overview).font(.caption).foregroundStyle(Color.white.opacity(0.72)).lineLimit(2)
-                                }
-                                Spacer()
-                                Image(systemName: model.episodeProgress[episode.id]?.completed == true ? "checkmark.circle.fill" : "chevron.right")
-                            }.padding(12)
-                            if let progress = model.episodeProgress[episode.id], progress.durationSeconds > 0, !progress.completed {
-                                ProgressView(value: Double(progress.positionSeconds), total: Double(progress.durationSeconds)).tint(.accentColor)
-                            }
+        ZStack {
+            cinematicBackdrop(url: seasonBackdropURL(season))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let seriesName = model.mediaDetail?.series?.name ?? model.mediaDetail?.parentSeries?.name {
+                            Text(seriesName)
+                                .font(.headline)
+                                .foregroundStyle(Color.white.opacity(0.72))
                         }
-                        .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    }.buttonStyle(.plain)
+                        Text(season.name)
+#if os(macOS)
+                            .font(.system(size: 42, weight: .bold))
+#else
+                            .font(.largeTitle.bold())
+#endif
+                        let metadata = [
+                            season.airDate,
+                            rivuneLocalizedFormat("%d episodes", season.episodes.count),
+                            season.voteAverage > 0 ? String(format: "★ %.1f", season.voteAverage) : nil,
+                        ].compactMap { $0 }
+                        if !metadata.isEmpty {
+                            Text(metadata.joined(separator: " · "))
+                                .foregroundStyle(Color.white.opacity(0.76))
+                        }
+                    }
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 140, maximum: 240), spacing: 10)],
+                        alignment: .leading,
+                        spacing: 10
+                    ) {
+                        if let detail = model.mediaDetail, detail.target.mediaType != "episode" {
+                            Button(action: model.toggleLibrary) {
+                                Label(rivuneLocalized(detail.inLibrary ? "In library" : "Add to library"), systemImage: detail.inLibrary ? "checkmark" : "plus")
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.8)
+                                    .frame(maxWidth: .infinity, minHeight: 22, alignment: .center)
+                            }
+                            .rivuneGlassButton()
+                        }
+                        Button(action: model.toggleWatched) {
+                            let watched = !season.episodes.isEmpty && season.episodes.allSatisfy { model.episodeProgress[$0.id]?.completed == true }
+                            Label(rivuneLocalized(watched ? "Mark as unwatched" : "Mark as watched"), systemImage: watched ? "eye.slash" : "checkmark.circle")
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                                .frame(maxWidth: .infinity, minHeight: 22, alignment: .center)
+                        }
+                        .rivuneGlassButton(prominent: true)
+                        if let trailer = model.seasonTrailers.first, let url = trailerURL(trailer) {
+                            Button { openURL(url) } label: {
+                                Label("Trailer", systemImage: "play.rectangle")
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                    .frame(maxWidth: .infinity, minHeight: 22, alignment: .center)
+                            }
+                            .rivuneGlassButton()
+                        }
+                        if model.mediaActionLoading { ProgressView() }
+                    }
+                    .disabled(model.mediaActionLoading)
+                    if !season.overview.isEmpty {
+                        Text(season.overview)
+                            .foregroundStyle(Color.white.opacity(0.86))
+                            .frame(maxWidth: 780, alignment: .leading)
+                    }
+                    Text("Episodes").font(.title2.bold())
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            LazyHStack(alignment: .top, spacing: 16) {
+                                ForEach(season.episodes) { episode in
+                                    Button {
+#if os(macOS)
+                                        guard !episodeRailDrag.suppressesClicks else { return }
+#endif
+                                        model.openEpisode(episode)
+                                    } label: {
+                                        VStack(alignment: .leading, spacing: 0) {
+                                            ZStack(alignment: .bottom) {
+                                                AsyncImage(url: (episode.stillUrl ?? episode.backdropUrl).flatMap(model.resolvedResourceURL)) { phase in
+                                                    if let image = phase.image { image.resizable().scaledToFill() }
+                                                    else { Color.white.opacity(0.08) }
+                                                }
+#if os(macOS)
+                                                .frame(width: 380, height: 213.75)
+#else
+                                                .frame(width: 300, height: 168.75)
+#endif
+                                                .clipped()
+                                                if let progress = model.episodeProgress[episode.id], progress.durationSeconds > 0, !progress.completed {
+                                                    ProgressView(value: Double(progress.positionSeconds), total: Double(progress.durationSeconds))
+                                                        .tint(.accentColor)
+                                                        .frame(maxWidth: .infinity)
+                                                }
+                                            }
+                                            VStack(alignment: .leading, spacing: 8) {
+                                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                                    Text(rivuneLocalizedFormat("%d. %@", episode.episodeNumber, episode.name))
+                                                        .font(.headline)
+                                                        .lineLimit(2)
+                                                    Spacer(minLength: 4)
+                                                    if model.episodeProgress[episode.id]?.completed == true {
+                                                        Image(systemName: "checkmark.circle.fill")
+                                                            .foregroundStyle(.secondary)
+                                                    }
+                                                }
+                                                let metadata = [
+                                                    episode.runtimeMinutes.map { rivuneLocalizedFormat("%d min", $0) },
+                                                    episode.airDate,
+                                                    episode.voteAverage > 0 ? String(format: "★ %.1f", episode.voteAverage) : nil,
+                                                ].compactMap { $0 }
+                                                if !metadata.isEmpty {
+                                                    Text(metadata.joined(separator: " · "))
+                                                        .font(.caption)
+                                                        .foregroundStyle(Color.white.opacity(0.64))
+                                                        .lineLimit(1)
+                                                }
+                                                if !episode.overview.isEmpty {
+                                                    Text(episode.overview)
+                                                        .font(.caption)
+                                                        .foregroundStyle(Color.white.opacity(0.72))
+                                                        .lineLimit(3)
+                                                }
+                                            }
+                                            .padding(14)
+                                        }
+#if os(macOS)
+                                        .frame(width: 380, alignment: .leading)
+#else
+                                        .frame(width: 300, alignment: .leading)
+#endif
+                                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+#if os(macOS)
+                            .rivuneHorizontalRailContent(episodeRailDrag)
+#endif
+                        }
+#if os(macOS)
+                        .rivuneHorizontalRailDrag(episodeRailDrag)
+#endif
+                    if let failure = model.mediaFailure {
+                        Text(rivuneLocalized(failure.localizedDescription)).foregroundStyle(.red)
+                    }
                 }
-                if let failure = model.mediaFailure { Text(rivuneLocalized(failure.localizedDescription)).foregroundStyle(.red) }
+#if os(macOS)
+                .padding(.horizontal, 48)
+                .padding(.top, 112)
+                .padding(.bottom, 48)
+                .frame(maxWidth: .infinity, alignment: .leading)
+#else
+                .padding(20)
+                .frame(maxWidth: 1000, alignment: .leading)
+                .frame(maxWidth: .infinity)
+#endif
             }
-            .padding(20)
-            .frame(maxWidth: 1000, alignment: .leading)
-            .frame(maxWidth: .infinity)
         }
     }
 
@@ -345,44 +631,348 @@ struct RivuneMediaDetailView: View {
     }
 }
 
+#if os(macOS)
+private final class RivuneHorizontalRailDragController: ObservableObject {
+    private enum Axis: Equatable {
+        case horizontal
+        case vertical
+    }
+
+    private(set) var suppressesClicks = false
+
+    private weak var scrollView: NSScrollView?
+    private var axis: Axis?
+    private var dragStartX: CGFloat?
+    private var clearClickSuppression: DispatchWorkItem?
+
+    func attach(to scrollView: NSScrollView) {
+        self.scrollView = scrollView
+    }
+
+    func dragChanged(_ value: DragGesture.Value) {
+        if axis == nil {
+            axis = abs(value.translation.width) > abs(value.translation.height) ? .horizontal : .vertical
+            suppressesClicks = true
+            clearClickSuppression?.cancel()
+        }
+
+        guard axis == .horizontal, let scrollView else { return }
+        if dragStartX == nil {
+            dragStartX = scrollView.contentView.bounds.origin.x
+        }
+        guard let dragStartX else { return }
+        scroll(to: dragStartX - value.translation.width, in: scrollView)
+    }
+
+    func dragEnded(_ value: DragGesture.Value) {
+        if axis == .horizontal, let scrollView, let dragStartX {
+            let targetX = constrainedX(
+                dragStartX - value.predictedEndTranslation.width,
+                in: scrollView
+            )
+            let targetOrigin = CGPoint(x: targetX, y: scrollView.contentView.bounds.origin.y)
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.24
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                scrollView.contentView.animator().setBoundsOrigin(targetOrigin)
+            }, completionHandler: { [weak scrollView] in
+                guard let scrollView else { return }
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+            })
+        }
+
+        axis = nil
+        dragStartX = nil
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.suppressesClicks = false
+        }
+        clearClickSuppression = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: workItem)
+    }
+
+    private func scroll(to proposedX: CGFloat, in scrollView: NSScrollView) {
+        let clipView = scrollView.contentView
+        clipView.scroll(to: CGPoint(x: constrainedX(proposedX, in: scrollView), y: clipView.bounds.origin.y))
+        scrollView.reflectScrolledClipView(clipView)
+    }
+
+    private func constrainedX(_ proposedX: CGFloat, in scrollView: NSScrollView) -> CGFloat {
+        let clipView = scrollView.contentView
+        var proposedBounds = clipView.bounds
+        proposedBounds.origin.x = proposedX
+        return clipView.constrainBoundsRect(proposedBounds).origin.x
+    }
+}
+
+private struct RivuneHorizontalScrollViewResolver: NSViewRepresentable {
+    let controller: RivuneHorizontalRailDragController
+
+    func makeNSView(context: Context) -> RivuneHorizontalScrollViewResolverView {
+        let view = RivuneHorizontalScrollViewResolverView()
+        view.controller = controller
+        DispatchQueue.main.async { [weak view] in view?.resolveScrollView() }
+        return view
+    }
+
+    func updateNSView(_ nsView: RivuneHorizontalScrollViewResolverView, context: Context) {
+        nsView.controller = controller
+        DispatchQueue.main.async { [weak nsView] in nsView?.resolveScrollView() }
+    }
+}
+
+private final class RivuneHorizontalScrollViewResolverView: NSView {
+    weak var controller: RivuneHorizontalRailDragController?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        resolveScrollView()
+    }
+
+    func resolveScrollView() {
+        guard let scrollView = enclosingScrollView else { return }
+        controller?.attach(to: scrollView)
+    }
+}
+
+private struct RivuneHorizontalRailDragModifier: ViewModifier {
+    let controller: RivuneHorizontalRailDragController
+
+    func body(content: Content) -> some View {
+        content.simultaneousGesture(
+            DragGesture(minimumDistance: 8)
+                .onChanged { controller.dragChanged($0) }
+                .onEnded { controller.dragEnded($0) }
+        )
+    }
+}
+
+private extension View {
+    func rivuneHorizontalRailContent(_ controller: RivuneHorizontalRailDragController) -> some View {
+        background(RivuneHorizontalScrollViewResolver(controller: controller).allowsHitTesting(false))
+    }
+
+    func rivuneHorizontalRailDrag(_ controller: RivuneHorizontalRailDragController) -> some View {
+        modifier(RivuneHorizontalRailDragModifier(controller: controller))
+    }
+}
+#endif
+
 struct RivunePlaybackSourcesView: View {
     @ObservedObject var model: RivuneAppModel
-    @Environment(\.dismiss) private var dismiss
+    let panelMode: Bool
+    @State private var selectedAddonID: UUID? = nil
 
-    var body: some View {
-        RivuneSingleColumnNavigation {
-            List {
-                if model.mediaLoading && model.playbackSources.isEmpty { ProgressView("Finding streams…") }
-                ForEach(model.playbackSources) { source in
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text(source.name).font(.headline)
-                        if let description = source.description { Text(description).font(.caption).foregroundStyle(.secondary) }
-                        Text([source.protocol.uppercased(), source.container?.uppercased(), source.mode?.rawValue.replacingOccurrences(of: "_", with: " ").capitalized].compactMap { $0 }.joined(separator: " · ")).font(.caption2).foregroundStyle(.secondary)
-                        HStack {
-                            if model.preferredPlayer != .external {
-                                Button { model.play(source, externally: false); dismiss() } label: { Label("Play in Rivune", systemImage: "play.fill") }.buttonStyle(.borderedProminent)
-                            }
-#if !os(tvOS)
-                            if model.preferredPlayer != .rivune {
-                                Button { model.play(source, externally: true); dismiss() } label: { Label("Open in app", systemImage: "square.and.arrow.up") }.buttonStyle(.bordered)
-                            }
-#endif
-                            if !["hls", "dash"].contains(source.protocol.lowercased()) {
-                                Button { model.download(source) } label: {
-                                    Label(rivuneLocalized(model.offlineDownloadActive ? "Downloading…" : "Download"), systemImage: "arrow.down.circle")
-                                }
-                                .disabled(model.offlineDownloadActive)
-                                .buttonStyle(.bordered)
-                            }
-                        }
-                    }.padding(.vertical, 8)
-                }
-                if !model.mediaLoading && model.playbackSources.isEmpty { Text("No compatible stream was returned by your server.").foregroundStyle(.secondary) }
-            }
-            .navigationTitle("Choose a stream")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { model.closePlaybackSources(); dismiss() } } }
+    init(model: RivuneAppModel, panelMode: Bool = false) {
+        self.model = model
+        self.panelMode = panelMode
+    }
+
+    private var filteredSources: [PlaybackSourceOption] {
+        guard let selectedAddonID else { return model.playbackSources }
+        return model.playbackSources.filter { $0.addonId == selectedAddonID }
+    }
+
+    private var addonFilters: [RivunePlaybackSourceFilter] {
+        var seen = Set<UUID>()
+        return model.playbackSources.compactMap { source in
+            guard seen.insert(source.addonId).inserted else { return nil }
+            return RivunePlaybackSourceFilter(
+                id: source.addonId,
+                label: source.addonName?.nilIfEmpty ?? source.manifestId
+            )
         }
     }
+
+    var body: some View {
+        ZStack {
+            if !panelMode { Color.black.ignoresSafeArea() }
+            VStack(alignment: .leading, spacing: panelMode ? 14 : 20) {
+                header
+                if !model.playbackSources.isEmpty { filters }
+                ScrollView {
+                    sourceList
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(panelMode ? 18 : 28)
+            .frame(maxWidth: panelMode ? .infinity : 920, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .background(panelMode ? Color.black.opacity(0.46) : Color.clear)
+        }
+        .preferredColorScheme(.dark)
+        .onChange(of: model.playbackSources) { sources in
+            if let selectedAddonID, !sources.contains(where: { $0.addonId == selectedAddonID }) {
+                self.selectedAddonID = nil
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Button(action: model.closePlaybackSources) {
+                Image(systemName: "chevron.left")
+                    .foregroundStyle(.primary)
+                    .font(.headline.weight(.semibold))
+                    .frame(width: 34, height: 34)
+            }
+            .rivuneCircularButton()
+            .rivuneGlassButton()
+            VStack(alignment: .leading, spacing: panelMode ? 2 : 6) {
+                if !panelMode {
+                    Text("CHOOSE A STREAM")
+                        .font(.caption.weight(.bold))
+                        .tracking(1.6)
+                        .foregroundStyle(Color.white.opacity(0.58))
+                }
+                Text("Playback sources")
+                    .font(panelMode ? .title2.bold() : .largeTitle.bold())
+                if !panelMode {
+                    Text("Choose the quality and playback route returned by your server.")
+                        .foregroundStyle(Color.white.opacity(0.68))
+                }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var filters: some View {
+        HStack(spacing: 8) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    filterButton(label: rivuneLocalized("All"), addonID: nil)
+                    ForEach(addonFilters) { filter in
+                        filterButton(label: filter.label, addonID: filter.id)
+                    }
+                }
+            }
+            Button(action: model.loadPlaybackSources) {
+                Image(systemName: "arrow.clockwise")
+                    .frame(width: 28, height: 28)
+            }
+            .rivuneCircularButton()
+            .rivuneGlassButton()
+            .disabled(model.mediaLoading)
+            .accessibilityLabel(rivuneLocalized("Refresh sources"))
+        }
+    }
+
+    private func filterButton(label: String, addonID: UUID?) -> some View {
+        Button {
+            selectedAddonID = addonID
+        } label: {
+            HStack(spacing: 6) {
+                if selectedAddonID == addonID { Image(systemName: "checkmark") }
+                Text(label).lineLimit(1)
+            }
+        }
+        .rivuneGlassButton()
+        .accessibilityAddTraits(selectedAddonID == addonID ? .isSelected : [])
+    }
+
+    @ViewBuilder private var sourceList: some View {
+        if model.mediaLoading && model.playbackSources.isEmpty {
+            HStack(spacing: 12) {
+                ProgressView()
+                Text("Finding streams…")
+            }
+            .frame(maxWidth: .infinity, minHeight: 180)
+            .foregroundStyle(Color.white.opacity(0.72))
+        } else if model.playbackSources.isEmpty {
+            VStack(spacing: 12) {
+                Image(systemName: "play.slash").font(.largeTitle)
+                Text("No compatible stream").font(.title2.bold())
+                Text("Your server did not return a source that this device can play.")
+                    .foregroundStyle(Color.white.opacity(0.68))
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity, minHeight: 240)
+        } else if filteredSources.isEmpty {
+            Text("No sources are available from this add-on.")
+                .foregroundStyle(Color.white.opacity(0.68))
+                .frame(maxWidth: .infinity, minHeight: 160)
+        } else {
+            LazyVStack(spacing: 12) {
+                ForEach(filteredSources) { source in sourceCard(source) }
+            }
+        }
+    }
+
+    private func sourceCard(_ source: PlaybackSourceOption) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(source.name)
+                    .font(panelMode ? .headline : .title3.weight(.semibold))
+                    .foregroundStyle(.white)
+                Spacer(minLength: 12)
+                Text(source.protocol.uppercased())
+                    .font(.caption2.weight(.bold))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(Color.white.opacity(0.10), in: Capsule())
+            }
+            if let description = source.description {
+                Text(description)
+                    .font(.callout)
+                    .foregroundStyle(Color.white.opacity(0.72))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text([
+                source.addonName?.nilIfEmpty ?? source.manifestId,
+                source.container?.uppercased(),
+                source.mode?.rawValue.replacingOccurrences(of: "_", with: " ").capitalized,
+            ].compactMap { $0 }.joined(separator: " · "))
+                .font(.caption)
+                .foregroundStyle(Color.white.opacity(0.54))
+
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: panelMode ? 124 : 150), spacing: 8)],
+                alignment: .leading,
+                spacing: 8
+            ) {
+                if model.preferredPlayer != .external {
+                    Button { model.play(source, externally: false) } label: {
+                        Label("Play in Rivune", systemImage: "play.fill")
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .rivuneGlassButton(prominent: true)
+                }
+#if !os(tvOS)
+                if model.preferredPlayer != .rivune {
+                    Button { model.play(source, externally: true) } label: {
+                        Label("Open in app", systemImage: "play.rectangle.on.rectangle")
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .rivuneGlassButton()
+                }
+#endif
+                if !["hls", "dash"].contains(source.protocol.lowercased()) {
+                    Button { model.download(source) } label: {
+                        Label(
+                            rivuneLocalized(model.isDownloading(source) ? "Downloading…" : "Download"),
+                            systemImage: "arrow.down.circle"
+                        )
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                    }
+                    .disabled(model.offlineDownloadActive)
+                    .rivuneGlassButton()
+                }
+            }
+        }
+        .padding(panelMode ? 14 : 18)
+        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+        }
+    }
+}
+
+private struct RivunePlaybackSourceFilter: Identifiable {
+    let id: UUID
+    let label: String
 }
 
 struct RivuneInternalPlayerView: View {
@@ -396,6 +986,220 @@ struct RivuneInternalPlayerView: View {
         } else {
             RivuneNativeInternalPlayerView(presentation: active, model: model)
         }
+    }
+}
+
+private struct RivunePlayerChrome<Options: View>: View {
+    let title: String
+    let badge: String?
+    let playing: Bool
+    @Binding private var position: Double
+    let duration: Double
+    let close: () -> Void
+    let minimize: () -> Void
+    let seekBackward: () -> Void
+    let togglePlayback: () -> Void
+    let seekForward: () -> Void
+    let scrubbingChanged: (Bool) -> Void
+    let options: Options
+
+    init(
+        title: String,
+        badge: String? = nil,
+        playing: Bool,
+        position: Binding<Double>,
+        duration: Double,
+        close: @escaping () -> Void,
+        minimize: @escaping () -> Void,
+        seekBackward: @escaping () -> Void,
+        togglePlayback: @escaping () -> Void,
+        seekForward: @escaping () -> Void,
+        scrubbingChanged: @escaping (Bool) -> Void,
+        @ViewBuilder options: () -> Options
+    ) {
+        self.title = title
+        self.badge = badge
+        self.playing = playing
+        _position = position
+        self.duration = duration
+        self.close = close
+        self.minimize = minimize
+        self.seekBackward = seekBackward
+        self.togglePlayback = togglePlayback
+        self.seekForward = seekForward
+        self.scrubbingChanged = scrubbingChanged
+        self.options = options()
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                playerButton(systemImage: "xmark", label: "Close player", action: close)
+                Text(title)
+                    .font(.headline)
+                    .lineLimit(1)
+                if let badge {
+                    Text(badge)
+                        .font(.caption2.weight(.bold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.thinMaterial, in: Capsule())
+                }
+                Spacer(minLength: 12)
+                playerButton(systemImage: "pip.enter", label: "Mini player", action: minimize)
+            }
+            .padding(.horizontal, 22)
+            .padding(.top, 18)
+
+            Spacer()
+
+            HStack(spacing: 20) {
+                transportButton(systemImage: "gobackward.10", label: "Back 10 seconds", action: seekBackward)
+                Button(action: togglePlayback) {
+                    Image(systemName: playing ? "pause.fill" : "play.fill")
+                        .font(.system(size: 29, weight: .bold))
+                        .frame(width: 66, height: 66)
+                }
+                .rivuneCircularButton()
+                .rivuneGlassButton()
+                .accessibilityLabel(rivuneLocalized(playing ? "Pause" : "Play"))
+                transportButton(systemImage: "goforward.10", label: "Forward 10 seconds", action: seekForward)
+            }
+
+            Spacer()
+
+            VStack(spacing: 10) {
+#if os(tvOS)
+                GeometryReader { proxy in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.white.opacity(0.24))
+                        Capsule()
+                            .fill(Color.white.opacity(0.88))
+                            .frame(width: proxy.size.width * min(max(position / max(duration, 1), 0), 1))
+                    }
+                }
+                .frame(height: 8)
+#else
+                Slider(value: $position, in: 0...max(duration, 1), onEditingChanged: scrubbingChanged)
+                    .tint(.white)
+#endif
+                HStack {
+                    Text(formatTime(position))
+                    Spacer()
+                    Text("−\(formatTime(max(duration - position, 0)))")
+                }
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(Color.white.opacity(0.82))
+
+                HStack(spacing: 10) {
+                    options
+                }
+                .font(.subheadline.weight(.semibold))
+                .rivunePlayerOptionsContainer()
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 20)
+        }
+    }
+
+    private func playerButton(systemImage: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.headline)
+                .frame(width: 34, height: 34)
+        }
+        .rivuneCircularButton()
+        .rivuneGlassButton()
+        .accessibilityLabel(rivuneLocalized(label))
+    }
+
+    private func transportButton(systemImage: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 24, weight: .semibold))
+                .frame(width: 50, height: 50)
+        }
+        .rivuneCircularButton()
+        .rivuneGlassButton()
+        .accessibilityLabel(rivuneLocalized(label))
+    }
+
+    private func formatTime(_ value: Double) -> String {
+        let seconds = max(Int(value.isFinite ? value : 0), 0)
+        let hours = seconds / 3600
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, seconds / 60 % 60, seconds % 60)
+            : String(format: "%02d:%02d", seconds / 60, seconds % 60)
+    }
+}
+
+private struct RivunePlayerOptionControlModifier: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+#if os(macOS)
+        content
+            .buttonStyle(.plain)
+            .frame(width: 36, height: 30)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.white.opacity(0.14), lineWidth: 1)
+            }
+#else
+        content
+#endif
+    }
+}
+
+private struct RivuneMiniPlayerControlModifier: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+#if os(macOS)
+        content.rivuneGlassButton()
+#else
+        content.buttonStyle(.plain)
+#endif
+    }
+}
+
+private struct RivunePlayerActionButtonModifier: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+#if os(macOS)
+        content.rivuneGlassButton()
+#else
+        content.rivuneGlassButton(prominent: true)
+#endif
+    }
+}
+
+private struct RivunePlayerOptionsContainerModifier: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+#if os(macOS)
+        content
+#else
+        content.rivuneGlassButton()
+#endif
+    }
+}
+
+private extension View {
+    func rivunePlayerOptionControl() -> some View {
+        modifier(RivunePlayerOptionControlModifier())
+    }
+
+    func rivunePlayerOptionsContainer() -> some View {
+        modifier(RivunePlayerOptionsContainerModifier())
+    }
+
+    func rivuneMiniPlayerControl() -> some View {
+        modifier(RivuneMiniPlayerControlModifier())
+    }
+
+    func rivunePlayerActionButton() -> some View {
+        modifier(RivunePlayerActionButtonModifier())
     }
 }
 
@@ -445,34 +1249,35 @@ private struct RivuneNativeInternalPlayerView: View {
             Color.clear.contentShape(Rectangle()).onTapGesture { revealControls() }
 #endif
             if controlsVisible {
-                LinearGradient(colors: [.black.opacity(0.72), .clear, .black.opacity(0.84)], startPoint: .top, endPoint: .bottom).ignoresSafeArea()
-                VStack(spacing: 0) {
-                    HStack(spacing: 16) {
-                        Button { finish(completed: false) } label: {
-                            Image(systemName: "xmark").font(.headline).frame(width: 44, height: 44).background(.ultraThinMaterial, in: Circle())
+                LinearGradient(
+                    colors: [.black.opacity(0.68), .clear, .black.opacity(0.78)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea()
+                RivunePlayerChrome(
+                    title: activePresentation.title,
+                    playing: playing,
+                    position: Binding(get: { position }, set: { position = $0 }),
+                    duration: duration,
+                    close: { finish(completed: false) },
+                    minimize: minimize,
+                    seekBackward: { seek(by: -10) },
+                    togglePlayback: togglePlayback,
+                    seekForward: { seek(by: 10) },
+                    scrubbingChanged: { editing in
+                        scrubbing = editing
+                        if !editing {
+                            player.seek(
+                                to: CMTime(seconds: position, preferredTimescale: 600),
+                                toleranceBefore: .zero,
+                                toleranceAfter: .zero
+                            )
+                            scheduleControlsHide()
                         }
-                        .accessibilityLabel("Close player")
-                        Text(activePresentation.title).font(.headline).lineLimit(1)
-                        Spacer()
-                        Button { minimize() } label: {
-                            Image(systemName: "pip.enter").font(.headline).frame(width: 44, height: 44).background(.ultraThinMaterial, in: Circle())
-                        }
-                        .accessibilityLabel("Mini player")
                     }
-                    .padding(.horizontal, 22).padding(.top, 14)
-                    Spacer()
-                    HStack(spacing: 38) {
-                        Button { seek(by: -10) } label: { Image(systemName: "gobackward.10").font(.system(size: 30, weight: .semibold)) }.accessibilityLabel(rivuneLocalized("Back 10 seconds"))
-                        Button { togglePlayback() } label: {
-                            Image(systemName: playing ? "pause.fill" : "play.fill")
-                                .font(.system(size: 34, weight: .bold)).frame(width: 68, height: 68).background(.ultraThinMaterial, in: Circle())
-                        }
-                        .accessibilityLabel(rivuneLocalized(playing ? "Pause" : "Play"))
-                        Button { seek(by: 10) } label: { Image(systemName: "goforward.10").font(.system(size: 30, weight: .semibold)) }.accessibilityLabel(rivuneLocalized("Forward 10 seconds"))
-                    }
-                    .buttonStyle(.plain)
-                    Spacer()
-                    HStack(spacing: 12) {
+                ) {
+                    Group {
 #if os(tvOS)
                         Button { cycleAudio() } label: { Label("Audio", systemImage: "speaker.wave.2") }
                         Button { cycleSubtitle() } label: { Label("Subtitles", systemImage: "captions.bubble") }
@@ -487,41 +1292,56 @@ private struct RivuneNativeInternalPlayerView: View {
                                 Button {
                                     changeServerOptions(audioTrack: track.index, subtitleId: activePresentation.selectedSubtitleId)
                                 } label: {
-                                    if activePresentation.selectedAudioTrack == track.index { Label(trackLabel(track), systemImage: "checkmark") }
-                                    else { Text(trackLabel(track)) }
+                                    if activePresentation.selectedAudioTrack == track.index {
+                                        Label(trackLabel(track), systemImage: "checkmark")
+                                    } else {
+                                        Text(trackLabel(track))
+                                    }
                                 }
                             }
                             ForEach(Array(audioOptions.enumerated()), id: \.offset) { _, option in
                                 Button(option.displayName) { select(option, in: audioGroup) }
                             }
                         } label: {
-                            Image(systemName: "speaker.wave.2").frame(minWidth: 24)
+                            Image(systemName: "speaker.wave.2")
+                                .foregroundStyle(.white)
+                                .frame(width: 28, height: 28)
                                 .accessibilityLabel(rivuneLocalized("Audio"))
                         }
+                        .rivunePlayerOptionControl()
 
                         Menu {
                             Button {
                                 changeServerOptions(audioTrack: activePresentation.selectedAudioTrack, subtitleId: "none")
                                 select(nil, in: subtitleGroup)
                             } label: {
-                                if activePresentation.selectedSubtitleId == nil || activePresentation.selectedSubtitleId == "none" { Label("Off", systemImage: "checkmark") }
-                                else { Text("Off") }
+                                if activePresentation.selectedSubtitleId == nil || activePresentation.selectedSubtitleId == "none" {
+                                    Label("Off", systemImage: "checkmark")
+                                } else {
+                                    Text("Off")
+                                }
                             }
                             ForEach(activePresentation.subtitles) { subtitle in
                                 Button {
                                     changeServerOptions(audioTrack: activePresentation.selectedAudioTrack, subtitleId: subtitle.id)
                                 } label: {
-                                    if activePresentation.selectedSubtitleId == subtitle.id { Label(subtitleLabel(subtitle), systemImage: "checkmark") }
-                                    else { Text(subtitleLabel(subtitle)) }
+                                    if activePresentation.selectedSubtitleId == subtitle.id {
+                                        Label(subtitleLabel(subtitle), systemImage: "checkmark")
+                                    } else {
+                                        Text(subtitleLabel(subtitle))
+                                    }
                                 }
                             }
                             ForEach(Array(subtitleOptions.enumerated()), id: \.offset) { _, option in
                                 Button(option.displayName) { select(option, in: subtitleGroup) }
                             }
                         } label: {
-                            Image(systemName: "captions.bubble").frame(minWidth: 24)
+                            Image(systemName: "captions.bubble")
+                                .foregroundStyle(.white)
+                                .frame(width: 28, height: 28)
                                 .accessibilityLabel(rivuneLocalized("Subtitles"))
                         }
+                        .rivunePlayerOptionControl()
 
                         Menu {
                             ForEach(RivuneVideoAspect.allCases) { aspect in
@@ -529,66 +1349,47 @@ private struct RivuneNativeInternalPlayerView: View {
                                     sessionAspect = aspect
                                     scheduleControlsHide()
                                 } label: {
-                                    if sessionAspect == aspect { Label(rivuneLocalized(aspect.displayName), systemImage: "checkmark") }
-                                    else { Text(rivuneLocalized(aspect.displayName)) }
+                                    if sessionAspect == aspect {
+                                        Label(rivuneLocalized(aspect.displayName), systemImage: "checkmark")
+                                    } else {
+                                        Text(rivuneLocalized(aspect.displayName))
+                                    }
                                 }
                             }
                         } label: {
-                            Label(rivuneLocalized(sessionAspect.displayName), systemImage: "aspectratio")
+                            Image(systemName: "aspectratio")
+                                .foregroundStyle(.white)
+                                .frame(width: 28, height: 28)
+                                .accessibilityLabel(rivuneLocalized(sessionAspect.displayName))
                         }
+                        .rivunePlayerOptionControl()
 
                         Menu {
                             ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { speed in
-                                Button(speed == 1 ? rivuneLocalized("Normal") : "\(speed.formatted())×") { setSpeed(speed) }
+                                Button(speed == 1 ? rivuneLocalized("Normal") : "\(speed.formatted())×") {
+                                    setSpeed(speed)
+                                }
                             }
                         } label: {
-                            Label(playbackSpeed == 1 ? "1×" : "\(playbackSpeed.formatted())×", systemImage: "speedometer")
+                            Image(systemName: "speedometer")
+                                .foregroundStyle(.white)
+                                .frame(width: 28, height: 28)
+                                .accessibilityLabel(playbackSpeed == 1 ? "1×" : "\(playbackSpeed.formatted())×")
                         }
+                        .rivunePlayerOptionControl()
 #endif
                     }
                     .disabled(model.playbackOptionLoading)
-                    .font(.subheadline.weight(.semibold))
-                    .buttonStyle(.bordered)
-                    .padding(.horizontal, 28).padding(.bottom, 14)
-                    VStack(spacing: 8) {
-#if os(tvOS)
-                        GeometryReader { proxy in
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(Color.white.opacity(0.28))
-                                Capsule().fill(Color.accentColor).frame(width: proxy.size.width * min(max(position / max(duration, 1), 0), 1))
-                            }
-                        }.frame(height: 8)
-#else
-                        Slider(
-                            value: Binding(get: { position }, set: { position = $0 }),
-                            in: 0...max(duration, 1),
-                            onEditingChanged: { editing in
-                                scrubbing = editing
-                                if !editing {
-                                    player.seek(to: CMTime(seconds: position, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
-                                    scheduleControlsHide()
-                                }
-                            }
-                        )
-#endif
-                        HStack {
-                            Text(formatTime(position))
-                            Spacer()
-                            Text("−\(formatTime(max(duration - position, 0)))  /  \(formatTime(duration))")
-                        }
-                        .font(.caption.monospacedDigit()).foregroundStyle(Color.white.opacity(0.82))
-                    }
-                    .padding(.horizontal, 28).padding(.bottom, 22)
                 }
                 .transition(.opacity)
             }
             if let marker = activeMarker {
                 Button { skip(marker) } label: {
                     Label(skipTitle(marker.type), systemImage: "forward.fill")
-                        .font(.headline).padding(.horizontal, 18).padding(.vertical, 12)
-                        .background(.ultraThinMaterial, in: Capsule())
+                        .font(.headline)
+                        .padding(.horizontal, 8)
                 }
-                .buttonStyle(.plain)
+                .rivunePlayerActionButton()
                 .padding(24)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
             }
@@ -908,35 +1709,32 @@ private struct RivuneMPVInternalPlayerView: View {
             Color.clear.contentShape(Rectangle()).onTapGesture { revealControls() }
 #endif
             if controlsVisible {
-                LinearGradient(colors: [.black.opacity(0.72), .clear, .black.opacity(0.84)], startPoint: .top, endPoint: .bottom).ignoresSafeArea()
-                VStack(spacing: 0) {
-                    HStack(spacing: 16) {
-                        Button { finish(completed: false) } label: {
-                            Image(systemName: "xmark").font(.headline).frame(width: 44, height: 44).background(.ultraThinMaterial, in: Circle())
-                        }
-                        .accessibilityLabel("Close player")
-                        Text(activePresentation.title).font(.headline).lineLimit(1)
-                        Text("MPV").font(.caption2.weight(.bold)).padding(.horizontal, 8).padding(.vertical, 4).background(.ultraThinMaterial, in: Capsule())
-                        Spacer()
-                        Button { minimize() } label: {
-                            Image(systemName: "pip.enter").font(.headline).frame(width: 44, height: 44).background(.ultraThinMaterial, in: Circle())
-                        }
-                        .accessibilityLabel("Mini player")
+                LinearGradient(
+                    colors: [.black.opacity(0.68), .clear, .black.opacity(0.78)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea()
+                RivunePlayerChrome(
+                    title: activePresentation.title,
+                    badge: "MPV",
+                    playing: player.playing,
+                    position: Binding(
+                        get: { player.position },
+                        set: { if !$0.isNaN { player.seek(to: $0) } }
+                    ),
+                    duration: player.duration,
+                    close: { finish(completed: false) },
+                    minimize: minimize,
+                    seekBackward: { seek(by: -10) },
+                    togglePlayback: togglePlayback,
+                    seekForward: { seek(by: 10) },
+                    scrubbingChanged: { editing in
+                        scrubbing = editing
+                        if !editing { scheduleControlsHide() }
                     }
-                    .padding(.horizontal, 22).padding(.top, 14)
-                    Spacer()
-                    HStack(spacing: 38) {
-                        Button { seek(by: -10) } label: { Image(systemName: "gobackward.10").font(.system(size: 30, weight: .semibold)) }.accessibilityLabel(rivuneLocalized("Back 10 seconds"))
-                        Button { togglePlayback() } label: {
-                            Image(systemName: player.playing ? "pause.fill" : "play.fill")
-                                .font(.system(size: 34, weight: .bold)).frame(width: 68, height: 68).background(.ultraThinMaterial, in: Circle())
-                        }
-                        .accessibilityLabel(rivuneLocalized(player.playing ? "Pause" : "Play"))
-                        Button { seek(by: 10) } label: { Image(systemName: "goforward.10").font(.system(size: 30, weight: .semibold)) }.accessibilityLabel(rivuneLocalized("Forward 10 seconds"))
-                    }
-                    .buttonStyle(.plain)
-                    Spacer()
-                    HStack(spacing: 12) {
+                ) {
+                    Group {
 #if os(tvOS)
                         Button { cycleAudio() } label: { Label("Audio", systemImage: "speaker.wave.2") }
                         Button { cycleSubtitle() } label: { Label("Subtitles", systemImage: "captions.bubble") }
@@ -951,68 +1749,82 @@ private struct RivuneMPVInternalPlayerView: View {
                                     player.selectAudio(streamIndex: track.index)
                                     scheduleControlsHide()
                                 } label: {
-                                    if selectedAudioTrack == track.index { Label(trackLabel(track), systemImage: "checkmark") }
-                                    else { Text(trackLabel(track)) }
+                                    if selectedAudioTrack == track.index {
+                                        Label(trackLabel(track), systemImage: "checkmark")
+                                    } else {
+                                        Text(trackLabel(track))
+                                    }
                                 }
                             }
-                        } label: { Image(systemName: "speaker.wave.2").frame(minWidth: 24).accessibilityLabel(rivuneLocalized("Audio")) }
+                        } label: {
+                            Image(systemName: "speaker.wave.2")
+                                .foregroundStyle(.white)
+                                .frame(width: 28, height: 28)
+                                .accessibilityLabel(rivuneLocalized("Audio"))
+                        }
+                        .rivunePlayerOptionControl()
 
                         Menu {
                             Button { selectSubtitle(nil) } label: {
-                                if selectedSubtitleId == nil || selectedSubtitleId == "none" { Label("Off", systemImage: "checkmark") }
-                                else { Text("Off") }
+                                if selectedSubtitleId == nil || selectedSubtitleId == "none" {
+                                    Label("Off", systemImage: "checkmark")
+                                } else {
+                                    Text("Off")
+                                }
                             }
                             ForEach(activePresentation.subtitles) { subtitle in
                                 Button { selectSubtitle(subtitle) } label: {
-                                    if selectedSubtitleId == subtitle.id { Label(subtitleLabel(subtitle), systemImage: "checkmark") }
-                                    else { Text(subtitleLabel(subtitle)) }
+                                    if selectedSubtitleId == subtitle.id {
+                                        Label(subtitleLabel(subtitle), systemImage: "checkmark")
+                                    } else {
+                                        Text(subtitleLabel(subtitle))
+                                    }
                                 }
                             }
-                        } label: { Image(systemName: "captions.bubble").frame(minWidth: 24).accessibilityLabel(rivuneLocalized("Subtitles")) }
+                        } label: {
+                            Image(systemName: "captions.bubble")
+                                .foregroundStyle(.white)
+                                .frame(width: 28, height: 28)
+                                .accessibilityLabel(rivuneLocalized("Subtitles"))
+                        }
+                        .rivunePlayerOptionControl()
 
                         Menu {
                             ForEach(RivuneVideoAspect.allCases) { aspect in
-                                Button { sessionAspect = aspect; scheduleControlsHide() } label: {
-                                    if sessionAspect == aspect { Label(rivuneLocalized(aspect.displayName), systemImage: "checkmark") }
-                                    else { Text(rivuneLocalized(aspect.displayName)) }
+                                Button {
+                                    sessionAspect = aspect
+                                    scheduleControlsHide()
+                                } label: {
+                                    if sessionAspect == aspect {
+                                        Label(rivuneLocalized(aspect.displayName), systemImage: "checkmark")
+                                    } else {
+                                        Text(rivuneLocalized(aspect.displayName))
+                                    }
                                 }
                             }
-                        } label: { Label(rivuneLocalized(sessionAspect.displayName), systemImage: "aspectratio") }
+                        } label: {
+                            Image(systemName: "aspectratio")
+                                .foregroundStyle(.white)
+                                .frame(width: 28, height: 28)
+                                .accessibilityLabel(rivuneLocalized(sessionAspect.displayName))
+                        }
+                        .rivunePlayerOptionControl()
 
                         Menu {
                             ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { speed in
-                                Button(speed == 1 ? rivuneLocalized("Normal") : "\(speed.formatted())×") { setSpeed(speed) }
+                                Button(speed == 1 ? rivuneLocalized("Normal") : "\(speed.formatted())×") {
+                                    setSpeed(speed)
+                                }
                             }
-                        } label: { Label(playbackSpeed == 1 ? "1×" : "\(playbackSpeed.formatted())×", systemImage: "speedometer") }
-#endif
-                    }
-                    .font(.subheadline.weight(.semibold)).buttonStyle(.bordered)
-                    .padding(.horizontal, 28).padding(.bottom, 14)
-                    VStack(spacing: 8) {
-#if os(tvOS)
-                        GeometryReader { proxy in
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(Color.white.opacity(0.28))
-                                Capsule().fill(Color.accentColor).frame(width: proxy.size.width * min(max(player.position / max(player.duration, 1), 0), 1))
-                            }
-                        }.frame(height: 8)
-#else
-                        Slider(value: Binding(
-                            get: { player.position },
-                            set: { if !$0.isNaN { player.seek(to: $0) } }
-                        ), in: 0...max(player.duration, 1), onEditingChanged: { editing in
-                            scrubbing = editing
-                            if !editing { scheduleControlsHide() }
-                        })
-#endif
-                        HStack {
-                            Text(formatTime(player.position))
-                            Spacer()
-                            Text("−\(formatTime(max(player.duration - player.position, 0)))  /  \(formatTime(player.duration))")
+                        } label: {
+                            Image(systemName: "speedometer")
+                                .foregroundStyle(.white)
+                                .frame(width: 28, height: 28)
+                                .accessibilityLabel(playbackSpeed == 1 ? "1×" : "\(playbackSpeed.formatted())×")
                         }
-                        .font(.caption.monospacedDigit()).foregroundStyle(Color.white.opacity(0.82))
+                        .rivunePlayerOptionControl()
+#endif
                     }
-                    .padding(.horizontal, 28).padding(.bottom, 22)
                 }
                 .transition(.opacity)
             }
@@ -1022,9 +1834,12 @@ private struct RivuneMPVInternalPlayerView: View {
             if let marker = activeMarker {
                 Button { skip(marker) } label: {
                     Label(skipTitle(marker.type), systemImage: "forward.fill")
-                        .font(.headline).padding(.horizontal, 18).padding(.vertical, 12).background(.ultraThinMaterial, in: Capsule())
+                        .font(.headline)
+                        .padding(.horizontal, 8)
                 }
-                .buttonStyle(.plain).padding(24).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .rivunePlayerActionButton()
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
             }
             if let failureMessage {
                 RivunePlaybackFailureView(
@@ -1247,8 +2062,8 @@ private struct RivunePlaybackFailureView: View {
                 .textSelection(.enabled)
 #endif
             HStack(spacing: 12) {
-                Button("Close", action: close).buttonStyle(.bordered)
-                Button("Try again", action: retry).buttonStyle(.borderedProminent)
+                Button("Close", action: close).rivuneGlassButton()
+                Button("Try again", action: retry).rivunePlayerActionButton()
             }
         }
         .padding(26).frame(maxWidth: 520)
@@ -1294,24 +2109,26 @@ private struct RivuneNativeMiniPlayerView: View {
                     Text(presentation.title).font(.caption.weight(.semibold)).lineLimit(1)
                     Spacer()
                     Button { finish(completed: false) } label: { Image(systemName: "xmark") }
+                        .rivuneMiniPlayerControl()
                         .accessibilityLabel("Close player")
                 }
                 Spacer()
                 HStack(spacing: 18) {
                     Button { togglePlayback() } label: { Image(systemName: playing ? "pause.fill" : "play.fill").font(.title2) }
+                        .rivuneMiniPlayerControl()
                         .accessibilityLabel(rivuneLocalized(playing ? "Pause" : "Play"))
                     Spacer()
                     Button { restore() } label: { Image(systemName: "pip.exit").font(.title3) }
+                        .rivuneMiniPlayerControl()
                         .accessibilityLabel(rivuneLocalized("Return to full player"))
                 }
             }
-            .buttonStyle(.plain)
             .padding(12)
             if let failureMessage {
                 VStack(spacing: 8) {
                     Text("Playback failed").font(.caption.bold())
                     Text(rivuneLocalized(failureMessage)).font(.caption2).lineLimit(3).multilineTextAlignment(.center)
-                    Button("Try again") { self.failureMessage = nil; loadAttempt += 1 }.buttonStyle(.borderedProminent)
+                    Button("Try again") { self.failureMessage = nil; loadAttempt += 1 }.rivunePlayerActionButton()
                 }
                 .padding(12).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)).padding(8)
             }
@@ -1447,22 +2264,26 @@ private struct RivuneMPVMiniPlayerView: View {
                     Text("MPV").font(.system(size: 8, weight: .bold)).padding(.horizontal, 5).padding(.vertical, 2).background(.ultraThinMaterial, in: Capsule())
                     Spacer()
                     Button { finish(completed: false) } label: { Image(systemName: "xmark") }
+                        .rivuneMiniPlayerControl()
                         .accessibilityLabel("Close player")
                 }
                 Spacer()
                 HStack(spacing: 18) {
                     Button { player.playing ? player.pause() : player.play() } label: { Image(systemName: player.playing ? "pause.fill" : "play.fill").font(.title2) }
+                        .rivuneMiniPlayerControl()
                         .accessibilityLabel(rivuneLocalized(player.playing ? "Pause" : "Play"))
                     Spacer()
-                    Button { restore() } label: { Image(systemName: "pip.exit").font(.title3) }.accessibilityLabel(rivuneLocalized("Return to full player"))
+                    Button { restore() } label: { Image(systemName: "pip.exit").font(.title3) }
+                        .rivuneMiniPlayerControl()
+                        .accessibilityLabel(rivuneLocalized("Return to full player"))
                 }
             }
-            .buttonStyle(.plain).padding(12)
+            .padding(12)
             if let failureMessage {
                 VStack(spacing: 8) {
                     Text("Playback failed").font(.caption.bold())
                     Text(rivuneLocalized(failureMessage)).font(.caption2).lineLimit(3).multilineTextAlignment(.center)
-                    Button("Try again") { self.failureMessage = nil; loadAttempt += 1 }.buttonStyle(.borderedProminent)
+                    Button("Try again") { self.failureMessage = nil; loadAttempt += 1 }.rivunePlayerActionButton()
                 }
                 .padding(12).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)).padding(8)
             }
@@ -1578,6 +2399,195 @@ struct RivuneExternalPlaybackSheet: UIViewControllerRepresentable {
 }
 #endif
 #elseif canImport(AppKit)
+private struct RivuneExternalApplicationPicker: View {
+    let url: URL
+    let cancel: () -> Void
+    let opened: () -> Void
+    @State private var errorMessage: String?
+
+    private var applications: [RivuneExternalApplication] {
+        RivuneExternalApplication.discover(for: url)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: "play.rectangle.on.rectangle")
+                    .font(.title2)
+                    .frame(width: 36, height: 36)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Open in a player").font(.title2.bold())
+                    Text("Choose which installed video app should open this stream.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if applications.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "play.slash").font(.largeTitle)
+                    Text("No video player found").font(.headline)
+                    Text("Choose another application installed on this Mac.")
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 150)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(applications) { application in
+                            Button { open(url, with: application) } label: {
+                                HStack(spacing: 12) {
+                                    Image(nsImage: application.icon)
+                                        .resizable()
+                                        .frame(width: 34, height: 34)
+                                    Text(application.name)
+                                        .font(.headline)
+                                    Spacer()
+                                    Image(systemName: "arrow.up.forward.app")
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.horizontal, 12)
+                                .frame(maxWidth: .infinity, minHeight: 52)
+                            }
+                            .buttonStyle(.plain)
+                            .contentShape(Rectangle())
+                            .accessibilityLabel(rivuneLocalizedFormat("Open in %@", application.name))
+                        }
+                    }
+                }
+                .frame(maxHeight: 320)
+            }
+
+            Divider()
+            HStack {
+                Button("Cancel", role: .cancel, action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                    .rivuneGlassButton()
+                Spacer()
+                Button(action: chooseApplication) {
+                    Label("Choose Application…", systemImage: "folder.badge.plus")
+                }
+                .rivuneGlassButton()
+            }
+        }
+        .padding(24)
+        .frame(minWidth: 430, idealWidth: 500, minHeight: 260)
+        .alert("Could not open player", isPresented: Binding(
+            get: { errorMessage != nil },
+            set: { if !$0 { errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { errorMessage = nil }
+        } message: {
+            Text(errorMessage ?? "")
+        }
+    }
+
+    private func chooseApplication() {
+        let panel = NSOpenPanel()
+        panel.title = rivuneLocalized("Choose a video player")
+        panel.prompt = rivuneLocalized("Open")
+        panel.message = rivuneLocalized("Select an application to open this stream.")
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.begin { response in
+            guard response == .OK, let applicationURL = panel.url else { return }
+            let application = RivuneExternalApplication(url: applicationURL)
+            guard application.bundleIdentifier != Bundle.main.bundleIdentifier else {
+                errorMessage = rivuneLocalized("Choose an application other than Rivune.")
+                return
+            }
+            open(url, with: application)
+        }
+    }
+
+    private func open(_ streamURL: URL, with application: RivuneExternalApplication) {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.open(
+            [streamURL],
+            withApplicationAt: application.url,
+            configuration: configuration
+        ) { _, error in
+            DispatchQueue.main.async {
+                if let error {
+                    errorMessage = error.localizedDescription
+                } else {
+                    opened()
+                }
+            }
+        }
+    }
+}
+
+private struct RivuneExternalApplication: Identifiable {
+    let url: URL
+    let name: String
+    let bundleIdentifier: String?
+    let icon: NSImage
+
+    var id: String { url.standardizedFileURL.path }
+
+    init(url: URL) {
+        self.url = url
+        let bundle = Bundle(url: url)
+        bundleIdentifier = bundle?.bundleIdentifier
+        name = (bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)?.nilIfEmpty
+            ?? (bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String)?.nilIfEmpty
+            ?? url.deletingPathExtension().lastPathComponent
+        icon = NSWorkspace.shared.icon(forFile: url.path)
+    }
+
+    static func discover(for streamURL: URL) -> [Self] {
+        let workspace = NSWorkspace.shared
+        let knownBundleIDs = [
+            "com.colliderli.iina",
+            "org.videolan.vlc",
+            "io.mpv",
+            "com.firecore.infuse",
+            "com.firecore.infuse.mac",
+            "com.apple.QuickTimePlayerX",
+            "com.movist.Movist",
+            "com.movist.MovistPro",
+        ]
+        let browserBundleIDs: Set<String> = [
+            "com.apple.Safari", "com.google.Chrome", "org.mozilla.firefox",
+            "com.microsoft.edgemac", "com.brave.Browser", "company.thebrowser.Browser",
+            "com.operasoftware.Opera", "com.vivaldi.Vivaldi",
+        ]
+        let videoNameFragments = ["iina", "vlc", "mpv", "infuse", "quicktime", "movist", "elmedia", "optimus", "mplayer", "plex"]
+        let knownApplicationNames = ["IINA.app", "VLC.app", "mpv.app", "Infuse.app", "Movist.app", "Movist Pro.app", "Elmedia Player.app"]
+        var candidates = knownBundleIDs.compactMap { workspace.urlForApplication(withBundleIdentifier: $0) }
+        let applicationDirectories = FileManager.default.urls(for: .applicationDirectory, in: .allDomainsMask)
+        for directory in applicationDirectories {
+            candidates.append(contentsOf: knownApplicationNames.compactMap { name in
+                let candidate = directory.appendingPathComponent(name, isDirectory: true)
+                return FileManager.default.fileExists(atPath: candidate.path) ? candidate : nil
+            })
+        }
+        candidates.append(contentsOf: workspace.urlsForApplications(toOpen: streamURL))
+
+        var seen = Set<String>()
+        return candidates.compactMap { applicationURL -> Self? in
+            let application = Self(url: applicationURL)
+            guard seen.insert(application.id).inserted,
+                  application.bundleIdentifier != Bundle.main.bundleIdentifier,
+                  application.url.standardizedFileURL != Bundle.main.bundleURL.standardizedFileURL,
+                  !browserBundleIDs.contains(application.bundleIdentifier ?? "") else { return nil }
+            let normalizedName = application.name.lowercased()
+            let recognized = application.bundleIdentifier.map { knownBundleIDs.contains($0) } == true
+                || videoNameFragments.contains(where: normalizedName.contains)
+            return recognized ? application : nil
+        }
+        .sorted { lhs, rhs in
+            let leftPriority = lhs.bundleIdentifier.flatMap { knownBundleIDs.firstIndex(of: $0) } ?? knownBundleIDs.count
+            let rightPriority = rhs.bundleIdentifier.flatMap { knownBundleIDs.firstIndex(of: $0) } ?? knownBundleIDs.count
+            return leftPriority == rightPriority
+                ? lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+                : leftPriority < rightPriority
+        }
+    }
+}
+
 private struct RivuneNativePlayer: NSViewRepresentable {
     let player: AVPlayer
     let aspect: RivuneVideoAspect
@@ -1594,7 +2604,7 @@ extension View {
         @ViewBuilder content: @escaping (RivunePlaybackPresentation) -> Content
     ) -> some View {
 #if os(macOS)
-        sheet(item: item, content: content)
+        self
 #else
         fullScreenCover(item: item, content: content)
 #endif

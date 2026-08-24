@@ -118,6 +118,74 @@ actor OrderedCredentialStore {
     }
 }
 
+#if DEBUG && os(macOS)
+actor DebugFileCredentialStore: CredentialStore {
+    private struct PersistedCredentials: Codable {
+        let issuer: String
+        let credentials: StoredCredentials
+    }
+
+    private let directory: URL
+
+    init() {
+        let applicationSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first!
+        directory = applicationSupport
+            .appendingPathComponent("Rivune", isDirectory: true)
+            .appendingPathComponent("DebugCredentials", isDirectory: true)
+    }
+
+    init(directory: URL) {
+        self.directory = directory
+    }
+
+    func load(for issuer: URL) async throws -> StoredCredentials? {
+        let url = credentialURL(for: issuer)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let data = try Data(contentsOf: url)
+        guard let persisted = try? JSONDecoder().decode(PersistedCredentials.self, from: data),
+              persisted.issuer == issuer.absoluteString else {
+            try FileManager.default.removeItem(at: url)
+            return nil
+        }
+        return persisted.credentials
+    }
+
+    func save(_ credentials: StoredCredentials, for issuer: URL) async throws {
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        let data = try JSONEncoder().encode(
+            PersistedCredentials(issuer: issuer.absoluteString, credentials: credentials)
+        )
+        let url = credentialURL(for: issuer)
+        try data.write(to: url, options: .atomic)
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    func clear(for issuer: URL) async throws {
+        let url = credentialURL(for: issuer)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try FileManager.default.removeItem(at: url)
+    }
+
+    private func credentialURL(for issuer: URL) -> URL {
+        let filename = Data(issuer.absoluteString.utf8)
+            .base64EncodedString()
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "=", with: "")
+        return directory.appendingPathComponent(filename + ".json", isDirectory: false)
+    }
+}
+#endif
+
 #if canImport(Security)
 public enum CredentialStoreError: Error, LocalizedError, Sendable {
     case keychain(OSStatus)

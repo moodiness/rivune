@@ -146,6 +146,22 @@ public struct CategoryRef: Codable, Sendable, Equatable, Identifiable {
         icon = try values.decodeRequiredNullable(String.self, forKey: .icon)
     }
 
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id)
+        try values.encode(name, forKey: .name)
+        if let color {
+            try values.encode(color, forKey: .color)
+        } else {
+            try values.encodeNil(forKey: .color)
+        }
+        if let icon {
+            try values.encode(icon, forKey: .icon)
+        } else {
+            try values.encodeNil(forKey: .icon)
+        }
+    }
+
     private enum CodingKeys: String, CodingKey {
         case id, name, color, icon
     }
@@ -461,6 +477,23 @@ public struct TokenPair: Codable, Sendable, Equatable {
         authorizationScope = try values.decode(AuthorizationScope.self, forKey: .authorizationScope)
         category = try values.decodeRequiredNullable(CategoryRef.self, forKey: .category)
         try validateAuthorizationContext(authorizationScope, category: category, codingPath: decoder.codingPath)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(tokenType, forKey: .tokenType)
+        try values.encode(accessToken, forKey: .accessToken)
+        try values.encode(accessTokenExpiresAt, forKey: .accessTokenExpiresAt)
+        try values.encode(refreshToken, forKey: .refreshToken)
+        try values.encode(refreshTokenExpiresAt, forKey: .refreshTokenExpiresAt)
+        try values.encode(sessionId, forKey: .sessionId)
+        try values.encode(deviceId, forKey: .deviceId)
+        try values.encode(authorizationScope, forKey: .authorizationScope)
+        if let category {
+            try values.encode(category, forKey: .category)
+        } else {
+            try values.encodeNil(forKey: .category)
+        }
     }
 
     private enum CodingKeys: String, CodingKey {

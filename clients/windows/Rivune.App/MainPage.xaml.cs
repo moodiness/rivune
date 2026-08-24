@@ -124,6 +124,7 @@ public sealed partial class MainPage : Page
         ConfigureZoomButton(CloseSourcesButton);
         ConfigureZoomButton(RefreshSourcesButton);
         ConfigureZoomButton(PlaySourceButton);
+        ConfigureZoomButton(ExternalSourceButton);
         ConfigureZoomButton(DownloadSourceButton);
         try
         {
@@ -989,7 +990,8 @@ public sealed partial class MainPage : Page
         _sourceRequest = request;
         var client = _state.Client ?? throw new InvalidOperationException("No server connection is active.");
         SourceStatus.Text = "Loading compatible sources…";
-        _playbackCapabilitiesTask ??= DetectPlaybackCapabilitiesAsync();
+        _externalPlayersTask ??= Task.Run(DetectExternalPlayers);
+        _playbackCapabilitiesTask ??= DetectPlaybackCapabilitiesAsync(_externalPlayersTask);
         var capabilities = await _playbackCapabilitiesTask;
         if (!_state.IsCurrent(generation)) return;
         var sources = await client.GetPlaybackSourcesAsync(mediaType, resourceId, capabilities, addonId, _state.Token);
@@ -1050,6 +1052,8 @@ public sealed partial class MainPage : Page
         _state.SelectedSource = source;
         _state.Preparation = null;
         PlaySourceButton.IsEnabled = false;
+        ExternalSourceButton.IsEnabled = false;
+        ExternalSourceButton.Visibility = SupportsExternalPlayer(source) ? Visibility.Visible : Visibility.Collapsed;
         SourceProgress.IsActive = true;
         SourceStatus.Text = UiFormat("Preparing {0}…", source.Name);
         try
@@ -1064,6 +1068,8 @@ public sealed partial class MainPage : Page
             SourceStatus.Text = UiFormat("Ready · {0} · {1} · {2}", preparation.Mode, preparation.Protocol, preparation.Container ?? UiText("Automatic"));
             PlaySourceButton.IsEnabled = true;
             PlaySourceButton.Visibility = Visibility.Visible;
+            ExternalSourceButton.IsEnabled = SupportsExternalPlayer(source);
+            ExternalSourceButton.Visibility = SupportsExternalPlayer(source) ? Visibility.Visible : Visibility.Collapsed;
             var downloadable = !preparation.Protocol.Equals("hls", StringComparison.OrdinalIgnoreCase) &&
                 !preparation.Protocol.Equals("dash", StringComparison.OrdinalIgnoreCase) &&
                 _offlineMediaStore is not null && _offlineScope is not null;
@@ -1092,6 +1098,10 @@ public sealed partial class MainPage : Page
             var downloading = _offlineDownloadTask is { IsCompleted: false };
             DownloadSourceButton.IsEnabled = downloading;
             DownloadSourceButton.Visibility = downloading ? Visibility.Visible : Visibility.Collapsed;
+            ExternalSourceButton.IsEnabled = SupportsExternalPlayer(source);
+            ExternalSourceButton.Visibility = SupportsExternalPlayer(source) ? Visibility.Visible : Visibility.Collapsed;
+            if (SupportsExternalPlayer(source))
+                SourceStatus.Text = "Internal preparation failed. Choose the external player option or select another source.";
         }
         finally
         {
@@ -1114,6 +1124,8 @@ public sealed partial class MainPage : Page
         SourceList.SelectedItem = null;
         SourceList.ItemsSource = null;
         PlaySourceButton.IsEnabled = false;
+        ExternalSourceButton.IsEnabled = false;
+        ExternalSourceButton.Visibility = Visibility.Collapsed;
         SourceBanner.IsOpen = false;
         SourceProgress.IsActive = true;
         var downloading = _offlineDownloadTask is { IsCompleted: false };
@@ -1166,6 +1178,7 @@ public sealed partial class MainPage : Page
         var cancellation = _offlineDownloadCancellation;
         DownloadSourceButton.IsEnabled = true;
         PlaySourceButton.IsEnabled = false;
+        ExternalSourceButton.IsEnabled = false;
         DownloadSourceLabel.Text = "Starting… · Cancel";
         AutomationProperties.SetName(DownloadSourceButton, "Cancel offline download");
         SourceBanner.IsOpen = false;
@@ -1215,6 +1228,7 @@ public sealed partial class MainPage : Page
             if (!_closed)
             {
                 PlaySourceButton.IsEnabled = _state.Preparation is not null;
+                ExternalSourceButton.IsEnabled = _state.SelectedSource is { } source && SupportsExternalPlayer(source);
                 DownloadSourceButton.IsEnabled = _state.Preparation is not null;
             }
         }
@@ -1282,6 +1296,7 @@ public sealed partial class MainPage : Page
         var client = _state.Client;
         if (client is null) return;
         PlaySourceButton.IsEnabled = false;
+        ExternalSourceButton.IsEnabled = false;
         SourceProgress.IsActive = true;
         SourceStatus.Text = "Resolving secure playback…";
         var playbackFailureRecorded = false;
@@ -1362,6 +1377,8 @@ public sealed partial class MainPage : Page
         finally
         {
             if (_state.IsCurrent(generation)) SourceProgress.IsActive = false;
+            if (_state.IsCurrent(generation) && _state.SelectedSource is { } source)
+                ExternalSourceButton.IsEnabled = SupportsExternalPlayer(source);
         }
     }
 
@@ -2114,6 +2131,9 @@ public sealed partial class MainPage : Page
     {
         SourceProgress.IsActive = false;
         PlaySourceButton.IsEnabled = false;
+        var externalAvailable = _state.SelectedSource is { } source && SupportsExternalPlayer(source);
+        ExternalSourceButton.IsEnabled = externalAvailable;
+        ExternalSourceButton.Visibility = externalAvailable ? Visibility.Visible : Visibility.Collapsed;
         SourceBanner.Severity = InfoBarSeverity.Error;
         SourceBanner.Message = FriendlyError(exception);
         SourceBanner.IsOpen = true;
@@ -2639,7 +2659,7 @@ public sealed partial class MainPage : Page
     private TimeSpan MediaPlaybackPosition(double absolutePosition) => _timeline.ToMediaPosition(absolutePosition);
 
     private double LogicalDurationSeconds(TimeSpan naturalDuration) => _timeline.UpdateDuration(naturalDuration);
-    private static async Task<PlaybackCapabilities> DetectPlaybackCapabilitiesAsync()
+    private static async Task<PlaybackCapabilities> DetectPlaybackCapabilitiesAsync(Task<IReadOnlyList<ExternalPlayerApp>> externalPlayersTask)
     {
         var query = new CodecQuery();
         var videoCandidates = new[]
@@ -2699,6 +2719,7 @@ public sealed partial class MainPage : Page
             VideoCodecs = videoCodecs,
             AudioCodecs = audioCodecs,
             HdrFormats = ["sdr"],
+            ExternalPlayers = (await externalPlayersTask).Count > 0 ? ["windows_process"] : null,
             ProcessingModes = [PlaybackProcessingMode.Remux, PlaybackProcessingMode.TranscodeAudio, PlaybackProcessingMode.Transcode],
             MaximumHeight = 2160,
             MaximumAudioChannels = 2,

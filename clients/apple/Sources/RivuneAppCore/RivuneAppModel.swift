@@ -197,6 +197,7 @@ public struct OpenedCollectionFolder: Identifiable, Equatable {
     public let collectionID: UUID
     public let folder: CollectionFolder
     public let items: [CollectionItem]?
+    public let sourcePosterUrls: [String: String]?
     public let page: Int
     public let hasMore: Bool
     public let errors: [CollectionSourceFailure]
@@ -315,6 +316,17 @@ public final class RivuneAppModel: ObservableObject {
     @Published public private(set) var pendingOfflineProfile: RivuneOfflineProfileAccess?
     @Published public private(set) var offlineDownloadBytes: Int64 = 0
     @Published public private(set) var offlineDownloadActive = false
+    private struct OfflineDownloadSourceIdentity: Equatable {
+        let id: String
+        let sourceRef: String
+
+        init(_ source: PlaybackSourceOption) {
+            id = source.id
+            sourceRef = source.sourceRef
+        }
+    }
+
+    private var offlineDownloadSourceIdentity: OfflineDownloadSourceIdentity?
     @Published public private(set) var playbackDevices: [PlaybackDevice] = []
     @Published public private(set) var activePlaybackRoom: PlaybackRoom?
     @Published public private(set) var playbackCoordinationAvailable = false
@@ -346,6 +358,7 @@ public final class RivuneAppModel: ObservableObject {
     @Published public private(set) var mediaDetail: RivuneMediaDetail?
     @Published public private(set) var seasonTrailers: [Trailer] = []
     @Published public private(set) var episodeProgress: [UUID: PlaybackProgress] = [:]
+    @Published public private(set) var seriesEpisodesWatched: Bool?
     @Published public private(set) var mediaActionLoading = false
     @Published public private(set) var selectedSeason: Season?
     @Published public private(set) var mediaLoading = false
@@ -356,6 +369,7 @@ public final class RivuneAppModel: ObservableObject {
     @Published public private(set) var minimizedPlaybackPresentation: RivunePlaybackPresentation?
     @Published public private(set) var playbackOptionLoading = false
     @Published public private(set) var externalPlaybackURL: URL?
+    private var externalPlaybackSessionID: UUID?
     @Published public private(set) var profileSettings: SettingsValues?
     @Published public private(set) var profileSettingsSources: EffectiveSettingsSources?
     @Published public private(set) var settingsLoading = false
@@ -389,9 +403,20 @@ public final class RivuneAppModel: ObservableObject {
     private var coordinationEndedPlaybackID: UUID?
     private var settingsGeneration: UInt64 = 0
     private var previousMediaDetail: RivuneMediaDetail?
+    private struct SeriesWatchState: Sendable {
+        let episodes: [Episode]
+        let progress: [UUID: PlaybackProgress]
+    }
+    private var seriesEpisodes: [Episode] = []
+    private var previousSeriesEpisodes: [Episode] = []
+    private var previousSeriesEpisodeProgress: [UUID: PlaybackProgress] = [:]
+    private var previousSeriesEpisodesWatched: Bool?
     private let pathMonitor = NWPathMonitor()
     private let pathMonitorQueue = DispatchQueue(label: "io.rivune.network-path")
     public var offlineAccessUnlocked: Bool { offlineScope != nil }
+    public func isDownloading(_ source: PlaybackSourceOption) -> Bool {
+        offlineDownloadActive && offlineDownloadSourceIdentity == OfflineDownloadSourceIdentity(source)
+    }
     private var usesCellularNetwork = false
     public var canNavigateBackFromMedia: Bool { selectedSeason != nil || previousMediaDetail != nil }
     public var applicationVersion: String { installedApplicationVersion }
@@ -682,7 +707,7 @@ public final class RivuneAppModel: ObservableObject {
         guard let folderID = folder.id, let client else { return }
         beginOperation()
         let currentGeneration = generation
-        openedFolder = OpenedCollectionFolder(id: folderID, collectionID: collection.id, folder: folder, items: nil, page: 0, hasMore: false, errors: [])
+        openedFolder = OpenedCollectionFolder(id: folderID, collectionID: collection.id, folder: folder, items: nil, sourcePosterUrls: nil, page: 0, hasMore: false, errors: [])
         isBusy = true
         failure = nil
         operation = Task { [weak self] in
@@ -699,6 +724,7 @@ public final class RivuneAppModel: ObservableObject {
                     collectionID: resolved.collectionId,
                     folder: resolved.folder,
                     items: resolved.items,
+                    sourcePosterUrls: resolved.sourcePosterUrls,
                     page: resolved.page,
                     hasMore: resolved.hasMore,
                     errors: resolved.errors
@@ -734,6 +760,9 @@ public final class RivuneAppModel: ObservableObject {
                     collectionID: resolved.collectionId,
                     folder: resolved.folder,
                     items: (current.items ?? []) + additions,
+                    sourcePosterUrls: current.sourcePosterUrls.map { existing in
+                        existing.merging(resolved.sourcePosterUrls ?? [:]) { _, latest in latest }
+                    } ?? resolved.sourcePosterUrls,
                     page: resolved.page,
                     hasMore: resolved.hasMore && !additions.isEmpty,
                     errors: current.errors + resolved.errors
@@ -1018,7 +1047,12 @@ public final class RivuneAppModel: ObservableObject {
         selectedSeason = nil
         seasonTrailers = []
         episodeProgress = [:]
+        seriesEpisodes = []
+        seriesEpisodesWatched = nil
         previousMediaDetail = nil
+        previousSeriesEpisodes = []
+        previousSeriesEpisodeProgress = [:]
+        previousSeriesEpisodesWatched = nil
         playbackSources = []
         showPlaybackSources = false
         mediaOperation = Task { [weak self] in
@@ -1033,6 +1067,16 @@ public final class RivuneAppModel: ObservableObject {
                     series = try? await client.series(id: titleID, mappingProvider: .tmdb)
                     if series == nil { series = try? await client.series(id: titleID, mappingProvider: .tvdb) }
                 }
+                var seriesWatchState: SeriesWatchState?
+                if let series {
+                    do {
+                        seriesWatchState = try await Self.loadSeriesWatchState(series, using: client)
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        seriesWatchState = nil
+                    }
+                }
                 var episode: Episode?
                 var parentSeries: Series?
                 if target.mediaType == "episode", let seriesID = target.seriesId, let seasonID = target.seasonId {
@@ -1045,6 +1089,11 @@ public final class RivuneAppModel: ObservableObject {
                 let library = await libraryValue
                 let trailers = await trailersValue ?? []
                 guard let self, self.isCurrentMedia(current) else { return }
+                self.seriesEpisodes = seriesWatchState?.episodes ?? []
+                self.episodeProgress = seriesWatchState?.progress ?? [:]
+                self.seriesEpisodesWatched = seriesWatchState.map { state in
+                    !state.episodes.isEmpty && state.episodes.allSatisfy { state.progress[$0.id]?.completed == true }
+                }
                 self.mediaDetail = RivuneMediaDetail(
                     target: target, titleId: titleID, movie: movie, series: series, episode: episode, parentSeries: parentSeries,
                     progress: progress, trailers: trailers, inLibrary: library?.items.contains { $0.titleId == titleID } == true
@@ -1116,17 +1165,54 @@ public final class RivuneAppModel: ObservableObject {
 
     public func toggleWatched() {
         guard let client, var detail = mediaDetail, !mediaActionLoading else { return }
+        let titleID = detail.titleId
+        let season = selectedSeason
+        let isSeriesTarget = season == nil && detail.target.mediaType == "series"
+        let series = isSeriesTarget ? detail.series : nil
+        let initialEpisodes: [Episode]? = season?.episodes ?? (isSeriesTarget ? seriesEpisodes : nil)
+        let initialSeriesWatched = isSeriesTarget ? seriesEpisodesWatched : nil
+        guard season?.episodes.isEmpty != true else { return }
         mediaActionLoading = true
         mediaFailure = nil
         Task { [weak self] in
             do {
-                if let season = self?.selectedSeason, !season.episodes.isEmpty {
-                    let completed = season.episodes.allSatisfy { self?.episodeProgress[$0.id]?.completed == true }
-                    let result = try await client.setTitlesWatchedBatch(season.episodes.map {
-                        SetWatchedBatchItem(titleId: $0.id, completed: !completed, expectedVersion: self?.episodeProgress[$0.id]?.version ?? 0)
-                    })
-                    guard let self else { return }
-                    self.episodeProgress = Dictionary(uniqueKeysWithValues: result.items.map { ($0.titleId, $0.progress) })
+                if var episodes = initialEpisodes {
+                    var previousProgress = self?.episodeProgress ?? [:]
+                    if isSeriesTarget, episodes.isEmpty {
+                        guard let series else { throw RivuneAPIError.invalidResponse }
+                        let state = try await Self.loadSeriesWatchState(series, using: client)
+                        episodes = state.episodes
+                        previousProgress = state.progress
+                    }
+                    guard !episodes.isEmpty else {
+                        self?.mediaActionLoading = false
+                        return
+                    }
+                    let completed = initialSeriesWatched
+                        ?? episodes.allSatisfy { previousProgress[$0.id]?.completed == true }
+                    var updatedProgress = previousProgress
+                    for start in stride(from: 0, to: episodes.count, by: 100) {
+                        let end = min(start + 100, episodes.count)
+                        let result = try await client.setTitlesWatchedBatch(episodes[start..<end].map {
+                            SetWatchedBatchItem(
+                                titleId: $0.id,
+                                completed: !completed,
+                                expectedVersion: updatedProgress[$0.id]?.version ?? 0
+                            )
+                        })
+                        for item in result.items {
+                            updatedProgress[item.titleId] = item.progress
+                        }
+                        if let self, self.mediaDetail?.titleId == titleID {
+                            self.episodeProgress = updatedProgress
+                        }
+                    }
+                    guard let self, self.mediaDetail?.titleId == titleID else { return }
+                    self.episodeProgress = updatedProgress
+                    if isSeriesTarget {
+                        self.seriesEpisodes = episodes
+                        self.seriesEpisodesWatched = !completed
+                    }
                     self.mediaActionLoading = false
                     return
                 }
@@ -1137,12 +1223,12 @@ public final class RivuneAppModel: ObservableObject {
                 } else {
                     progress = try await client.markTitleWatched(titleId: detail.titleId, expectedVersion: expected)
                 }
-                guard let self, self.mediaDetail?.titleId == detail.titleId else { return }
+                guard let self, self.mediaDetail?.titleId == titleID else { return }
                 detail.progress = progress
                 self.mediaDetail = detail
                 self.mediaActionLoading = false
             } catch {
-                guard let self else { return }
+                guard let self, self.mediaDetail?.titleId == titleID else { return }
                 self.mediaActionLoading = false
                 self.mediaFailure = self.map(error, fallback: .message("The watched state could not be updated."))
             }
@@ -1152,6 +1238,9 @@ public final class RivuneAppModel: ObservableObject {
     public func openEpisode(_ episode: Episode) {
         guard let detail = mediaDetail else { return }
         let series = detail.series ?? detail.parentSeries
+        let priorSeriesEpisodes = seriesEpisodes
+        let priorSeriesEpisodeProgress = episodeProgress
+        let priorSeriesEpisodesWatched = seriesEpisodesWatched
         let target = RivuneMediaTarget(
             id: episode.id.uuidString, resourceId: Self.episodeResourceID(episode, series: series), mediaType: "episode", title: episode.name,
             titleId: episode.id, provider: nil, externalId: nil, externalIds: episode.externalIds, sourceAddonId: detail.target.sourceAddonId,
@@ -1162,6 +1251,9 @@ public final class RivuneAppModel: ObservableObject {
         )
         openMedia(target)
         previousMediaDetail = detail
+        previousSeriesEpisodes = priorSeriesEpisodes
+        previousSeriesEpisodeProgress = priorSeriesEpisodeProgress
+        previousSeriesEpisodesWatched = priorSeriesEpisodesWatched
     }
 
     public func closeMedia() {
@@ -1169,8 +1261,17 @@ public final class RivuneAppModel: ObservableObject {
         if let previousMediaDetail {
             mediaDetail = previousMediaDetail
             self.previousMediaDetail = nil
+            seriesEpisodes = previousSeriesEpisodes
+            episodeProgress = previousSeriesEpisodeProgress
+            seriesEpisodesWatched = previousSeriesEpisodesWatched
+            previousSeriesEpisodes = []
+            previousSeriesEpisodeProgress = [:]
+            previousSeriesEpisodesWatched = nil
         } else {
             mediaDetail = nil
+            seriesEpisodes = []
+            episodeProgress = [:]
+            seriesEpisodesWatched = nil
         }
         selectedSeason = nil
         mediaFailure = nil
@@ -1203,7 +1304,14 @@ public final class RivuneAppModel: ObservableObject {
     }
 
     public func download(_ source: PlaybackSourceOption) {
-        guard let client, let detail = mediaDetail, !offlineDownloadActive else { return }
+        guard let client, let detail = mediaDetail, !offlineDownloadActive,
+              let selectedSource = playbackSources.first(where: {
+                  $0.id == source.id && $0.sourceRef == source.sourceRef
+              }) else { return }
+        guard !["hls", "dash"].contains(selectedSource.protocol.lowercased()) else {
+            mediaFailure = .message(RivuneOfflineMediaError.unsupportedSource.localizedDescription)
+            return
+        }
         guard let scope = offlineScope else {
             showPlaybackSources = false
             requestActiveOfflineUnlockIfAvailable()
@@ -1211,27 +1319,51 @@ public final class RivuneAppModel: ObservableObject {
         }
         beginMediaOperation()
         let current = mediaGeneration
+        let sourceIdentity = OfflineDownloadSourceIdentity(selectedSource)
+        offlineDownloadSourceIdentity = sourceIdentity
         offlineDownloadActive = true
         offlineDownloadBytes = 0
         mediaFailure = nil
         mediaOperation = Task { [weak self] in
             guard let self else { return }
+            var playbackSessionID: UUID?
             defer {
-                if self.mediaGeneration == current { self.offlineDownloadActive = false }
+                if let playbackSessionID {
+                    Task.detached(priority: .utility) {
+                        try? await client.stopPlayback(sessionId: playbackSessionID)
+                    }
+                }
+                if self.mediaGeneration == current,
+                   self.offlineDownloadSourceIdentity == sourceIdentity {
+                    self.offlineDownloadSourceIdentity = nil
+                    self.offlineDownloadActive = false
+                }
             }
             do {
-                _ = try await client.preparePlayback(sourceRef: source.sourceRef, externalPlayer: true)
-                let session = try await client.resolvePlayback(sourceRef: source.sourceRef, titleId: detail.titleId.uuidString.lowercased(), externalPlayer: true)
-                guard let selected = session.sources.first(where: { $0.id == session.selectedSourceId }) ?? session.sources.first,
-                      let rawURL = selected.url, self.isCurrentMedia(current),
-                      let url = self.resolvedResourceURL(rawURL), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-                      !["hls", "dash"].contains(selected.protocol.lowercased()) else { throw RivuneOfflineMediaError.unsupportedSource }
+                _ = try await client.preparePlayback(sourceRef: selectedSource.sourceRef, externalPlayer: true)
+                let session = try await client.resolvePlayback(
+                    sourceRef: selectedSource.sourceRef,
+                    titleId: detail.titleId.uuidString.lowercased(),
+                    externalPlayer: true
+                )
+                playbackSessionID = session.id
+                guard let resolvedSource = session.sources.first(where: { $0.id == session.selectedSourceId }) ?? session.sources.first,
+                      let rawURL = resolvedSource.url, self.isCurrentMedia(current),
+                      let url = self.resolvedResourceURL(rawURL),
+                      ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                      !["hls", "dash"].contains(resolvedSource.protocol.lowercased()) else {
+                    throw RivuneOfflineMediaError.unsupportedSource
+                }
                 let item = try await RivuneOfflineMediaStore.shared.download(
                     from: url, titleId: detail.titleId, title: detail.target.title,
-                    container: selected.container ?? source.container, posterURL: detail.target.posterUrl,
-                    in: scope
+                    container: resolvedSource.container ?? selectedSource.container,
+                    posterURL: detail.target.posterUrl, in: scope
                 ) { [weak self] bytes in
-                    Task { @MainActor in self?.offlineDownloadBytes = bytes }
+                    Task { @MainActor in
+                        guard let self, self.mediaGeneration == current,
+                              self.offlineDownloadSourceIdentity == sourceIdentity else { return }
+                        self.offlineDownloadBytes = bytes
+                    }
                 }
                 if let access = self.currentOfflineAccess, access.id == scope.identifier {
                     self.persistOfflineAccess(access)
@@ -1366,6 +1498,7 @@ public final class RivuneAppModel: ObservableObject {
                 self.mediaLoading = false
                 self.showPlaybackSources = false
                 if externally {
+                    self.externalPlaybackSessionID = session.id
                     self.externalPlaybackURL = url
                 } else {
                     self.playbackPresentation = RivunePlaybackPresentation(
@@ -1443,6 +1576,12 @@ public final class RivuneAppModel: ObservableObject {
         mediaDetail = nil
         previousMediaDetail = nil
         selectedSeason = nil
+        seriesEpisodes = []
+        episodeProgress = [:]
+        seriesEpisodesWatched = nil
+        previousSeriesEpisodes = []
+        previousSeriesEpisodeProgress = [:]
+        previousSeriesEpisodesWatched = nil
         playbackSources = []
         showPlaybackSources = false
     }
@@ -1519,7 +1658,16 @@ public final class RivuneAppModel: ObservableObject {
         )
     }
 
-    public func clearExternalPlaybackURL() { externalPlaybackURL = nil }
+    public func clearExternalPlaybackURL() {
+        let sessionID = externalPlaybackSessionID
+        externalPlaybackSessionID = nil
+        externalPlaybackURL = nil
+        if let client, let sessionID {
+            Task.detached(priority: .utility) {
+                try? await client.stopPlayback(sessionId: sessionID)
+            }
+        }
+    }
 
     public var playbackQuality: RivuneNetworkQuality { usesCellularNetwork ? mobileQuality : wifiQuality }
 
@@ -1702,6 +1850,48 @@ public final class RivuneAppModel: ObservableObject {
         }
     }
 
+    nonisolated private static func loadSeriesWatchState(
+        _ series: Series,
+        using client: RivuneAPIClient
+    ) async throws -> SeriesWatchState {
+        let summaries = series.seasons.filter { $0.episodeCount > 0 }
+        var seasonsByIndex: [Int: Season] = [:]
+        try await withThrowingTaskGroup(of: (Int, Season).self) { group in
+            for (index, summary) in summaries.enumerated() {
+                group.addTask {
+                    (index, try await client.season(id: summary.id, mappingProvider: series.mappingProvider))
+                }
+            }
+            for try await (index, season) in group {
+                seasonsByIndex[index] = season
+            }
+        }
+
+        var seen = Set<UUID>()
+        let episodes = summaries.indices
+            .compactMap { seasonsByIndex[$0] }
+            .flatMap(\.episodes)
+            .filter { seen.insert($0.id).inserted }
+        var progress: [UUID: PlaybackProgress] = [:]
+        try await withThrowingTaskGroup(of: PlaybackProgressBatch.self) { group in
+            for start in stride(from: 0, to: episodes.count, by: 100) {
+                let end = min(start + 100, episodes.count)
+                let titleIDs = episodes[start..<end].map(\.id)
+                group.addTask {
+                    try await client.playbackProgressBatch(titleIds: titleIDs)
+                }
+            }
+            for try await batch in group {
+                for item in batch.items {
+                    if let itemProgress = item.progress {
+                        progress[item.titleId] = itemProgress
+                    }
+                }
+            }
+        }
+        return SeriesWatchState(episodes: episodes, progress: progress)
+    }
+
     private func loadCustomProfileAvatars(
         using client: RivuneAPIClient,
         profiles: [Profile],
@@ -1794,44 +1984,71 @@ public final class RivuneAppModel: ObservableObject {
             : nil
         let scope = offlineScope
         let candidates = Array(collections.filter(\.heroEnabled).flatMap { collection in
-            collection.folders.compactMap { folder -> (UUID, UUID)? in
+            collection.folders.compactMap { folder -> (collectionID: UUID, folderID: UUID, collectionBackdrop: String?)? in
                 guard let folderID = folder.id else { return nil }
-                return (collection.id, folderID)
+                return (collection.id, folderID, collection.backdropImageUrl)
             }
         }.prefix(12))
-        var heroes: [RivuneHeroItem] = []
-        await withTaskGroup(of: ResolvedCollectionFolder?.self) { group in
+        var resolvedByIndex: [Int: ResolvedCollectionFolder] = [:]
+        await withTaskGroup(of: (Int, ResolvedCollectionFolder?).self) { group in
             var nextIndex = 0
             for _ in 0..<min(4, candidates.count) {
-                let candidate = candidates[nextIndex]
+                let index = nextIndex
+                let candidate = candidates[index]
                 nextIndex += 1
                 group.addTask {
-                    try? await client.resolveCollectionFolder(collectionId: candidate.0, folderId: candidate.1, page: 1, limit: 12)
+                    let resolved = try? await client.resolveCollectionFolder(
+                        collectionId: candidate.collectionID,
+                        folderId: candidate.folderID,
+                        page: 1,
+                        limit: 12
+                    )
+                    return (index, resolved)
                 }
             }
-            while let resolved = await group.next() {
-                if let resolved {
-                    for item in resolved.items where heroes.count < 12 {
-                        heroes.append(
-                            RivuneHeroItem(
-                                id: "\(item.mediaType):\(item.id)",
-                                title: item.title,
-                                backgroundUrl: item.backgroundUrl ?? resolved.folder.heroBackdropUrl ?? item.posterUrl,
-                                logoUrl: item.logoUrl ?? resolved.folder.titleLogoUrl,
-                                releaseInfo: item.releaseInfo,
-                                target: Self.target(from: item)
-                            )
-                        )
-                    }
-                }
+            while let (index, resolved) = await group.next() {
+                if let resolved { resolvedByIndex[index] = resolved }
                 if nextIndex < candidates.count {
-                    let candidate = candidates[nextIndex]
+                    let scheduledIndex = nextIndex
+                    let candidate = candidates[scheduledIndex]
                     nextIndex += 1
                     group.addTask {
-                        try? await client.resolveCollectionFolder(collectionId: candidate.0, folderId: candidate.1, page: 1, limit: 12)
+                        let resolved = try? await client.resolveCollectionFolder(
+                            collectionId: candidate.collectionID,
+                            folderId: candidate.folderID,
+                            page: 1,
+                            limit: 12
+                        )
+                        return (scheduledIndex, resolved)
                     }
                 }
             }
+        }
+        var heroes: [RivuneHeroItem] = []
+        for index in candidates.indices {
+            guard let resolved = resolvedByIndex[index] else { continue }
+            for item in resolved.items where heroes.count < 12 {
+                heroes.append(
+                    RivuneHeroItem(
+                        id: "\(item.mediaType):\(item.id)",
+                        title: item.title,
+                        backgroundUrl: [
+                            item.backgroundUrl,
+                            resolved.folder.heroBackdropUrl,
+                            candidates[index].collectionBackdrop,
+                            item.posterUrl,
+                        ]
+                        .compactMap { $0 }
+                        .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty },
+                        logoUrl: [item.logoUrl, resolved.folder.titleLogoUrl]
+                            .compactMap { $0 }
+                            .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty },
+                        releaseInfo: item.releaseInfo,
+                        target: Self.target(from: item)
+                    )
+                )
+            }
+            if heroes.count == 12 { break }
         }
         let watching = await continuePage?.items ?? []
         let recommendations = await recommendationPage?.items ?? []
@@ -2137,6 +2354,7 @@ public final class RivuneAppModel: ObservableObject {
         mediaGeneration &+= 1
         mediaOperation?.cancel()
         mediaOperation = nil
+        offlineDownloadSourceIdentity = nil
         offlineDownloadActive = false
         offlineDownloadBytes = 0
     }
@@ -2282,12 +2500,19 @@ public final class RivuneAppModel: ObservableObject {
         mediaDetail = nil
         previousMediaDetail = nil
         selectedSeason = nil
+        seriesEpisodes = []
+        episodeProgress = [:]
+        seriesEpisodesWatched = nil
+        previousSeriesEpisodes = []
+        previousSeriesEpisodeProgress = [:]
+        previousSeriesEpisodesWatched = nil
         playbackSources = []
         showPlaybackSources = false
         playbackPresentation = nil
         minimizedPlaybackPresentation = nil
         playbackOptionLoading = false
         externalPlaybackURL = nil
+        externalPlaybackSessionID = nil
         if clearPairing { pairingCode = nil }
         isBusy = false
         failure = value
@@ -2346,12 +2571,19 @@ public final class RivuneAppModel: ObservableObject {
         mediaDetail = nil
         previousMediaDetail = nil
         selectedSeason = nil
+        seriesEpisodes = []
+        episodeProgress = [:]
+        seriesEpisodesWatched = nil
+        previousSeriesEpisodes = []
+        previousSeriesEpisodeProgress = [:]
+        previousSeriesEpisodesWatched = nil
         playbackSources = []
         showPlaybackSources = false
         playbackPresentation = nil
         minimizedPlaybackPresentation = nil
         playbackOptionLoading = false
         externalPlaybackURL = nil
+        externalPlaybackSessionID = nil
     }
 
     private static let serverKey = "rivune.server.origin"
