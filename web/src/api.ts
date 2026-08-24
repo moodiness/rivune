@@ -80,6 +80,7 @@ const DEVICE_KEY = "rivune.device";
 const REFRESH_LOCK = "rivune.auth.refresh";
 const PROFILE_KEY = "rivune.profile";
 const PROFILE_CONTEXT_KEY = "rivune.profile.context";
+const TAB_SESSION_KEY = "rivune.tab.session";
 export const PROFILE_SELECTION_BROADCAST_KEY = "rivune.profile.selection";
 const SHARED_PROFILE_CONTEXT_KEY = "rivune.profile.shared-context";
 let refreshPromise: Promise<boolean> | null = null;
@@ -200,6 +201,7 @@ export function broadcastProfileSelectionChange(): void {
 
 function saveTokens(tokens: TokenPair) {
   safeSessionStorage.setItem(ACCESS_KEY, tokens.accessToken);
+  safeSessionStorage.setItem(TAB_SESSION_KEY, tokens.sessionId);
   safeLocalStorage.setItem(ACCESS_KEY, tokens.accessToken);
   safeLocalStorage.setItem(SESSION_KEY, tokens.sessionId);
   safeLocalStorage.setItem(DEVICE_KEY, tokens.deviceId);
@@ -208,6 +210,7 @@ function saveTokens(tokens: TokenPair) {
 
 export function clearSession() {
   safeSessionStorage.removeItem(ACCESS_KEY);
+  safeSessionStorage.removeItem(TAB_SESSION_KEY);
   safeSessionStorage.removeItem(PROFILE_KEY);
   safeSessionStorage.removeItem(PROFILE_CONTEXT_KEY);
   safeLocalStorage.removeItem(ACCESS_KEY);
@@ -222,13 +225,26 @@ function adoptNewerSharedSession(refreshToken: string, sessionId: string | null)
   const sharedSessionId = safeLocalStorage.getItem(SESSION_KEY);
   if (!sessionId || sharedSessionId !== sessionId || !sharedRefreshToken || sharedRefreshToken === refreshToken || !sharedAccessToken) return false;
   safeSessionStorage.setItem(ACCESS_KEY, sharedAccessToken);
+  safeSessionStorage.setItem(TAB_SESSION_KEY, sessionId);
+  return true;
+}
+
+function adoptChangedSharedAccessToken(sessionId: string | null): boolean {
+  const tabAccessToken = safeSessionStorage.getItem(ACCESS_KEY);
+  const tabSessionId = safeSessionStorage.getItem(TAB_SESSION_KEY);
+  const sharedAccessToken = safeLocalStorage.getItem(ACCESS_KEY);
+  const sharedSessionId = safeLocalStorage.getItem(SESSION_KEY);
+  if (!sessionId || (tabSessionId && tabSessionId !== sessionId) || sharedSessionId !== sessionId || !tabAccessToken || !sharedAccessToken || tabAccessToken === sharedAccessToken) return false;
+  safeSessionStorage.setItem(ACCESS_KEY, sharedAccessToken);
+  safeSessionStorage.setItem(TAB_SESSION_KEY, sessionId);
   return true;
 }
 
 async function refreshSession(): Promise<boolean> {
+  const sessionId = safeLocalStorage.getItem(SESSION_KEY);
+  if (adoptChangedSharedAccessToken(sessionId)) return true;
   const refreshToken = safeLocalStorage.getItem(REFRESH_KEY);
   if (!refreshToken) return false;
-  const sessionId = safeLocalStorage.getItem(SESSION_KEY);
 
   const refresh = async () => {
     if (safeLocalStorage.getItem(REFRESH_KEY) !== refreshToken) {

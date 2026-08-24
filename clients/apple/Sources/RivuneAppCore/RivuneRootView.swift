@@ -1774,7 +1774,7 @@ private struct SearchTabView: View {
                             Label("Search", systemImage: "magnifyingglass")
                         }
                         .rivuneGlassButton(prominent: true)
-                        .disabled(model.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(model.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).count < 2 || model.tabLoading)
                     }
 #if os(macOS)
                     .frame(maxWidth: 760, alignment: .leading)
@@ -1793,6 +1793,15 @@ private struct SearchTabView: View {
                             }
                             .buttonStyle(.plain)
                         }
+                    }
+                    if model.searchHasMore {
+                        Button(action: model.loadMoreSearch) {
+                            if model.tabLoading { ProgressView() }
+                            else { Label("Load more", systemImage: "arrow.down.circle") }
+                        }
+                        .rivuneGlassButton()
+                        .disabled(model.tabLoading)
+                        .frame(maxWidth: .infinity)
                     }
                 }
                 .rivunePrimaryTabInsets()
@@ -1821,6 +1830,14 @@ private struct PersonalLibraryTabView: View {
                     LibraryHeader(compact: true, switchProfile: model.chooseAnotherProfile, settings: settings, disconnect: disconnect)
 #endif
                     ScreenHeading(eyebrow: model.serverName, title: "Library", bodyText: "Titles saved to this profile.")
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            libraryFilter("All", mediaType: nil)
+                            libraryFilter("Movies", mediaType: .movie)
+                            libraryFilter("Series", mediaType: .series)
+                            libraryFilter("Live TV", mediaType: .tv)
+                        }
+                    }
                     TabStatus(model: model, empty: model.libraryItems.isEmpty ? "Your library is empty." : nil)
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 24) {
                         ForEach(model.libraryItems) { item in
@@ -1838,11 +1855,34 @@ private struct PersonalLibraryTabView: View {
                             .opacity(item.available ? 1 : 0.5)
                         }
                     }
+                    if model.libraryPage < model.libraryTotalPages {
+                        Button(action: model.loadMoreLibrary) {
+                            if model.tabLoading { ProgressView() }
+                            else { Label("Load more", systemImage: "arrow.down.circle") }
+                        }
+                        .rivuneGlassButton()
+                        .disabled(model.tabLoading)
+                        .frame(maxWidth: .infinity)
+                    }
                 }
                 .rivunePrimaryTabInsets()
                 .rivunePageWidth(1200)
             }
         }
+    }
+
+    private func libraryFilter(_ label: String, mediaType: TitleMediaType?) -> some View {
+        Button {
+            model.setLibraryMediaType(mediaType)
+        } label: {
+            HStack(spacing: 6) {
+                if model.libraryMediaType == mediaType { Image(systemName: "checkmark") }
+                Text(rivuneLocalized(label))
+            }
+        }
+        .rivuneGlassButton()
+        .accessibilityAddTraits(model.libraryMediaType == mediaType ? .isSelected : [])
+        .disabled(model.tabLoading)
     }
 }
 
@@ -1865,6 +1905,25 @@ private struct CalendarTabView: View {
                     LibraryHeader(compact: true, switchProfile: model.chooseAnotherProfile, settings: settings, disconnect: disconnect)
 #endif
                     ScreenHeading(eyebrow: model.serverName, title: "Calendar", bodyText: "Upcoming movies and episodes from your library.")
+                    HStack(spacing: 12) {
+                        Button(action: model.previousCalendarMonth) {
+                            Image(systemName: "chevron.left").frame(width: 28, height: 28)
+                        }
+                        .rivuneCircularButton()
+                        .rivuneGlassButton()
+                        .accessibilityLabel(rivuneLocalized("Previous month"))
+                        Spacer()
+                        Text(model.calendarMonth.formatted(.dateTime.month(.wide).year()))
+                            .font(.title3.weight(.semibold))
+                        Spacer()
+                        Button(action: model.nextCalendarMonth) {
+                            Image(systemName: "chevron.right").frame(width: 28, height: 28)
+                        }
+                        .rivuneCircularButton()
+                        .rivuneGlassButton()
+                        .accessibilityLabel(rivuneLocalized("Next month"))
+                    }
+                    .disabled(model.tabLoading)
                     TabStatus(model: model, empty: model.calendarEvents.isEmpty ? "No releases in this date range." : nil)
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
                         ForEach(model.calendarEvents) { event in
