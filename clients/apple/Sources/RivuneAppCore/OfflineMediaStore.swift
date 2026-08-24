@@ -121,6 +121,7 @@ enum RivuneOfflinePINVerifier {
 public enum RivuneOfflineMediaError: LocalizedError {
     case unavailable
     case unsupportedSource
+    case downloadFailed(statusCode: Int)
     case invalidArchive
     case serverFailure
 
@@ -128,6 +129,7 @@ public enum RivuneOfflineMediaError: LocalizedError {
         switch self {
         case .unavailable: return "Offline media storage is unavailable."
         case .unsupportedSource: return "This stream cannot be downloaded as one offline file."
+        case .downloadFailed(let statusCode): return "The offline source returned HTTP \(statusCode)."
         case .invalidArchive: return "The encrypted offline file is invalid or incomplete."
         case .serverFailure: return "The encrypted offline file could not be played."
         }
@@ -545,8 +547,13 @@ final class RivuneStreamingDownloader: NSObject, URLSessionDataDelegate, @unchec
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        guard let response = response as? HTTPURLResponse, (200...299).contains(response.statusCode) else {
+        guard let response = response as? HTTPURLResponse else {
             failure = RivuneOfflineMediaError.unsupportedSource
+            completionHandler(.cancel)
+            return
+        }
+        guard (200...299).contains(response.statusCode) else {
+            failure = RivuneOfflineMediaError.downloadFailed(statusCode: response.statusCode)
             completionHandler(.cancel)
             return
         }

@@ -457,7 +457,12 @@ public actor RivuneAPIClient {
 
 #if canImport(Security)
     public init(serverURL: URL, transport: any HTTPTransport = URLSessionTransport()) throws {
-        try self.init(serverURL: serverURL, transport: transport, credentialStore: KeychainCredentialStore())
+#if DEBUG && os(macOS)
+        let credentialStore: any CredentialStore = DebugFileCredentialStore()
+#else
+        let credentialStore: any CredentialStore = KeychainCredentialStore()
+#endif
+        try self.init(serverURL: serverURL, transport: transport, credentialStore: credentialStore)
     }
 #endif
 
