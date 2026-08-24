@@ -619,6 +619,7 @@
                     </ListView>
                     <StackPanel Grid.Row="3" Spacing="8">
                         <Button x:Name="PlaySourceButton" Content="Play inside Rivune" IsEnabled="False" Click="PlaySource_Click" Style="{StaticResource RivunePrimaryButton}" Visibility="Collapsed" XYFocusUp="{x:Bind SourceList}" />
+                        <Button x:Name="ExternalSourceButton" Content="Play with external player" IsEnabled="False" Click="ExternalSource_Click" Style="{StaticResource RivuneSecondaryButton}" Visibility="Collapsed" XYFocusUp="{x:Bind PlaySourceButton}" />
                         <Button x:Name="DownloadSourceButton" IsEnabled="False" Click="DownloadSource_Click" Style="{StaticResource RivuneSecondaryButton}" Visibility="Collapsed" AutomationProperties.Name="Download for offline playback">
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8"><FontIcon Glyph="&#xE896;" FontSize="20" /><TextBlock x:Name="DownloadSourceLabel" Text="Download" /></StackPanel>
                         </Button>
