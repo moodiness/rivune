@@ -41,6 +41,16 @@ public sealed class AppUpdateCheckerTests
         Assert.Equal(expectedSign, Math.Sign(AppUpdateChecker.CompareSemanticVersions(left, right)));
     }
 
+    [Fact]
+    public void UpdateNoticeOnlyPresentsStrictlyNewerVersions()
+    {
+        Assert.True(AppUpdateNotificationPolicy.ShouldPresent(null, "1.7.2"));
+        Assert.False(AppUpdateNotificationPolicy.ShouldPresent("1.7.2", "1.7.2"));
+        Assert.True(AppUpdateNotificationPolicy.ShouldPresent("1.7.2", "1.8.0"));
+        Assert.False(AppUpdateNotificationPolicy.ShouldPresent("1.8.0", "1.7.2"));
+        Assert.False(AppUpdateNotificationPolicy.ShouldPresent("invalid", "1.8.0"));
+    }
+
     [Theory]
     [InlineData("1.7.1", true)]
     [InlineData("1.7.2", false)]
@@ -50,11 +60,10 @@ public sealed class AppUpdateCheckerTests
         var handler = new SequenceHandler(Response(HttpStatusCode.OK, Manifest()));
         using var client = new HttpClient(handler);
 
-        var result = await AppUpdateChecker.CheckAsync(
-            client,
-            currentVersion,
-            Architecture.X64,
-            TestContext.Current.CancellationToken);
+        var result = await AppUpdateChecker.CheckUnsignedForTestingAsync(client,
+        currentVersion,
+        Architecture.X64,
+        TestContext.Current.CancellationToken);
 
         Assert.Equal(currentVersion, result.CurrentVersion);
         Assert.Equal("1.7.2", result.LatestVersion);
@@ -81,11 +90,10 @@ public sealed class AppUpdateCheckerTests
         var handler = new SequenceHandler(Response(HttpStatusCode.OK, Manifest()));
         using var client = new HttpClient(handler);
 
-        var result = await AppUpdateChecker.CheckAsync(
-            client,
-            "1.7.1",
-            Architecture.Arm64,
-            TestContext.Current.CancellationToken);
+        var result = await AppUpdateChecker.CheckUnsignedForTestingAsync(client,
+        "1.7.1",
+        Architecture.Arm64,
+        TestContext.Current.CancellationToken);
 
         Assert.Equal(new Uri("https://github.com/moodiness/rivune/releases/download/v1.7.2/Rivune-Windows.exe"), result.Package.Uri);
         Assert.Equal(new[] { "arm64", "x64" }, result.Package.Architectures);
@@ -103,11 +111,10 @@ public sealed class AppUpdateCheckerTests
         var handler = new SequenceHandler();
         using var client = new HttpClient(handler);
 
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => AppUpdateChecker.CheckAsync(
-            client,
-            "1.7.1",
-            architecture,
-            TestContext.Current.CancellationToken));
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => AppUpdateChecker.CheckUnsignedForTestingAsync(client,
+        "1.7.1",
+        architecture,
+        TestContext.Current.CancellationToken));
 
         Assert.Contains("architecture", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Empty(handler.RequestUris);
@@ -126,11 +133,10 @@ public sealed class AppUpdateCheckerTests
         invalid = invalid.Remove(metadataIndex, expected.Length).Insert(metadataIndex, replacement);
         using var client = new HttpClient(new SequenceHandler(Response(HttpStatusCode.OK, invalid)));
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => AppUpdateChecker.CheckAsync(
-            client,
-            "1.7.1",
-            Architecture.Arm64,
-            TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => AppUpdateChecker.CheckUnsignedForTestingAsync(client,
+        "1.7.1",
+        Architecture.Arm64,
+        TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -144,8 +150,7 @@ public sealed class AppUpdateCheckerTests
             Response(HttpStatusCode.OK, Manifest()));
         using var client = new HttpClient(handler);
 
-        var result = await AppUpdateChecker.CheckAsync(
-            client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken);
+        var result = await AppUpdateChecker.CheckUnsignedForTestingAsync(client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken);
 
         Assert.True(result.IsUpdateAvailable);
         Assert.Equal(new[] { ManifestUri, releaseUri, assetUri }, handler.RequestUris);
@@ -162,7 +167,7 @@ public sealed class AppUpdateCheckerTests
         using var client = new HttpClient(handler);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            AppUpdateChecker.CheckAsync(client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken));
+            AppUpdateChecker.CheckUnsignedForTestingAsync(client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken));
 
         Assert.Contains("untrusted host", exception.Message);
         Assert.Single(handler.RequestUris);
@@ -178,7 +183,7 @@ public sealed class AppUpdateCheckerTests
         using var client = new HttpClient(handler);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            AppUpdateChecker.CheckAsync(client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken));
+            AppUpdateChecker.CheckUnsignedForTestingAsync(client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken));
     }
 
     [Theory]
@@ -260,8 +265,7 @@ public sealed class AppUpdateCheckerTests
             .Replace("\"format\":\"exe\"", "\"format\":\"exe\",\"futureWindowsField\":true", StringComparison.Ordinal);
         using var client = new HttpClient(new SequenceHandler(Response(HttpStatusCode.OK, manifest)));
 
-        var result = await AppUpdateChecker.CheckAsync(
-            client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken);
+        var result = await AppUpdateChecker.CheckUnsignedForTestingAsync(client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken);
 
         Assert.True(result.IsUpdateAvailable);
     }
@@ -274,9 +278,30 @@ public sealed class AppUpdateCheckerTests
         using var client = new HttpClient(handler);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            AppUpdateChecker.CheckAsync(client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken));
+            AppUpdateChecker.CheckUnsignedForTestingAsync(client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken));
 
         Assert.Equal("The Rivune update manifest is too large.", exception.Message);
+    }
+
+    [Fact]
+    public void VerifiesPinnedManifestSignatureAndRejectsTampering()
+    {
+        var manifest = Encoding.UTF8.GetBytes("fixture");
+        var valid = Encoding.UTF8.GetBytes("{\"schemaVersion\":1,\"algorithm\":\"ecdsa-p256-sha256\",\"keyId\":\"4e9b15a0b6aed77908f3686fbf05a0a9c322ad846662eb758f56d4e65c22796f\",\"manifestSha256\":\"f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d\",\"signature\":\"MEUCID/exybli2HXWsp9h4iFZIXCTAlvZZcaizBj+dIOfOfRAiEAuxdEPEnwG3MWFlChfZ8NfUvHp+QRoLKu4NXhyFQYNBM=\"}");
+        AppUpdateChecker.VerifyManifestSignature(manifest, valid);
+        Assert.Throws<InvalidOperationException>(() => AppUpdateChecker.VerifyManifestSignature([.. manifest, 0x20], valid));
+        Assert.Throws<InvalidOperationException>(() => AppUpdateChecker.VerifyManifestSignature(manifest, Encoding.UTF8.GetBytes("{\"schemaVersion\":1,\"algorithm\":\"ecdsa-p256-sha256\",\"keyId\":\"bad\",\"manifestSha256\":\"bad\",\"signature\":\"%%%\"}")));
+        Assert.Throws<InvalidOperationException>(() => AppUpdateChecker.VerifyManifestSignature(manifest, new byte[4097]));
+    }
+
+    [Fact]
+    public async Task MissingSignatureFailsClosedBeforeManifestParsing()
+    {
+        var handler = new SequenceHandler(Response(HttpStatusCode.OK, Manifest()), Response(HttpStatusCode.NotFound));
+        using var client = new HttpClient(handler);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => AppUpdateChecker.CheckAsync(
+            client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken));
+        Assert.Equal(new[] { ManifestUri, new Uri(ManifestUri.AbsoluteUri + ".sig") }, handler.RequestUris);
     }
 
     [Fact]
@@ -674,7 +699,7 @@ public sealed class AppUpdateCheckerTests
     {
         using var client = new HttpClient(new SequenceHandler(Response(HttpStatusCode.OK, manifest)));
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            AppUpdateChecker.CheckAsync(client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken));
+            AppUpdateChecker.CheckUnsignedForTestingAsync(client, "1.7.1", Architecture.X64, TestContext.Current.CancellationToken));
     }
 
     private static string Manifest() => $$"""

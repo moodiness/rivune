@@ -22,6 +22,11 @@ internal sealed record WindowsDevicePreferences
     private int _videoAspectIndex;
     private DeviceMotionPreference _motion = DeviceMotionPreference.System;
     private string _accentColor = DefaultAccentColor;
+    private PlaybackQualityPreset _localQuality = PlaybackQualityPreset.Automatic;
+    private PlaybackQualityPreset _remoteWifiQuality = PlaybackQualityPreset.Automatic;
+    private PlaybackQualityPreset _mobileQuality = PlaybackQualityPreset.Automatic;
+    private int _offlineExpirationDays = 30;
+    private long _offlineQuotaBytes = 20L * 1024 * 1024 * 1024;
 
     public ViewerTab StartupTab
     {
@@ -53,6 +58,38 @@ internal sealed record WindowsDevicePreferences
     public bool AutoSkipRecap { get; init; }
     public bool AutoSkipOutro { get; init; }
     public DateTimeOffset? LastSuccessfulUpdateCheckAt { get; init; }
+    public string? LastPresentedUpdateVersion { get; init; }
+    public PlaybackQualityPreset LocalQuality
+    {
+        get => _localQuality;
+        init => _localQuality = Enum.IsDefined(value) ? value : PlaybackQualityPreset.Automatic;
+    }
+
+    public PlaybackQualityPreset RemoteWifiQuality
+    {
+        get => _remoteWifiQuality;
+        init => _remoteWifiQuality = Enum.IsDefined(value) ? value : PlaybackQualityPreset.Automatic;
+    }
+
+    public PlaybackQualityPreset MobileQuality
+    {
+        get => _mobileQuality;
+        init => _mobileQuality = Enum.IsDefined(value) ? value : PlaybackQualityPreset.Automatic;
+    }
+
+    public long OfflineQuotaBytes
+    {
+        get => _offlineQuotaBytes;
+        init => _offlineQuotaBytes = Math.Clamp(value, 1L * 1024 * 1024, 2L * 1024 * 1024 * 1024 * 1024);
+    }
+
+    public int OfflineExpirationDays
+    {
+        get => _offlineExpirationDays;
+        init => _offlineExpirationDays = Math.Clamp(value, 0, 3_650);
+    }
+
+    public bool DownloadOnMobile { get; init; }
 
     private static string NormalizeAccentColor(string? value)
     {
@@ -267,6 +304,13 @@ internal sealed class WindowsDevicePreferencesStore : IAsyncDisposable
         public bool AutoSkipRecap { get; init; }
         public bool AutoSkipOutro { get; init; }
         public string? LastSuccessfulUpdateCheckAt { get; init; }
+        public string? LastPresentedUpdateVersion { get; init; }
+        public string? LocalQuality { get; init; } = "automatic";
+        public string? RemoteWifiQuality { get; init; } = "automatic";
+        public string? MobileQuality { get; init; } = "automatic";
+        public long OfflineQuotaBytes { get; init; } = 20L * 1024 * 1024 * 1024;
+        public int OfflineExpirationDays { get; init; } = 30;
+        public bool DownloadOnMobile { get; init; }
 
         public WindowsDevicePreferences ToPreferences() => new()
         {
@@ -280,6 +324,13 @@ internal sealed class WindowsDevicePreferencesStore : IAsyncDisposable
             AutoSkipRecap = AutoSkipRecap,
             AutoSkipOutro = AutoSkipOutro,
             LastSuccessfulUpdateCheckAt = ParseUpdateCheckTimestamp(LastSuccessfulUpdateCheckAt),
+            LastPresentedUpdateVersion = ParseUpdateVersion(LastPresentedUpdateVersion),
+            LocalQuality = ParseQuality(LocalQuality),
+            RemoteWifiQuality = ParseQuality(RemoteWifiQuality),
+            MobileQuality = ParseQuality(MobileQuality),
+            OfflineQuotaBytes = OfflineQuotaBytes,
+            OfflineExpirationDays = OfflineExpirationDays,
+            DownloadOnMobile = DownloadOnMobile,
         };
 
         public static PersistedPreferences From(WindowsDevicePreferences preferences) => new()
@@ -294,6 +345,13 @@ internal sealed class WindowsDevicePreferencesStore : IAsyncDisposable
             AutoSkipRecap = preferences.AutoSkipRecap,
             AutoSkipOutro = preferences.AutoSkipOutro,
             LastSuccessfulUpdateCheckAt = preferences.LastSuccessfulUpdateCheckAt?.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture),
+            LastPresentedUpdateVersion = preferences.LastPresentedUpdateVersion,
+            LocalQuality = preferences.LocalQuality.ToString().ToLowerInvariant(),
+            RemoteWifiQuality = preferences.RemoteWifiQuality.ToString().ToLowerInvariant(),
+            MobileQuality = preferences.MobileQuality.ToString().ToLowerInvariant(),
+            OfflineQuotaBytes = preferences.OfflineQuotaBytes,
+            OfflineExpirationDays = preferences.OfflineExpirationDays,
+            DownloadOnMobile = preferences.DownloadOnMobile,
         };
 
         private static ViewerTab ParseStartupTab(string? value) =>
@@ -305,6 +363,25 @@ internal sealed class WindowsDevicePreferencesStore : IAsyncDisposable
             Enum.TryParse<DeviceMotionPreference>(value, ignoreCase: true, out var parsed) && Enum.IsDefined(parsed)
                 ? parsed
                 : DeviceMotionPreference.System;
+
+        private static PlaybackQualityPreset ParseQuality(string? value) =>
+            Enum.TryParse<PlaybackQualityPreset>(value, ignoreCase: true, out var parsed) && Enum.IsDefined(parsed)
+                ? parsed
+                : PlaybackQualityPreset.Automatic;
+
+        private static string? ParseUpdateVersion(string? value)
+        {
+            if (value is null) return null;
+            try
+            {
+                _ = AppUpdateChecker.CompareSemanticVersions(value, value);
+                return value;
+            }
+            catch (InvalidOperationException)
+            {
+                return null;
+            }
+        }
 
         private static DateTimeOffset? ParseUpdateCheckTimestamp(string? value) =>
             DateTimeOffset.TryParseExact(
