@@ -465,7 +465,7 @@ jobs:
         run: pwsh -NoProfile -File scripts/create-env.Tests.ps1
       - name: Test Windows library
         if: matrix.label == 'x64'
-        run: dotnet test clients/windows/Rivune.Windows.slnx --configuration Release --nologo
+        run: dotnet test clients/windows/Rivune.Windows.Tests/Rivune.Windows.Tests.csproj --configuration Release --nologo
       - name: Test Windows operator lifecycle delegation
         if: matrix.label == 'x64'
         run: pwsh -NoProfile -File scripts/rivune.Tests.ps1
@@ -484,6 +484,7 @@ jobs:
           $project = Join-Path $env:GITHUB_WORKSPACE 'clients/windows/Rivune.App/Rivune.App.csproj'
           $publish = Join-Path $env:RUNNER_TEMP 'rivune-portable-publish'
           & dotnet publish $project --configuration Release --runtime $env:RUNTIME --output $publish --nologo `
+            -p:NuGetLockFilePath=packages.$env:RUNTIME.lock.json `
             -p:Platform=$env:PLATFORM `
             -p:WindowsPackageType=None `
             -p:PublishSingleFile=true `
@@ -552,6 +553,7 @@ jobs:
           $appProject = Join-Path $env:GITHUB_WORKSPACE 'clients/windows/Rivune.App/Rivune.App.csproj'
           $arm64Publish = Join-Path $env:RUNNER_TEMP 'rivune-setup-arm64-publish'
           & dotnet publish $appProject --configuration Release --runtime win-arm64 --output $arm64Publish --nologo `
+            -p:NuGetLockFilePath=packages.win-arm64.lock.json `
             -p:Platform=ARM64 `
             -p:WindowsPackageType=None `
             -p:PublishSingleFile=true `
@@ -586,6 +588,7 @@ jobs:
           $bootstrapperProject = Join-Path $env:GITHUB_WORKSPACE 'clients/windows/Rivune.Bootstrapper/Rivune.Bootstrapper.csproj'
           $bootstrapperPublish = Join-Path $env:RUNNER_TEMP 'rivune-setup-bootstrapper'
           & dotnet publish $bootstrapperProject --configuration Release --runtime win-x86 --output $bootstrapperPublish --nologo `
+            -p:NuGetLockFilePath=packages.win-x86.lock.json `
             -p:Version=1.12.4 `
             -p:AssemblyVersion=1.12.4.0 `
             -p:FileVersion=1.12.4.0 `

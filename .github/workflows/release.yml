@@ -369,6 +369,7 @@ jobs:
           foreach ($target in $targets) {
             $publish = Join-Path $env:RUNNER_TEMP "rivune-portable-publish-$($target.Label.ToLowerInvariant())"
             & dotnet publish $project --configuration Release --runtime $target.Runtime --output $publish --nologo `
+              -p:NuGetLockFilePath=packages.$($target.Runtime).lock.json `
               -p:Platform=$($target.Platform) `
               -p:WindowsPackageType=None `
               -p:PublishSingleFile=true `
@@ -431,6 +432,7 @@ jobs:
           $bootstrapperProject = Join-Path $env:GITHUB_WORKSPACE 'clients/windows/Rivune.Bootstrapper/Rivune.Bootstrapper.csproj'
           $bootstrapperPublish = Join-Path $env:RUNNER_TEMP 'rivune-bootstrapper-publish'
           & dotnet publish $bootstrapperProject --configuration Release --runtime win-x86 --output $bootstrapperPublish --nologo `
+            -p:NuGetLockFilePath=packages.win-x86.lock.json `
             -p:Version=$versionName `
             -p:AssemblyVersion=$fileVersion `
             -p:FileVersion=$fileVersion `
