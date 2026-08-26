@@ -12,7 +12,7 @@ public sealed class LanServerDiscoveryTests
     {
         var secure = RivuneLanService.Parse("Living room", new Dictionary<string, string>
         {
-            ["protocol"] = "20",
+            ["protocol"] = "22",
             ["url"] = "https://media.example.com",
             ["version"] = "1.10.0",
         });
@@ -23,7 +23,7 @@ public sealed class LanServerDiscoveryTests
 
         var local = RivuneLanService.Parse("Bedroom", new Dictionary<string, string>
         {
-            ["protocol"] = "20",
+            ["protocol"] = "22",
             ["url"] = "http://192.168.1.20:8080/",
         });
         Assert.NotNull(local);
@@ -32,13 +32,13 @@ public sealed class LanServerDiscoveryTests
     }
 
     [Theory]
-    [InlineData("19", "https://media.example.com")]
-    [InlineData("20", "http://media.example.com")]
-    [InlineData("20", "http://198.51.100.20:8080")]
-    [InlineData("20", "https://user:secret@media.example.com")]
-    [InlineData("20", "https://media.example.com/path")]
-    [InlineData("20", "https://media.example.com?token=secret")]
-    [InlineData("20", "ftp://media.example.com")]
+    [InlineData("23", "https://media.example.com")]
+    [InlineData("22", "http://media.example.com")]
+    [InlineData("22", "http://198.51.100.20:8080")]
+    [InlineData("22", "https://user:secret@media.example.com")]
+    [InlineData("22", "https://media.example.com/path")]
+    [InlineData("22", "https://media.example.com?token=secret")]
+    [InlineData("22", "ftp://media.example.com")]
     public void RejectsIncompatibleOrUnsafeAnnouncements(string protocol, string address)
     {
         Assert.Null(RivuneLanService.Parse("Hostile", new Dictionary<string, string>
@@ -71,7 +71,7 @@ public sealed class LanServerDiscoveryTests
         Assert.Equal("Living room._rivune._tcp.local", pointer.Target);
         var text = Assert.Single(records, record => record.Type == DnsRecordType.Txt);
         Assert.Equal("https://media.example.com", text.Attributes?["url"]);
-        Assert.Equal("20", text.Attributes?["protocol"]);
+        Assert.Equal("22", text.Attributes?["protocol"]);
         Assert.Equal("Living room", DnsPacket.InstanceName(text.Name));
     }
 
@@ -114,7 +114,7 @@ public sealed class LanServerDiscoveryTests
         WriteUInt16(stream, 16);
         WriteUInt16(stream, 1);
         WriteUInt32(stream, 120);
-        var values = new[] { "protocol=20", "url=https://media.example.com", "version=1.10.0" };
+        var values = new[] { "protocol=22", "url=https://media.example.com", "version=1.10.0" };
         var payloadLength = values.Sum(value => Encoding.UTF8.GetByteCount(value) + 1);
         WriteUInt16(stream, checked((ushort)payloadLength));
         foreach (var value in values)

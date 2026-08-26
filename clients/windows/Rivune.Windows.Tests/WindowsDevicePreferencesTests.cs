@@ -24,6 +24,13 @@ public sealed class WindowsDevicePreferencesTests : IDisposable
         Assert.False(store.Snapshot.AutoSkipRecap);
         Assert.False(store.Snapshot.AutoSkipOutro);
         Assert.Null(store.Snapshot.LastSuccessfulUpdateCheckAt);
+        Assert.Null(store.Snapshot.LastPresentedUpdateVersion);
+        Assert.Equal(Rivune.App.PlaybackQualityPreset.Automatic, store.Snapshot.LocalQuality);
+        Assert.Equal(Rivune.App.PlaybackQualityPreset.Automatic, store.Snapshot.RemoteWifiQuality);
+        Assert.Equal(Rivune.App.PlaybackQualityPreset.Automatic, store.Snapshot.MobileQuality);
+        Assert.Equal(20L * 1024 * 1024 * 1024, store.Snapshot.OfflineQuotaBytes);
+        Assert.Equal(30, store.Snapshot.OfflineExpirationDays);
+        Assert.False(store.Snapshot.DownloadOnMobile);
     }
 
     [Fact]
@@ -40,6 +47,13 @@ public sealed class WindowsDevicePreferencesTests : IDisposable
             AutoSkipRecap = true,
             AutoSkipOutro = true,
             LastSuccessfulUpdateCheckAt = new DateTimeOffset(2026, 8, 19, 12, 34, 56, TimeSpan.Zero),
+            LastPresentedUpdateVersion = "1.11.5",
+            LocalQuality = Rivune.App.PlaybackQualityPreset.Maximum,
+            RemoteWifiQuality = Rivune.App.PlaybackQualityPreset.Balanced,
+            MobileQuality = Rivune.App.PlaybackQualityPreset.Economy,
+            OfflineQuotaBytes = 10L * 1024 * 1024 * 1024,
+            OfflineExpirationDays = 0,
+            DownloadOnMobile = true,
         };
 
         await using (var writer = new WindowsDevicePreferencesStore(FilePath))

@@ -10,7 +10,7 @@ public sealed class ProfileContextLifecycleTests
 {
     private static readonly Guid ProfileId = Guid.Parse("44444444-4444-4444-8444-444444444444");
     private const string DiscoveryBody = """
-        {"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1/","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
+        {"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1/","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
         """;
     private const string SelectionBody = """
         {"profile":{"id":"44444444-4444-4444-8444-444444444444","name":"Viewer","description":null,"categoryId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","category":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","name":"Default","color":null,"icon":null},"isChild":false,"hasPin":false,"canManage":true,"enabled":true,"availableFrom":null,"availableUntil":null,"accessStartTime":null,"accessEndTime":null,"accessTimezone":"UTC","accessible":true,"avatar":{"kind":"preset","presetId":"blue","url":"/api/v1/profiles/44444444-4444-4444-8444-444444444444/avatar"}},"expiresAt":"2026-08-15T13:00:00Z","profileContext":"context-one"}

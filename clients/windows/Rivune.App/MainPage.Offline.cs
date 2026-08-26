@@ -247,11 +247,13 @@ public sealed partial class MainPage
             width,
             width / LandscapeCardAspectRatio,
             hideTitle: false,
-            enabled: true,
+            enabled: item.State == OfflineMediaState.Ready,
             fallbackText: item.Title.Length == 0 ? "R" : item.Title[..1].ToUpperInvariant());
         button.Tag = item;
         button.Click += OfflineMedia_Click;
-        AutomationProperties.SetName(button, UiFormat("Play downloaded {0}, {1}", item.Title, FormatBytes(item.SizeBytes)));
+        AutomationProperties.SetName(button, item.State == OfflineMediaState.Ready
+            ? UiFormat("Play downloaded {0}, {1}", item.Title, FormatBytes(item.SizeBytes))
+            : UiFormat("Downloaded {0}, {1}, {2}", item.Title, FormatBytes(item.SizeBytes), item.State.ToString()));
         var menu = new MenuFlyout();
         var remove = new MenuFlyoutItem { Text = UiText("Delete download"), Icon = new FontIcon { Glyph = "\uE74D" }, Tag = item };
         remove.Click += RemoveOfflineMedia_Click;

@@ -5,7 +5,7 @@ using Xunit;
 
 namespace Rivune.Windows.Tests;
 
-public sealed class ProtocolV20BrowseContractsTests
+public sealed class ProtocolV22BrowseContractsTests
 {
     private static readonly Guid CollectionId = Guid.Parse("11111111-1111-4111-8111-111111111111");
     private static readonly Guid ProfileId = Guid.Parse("22222222-2222-4222-8222-222222222222");
@@ -138,7 +138,7 @@ public sealed class ProtocolV20BrowseContractsTests
             if (request.RequestUri!.AbsolutePath == "/.well-known/rivune")
             {
                 return JsonResponse(
-                    """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1/","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""");
+                    """{"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1/","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""");
             }
 
             var escapedPath = request.RequestUri.GetComponents(UriComponents.Path, UriFormat.UriEscaped);
