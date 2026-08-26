@@ -38,6 +38,10 @@ public sealed class OfflineMediaStoreTests : IDisposable
         Assert.DoesNotContain(Convert.ToHexString(plaintext.AsSpan(0, 64)), Convert.ToHexString(archive));
         Assert.Equal(plaintext.Length, item.SizeBytes);
         Assert.Equal(item, Assert.Single(store.Items(scope)));
+        var transition = Assert.Single(store.DownloadTransitions());
+        Assert.Equal(item.Id, transition.Id);
+        Assert.Equal(OfflineMediaState.Ready, transition.State);
+        Assert.Equal(0, transition.ReservedBytes);
 
         var protectedKey = await File.ReadAllBytesAsync(Path.Combine(_root, scope, "key.v1.dpapi"), TestContext.Current.CancellationToken);
         var key = protector.Unprotect(protectedKey);
@@ -190,6 +194,53 @@ public sealed class OfflineMediaStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task QuotaIsGlobalAcrossProfileScopesAndCountsRealArchives()
+    {
+        using var store = new OfflineMediaStore(_root, new TestKeyProtector(), maximumStoredBytes: 2_500);
+        var firstScope = store.RegisterProfile(Server, Profile(hasPin: false), null);
+        await store.DownloadAsync(firstScope, new Uri(Server, "/media/first.mp4"), uri => uri.Host == Server.Host,
+            TitleId, "First", "mp4", null, handler: new FixedBodyHandler(new byte[1_500]), cancellationToken: TestContext.Current.CancellationToken);
+        var secondScope = store.RegisterProfile(Server, Profile(Guid.NewGuid(), hasPin: false), null);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.DownloadAsync(secondScope,
+            new Uri(Server, "/media/second.mp4"), uri => uri.Host == Server.Host, Guid.NewGuid(), "Second", "mp4", null,
+            handler: new FixedBodyHandler(new byte[1_000]), cancellationToken: TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task ExpirationIsPersistedAndCleanupRemovesOnlyExpiredReferencedArchive()
+    {
+        var clock = new TestTimeProvider(new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero));
+        using var store = new OfflineMediaStore(_root, new TestKeyProtector(), expirationDays: 30, timeProvider: clock);
+        var scope = store.RegisterProfile(Server, Profile(hasPin: false), null);
+        var item = await store.DownloadAsync(scope, new Uri(Server, "/media/video.mp4"), uri => uri.Host == Server.Host,
+            TitleId, "Movie", "mp4", null, handler: new FixedBodyHandler(new byte[1_024]), cancellationToken: TestContext.Current.CancellationToken);
+        var orphan = Path.Combine(_root, scope, $"{Guid.NewGuid():N}.rvn");
+        await File.WriteAllBytesAsync(orphan, new byte[128], TestContext.Current.CancellationToken);
+        Assert.Equal(clock.GetUtcNow().AddDays(30), item.ExpiresAt);
+
+        clock.Advance(TimeSpan.FromDays(31));
+        Assert.Equal(1, store.CleanupExpired());
+        Assert.Empty(store.Items(scope));
+        Assert.True(File.Exists(orphan));
+    }
+
+    [Fact]
+    public async Task ZeroExpirationNeverExpires()
+    {
+        var clock = new TestTimeProvider(DateTimeOffset.UtcNow);
+        using var store = new OfflineMediaStore(_root, new TestKeyProtector(), expirationDays: 0, timeProvider: clock);
+        var scope = store.RegisterProfile(Server, Profile(hasPin: false), null);
+        var item = await store.DownloadAsync(scope, new Uri(Server, "/media/video.mp4"), uri => uri.Host == Server.Host,
+            TitleId, "Movie", "mp4", null, handler: new FixedBodyHandler(new byte[1_024]), cancellationToken: TestContext.Current.CancellationToken);
+        clock.Advance(TimeSpan.FromDays(365));
+
+        Assert.Null(item.ExpiresAt);
+        Assert.Equal(0, store.CleanupExpired());
+        Assert.Single(store.Items(scope));
+    }
+
+    [Fact]
     public void SecondStoreCannotOpenTheSameOfflineRoot()
     {
         using var firstStore = new OfflineMediaStore(_root, new TestKeyProtector(), maximumStoredBytes: 3000);
@@ -297,6 +348,13 @@ public sealed class OfflineMediaStoreTests : IDisposable
         public byte[] Unprotect(ReadOnlySpan<byte> ciphertext) => Protect(ciphertext);
     }
 
+
+    private sealed class TestTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        private DateTimeOffset _now = now;
+        public override DateTimeOffset GetUtcNow() => _now;
+        public void Advance(TimeSpan duration) => _now += duration;
+    }
     private sealed class FixedBodyHandler(byte[] body) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>

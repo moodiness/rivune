@@ -29,9 +29,16 @@ public sealed partial class MainPage
     private IReadOnlyList<AddonCatalogDescriptor> _searchDescriptors = [];
     private Guid? _viewerProfileId;
     private readonly List<MediaTarget> _searchTargets = [];
+    private IReadOnlyList<SemanticSearchIntent> _searchIntents = [];
+    private bool _searchPartial;
     private string _searchQuery = string.Empty;
     private int _searchPage;
     private bool _searchHasMore;
+    private long _searchPublicationEpoch;
+    private bool _searchProgressPublished;
+    private bool _searchProgressQueued;
+    private AddonResourceBatch?[]? _pendingAddonSearchProgress;
+    private SemanticSearchOutcome? _pendingSemanticSearchProgress;
     private readonly List<LibraryItem> _libraryItems = [];
     private TitleMediaType? _libraryType;
     private int _libraryPage;
@@ -76,6 +83,7 @@ public sealed partial class MainPage
     private CancellationTokenSource? _updateOperationCancellation;
     private Task? _updateOperationTask;
     private bool _manualUpdateCheckRequested;
+    private long _searchDiagnosticSequence;
     private ListView? _horizontalDragList;
     private ScrollViewer? _horizontalDragScroller;
     private uint _horizontalDragPointerId;
@@ -210,6 +218,14 @@ public sealed partial class MainPage
             }
 
             _diagnostics.Record(DiagnosticEventCode.UpdateAvailable);
+            var isNewNotice = AppUpdateNotificationPolicy.ShouldPresent(
+                _devicePreferences.LastPresentedUpdateVersion,
+                result.LatestVersion);
+            if (isNewNotice) await RecordPresentedUpdateAsync(result.LatestVersion, CancellationToken.None);
+            if (automatic && !_manualUpdateCheckRequested)
+            {
+                if (!isNewNotice || _updateNotifier.Deliver(result)) return;
+            }
             var available = new ContentDialog
             {
                 XamlRoot = XamlRoot,
@@ -241,6 +257,7 @@ public sealed partial class MainPage
             }
             string? packagePath = null;
             string? updatePath = null;
+            var failurePhase = AppUpdateFailurePhase.Download;
             try
             {
                 var processPath = Environment.ProcessPath ??
@@ -264,6 +281,7 @@ public sealed partial class MainPage
                 {
                     await AppUpdateChecker.DownloadPackageAsync(result.Package, destination, cancellation.Token);
                 }
+                failurePhase = AppUpdateFailurePhase.Package;
                 await AppUpdateChecker.ExtractExecutableAsync(result.Package, packagePath, updatePath, cancellation.Token);
                 PortableAppUpdate.VerifyProductVersion(updatePath, result.LatestVersion);
                 await DeleteTemporaryUpdateAsync(packagePath);
@@ -276,6 +294,7 @@ public sealed partial class MainPage
                     await DeleteTemporaryUpdateAsync(updatePath);
                     return;
                 }
+                failurePhase = AppUpdateFailurePhase.Apply;
                 PortableAppUpdate.StartHandoff(
                     updatePath,
                     processPath,
@@ -288,19 +307,29 @@ public sealed partial class MainPage
             }
             catch (Exception exception)
             {
-                HideDialog(downloading);
-                await downloadingOperation;
-                await DeleteTemporaryUpdateAsync(updatePath);
-                await DeleteTemporaryUpdateAsync(packagePath);
-                if (!_closed)
+                var explicitlyCanceled = exception is OperationCanceledException && (cancellation.IsCancellationRequested || _closed);
+                _diagnostics.Record(AppUpdateFailureDiagnostics.TerminalCode(failurePhase, explicitlyCanceled));
+                try
                 {
-                    var message = exception switch
+                    HideDialog(downloading);
+                    await downloadingOperation;
+                    await DeleteTemporaryUpdateAsync(updatePath);
+                    await DeleteTemporaryUpdateAsync(packagePath);
+                    if (!_closed)
                     {
-                        HttpRequestException => "GitHub could not be reached while downloading the update. Check the network connection and try again.",
-                        OperationCanceledException => "The update download timed out. Check the network connection and try again.",
-                        _ => exception.Message,
-                    };
-                    await ShowUpdateDialogAsync("Could not apply update", message);
+                        var message = exception switch
+                        {
+                            HttpRequestException => "GitHub could not be reached while downloading the update. Check the network connection and try again.",
+                            OperationCanceledException when explicitlyCanceled => "The update was canceled. The current app is unchanged.",
+                            OperationCanceledException => "The update download timed out. Check the network connection and try again.",
+                            _ => exception.Message,
+                        };
+                        await ShowUpdateDialogAsync("Could not apply update", message);
+                    }
+                }
+                catch
+                {
+                    // The terminal phase was already recorded. Cleanup or dialog failures must not emit a second outcome.
                 }
             }
         }
@@ -356,6 +385,27 @@ public sealed partial class MainPage
         catch (Exception)
         {
             // A local preference write failure must not block a verified update check.
+        }
+    }
+
+    private async Task RecordPresentedUpdateAsync(string version, CancellationToken cancellationToken)
+    {
+        _devicePreferences = _devicePreferences with { LastPresentedUpdateVersion = version };
+        if (_devicePreferencesStore is null) return;
+        try
+        {
+            await _devicePreferencesStore.UpdateAsync(
+                preferences => preferences with { LastPresentedUpdateVersion = version },
+                cancellationToken);
+            _devicePreferences = _devicePreferencesStore.Snapshot;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            // In-app fallback remains usable if local device preference storage is unavailable.
         }
     }
 
@@ -596,7 +646,7 @@ public sealed partial class MainPage
         try
         {
             return new HomeRecommendationResult(
-                await client.GetLocalRecommendationsAsync(limit: 24, cancellationToken),
+                await client.GetLocalRecommendationsAsync(limit: 24, artworkShape: "poster", cancellationToken: cancellationToken),
                 Failed: false);
         }
         catch (OperationCanceledException) { return new HomeRecommendationResult(null, Failed: false); }
@@ -1746,7 +1796,7 @@ public sealed partial class MainPage
         if (_heroTarget is not null) await OpenMediaTargetAsync(_heroTarget, playWhenReady: true);
     }
 
-    private async Task LoadSearchDescriptorsAsync()
+    private async Task LoadSearchDescriptorsAsync(bool keepLoadingVisible = false)
     {
         var client = _state.Client;
         if (client is null) return;
@@ -1771,7 +1821,7 @@ public sealed partial class MainPage
         }
         finally
         {
-            if (_state.IsCurrent(generation)) SearchLoading.Visibility = Visibility.Collapsed;
+            if (!keepLoadingVisible && _state.IsCurrent(generation)) SearchLoading.Visibility = Visibility.Collapsed;
         }
     }
 
@@ -1790,10 +1840,13 @@ public sealed partial class MainPage
         if (query.Length < 2)
         {
             _searchTargets.Clear();
+            _searchIntents = [];
+            _searchPartial = false;
             _searchQuery = string.Empty;
             _searchPage = 0;
             _searchHasMore = false;
             SearchResults.Items.Clear();
+            SearchLoading.Visibility = Visibility.Collapsed;
             SearchResultCount.Text = string.Empty;
             SearchMoreButton.Visibility = Visibility.Collapsed;
             SearchResultContent.Visibility = Visibility.Collapsed;
@@ -1802,10 +1855,11 @@ public sealed partial class MainPage
             SearchEmpty.Visibility = Visibility.Visible;
             return;
         }
-        if (_searchDescriptors.Count == 0) await LoadSearchDescriptorsAsync();
+        if (_searchDescriptors.Count == 0) await LoadSearchDescriptorsAsync(keepLoadingVisible: true);
         if (!_state.IsCurrent(generation)) return;
-        if (_searchDescriptors.Count == 0)
+        if (_searchDescriptors.Count == 0 && !SemanticSearchAvailable)
         {
+            SearchLoading.Visibility = Visibility.Collapsed;
             SearchResults.Items.Clear();
             SearchResultCount.Text = string.Empty;
             SearchMoreButton.Visibility = Visibility.Collapsed;
@@ -1822,32 +1876,92 @@ public sealed partial class MainPage
             return;
         }
         SearchEmpty.Visibility = Visibility.Collapsed;
-        if (reset) SearchResultContent.Visibility = Visibility.Collapsed;
+        if (reset)
+        {
+            _searchTargets.Clear();
+            _searchIntents = [];
+            _searchPartial = false;
+            _searchHasMore = false;
+            SearchResults.Items.Clear();
+            SearchResultCount.Text = string.Empty;
+            SearchResultContent.Visibility = Visibility.Collapsed;
+        }
         SearchLoading.Visibility = Visibility.Visible;
         SearchBanner.IsOpen = false;
         SearchRetryButton.Visibility = Visibility.Collapsed;
+        var publicationEpoch = ++_searchPublicationEpoch;
+        _searchProgressPublished = false;
+        _searchProgressQueued = false;
+        _pendingAddonSearchProgress = null;
+        _pendingSemanticSearchProgress = null;
+        var diagnostic = _diagnostics.BeginOperation(
+            Interlocked.Increment(ref _searchDiagnosticSequence),
+            DiagnosticEventCode.SearchStarted);
         try
         {
             var page = reset ? 1 : _searchPage + 1;
             var skip = (page - 1) * SearchPageSize;
-            var types = _searchDescriptors.Where(value => value.Searchable).Select(value => value.Catalog.Type).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-            if (types.Length == 0) throw new InvalidOperationException("No searchable source is available for this profile.");
-            var results = await Task.WhenAll(types.Select(async type =>
+            var configuredTypes = ProgressiveSearchPolicy.NormalizeTypes(
+                _searchDescriptors.Where(value => value.Searchable).Select(value => value.Catalog.Type),
+                out var configuredTypesTruncated);
+            var progress = new Progress<AddonResourceBatch?[]>(results => QueueAddonSearchProgress(
+                results,
+                generation,
+                publicationEpoch));
+            var semanticProgress = new Progress<SemanticSearchOutcome>(outcome => QueueSemanticSearchProgress(
+                outcome,
+                generation,
+                publicationEpoch));
+
+            var search = await SemanticSearchPolicy.SearchAddonsAsync(
+                SemanticSearchAvailable,
+                configuredTypes,
+                query,
+                token => _state.Client!.SemanticSearchAsync(new SemanticSearchRequest
+                {
+                    Query = query,
+                    Language = MetadataLanguage(),
+                    Region = EffectiveMetadataRegion(),
+                    Page = page,
+                    Limit = Math.Min(SearchPageSize, 40),
+                    ExcludedIntentIds = [],
+                }, token),
+                (types, addonQuery, token) => SearchAddonTypesAsync(types, addonQuery, skip, progress, token),
+                _state.Token,
+                semanticProgress: semanticProgress);
+            var semantic = search.Semantic;
+            var results = search.Addon;
+            if (!_state.IsCurrent(generation) || _searchPublicationEpoch != publicationEpoch)
             {
-                try { return await _state.Client!.SearchAddonCatalogsAsync(type, query, skip, SearchPageSize, language: MetadataLanguage(), cancellationToken: _state.Token); }
-                catch (Exception exception) when (exception is not OperationCanceledException) { return null; }
-            }));
-            if (!_state.IsCurrent(generation)) return;
-            if (results.All(value => value is null)) throw new InvalidOperationException("No search source could be reached.");
+                diagnostic.Complete(DiagnosticEventCode.SearchCanceled);
+                return;
+            }
+            _searchPublicationEpoch++;
+            _pendingAddonSearchProgress = null;
+            _pendingSemanticSearchProgress = null;
+            _searchProgressQueued = false;
+            var inferredTypes = semantic.Page?.MediaTypes ?? [];
+            var selectedTypes = SemanticSearchPolicy.SelectTypes(configuredTypes, inferredTypes);
+            var inferredTypeSet = inferredTypes.Count > 0 && selectedTypes.Count < configuredTypes.Length
+                ? selectedTypes.ToHashSet(StringComparer.OrdinalIgnoreCase)
+                : null;
+            var semanticItems = semantic.Page?.Items.Select(value => value.ToMediaTarget()).ToArray() ?? [];
+            if (results.All(value => value is null) && semanticItems.Length == 0 && _searchTargets.Count == 0) throw new InvalidOperationException("No search source could be reached.");
             var batches = results.Where(value => value is not null).Cast<AddonResourceBatch>().ToArray();
-            var incoming = batches.SelectMany(value => value.ToMediaTargets(_searchDescriptors));
-            if (reset) _searchTargets.Clear();
-            var seen = _searchTargets.Select(TargetIdentity).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            _searchTargets.AddRange(incoming.Where(value => seen.Add(TargetIdentity(value))));
+            IEnumerable<MediaTarget> directItems = batches.SelectMany(value => value.ToMediaTargets(_searchDescriptors));
+            if (inferredTypeSet is not null) directItems = directItems.Where(value => inferredTypeSet.Contains(value.MediaType));
+            var directTargets = directItems.ToArray();
+            var merged = SemanticSearchPolicy.Merge(_searchTargets, directTargets, semanticItems);
+            _searchTargets.AddRange(merged.Skip(_searchTargets.Count));
+            _searchPartial = SemanticSearchPolicy.AccumulatePartial(
+                _searchPartial,
+                reset,
+                configuredTypesTruncated || semantic.Failed || semantic.Page?.Partial == true ||
+                    results.Any(value => value is null) || batches.Any(value => value.Errors.Count > 0));
             _searchQuery = query;
             _searchPage = page;
-            _searchHasMore = batches.Any(value => value.HasFullPage(SearchPageSize));
-            PopulateMediaGrid(SearchResults, _searchTargets);
+            _searchHasMore = semantic.Page?.HasMore == true || batches.Any(value => value.HasFullPage(SearchPageSize));
+            ReconcileMediaGrid(SearchResults, _searchTargets);
             SearchResultCount.Text = UiFormat(_searchTargets.Count == 1 ? "{0} title" : "{0} titles", _searchTargets.Count);
             SearchResultContent.Visibility = _searchTargets.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
             SearchEmpty.Visibility = _searchTargets.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -1857,17 +1971,26 @@ public sealed partial class MainPage
                 ((TextBlock)SearchEmpty.Children[1]).Text = UiText("Try another title or a broader search.");
             }
             SearchMoreButton.Visibility = _searchHasMore ? Visibility.Visible : Visibility.Collapsed;
-            if (results.Any(value => value is null) || batches.Any(value => value.Errors.Count > 0))
+            if (_searchPartial)
             {
                 SearchBanner.Severity = InfoBarSeverity.Warning;
                 SearchBanner.Message = UiText("Some sources could not be reached. Available results are shown.");
                 SearchBanner.IsOpen = true;
             }
+            diagnostic.Complete(_searchPartial ? DiagnosticEventCode.SearchPartial : DiagnosticEventCode.SearchSucceeded);
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException)
+        {
+            diagnostic.Complete(DiagnosticEventCode.SearchCanceled);
+        }
         catch (Exception exception)
         {
-            if (!_state.IsCurrent(generation)) return;
+            if (!_state.IsCurrent(generation))
+            {
+                diagnostic.Complete(DiagnosticEventCode.SearchCanceled);
+                return;
+            }
+            diagnostic.Complete(DiagnosticEventCode.SearchFailed);
             SearchBanner.Severity = InfoBarSeverity.Error;
             SearchBanner.Message = FriendlyError(exception);
             SearchBanner.IsOpen = true;
@@ -1879,14 +2002,135 @@ public sealed partial class MainPage
         }
     }
 
-    private void PopulateMediaGrid(GridView grid, IEnumerable<MediaTarget> targets)
+    private void ReconcileMediaGrid(GridView grid, IEnumerable<MediaTarget> targets)
     {
         ResizeMediaGrid(grid, ActualWidth);
-        grid.Items.Clear();
-        foreach (var target in targets) grid.Items.Add(CreateMediaCard(target));
+        var additions = IncrementalViewerPresentation.Additions(
+            grid.Items.OfType<object>(),
+            item => (item as FrameworkElement)?.Tag as MediaTarget,
+            targets);
+        foreach (var target in additions) grid.Items.Add(CreateMediaCard(target));
     }
 
-    private static string TargetIdentity(MediaTarget target) => target.Identity();
+    private bool SemanticSearchAvailable => _state.Discovery?.Supports(DiscoveryCapability.SemanticSearch) == true;
+    private void QueueAddonSearchProgress(AddonResourceBatch?[] results, long generation, long publicationEpoch)
+    {
+        if (!_state.IsCurrent(generation) || _searchPublicationEpoch != publicationEpoch) return;
+        if (!_searchProgressPublished && PublishProgressiveSearchResults(results, generation))
+        {
+            _searchProgressPublished = true;
+            PresentProgressiveSearchTargets();
+            return;
+        }
+        _pendingAddonSearchProgress = results;
+        QueueSearchProgressFlush(generation, publicationEpoch);
+    }
+
+    private void QueueSemanticSearchProgress(SemanticSearchOutcome outcome, long generation, long publicationEpoch)
+    {
+        if (!_state.IsCurrent(generation) || _searchPublicationEpoch != publicationEpoch) return;
+        if (!_searchProgressPublished && PublishProgressiveSemanticResults(outcome, generation))
+        {
+            _searchProgressPublished = true;
+            PresentProgressiveSearchTargets();
+            return;
+        }
+        _pendingSemanticSearchProgress = outcome;
+        QueueSearchProgressFlush(generation, publicationEpoch);
+    }
+
+    private void QueueSearchProgressFlush(long generation, long publicationEpoch)
+    {
+        if (_searchProgressQueued) return;
+        _searchProgressQueued = true;
+        if (DispatcherQueue.TryEnqueue(() => FlushSearchProgress(generation, publicationEpoch))) return;
+        _searchProgressQueued = false;
+        _pendingAddonSearchProgress = null;
+        _pendingSemanticSearchProgress = null;
+    }
+
+    private void FlushSearchProgress(long generation, long publicationEpoch)
+    {
+        _searchProgressQueued = false;
+        if (!_state.IsCurrent(generation) || _searchPublicationEpoch != publicationEpoch)
+        {
+            _pendingAddonSearchProgress = null;
+            _pendingSemanticSearchProgress = null;
+            return;
+        }
+        var addon = _pendingAddonSearchProgress;
+        var semantic = _pendingSemanticSearchProgress;
+        _pendingAddonSearchProgress = null;
+        _pendingSemanticSearchProgress = null;
+        var changed = addon is not null && PublishProgressiveSearchResults(addon, generation);
+        if (semantic is { } outcome) changed |= PublishProgressiveSemanticResults(outcome, generation);
+        if (changed) PresentProgressiveSearchTargets();
+    }
+
+    private bool PublishProgressiveSearchResults(AddonResourceBatch?[] results, long generation)
+    {
+        if (!_state.IsCurrent(generation)) return false;
+        var batches = results.Where(value => value is not null).Cast<AddonResourceBatch>().ToArray();
+        if (batches.Length == 0) return false;
+        var incoming = batches.SelectMany(value => value.ToMediaTargets(_searchDescriptors));
+        return AppendProgressiveSearchTargets(incoming, semantic: false);
+    }
+
+    private bool PublishProgressiveSemanticResults(SemanticSearchOutcome outcome, long generation)
+    {
+        if (!_state.IsCurrent(generation) || outcome.Page is not { } page) return false;
+        _searchIntents = page.Intents;
+        return AppendProgressiveSearchTargets(page.Items.Select(value => value.ToMediaTarget()), semantic: true);
+    }
+
+    private bool AppendProgressiveSearchTargets(IEnumerable<MediaTarget> incoming, bool semantic)
+    {
+        var merged = semantic
+            ? SemanticSearchPolicy.Merge(_searchTargets, [], incoming)
+            : SemanticSearchPolicy.Merge(_searchTargets, incoming, []);
+        if (merged.Count == _searchTargets.Count) return false;
+        _searchTargets.AddRange(merged.Skip(_searchTargets.Count));
+        return true;
+    }
+
+    private void PresentProgressiveSearchTargets()
+    {
+        ReconcileMediaGrid(SearchResults, _searchTargets);
+        SearchResultCount.Text = UiFormat(_searchTargets.Count == 1 ? "{0} title" : "{0} titles", _searchTargets.Count);
+        SearchResultContent.Visibility = Visibility.Visible;
+        SearchEmpty.Visibility = Visibility.Collapsed;
+    }
+
+    private Task<AddonResourceBatch?[]> SearchAddonTypesAsync(
+        IReadOnlyList<string> types,
+        string query,
+        int skip,
+        IProgress<AddonResourceBatch?[]> progress,
+        CancellationToken cancellationToken) =>
+        ProgressiveSearchPolicy.CollectOrderedAsync(
+            types.Select(type => new Func<CancellationToken, Task<AddonResourceBatch?>>(async token =>
+            {
+                try
+                {
+                    return await _state.Client!.SearchAddonCatalogsAsync(
+                        type,
+                        query,
+                        skip,
+                        SearchPageSize,
+                        language: MetadataLanguage(),
+                        cancellationToken: token);
+                }
+                catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                {
+                    return null;
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    return null;
+                }
+            })).ToArray(),
+            cancellationToken,
+            progress);
 
     private async void LibraryFilter_Click(object sender, RoutedEventArgs e)
     {
@@ -1928,7 +2172,7 @@ public sealed partial class MainPage
             _libraryItems.AddRange(response.Items.Where(value => seen.Add(value.TitleId)));
             _libraryPage = response.Page;
             _libraryTotalPages = response.TotalPages;
-            PopulateMediaGrid(LibraryResults, _libraryItems.Select(value => value.ToMediaTarget()));
+            ReconcileMediaGrid(LibraryResults, _libraryItems.Select(value => value.ToMediaTarget()));
             LibraryResultCount.Text = UiFormat(response.TotalResults == 1 ? "{0} saved title" : "{0} saved titles", response.TotalResults);
             LibraryEmpty.Visibility = _libraryItems.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             LibraryMoreButton.Visibility = _libraryPage < _libraryTotalPages ? Visibility.Visible : Visibility.Collapsed;
@@ -2524,18 +2768,51 @@ public sealed partial class MainPage
         var target = _detailTarget ?? throw new InvalidOperationException("No title is selected.");
         return target.CoordinatedItem(_progressTitleId, _detailTitleForPlayback());
     }
-
     private async Task ChooseHandoffDeviceAsync()
     {
         var devices = _state.PlaybackDevices.Where(device => device.Capabilities.Contains("remote-control", StringComparer.Ordinal)).ToArray();
         var device = await ChooseAsync("Send to device", devices, value => $"{value.Name} · {value.Platform}");
         if (device is null) return;
+        var modeChoice = await ChooseAsync("Playback mode", new[] { "Move playback", "Play a copy" }, value => value);
+        if (modeChoice is null) return;
+        var mode = modeChoice == "Move playback" ? PlaybackLoadMode.Handoff : PlaybackLoadMode.PlayCopy;
+        var operationId = Guid.NewGuid();
         await _state.Client!.SendPlaybackCommandAsync(device.SessionId, new PlaybackCommandInput
         {
-            Command = "load",
+            OperationId = operationId,
+            Command = PlaybackCommandKind.Load,
+            Mode = mode,
+            TargetRevision = device.Revision,
             Item = CurrentCoordinatedItem(),
-            PositionMilliseconds = (_detailProgress?.PositionSeconds ?? 0) * 1_000L,
+            PositionMilliseconds = PlayerView.Visibility == Visibility.Visible
+                ? (long)(_mediaPlayer.PlaybackSession.Position.TotalMilliseconds)
+                : (_detailProgress?.PositionSeconds ?? 0) * 1_000L,
         }, _state.Token);
+        var result = await WaitForOutgoingPlaybackResultAsync(operationId, _state.Token);
+        if (result.Status == PlaybackCommandStatus.Applied)
+        {
+            DetailBanner.Severity = InfoBarSeverity.Success;
+            DetailBanner.Message = mode == PlaybackLoadMode.Handoff ? UiFormat("Playback moved to {0}.", device.Name) : UiFormat("Playback copied to {0}.", device.Name);
+            DetailBanner.IsOpen = true;
+            if (mode == PlaybackLoadMode.Handoff && _state.PlaybackSession is not null)
+                await EndPlaybackAsync(completed: false, returnToDashboard: true);
+            return;
+        }
+        throw new InvalidOperationException(result.ResultCode == PlaybackOperationCode.StaleTarget
+            ? "The target device changed. Refresh devices and try again."
+            : $"The target device did not apply the operation ({result.ResultCode?.ToString() ?? result.Status.ToString()}).");
+    }
+
+    private async Task<PlaybackCommand> WaitForOutgoingPlaybackResultAsync(Guid operationId, CancellationToken cancellationToken)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromMinutes(2));
+        while (true)
+        {
+            var outgoing = await _state.Client!.GetOutgoingPlaybackCommandAsync(operationId, deadline.Token);
+            if (outgoing.Status is PlaybackCommandStatus.Applied or PlaybackCommandStatus.Failed or PlaybackCommandStatus.Expired) return outgoing;
+            await Task.Delay(TimeSpan.FromSeconds(1), deadline.Token);
+        }
     }
 
     private async Task ShowRemoteControlsAsync(PlaybackDevice device)
@@ -2554,23 +2831,24 @@ public sealed partial class MainPage
         panel.Children.Add(seekForward);
         panel.Children.Add(stop);
         var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = device.Name, Content = panel, CloseButtonText = UiText("Done") };
-        async Task SendAsync(string command, long? position = null)
+        async Task SendAsync(PlaybackCommandKind command, long? position = null)
         {
             try
             {
                 var target = LatestDevice();
-                await _state.Client!.SendPlaybackCommandAsync(target.SessionId, new PlaybackCommandInput { Command = command, PositionMilliseconds = position }, CancellationToken.None);
-                var current = LatestDevice();
-                var nextPosition = position ?? current.State.PositionMilliseconds;
-                device = current with
+                var operationId = Guid.NewGuid();
+                await _state.Client!.SendPlaybackCommandAsync(target.SessionId, new PlaybackCommandInput
                 {
-                    State = current.State with
-                    {
-                        Status = command == "play" ? "playing" : command == "pause" ? "paused" : current.State.Status,
-                        PositionMilliseconds = nextPosition,
-                    },
-                };
-                _state.PlaybackDevices = _state.PlaybackDevices.Select(value => value.SessionId == device.SessionId ? device : value).ToArray();
+                    OperationId = operationId,
+                    Command = command,
+                    PositionMilliseconds = position,
+                    TargetRevision = target.Revision,
+                }, CancellationToken.None);
+                var result = await WaitForOutgoingPlaybackResultAsync(operationId, CancellationToken.None);
+                if (result.Status != PlaybackCommandStatus.Applied)
+                    throw new InvalidOperationException(result.ResultCode == PlaybackOperationCode.StaleTarget
+                        ? "The target device changed. Reopen remote controls."
+                        : $"The target rejected the operation ({result.ResultCode?.ToString() ?? result.Status.ToString()}).");
             }
             catch (Exception exception)
             {
@@ -2580,17 +2858,17 @@ public sealed partial class MainPage
                 DetailBanner.IsOpen = true;
             }
         }
-        play.Click += async (_, _) => await SendAsync("play");
-        pause.Click += async (_, _) => await SendAsync("pause");
-        seekBack.Click += async (_, _) => await SendAsync("seek", Math.Max(0, LatestDevice().State.PositionMilliseconds - 10_000));
+        play.Click += async (_, _) => await SendAsync(PlaybackCommandKind.Play);
+        pause.Click += async (_, _) => await SendAsync(PlaybackCommandKind.Pause);
+        seekBack.Click += async (_, _) => await SendAsync(PlaybackCommandKind.Seek, Math.Max(0, LatestDevice().State.PositionMilliseconds - 10_000));
         seekForward.Click += async (_, _) =>
         {
             var state = LatestDevice().State;
-            await SendAsync("seek", PlaybackCoordinationPolicy.ForwardSeekPosition(
+            await SendAsync(PlaybackCommandKind.Seek, PlaybackCoordinationPolicy.ForwardSeekPosition(
                 state.PositionMilliseconds,
                 state.DurationMilliseconds));
         };
-        stop.Click += async (_, _) => await SendAsync("stop");
+        stop.Click += async (_, _) => await SendAsync(PlaybackCommandKind.Stop);
         await ShowDialogAsync(dialog);
     }
 
