@@ -4,6 +4,7 @@ import { Brand, ErrorPanel, Screen, Spinner, TvButton } from "./components";
 import { focusFirst } from "./focus";
 import { t } from "./i18n";
 import { platformAdapter } from "./platform";
+import { installationId } from "./storage";
 import type { Account, DeviceAuthorization, Discovery } from "./types";
 
 type Connected = { client: RivuneTvClient; discovery: Discovery; account: Account | null };
@@ -84,7 +85,7 @@ export function Onboarding({ rememberedServer, onConnected }: { rememberedServer
         return;
       }
       const deviceName = await adapter.deviceName();
-      const code = await next.beginDeviceAuthorization(deviceName, adapter.platform);
+      const code = await next.beginDeviceAuthorization(installationId(), deviceName, adapter.platform);
       setAuthorization(code);
     } catch (cause) {
       if (silent) window.localStorage.removeItem(serverKey);
@@ -100,7 +101,7 @@ export function Onboarding({ rememberedServer, onConnected }: { rememberedServer
     setError("");
     try {
       const deviceName = await adapter.deviceName();
-      setAuthorization(await client.beginDeviceAuthorization(deviceName, adapter.platform));
+      setAuthorization(await client.beginDeviceAuthorization(installationId(), deviceName, adapter.platform));
     } catch (cause) {
       setError(message(cause));
     } finally {

@@ -12,6 +12,7 @@ export type TvUpdateState = Readonly<{
   status: TvUpdateStatus;
   currentVersion: string;
   latestVersion?: string;
+  notice?: boolean;
 }>;
 
 export interface RivuneTvUpdater {
@@ -21,6 +22,7 @@ export interface RivuneTvUpdater {
   checkAutomatically(): Promise<void>;
   checkManually(): Promise<void>;
   download(): Promise<void>;
+  dismissNotice(): void;
   restart(): Promise<void>;
 }
 
