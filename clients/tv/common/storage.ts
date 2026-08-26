@@ -12,84 +12,35 @@ export interface CredentialStore {
   clear(issuer: string): Promise<void>;
 }
 
-export interface KeyValueStorage {
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-  removeItem(key: string): void;
+const INSTALLATION_ID_KEY = "rivune.tv.installation.v1";
+let volatileInstallationId: string | null = null;
+
+function createInstallationId(): string {
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
 }
 
-const STORAGE_PREFIX = "rivune.tv.credentials.v1:";
-
-function keyForIssuer(issuer: string): string {
-  return `${STORAGE_PREFIX}${encodeURIComponent(issuer)}`;
-}
-
-function isTokenPair(value: unknown): value is TokenPair {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const token = value as Partial<TokenPair>;
-  const categoryValid = token.category === null ||
-    (typeof token.category === "object" && token.category !== null && !Array.isArray(token.category));
-  const scopeValid = token.authorizationScope === "global_admin" || token.authorizationScope === "category";
-  const scopeCategoryConsistent = token.authorizationScope === "global_admin" ? token.category === null : token.category !== null;
-  return token.tokenType === "Bearer" &&
-    typeof token.accessToken === "string" && token.accessToken.length > 0 &&
-    typeof token.accessTokenExpiresAt === "string" && Number.isFinite(Date.parse(token.accessTokenExpiresAt)) &&
-    typeof token.refreshToken === "string" && token.refreshToken.length > 0 &&
-    typeof token.refreshTokenExpiresAt === "string" && Number.isFinite(Date.parse(token.refreshTokenExpiresAt)) &&
-    typeof token.sessionId === "string" && token.sessionId.length > 0 &&
-    typeof token.deviceId === "string" && token.deviceId.length > 0 &&
-    scopeValid && categoryValid && scopeCategoryConsistent;
-}
-
-function decodeStoredCredentials(raw: string, issuer: string): StoredCredentials | null {
-  let value: unknown;
+export function installationId(): string {
+  if (volatileInstallationId) return volatileInstallationId;
   try {
-    value = JSON.parse(raw);
+    const stored = globalThis.localStorage?.getItem(INSTALLATION_ID_KEY)?.trim();
+    if (stored && stored.length <= 128) return (volatileInstallationId = stored);
+    const generated = createInstallationId();
+    globalThis.localStorage?.setItem(INSTALLATION_ID_KEY, generated);
+    return (volatileInstallationId = generated);
   } catch {
-    return null;
-  }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  const persisted = value as { version?: unknown; issuer?: unknown; tokens?: unknown; profileContext?: unknown };
-  if (persisted.version !== 1 || persisted.issuer !== issuer || !isTokenPair(persisted.tokens)) return null;
-  if (persisted.profileContext !== null && typeof persisted.profileContext !== "string") return null;
-  return {
-    issuer,
-    tokens: persisted.tokens,
-    profileContext: persisted.profileContext as string | null,
-  };
-}
-
-/**
- * Issuer-scoped browser persistence. A token rotation and its profile context
- * are committed in one setItem operation, so a crash cannot expose a mixed
- * access/refresh pair.
- */
-export class LocalStorageCredentialStore implements CredentialStore {
-  constructor(private readonly storage: KeyValueStorage) {}
-
-  async load(issuer: string): Promise<StoredCredentials | null> {
-    const key = keyForIssuer(issuer);
-    const raw = this.storage.getItem(key);
-    if (raw === null) return null;
-    const credentials = decodeStoredCredentials(raw, issuer);
-    if (credentials === null) this.storage.removeItem(key);
-    return credentials;
-  }
-
-  async save(credentials: StoredCredentials): Promise<void> {
-    const payload = JSON.stringify({
-      version: 1,
-      issuer: credentials.issuer,
-      tokens: credentials.tokens,
-      profileContext: credentials.profileContext,
-    });
-    this.storage.setItem(keyForIssuer(credentials.issuer), payload);
-  }
-
-  async clear(issuer: string): Promise<void> {
-    this.storage.removeItem(keyForIssuer(issuer));
+    return (volatileInstallationId = createInstallationId());
   }
 }
+
+
 
 export class MemoryCredentialStore implements CredentialStore {
   private readonly entries = new Map<string, StoredCredentials>();
@@ -114,10 +65,15 @@ function structuredCloneSafe<T>(value: T): T {
 
 export function defaultCredentialStore(): CredentialStore {
   try {
-    return globalThis.localStorage
-      ? new LocalStorageCredentialStore(globalThis.localStorage)
-      : new MemoryCredentialStore();
+    const storage = globalThis.localStorage;
+    if (storage) {
+      for (let index = storage.length - 1; index >= 0; index -= 1) {
+        const key = storage.key(index);
+        if (key?.startsWith("rivune.tv.credentials.") || key === "rivune.tv.quality.v1") storage.removeItem(key);
+      }
+    }
   } catch {
-    return new MemoryCredentialStore();
+    // Storage cleanup is best effort; credentials still remain memory-only.
   }
+  return new MemoryCredentialStore();
 }
