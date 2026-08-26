@@ -481,7 +481,7 @@ function Run-Publisher {
         $hostName,
         [uint16] $config.port,
         [string[]] @('url', 'protocol', 'version'),
-        [string[]] @($config.origin, '21', $config.version)
+        [string[]] @($config.origin, '22', $config.version)
     )
     try {
         $registration.Register()
