@@ -24,12 +24,14 @@ RUN CGO_ENABLED=0 go build \
 
 FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
 ARG DEBIAN_SNAPSHOT=20260825T000000Z
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /usr/local/share/rivune-bootstrap-ca.crt
 RUN printf '%s\n' \
       "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ trixie main" \
       "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ trixie-updates main" \
       "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/ trixie-security main" \
       > /etc/apt/sources.list \
     && rm -f /etc/apt/sources.list.d/debian.sources \
+    && printf 'Acquire::https::CaInfo "/usr/local/share/rivune-bootstrap-ca.crt";\n' > /etc/apt/apt.conf.d/99rivune-bootstrap-ca \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
       ca-certificates=20250419 \
@@ -40,6 +42,7 @@ RUN printf '%s\n' \
     && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
         apt-get install -y --no-install-recommends intel-media-va-driver=25.2.3+dfsg1-1; \
     fi \
+    && rm -f /etc/apt/apt.conf.d/99rivune-bootstrap-ca /usr/local/share/rivune-bootstrap-ca.crt \
     && rm -rf /var/lib/apt/lists/*
 ENV XDG_CACHE_HOME=/tmp/.cache
 
