@@ -2,9 +2,11 @@ using System.Net;
 using System.Net.Sockets;
 using Rivune.App;
 
-if (args.Length != 2 || !TimeSpan.TryParse(args[1], out var timeout) || timeout <= TimeSpan.Zero)
+if (args.Length != 3 ||
+    !int.TryParse(args[1], out var expectedProtocol) || expectedProtocol <= 0 ||
+    !TimeSpan.TryParse(args[2], out var timeout) || timeout <= TimeSpan.Zero)
 {
-    Console.Error.WriteLine("Usage: Rivune.DiscoveryProbe EXPECTED_ORIGIN TIMEOUT");
+    Console.Error.WriteLine("Usage: Rivune.DiscoveryProbe EXPECTED_ORIGIN EXPECTED_PROTOCOL TIMEOUT");
     return 64;
 }
 if (!Uri.TryCreate(args[0], UriKind.Absolute, out var expectedOrigin))
@@ -14,6 +16,7 @@ if (!Uri.TryCreate(args[0], UriKind.Absolute, out var expectedOrigin))
 }
 
 var expected = new Uri(expectedOrigin.GetLeftPart(UriPartial.Authority));
+var expectedProtocolText = expectedProtocol.ToString(System.Globalization.CultureInfo.InvariantCulture);
 using var cancellation = new CancellationTokenSource(timeout);
 using var udp = new UdpClient(AddressFamily.InterNetwork);
 udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
@@ -40,10 +43,15 @@ try
         catch (InvalidDataException) { continue; }
         foreach (var record in records)
         {
-            if (record.Type != DnsRecordType.Txt || record.Attributes is null) continue;
-            var service = RivuneLanService.Parse(DnsPacket.InstanceName(record.Name), record.Attributes);
-            if (service?.Address != expected) continue;
-            Console.WriteLine($"Discovered {service.Name} at {service.Address.GetLeftPart(UriPartial.Authority)}.");
+            if (record.Type != DnsRecordType.Txt || record.Attributes is null ||
+                !record.Attributes.TryGetValue("protocol", out var protocol) || protocol != expectedProtocolText ||
+                !record.Attributes.TryGetValue("url", out var rawAddress) ||
+                !Uri.TryCreate(rawAddress, UriKind.Absolute, out var supplied) ||
+                new Uri(supplied.GetLeftPart(UriPartial.Authority)) != expected)
+            {
+                continue;
+            }
+            Console.WriteLine($"Discovered {DnsPacket.InstanceName(record.Name)} at {expected.GetLeftPart(UriPartial.Authority)} using protocol {expectedProtocolText}.");
             return 0;
         }
     }

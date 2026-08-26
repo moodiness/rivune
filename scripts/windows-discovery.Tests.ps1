@@ -99,7 +99,7 @@ try {
     & dotnet run `
         --project (Join-Path $repositoryRoot 'clients/windows/Rivune.DiscoveryProbe/Rivune.DiscoveryProbe.csproj') `
         --configuration Release `
-        -- 'https://media.example.com' '00:00:20'
+        -- 'https://media.example.com' '22' '00:00:20'
     if ($LASTEXITCODE -ne 0) {
         throw "The Windows mDNS probe failed with exit code $LASTEXITCODE."
     }
