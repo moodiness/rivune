@@ -1,0 +1,25 @@
+# This is a Gradle generated file for dependency locking.
+# Manual edits can break the build and are not advised.
+# This file is expected to be part of source control.
+# To regenerate this file, run: ./gradlew :rivune-api:dependencies --write-locks
+androidx.annotation:annotation-jvm:1.10.0=releaseLintChecksClasspath,releaseRuntimeClasspath
+androidx.annotation:annotation:1.10.0=releaseLintChecksClasspath,releaseRuntimeClasspath
+androidx.startup:startup-runtime:1.2.0=releaseLintChecksClasspath,releaseRuntimeClasspath
+androidx.tracing:tracing:1.0.0=releaseLintChecksClasspath,releaseRuntimeClasspath
+com.squareup.okhttp3:okhttp-android:5.5.0=releaseCompileClasspath,releaseLintChecksClasspath,releaseRuntimeClasspath
+com.squareup.okhttp3:okhttp:5.5.0=releaseCompileClasspath,releaseLintChecksClasspath,releaseRuntimeClasspath
+com.squareup.okio:okio-jvm:3.18.1=releaseCompileClasspath,releaseLintChecksClasspath,releaseRuntimeClasspath
+com.squareup.okio:okio:3.18.1=releaseCompileClasspath,releaseLintChecksClasspath,releaseRuntimeClasspath
+org.jetbrains.kotlin:kotlin-serialization-compiler-plugin-embeddable:2.4.10=kotlinCompilerPluginClasspathRelease
+org.jetbrains.kotlin:kotlin-stdlib:2.4.10=releaseCompileClasspath,releaseLintChecksClasspath,releaseRuntimeClasspath
+org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0=releaseCompileClasspath,releaseLintChecksClasspath,releaseRuntimeClasspath
+org.jetbrains.kotlinx:kotlinx-coroutines-bom:1.11.0=releaseCompileClasspath,releaseLintChecksClasspath,releaseRuntimeClasspath
+org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.11.0=releaseCompileClasspath,releaseLintChecksClasspath,releaseRuntimeClasspath
+org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0=releaseCompileClasspath,releaseLintChecksClasspath,releaseRuntimeClasspath
+org.jetbrains.kotlinx:kotlinx-serialization-bom:1.11.0=releaseCompileClasspath,releaseLintChecksClasspath,releaseRuntimeClasspath
+org.jetbrains.kotlinx:kotlinx-serialization-core-jvm:1.11.0=releaseCompileClasspath,releaseLintChecksClasspath,releaseRuntimeClasspath
+org.jetbrains.kotlinx:kotlinx-serialization-core:1.11.0=releaseCompileClasspath,releaseLintChecksClasspath,releaseRuntimeClasspath
+org.jetbrains.kotlinx:kotlinx-serialization-json-jvm:1.11.0=releaseCompileClasspath,releaseLintChecksClasspath,releaseRuntimeClasspath
+org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0=releaseCompileClasspath,releaseLintChecksClasspath,releaseRuntimeClasspath
+org.jetbrains:annotations:23.0.0=releaseCompileClasspath,releaseLintChecksClasspath,releaseRuntimeClasspath
+empty=releaseAnnotationProcessorClasspath,releaseImplementationDependenciesMetadata

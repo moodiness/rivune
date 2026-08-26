@@ -26,7 +26,7 @@ class ProfileSettingsContractsTest {
     fun effectiveSettingsDecodePreferencesAndUpdateSendsExactAuthenticatedProfilePatch() = runBlocking {
         val server = MockWebServer()
         server.enqueue(jsonResponse(
-            """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""",
+            """{"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""",
         ))
         server.enqueue(jsonResponse(effectiveSettingsFixture()))
         server.enqueue(jsonResponse(settingsLayerFixture()))
@@ -156,7 +156,7 @@ class ProfileSettingsContractsTest {
         val server = MockWebServer()
         val avatar = byteArrayOf(0x52, 0x49, 0x56, 0x55, 0x4e, 0x45)
         server.enqueue(jsonResponse(
-            """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""",
+            """{"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""",
         ))
         server.enqueue(MockResponse().setHeader("Content-Type", "image/png").setBody(okio.Buffer().write(avatar)))
         server.start()
@@ -183,7 +183,7 @@ class ProfileSettingsContractsTest {
     fun customProfileAvatarRejectsOversizedBodies() = runBlocking {
         val server = MockWebServer()
         server.enqueue(jsonResponse(
-            """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""",
+            """{"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""",
         ))
         server.enqueue(MockResponse().setHeader("Content-Type", "image/png").setBody(
             okio.Buffer().write(ByteArray(2 * 1024 * 1024 + 1)),
@@ -206,7 +206,7 @@ class ProfileSettingsContractsTest {
         val avatar = byteArrayOf(1, 2, 3, 4)
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
-        val discovery = """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}"""
+        val discovery = """{"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}"""
         val selection = """{"profile":{"id":"$profileId","name":"Viewer","description":null,"categoryId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","category":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","name":"Default","color":null,"icon":null},"isChild":false,"hasPin":false,"canManage":true,"enabled":true,"availableFrom":null,"availableUntil":null,"accessStartTime":null,"accessEndTime":null,"accessTimezone":"UTC","accessible":true,"avatar":{"kind":"custom","presetId":null,"url":"/api/v1/profiles/$profileId/avatar"}},"expiresAt":"2099-01-01T00:00:00Z","profileContext":"new-context"}"""
         val client = RivuneApiClient(
             serverUrl = "http://127.0.0.1/",

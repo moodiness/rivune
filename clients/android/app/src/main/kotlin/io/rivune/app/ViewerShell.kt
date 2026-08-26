@@ -66,6 +66,8 @@ import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material.icons.rounded.Notifications
+import androidx.compose.material.icons.rounded.NotificationsOff
 import androidx.compose.material.icons.rounded.Headphones
 import androidx.compose.material.icons.rounded.HighQuality
 import androidx.compose.material.icons.rounded.Info
@@ -319,11 +321,17 @@ internal fun ViewerShell(
     onAccentColor: (Int) -> Unit,
     onFrameRateMatching: (FrameRateMatchingPreference) -> Unit,
     onVideoAspect: (VideoAspectPreference) -> Unit,
-    onWifiQuality: (NetworkQualityPreference) -> Unit,
+    onLocalQuality: (NetworkQualityPreference) -> Unit,
+    onRemoteWifiQuality: (NetworkQualityPreference) -> Unit,
     onMobileQuality: (NetworkQualityPreference) -> Unit,
     onAutomaticallyShowStreams: (Boolean) -> Unit,
+    onOfflineQuotaBytes: (Long) -> Unit,
+    onOfflineExpirationDays: (Int) -> Unit,
+    onDownloadOnMobile: (Boolean) -> Unit,
     onAutoSkipIntro: (Boolean) -> Unit,
     onAutoSkipRecap: (Boolean) -> Unit,
+    onExportProfileArchive: () -> Unit,
+    onImportProfileArchive: (Boolean) -> Unit,
     onAutoSkipOutro: (Boolean) -> Unit,
     onChangeServer: () -> Unit,
     onOpenExternalUrl: (String) -> Unit,
@@ -402,11 +410,19 @@ internal fun ViewerShell(
                 onAccentColor = onAccentColor,
                 onFrameRateMatching = onFrameRateMatching,
                 onVideoAspect = onVideoAspect,
-                onWifiQuality = onWifiQuality,
+                onLocalQuality = onLocalQuality,
+                onRemoteWifiQuality = onRemoteWifiQuality,
                 onMobileQuality = onMobileQuality,
                 onAutomaticallyShowStreams = onAutomaticallyShowStreams,
+                onOfflineQuotaBytes = onOfflineQuotaBytes,
+                onOfflineExpirationDays = onOfflineExpirationDays,
+                onDownloadOnMobile = onDownloadOnMobile,
                 onAutoSkipIntro = onAutoSkipIntro,
                 onAutoSkipRecap = onAutoSkipRecap,
+                archiveReport = state.archiveReport,
+                archiveBusy = state.archiveBusy,
+                onExportProfileArchive = onExportProfileArchive,
+                onImportProfileArchive = onImportProfileArchive,
                 onAutoSkipOutro = onAutoSkipOutro,
                 serverName = state.serverName,
                 serverAddress = state.serverInput,
@@ -432,12 +448,15 @@ internal fun ViewerShell(
                 onPlay = { viewModel.playMedia() },
                 onToggleLibrary = viewModel::toggleLibrary,
                 onToggleWatched = viewModel::toggleWatched,
+                onAddQueue = viewModel::addDetailToQueue,
+                onToggleMediaNotifications = viewModel::toggleMediaNotifications,
                 externalPlayers = state.externalPlayers,
                 onSelectSource = viewModel::selectPlaybackSource,
                 onDownloadSource = viewModel::downloadPlaybackSource,
                 playbackDevices = state.viewer.playbackDevices,
                 activePlaybackRoom = state.viewer.activePlaybackRoom,
                 onHandoff = viewModel::handoffPlayback,
+                onPlayCopy = viewModel::playCopyPlayback,
                 onRemoteCommand = viewModel::controlPlayback,
                 onCreateRoom = viewModel::createPlaybackRoom,
                 onJoinRoom = viewModel::joinPlaybackRoom,
@@ -479,6 +498,7 @@ internal fun ViewerShell(
             onTab = viewModel::selectViewerTab,
             onPlayOffline = viewModel::playOffline,
             onRemoveOffline = viewModel::removeOffline,
+            viewModel = viewModel,
             onOpenFolder = viewModel::openFolder,
             onOpenCollection = viewModel::selectCollection,
             onMedia = viewModel::openMedia,
@@ -504,6 +524,7 @@ internal fun ViewerShell(
 @Composable
 private fun ViewerRoot(
     state: RivuneUiState,
+    viewModel: RivuneViewModel,
     onTab: (ViewerTab) -> Unit,
     onPlayOffline: (OfflineMediaItem) -> Unit,
     onRemoveOffline: (OfflineMediaItem) -> Unit,
@@ -544,6 +565,11 @@ private fun ViewerRoot(
                         onAccount = { showAccount = true },
                     )
                 }
+                V22FeatureLauncher(
+                    state = state,
+                    viewModel = viewModel,
+                    modifier = Modifier.padding(horizontal = RivuneSpacing.md, vertical = RivuneSpacing.xxs),
+                )
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     Box(
                         modifier = Modifier
@@ -746,9 +772,17 @@ private fun ProfilePreferencesScreen(
     onAccentColor: (Int) -> Unit,
     onFrameRateMatching: (FrameRateMatchingPreference) -> Unit,
     onVideoAspect: (VideoAspectPreference) -> Unit,
-    onWifiQuality: (NetworkQualityPreference) -> Unit,
+    onLocalQuality: (NetworkQualityPreference) -> Unit,
+    onRemoteWifiQuality: (NetworkQualityPreference) -> Unit,
     onMobileQuality: (NetworkQualityPreference) -> Unit,
     onAutomaticallyShowStreams: (Boolean) -> Unit,
+    onOfflineQuotaBytes: (Long) -> Unit,
+    onOfflineExpirationDays: (Int) -> Unit,
+    onDownloadOnMobile: (Boolean) -> Unit,
+    archiveReport: io.rivune.api.ProfileArchiveImportReport?,
+    archiveBusy: Boolean,
+    onExportProfileArchive: () -> Unit,
+    onImportProfileArchive: (Boolean) -> Unit,
     onAutoSkipIntro: (Boolean) -> Unit,
     onAutoSkipRecap: (Boolean) -> Unit,
     onAutoSkipOutro: (Boolean) -> Unit,
@@ -1029,11 +1063,20 @@ private fun ProfilePreferencesScreen(
                             }
                             item {
                                 NetworkQualityPreferenceRow(
-                                    title = stringResource(R.string.preferences_wifi_quality),
-                                    description = stringResource(R.string.preferences_wifi_quality_body),
-                                    selected = deviceSettings.wifiQuality,
+                                    title = stringResource(R.string.preferences_local_quality),
+                                    description = stringResource(R.string.preferences_local_quality_body),
+                                    selected = deviceSettings.localQuality,
                                     isTv = isTv,
-                                    onSelect = onWifiQuality,
+                                    onSelect = onLocalQuality,
+                                )
+                            }
+                            item {
+                                NetworkQualityPreferenceRow(
+                                    title = stringResource(R.string.preferences_remote_wifi_quality),
+                                    description = stringResource(R.string.preferences_remote_wifi_quality_body),
+                                    selected = deviceSettings.remoteWifiQuality,
+                                    isTv = isTv,
+                                    onSelect = onRemoteWifiQuality,
                                 )
                             }
                             item {
@@ -1043,6 +1086,46 @@ private fun ProfilePreferencesScreen(
                                     selected = deviceSettings.mobileQuality,
                                     isTv = isTv,
                                     onSelect = onMobileQuality,
+                                )
+                            }
+                            item {
+                                PreferenceChoiceCard(
+                                    title = stringResource(R.string.preferences_offline_quota),
+                                    description = stringResource(R.string.preferences_offline_quota_body),
+                                    selected = deviceSettings.offlineQuotaBytes.toString(),
+                                    options = listOf(10L, 20L, 50L).map { gib ->
+                                        (gib * 1024L * 1024L * 1024L).toString() to stringResource(R.string.preferences_offline_quota_gib, gib)
+                                    },
+                                    enabled = true,
+                                    disabledDescription = "",
+                                    isTv = isTv,
+                                    onSelect = { value -> value.toLongOrNull()?.let(onOfflineQuotaBytes) },
+                                )
+                            }
+                            item {
+                                PreferenceChoiceCard(
+                                    title = stringResource(R.string.preferences_offline_expiration),
+                                    description = stringResource(R.string.preferences_offline_expiration_body),
+                                    selected = deviceSettings.offlineExpirationDays.toString(),
+                                    options = listOf(
+                                        "0" to stringResource(R.string.preferences_offline_never),
+                                        "7" to stringResource(R.string.preferences_offline_days, 7),
+                                        "30" to stringResource(R.string.preferences_offline_days, 30),
+                                        "90" to stringResource(R.string.preferences_offline_days, 90),
+                                    ),
+                                    enabled = true,
+                                    disabledDescription = "",
+                                    isTv = isTv,
+                                    onSelect = { value -> value.toIntOrNull()?.let(onOfflineExpirationDays) },
+                                )
+                            }
+                            item {
+                                DeviceBooleanPreferenceCard(
+                                    title = stringResource(R.string.preferences_download_mobile),
+                                    description = stringResource(R.string.preferences_download_mobile_body),
+                                    value = deviceSettings.downloadOnMobile,
+                                    isTv = isTv,
+                                    onSelect = onDownloadOnMobile,
                                 )
                             }
                         }
@@ -1196,6 +1279,10 @@ private fun ProfilePreferencesScreen(
                                 onOpenExternalUrl = onOpenExternalUrl,
                                 onCopyDiagnostics = onCopyDiagnostics,
                                 onExportLogs = onExportLogs,
+                                archiveReport = archiveReport,
+                                archiveBusy = archiveBusy,
+                                onExportProfileArchive = onExportProfileArchive,
+                                onImportProfileArchive = onImportProfileArchive,
                             )
                         }
                     }
@@ -1916,6 +2003,10 @@ private fun AboutPreferencesPanel(
     onOpenExternalUrl: (String) -> Unit,
     onCopyDiagnostics: () -> Unit,
     onExportLogs: () -> Unit,
+    archiveReport: io.rivune.api.ProfileArchiveImportReport?,
+    archiveBusy: Boolean,
+    onExportProfileArchive: () -> Unit,
+    onImportProfileArchive: (Boolean) -> Unit,
 ) {
     val unavailable = stringResource(R.string.viewer_version_unavailable)
     val displayedServerName = safeDiagnosticField(serverName) ?: unavailable
@@ -1958,8 +2049,8 @@ private fun AboutPreferencesPanel(
                     RivuneSecondaryButton(
                         label = stringResource(R.string.update_check),
                         onClick = onCheckForUpdates,
-                        enabled = updateState !is AppUpdateState.Checking &&
-                            updateState !is AppUpdateState.Downloading && updateState !is AppUpdateState.Installing,
+                        enabled = updateState !is AppUpdateState.Checking && updateState !is AppUpdateState.Downloading &&
+                            updateState !is AppUpdateState.PreparingInstallation && updateState !is AppUpdateState.Installing,
                         loading = updateState is AppUpdateState.Checking,
                         isTv = isTv,
                         icon = Icons.Rounded.SystemUpdate,
@@ -1990,6 +2081,50 @@ private fun AboutPreferencesPanel(
                     isTv = isTv,
                     modifier = Modifier.fillMaxWidth(),
                 )
+            }
+        }
+        RivuneFunctionalSurface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RivuneShapes.large,
+            contentPadding = PaddingValues(if (isTv) RivuneSpacing.xl else RivuneSpacing.md),
+            color = Color.Transparent,
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(RivuneSpacing.md)) {
+                SettingsPanelTitle(Icons.Rounded.FileUpload, stringResource(R.string.profile_archive_title), isTv)
+                Text(
+                    stringResource(R.string.profile_archive_secret_warning),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = if (isTv) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.bodyMedium,
+                )
+                RivuneSecondaryButton(
+                    label = stringResource(R.string.profile_archive_export),
+                    onClick = onExportProfileArchive,
+                    enabled = !archiveBusy,
+                    isTv = isTv,
+                    icon = Icons.Rounded.FileDownload,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                RivuneSecondaryButton(
+                    label = stringResource(R.string.profile_archive_merge),
+                    onClick = { onImportProfileArchive(false) },
+                    enabled = !archiveBusy,
+                    isTv = isTv,
+                    icon = Icons.Rounded.FileUpload,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                RivuneSecondaryButton(
+                    label = stringResource(R.string.profile_archive_create),
+                    onClick = { onImportProfileArchive(true) },
+                    enabled = !archiveBusy,
+                    isTv = isTv,
+                    icon = Icons.Rounded.LibraryAdd,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                archiveReport?.let { report ->
+                    Text(stringResource(R.string.profile_archive_report, report.sections.joinToString(" · ") { section ->
+                        "${section.section}: +${section.created} / ~${section.updated} / =${section.unchanged}"
+                    }), style = MaterialTheme.typography.bodyMedium)
+                }
             }
         }
         RivuneFunctionalSurface(
@@ -2139,6 +2274,7 @@ private fun updatePreferenceStatus(state: AppUpdateState): String = when (state)
     is AppUpdateState.Available -> stringResource(R.string.update_available_status, state.manifest.version)
     is AppUpdateState.Downloading -> stringResource(R.string.update_downloading)
     is AppUpdateState.ReadyToInstall, is AppUpdateState.NeedsPermission -> stringResource(R.string.update_ready_status)
+    is AppUpdateState.PreparingInstallation -> stringResource(R.string.update_preparing_install)
     is AppUpdateState.Installing -> stringResource(R.string.update_installing)
     is AppUpdateState.Error -> stringResource(R.string.update_failed_status)
     AppUpdateState.Unavailable -> stringResource(R.string.update_unavailable)
@@ -3820,7 +3956,7 @@ private fun SearchRoot(
             keyboardController?.hide()
         }
     }
-    LaunchedEffect(isTv, state.query, state.items.firstOrNull()?.id) {
+    LaunchedEffect(isTv, state.query, state.items.isNotEmpty()) {
         if (isTv && state.items.isNotEmpty()) firstResultFocus.requestFocus()
     }
     RivuneCinematicBackground {
@@ -3879,13 +4015,23 @@ private fun SearchRoot(
                 )
             }
             Spacer(Modifier.height(RivuneSpacing.md))
-            InlineStatus(
-                loading = loading == ViewerLoading.SEARCH,
-                failure = failure,
-                onRetry = onRetry,
-                isTv = isTv,
-                loadingLabel = stringResource(R.string.viewer_loading_search),
-            )
+            if (loading == ViewerLoading.SEARCH) {
+                InlineStatus(
+                    loading = true,
+                    failure = failure,
+                    onRetry = onRetry,
+                    isTv = isTv,
+                    loadingLabel = stringResource(R.string.viewer_loading_search),
+                )
+            } else if (failure != null) {
+                InlineStatus(
+                    loading = false,
+                    failure = failure,
+                    onRetry = onRetry,
+                    isTv = isTv,
+                    loadingLabel = stringResource(R.string.viewer_loading_search),
+                )
+            }
             if (state.partial) {
                 InlineWarning(stringResource(R.string.viewer_partial_results))
                 Spacer(Modifier.height(RivuneSpacing.md))
@@ -3908,7 +4054,7 @@ private fun SearchRoot(
                         horizontalArrangement = Arrangement.spacedBy(ViewerCardGap),
                         verticalArrangement = Arrangement.spacedBy(if (isTv) RivuneSpacing.xl else RivuneSpacing.md),
                     ) {
-                        items(state.items, key = { "${it.mediaType}:${it.id}" }) { item ->
+                        items(state.items, key = ::searchMediaTargetKey) { item ->
                             MediaTile(
                                 target = item,
                                 imageUrl = artworkUrl(item.posterUrl ?: item.backgroundUrl),
@@ -4237,9 +4383,12 @@ private fun DetailScreen(
     onPlay: () -> Unit,
     onToggleLibrary: () -> Unit,
     onToggleWatched: () -> Unit,
+    onAddQueue: () -> Unit,
+    onToggleMediaNotifications: () -> Unit,
     playbackDevices: List<io.rivune.api.PlaybackDevice>,
     activePlaybackRoom: io.rivune.api.PlaybackRoom?,
     onHandoff: (io.rivune.api.PlaybackDevice) -> Unit,
+    onPlayCopy: (io.rivune.api.PlaybackDevice) -> Unit,
     onRemoteCommand: (io.rivune.api.PlaybackDevice, String) -> Unit,
     onCreateRoom: () -> Unit,
     onJoinRoom: (String) -> Unit,
@@ -4342,11 +4491,16 @@ private fun DetailScreen(
                             onToggleLibrary = onToggleLibrary,
                             onToggleWatched = onToggleWatched,
                             onTrailer = onTrailer,
+                            queued = state.features.queue?.items?.any { it.titleId == detail.titleId || (it.resourceId == detail.target.resourceId && it.sourceAddonId == detail.target.sourceAddonId) } == true,
+                            notificationsFollowed = state.features.notificationSubscriptions.any { it.titleId == detail.titleId },
+                            onAddQueue = onAddQueue,
+                            onToggleMediaNotifications = onToggleMediaNotifications,
                             playModifier = Modifier.focusRequester(playFocus),
                             playbackDevices = state.playbackDevices,
                             activePlaybackRoom = state.activePlaybackRoom,
                             playbackCoordinationAvailable = state.playbackCoordinationAvailable,
                             onHandoff = onHandoff,
+                            onPlayCopy = onPlayCopy,
                             onCreateRoom = onCreateRoom,
                             onJoinRoom = onJoinRoom,
                             onRemoteCommand = onRemoteCommand,
@@ -4584,10 +4738,15 @@ private fun DetailSummary(
     onToggleLibrary: () -> Unit,
     onToggleWatched: () -> Unit,
     onTrailer: (() -> Unit)?,
+    queued: Boolean,
+    notificationsFollowed: Boolean,
+    onAddQueue: () -> Unit,
+    onToggleMediaNotifications: () -> Unit,
     playbackDevices: List<io.rivune.api.PlaybackDevice>,
     activePlaybackRoom: io.rivune.api.PlaybackRoom?,
     playbackCoordinationAvailable: Boolean,
     onHandoff: (io.rivune.api.PlaybackDevice) -> Unit,
+    onPlayCopy: (io.rivune.api.PlaybackDevice) -> Unit,
     onCreateRoom: () -> Unit,
     onJoinRoom: (String) -> Unit,
     onLeaveRoom: () -> Unit,
@@ -4749,38 +4908,88 @@ private fun DetailSummary(
                     progressDescription = null,
                 )
             }
+            DetailLabeledAction(
+                icon = if (queued) Icons.Rounded.Check else Icons.Rounded.Bookmark,
+                label = stringResource(if (queued) R.string.v22_queue_added else R.string.v22_queue_add),
+                selected = queued,
+                enabled = actionsEnabled && !queued,
+                loading = actionLoading,
+                isTv = isTv,
+                onClick = onAddQueue,
+                progressDescription = null,
+            )
+            DetailLabeledAction(
+                icon = if (notificationsFollowed) Icons.Rounded.NotificationsOff else Icons.Rounded.Notifications,
+                label = stringResource(if (notificationsFollowed) R.string.v22_notifications_unfollow else R.string.v22_notifications_follow),
+                selected = notificationsFollowed,
+                enabled = actionsEnabled,
+                loading = actionLoading,
+                isTv = isTv,
+                onClick = onToggleMediaNotifications,
+                progressDescription = null,
+            )
         }
         if (playbackCoordinationAvailable && playbackDevices.isNotEmpty()) {
-            Text("Play on another device", style = MaterialTheme.typography.titleSmall)
+            Text(stringResource(R.string.viewer_coordination_devices_title), style = MaterialTheme.typography.titleSmall)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.xs)) {
                 playbackDevices.forEach { device ->
                     RivuneSecondaryButton(label = device.name, onClick = { onHandoff(device) }, isTv = isTv)
-                    RivuneTextButton(label = "Play", onClick = { onRemoteCommand(device, "play") }, isTv = isTv)
-                    RivuneTextButton(label = "Pause", onClick = { onRemoteCommand(device, "pause") }, isTv = isTv)
-                    RivuneTextButton(label = "Match position", onClick = { onRemoteCommand(device, "seek") }, isTv = isTv)
-                    RivuneTextButton(label = "Stop", onClick = { onRemoteCommand(device, "stop") }, isTv = isTv)
+                    RivuneTextButton(label = stringResource(R.string.viewer_coordination_play_copy), onClick = { onPlayCopy(device) }, isTv = isTv)
+                    RivuneTextButton(label = stringResource(R.string.viewer_coordination_play), onClick = { onRemoteCommand(device, "play") }, isTv = isTv)
+                    RivuneTextButton(label = stringResource(R.string.viewer_coordination_pause), onClick = { onRemoteCommand(device, "pause") }, isTv = isTv)
+                    RivuneTextButton(label = stringResource(R.string.viewer_coordination_match_position), onClick = { onRemoteCommand(device, "seek") }, isTv = isTv)
+                    RivuneTextButton(label = stringResource(R.string.viewer_coordination_stop), onClick = { onRemoteCommand(device, "stop") }, isTv = isTv)
                 }
             }
         }
         if (playbackCoordinationAvailable) {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.xs)) {
                 if (activePlaybackRoom == null) {
-                    RivuneSecondaryButton(label = "Start watch room", onClick = onCreateRoom, isTv = isTv)
-                    RivuneSecondaryButton(label = "Join room", onClick = { joinRoomVisible = true }, isTv = isTv)
+                    RivuneSecondaryButton(label = stringResource(R.string.viewer_coordination_room_start), onClick = onCreateRoom, isTv = isTv)
+                    RivuneSecondaryButton(label = stringResource(R.string.viewer_coordination_room_join), onClick = { joinRoomVisible = true }, isTv = isTv)
                 } else {
-                    Text(activePlaybackRoom.joinCode?.let { "Room $it" } ?: "Watch room", style = MaterialTheme.typography.titleSmall)
-                    Text("${activePlaybackRoom.members.size} watching", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    RivuneSecondaryButton(label = "Leave", onClick = onLeaveRoom, isTv = isTv)
+                    Text(
+                        activePlaybackRoom.joinCode?.let { stringResource(R.string.viewer_coordination_room_label, it) }
+                            ?: stringResource(R.string.viewer_coordination_room_default),
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        pluralStringResource(
+                            R.plurals.viewer_coordination_watching_count,
+                            activePlaybackRoom.members.size,
+                            activePlaybackRoom.members.size,
+                        ),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    RivuneSecondaryButton(label = stringResource(R.string.viewer_coordination_room_leave), onClick = onLeaveRoom, isTv = isTv)
                 }
             }
         }
         if (joinRoomVisible) {
             AlertDialog(
                 onDismissRequest = { joinRoomVisible = false },
-                title = { Text("Join watch room") },
-                text = { RivuneTextField(value = roomCode, onValueChange = { roomCode = it }, label = "Room code") },
-                confirmButton = { RivuneTextButton(label = "Join", onClick = { onJoinRoom(roomCode); roomCode = ""; joinRoomVisible = false }, isTv = isTv) },
-                dismissButton = { RivuneTextButton(label = "Cancel", onClick = { joinRoomVisible = false }, isTv = isTv) },
+                title = { Text(stringResource(R.string.viewer_coordination_join_title)) },
+                text = {
+                    RivuneTextField(
+                        value = roomCode,
+                        onValueChange = { roomCode = it },
+                        label = stringResource(R.string.viewer_coordination_room_code),
+                    )
+                },
+                confirmButton = {
+                    RivuneTextButton(
+                        label = stringResource(R.string.viewer_coordination_join_confirm),
+                        onClick = { onJoinRoom(roomCode); roomCode = ""; joinRoomVisible = false },
+                        isTv = isTv,
+                    )
+                },
+                dismissButton = {
+                    RivuneTextButton(
+                        label = stringResource(R.string.viewer_coordination_cancel),
+                        onClick = { joinRoomVisible = false },
+                        isTv = isTv,
+                    )
+                },
             )
         }
         if (!overview.isNullOrBlank()) {
@@ -4886,7 +5095,7 @@ private fun DetailLabeledAction(
     onClick: () -> Unit,
     enabled: Boolean,
     isTv: Boolean,
-    selected: Boolean = false,
+    selected: Boolean? = null,
     loading: Boolean = false,
     progressDescription: String?,
     modifier: Modifier = Modifier,
@@ -4905,7 +5114,7 @@ private fun DetailLabeledAction(
         modifier = modifier
             .heightIn(min = if (isTv) ViewerTvTarget else ViewerPhoneTarget)
             .semantics {
-                this.selected = selected
+                selected?.let { this.selected = it }
                 if (loading) stateDescription = label
                 else if (progressDescription != null) stateDescription = progressDescription
             },
