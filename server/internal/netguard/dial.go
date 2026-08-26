@@ -228,6 +228,20 @@ func DialContextPublic(ctx context.Context, network, address string) (net.Conn, 
 	return dialContext(ctx, network, address, IsPublicAddress)
 }
 
+// DialContextLocal restricts a configured local service to loopback and
+// private-network destinations while retaining DNS rebinding protection.
+func DialContextLocal(ctx context.Context, network, address string) (net.Conn, error) {
+	return dialContext(ctx, network, address, isLocalServiceAddress)
+}
+
+func isLocalServiceAddress(address netip.Addr) bool {
+	if !address.IsValid() {
+		return false
+	}
+	address = address.Unmap()
+	return address.IsLoopback() || allowedAddress(address) && IsPrivateNetworkAddress(address)
+}
+
 func dialContext(ctx context.Context, network, address string, permitted func(netip.Addr) bool) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {

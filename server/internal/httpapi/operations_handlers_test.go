@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -72,10 +73,16 @@ func TestOperationsOverviewReturnsAdministratorStatus(t *testing.T) {
 			NextRunAt: &nextRun, LastStartedAt: &lastStarted, LastCompletedAt: &lastCompleted,
 			LastStatus: &lastStatus, LastResult: &operations.MetadataRefreshResult{Candidates: 50, Refreshed: 48, Failed: 2},
 		},
-		PostgreSQLPool:              operations.PostgreSQLPoolStatus{Acquired: 2, Idle: 3, Total: 5, Max: 10, WaitCount: 7, WaitDurationMilliseconds: 145},
-		TrackingOutbox:              operations.TrackingOutboxStatus{Pending: 12, Due: 3, OldestAgeSeconds: 420},
-		Addons:                      operations.AddonStatus{Total: 8, Enabled: 7, LatestUpdatedAt: &lastCompleted},
-		Playback:                    operations.PlaybackStatus{Active: 4, Transcoding: 2},
+		PostgreSQLPool: operations.PostgreSQLPoolStatus{Acquired: 2, Idle: 3, Total: 5, Max: 10, WaitCount: 7, WaitDurationMilliseconds: 145},
+		TrackingOutbox: operations.TrackingOutboxStatus{Pending: 12, Due: 3, OldestAgeSeconds: 420},
+		Addons:         operations.AddonStatus{Total: 8, Enabled: 7, LatestUpdatedAt: &lastCompleted},
+		Playback:       operations.PlaybackStatus{Active: 4, Transcoding: 2},
+		SemanticExtension: operations.SemanticExtensionOperationsStatus{
+			Enabled: true, WarmupStatus: "ready", PersistentStatus: "ready",
+			MemoryEntries: 3, PersistentEntries: 2, Hits: 11, Misses: 5, CoalescedWaiters: 4,
+			Executions: 6, Successes: 3, Timeouts: 1, Failures: 1, Cancellations: 1, BusyFallbacks: 2,
+			Active: 1, Queued: 1, LatencyP50Milliseconds: 18, LatencyP95Milliseconds: 91,
+		},
 		HousekeepingIntervalMinutes: 5,
 	}}
 	api := authenticatedOperationsAPI(service)
@@ -91,8 +98,26 @@ func TestOperationsOverviewReturnsAdministratorStatus(t *testing.T) {
 	decodeResponse(t, response, &body)
 	if body.MetadataCache != service.overview.MetadataCache || body.PostgreSQLPool != service.overview.PostgreSQLPool ||
 		body.TrackingOutbox != service.overview.TrackingOutbox || body.Addons.Total != 8 || body.Addons.Enabled != 7 ||
-		body.Playback != service.overview.Playback || body.HousekeepingIntervalMinutes != 5 {
+		body.Playback != service.overview.Playback || body.SemanticExtension != service.overview.SemanticExtension ||
+		body.HousekeepingIntervalMinutes != 5 {
 		t.Fatalf("unexpected overview response %#v", body)
+	}
+	var raw struct {
+		SemanticExtension map[string]json.RawMessage `json:"semanticExtension"`
+	}
+	decodeResponse(t, response, &raw)
+	wantSemanticFields := []string{
+		"enabled", "warmupStatus", "persistentStatus", "memoryEntries", "persistentEntries", "hits", "misses",
+		"coalescedWaiters", "executions", "successes", "timeouts", "failures", "cancellations", "busyFallbacks", "active", "queued",
+		"latencyP50Milliseconds", "latencyP95Milliseconds",
+	}
+	if len(raw.SemanticExtension) != len(wantSemanticFields) {
+		t.Fatalf("semantic extension response fields = %v", raw.SemanticExtension)
+	}
+	for _, field := range wantSemanticFields {
+		if _, ok := raw.SemanticExtension[field]; !ok {
+			t.Fatalf("semantic extension response omitted %q: %v", field, raw.SemanticExtension)
+		}
 	}
 	if body.MetadataRefresh.LastResult == nil || !reflect.DeepEqual(*body.MetadataRefresh.LastResult, *service.overview.MetadataRefresh.LastResult) {
 		t.Fatalf("unexpected refresh result %#v", body.MetadataRefresh.LastResult)

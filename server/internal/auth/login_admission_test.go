@@ -41,8 +41,8 @@ func TestCorrectPasswordIgnoresAndClearsLegacyAccountLock(t *testing.T) {
 	})
 
 	service := &Service{pool: pool, accessTTL: time.Minute, refreshTTL: time.Hour, timezone: "UTC"}
-	if _, err := service.Login(context.Background(), LoginInput{
-		Username: username, Password: "wrong-login-password", DeviceName: "Regression browser", Platform: "web",
+	if _, err := service.LoginWeb(context.Background(), LoginInput{
+		Username: username, Password: "wrong-login-password", DeviceName: "Regression browser",
 	}); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("wrong password error = %v, want ErrInvalidCredentials", err)
 	}
@@ -58,8 +58,8 @@ func TestCorrectPasswordIgnoresAndClearsLegacyAccountLock(t *testing.T) {
 		t.Fatalf("set legacy account lock: %v", err)
 	}
 
-	if _, err := service.Login(context.Background(), LoginInput{
-		Username: username, Password: "correct-login-password", DeviceName: "Regression browser", Platform: "web",
+	if _, err := service.LoginWeb(context.Background(), LoginInput{
+		Username: username, Password: "correct-login-password", DeviceName: "Regression browser",
 	}); err != nil {
 		t.Fatalf("correct password was denied by legacy account lock: %v", err)
 	}

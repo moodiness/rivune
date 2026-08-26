@@ -521,6 +521,29 @@ func TestLoadRejectsInvalidTrustedProxy(t *testing.T) {
 	}
 }
 
+func TestLoadRequiresCompleteSemanticOllamaConfiguration(t *testing.T) {
+	for _, test := range []struct {
+		url, model string
+		valid      bool
+	}{
+		{valid: true},
+		{url: "http://127.0.0.1:11434"},
+		{model: "qwen3:0.6b"},
+		{url: "http://127.0.0.1:11434", model: "qwen3:0.6b", valid: true},
+	} {
+		setRequiredEnvironment(t)
+		t.Setenv("RIVUNE_SEMANTIC_OLLAMA_URL", test.url)
+		t.Setenv("RIVUNE_SEMANTIC_OLLAMA_MODEL", test.model)
+		cfg, err := Load()
+		if test.valid && (err != nil || cfg.SemanticOllamaURL != test.url || cfg.SemanticOllamaModel != test.model) {
+			t.Fatalf("valid semantic Ollama configuration = %+v, error=%v", cfg, err)
+		}
+		if !test.valid && err == nil {
+			t.Fatalf("incomplete semantic Ollama configuration url=%q model=%q was accepted", test.url, test.model)
+		}
+	}
+}
+
 func setRequiredEnvironment(t *testing.T) {
 	t.Helper()
 	t.Setenv("RIVUNE_DATABASE_URL", "postgres://rivune:secret@localhost/rivune")
@@ -535,6 +558,8 @@ func setRequiredEnvironment(t *testing.T) {
 	t.Setenv("RIVUNE_PUBLIC_URL", "")
 	t.Setenv("TZ", "")
 	t.Setenv("RIVUNE_TRUSTED_PROXIES", "")
+	t.Setenv("RIVUNE_SEMANTIC_OLLAMA_URL", "")
+	t.Setenv("RIVUNE_SEMANTIC_OLLAMA_MODEL", "")
 	t.Setenv("RIVUNE_ACCESS_TOKEN_TTL", "")
 	t.Setenv("RIVUNE_REFRESH_TOKEN_TTL", "")
 	t.Setenv("RIVUNE_PROFILE_GRANT_TTL", "")

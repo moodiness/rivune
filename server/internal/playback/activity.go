@@ -385,22 +385,31 @@ func (service *Service) StopActivitySession(ctx context.Context, principal auth.
 	return nil
 }
 
-// Cleanup removes inactive sessions and cancels HLS work with no active session.
-// It is safe to invoke repeatedly or concurrently.
+// Cleanup removes all stale failover pages during scheduled maintenance, then
+// removes inactive sessions and cancels HLS work with no active session.
 func (service *Service) Cleanup(ctx context.Context) error {
+	if err := service.cleanupPersistedFailovers(ctx); err != nil {
+		return err
+	}
 	_, err := service.cleanupActivity(ctx)
 	return err
 }
 
-// RunHousekeeping performs the normal stale playback cleanup and returns its
-// aggregate result for the trusted operations service.
+// RunHousekeeping performs one bounded failover cleanup page plus the normal
+// stale playback cleanup for the trusted operations request.
 func (service *Service) RunHousekeeping(ctx context.Context) (PurgeResult, error) {
+	if _, err := service.cleanupFailoversBatch(ctx, service.pool); err != nil {
+		return PurgeResult{}, err
+	}
 	return service.cleanupActivity(ctx)
 }
 
 func (service *Service) PurgeActivity(ctx context.Context, principal auth.Principal) (PurgeResult, error) {
 	if !principal.IsGlobalAdministrator() {
 		return PurgeResult{}, ErrForbidden
+	}
+	if _, err := service.cleanupFailoversBatch(ctx, service.pool); err != nil {
+		return PurgeResult{}, err
 	}
 	return service.cleanupActivity(ctx)
 }

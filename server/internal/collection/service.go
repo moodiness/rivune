@@ -16,6 +16,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/metadata"
+	"github.com/moodiness/rivune/server/internal/secretcrypto"
 )
 
 type AddonProvider interface {
@@ -24,8 +25,11 @@ type AddonProvider interface {
 
 type TMDBProvider interface {
 	ResolveCollectionSource(context.Context, TMDBSource, int, string, string) (SourcePage, error)
+	SearchCollectionTitles(context.Context, string, TMDBSource, int, string, string) (SourcePage, error)
 	LookupCollectionSource(context.Context, string, string, string, int) ([]LookupResult, error)
 	CollectionGenres(context.Context, string, string) ([]Genre, error)
+	SemanticCatalogLanguages(context.Context) ([]string, error)
+	SemanticCatalogLocale(context.Context, string) (SemanticCatalogLocale, error)
 }
 
 type TraktProvider interface {
@@ -79,21 +83,51 @@ func (source *staticProviderSource) CollectionProviders() ProviderSet {
 	return source.providers
 }
 
+type SemanticExtensionOperationsStatus struct {
+	Enabled                bool   `json:"enabled"`
+	WarmupStatus           string `json:"warmupStatus"`
+	PersistentStatus       string `json:"persistentStatus"`
+	MemoryEntries          int    `json:"memoryEntries"`
+	PersistentEntries      int    `json:"persistentEntries"`
+	Hits                   uint64 `json:"hits"`
+	Misses                 uint64 `json:"misses"`
+	CoalescedWaiters       uint64 `json:"coalescedWaiters"`
+	Executions             uint64 `json:"executions"`
+	Successes              uint64 `json:"successes"`
+	Timeouts               uint64 `json:"timeouts"`
+	Failures               uint64 `json:"failures"`
+	Cancellations          uint64 `json:"cancellations"`
+	BusyFallbacks          uint64 `json:"busyFallbacks"`
+	Active                 int    `json:"active"`
+	Queued                 int    `json:"queued"`
+	LatencyP50Milliseconds int64  `json:"latencyP50Milliseconds"`
+	LatencyP95Milliseconds int64  `json:"latencyP95Milliseconds"`
+}
 type collectionProviderContextKey struct{}
 
 type Service struct {
-	pool           *pgxpool.Pool
-	addon          AddonProvider
-	providerSource ProviderSource
-	artwork        ArtworkPresenter
-	logger         *slog.Logger
+	pool                        *pgxpool.Pool
+	addon                       AddonProvider
+	providerSource              ProviderSource
+	artwork                     ArtworkPresenter
+	logger                      *slog.Logger
+	semanticCatalog             *semanticCatalog
+	semanticExtensionMu         sync.RWMutex
+	semanticExtension           SemanticExtension
+	semanticMemo                *semanticExtensionMemo
+	semanticWarmupStatus        string
+	semanticExtensionGeneration uint64
 }
 
 func NewServiceWithProviderSource(pool *pgxpool.Pool, addonProvider AddonProvider, source ProviderSource) *Service {
 	if source == nil {
 		source = &staticProviderSource{}
 	}
-	return &Service{pool: pool, addon: addonProvider, providerSource: source}
+	return &Service{
+		pool: pool, addon: addonProvider, providerSource: source,
+		semanticCatalog: newSemanticCatalog(pool, source), semanticMemo: newSemanticExtensionMemo(),
+		semanticWarmupStatus: "disabled",
+	}
 }
 
 func NewService(pool *pgxpool.Pool, addonProvider AddonProvider, tmdbProvider TMDBProvider, traktProvider TraktProvider, mdblistProvider MDBListProvider) *Service {
@@ -116,6 +150,141 @@ func (service *Service) SetArtworkPresenter(presenter ArtworkPresenter) {
 	service.artwork = presenter
 }
 
+func (service *Service) SetLogger(logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	service.logger = logger
+	service.semanticCatalog.setLogger(logger)
+	if service.semanticMemo != nil {
+		service.semanticMemo.mu.Lock()
+		service.semanticMemo.logger = logger
+		service.semanticMemo.mu.Unlock()
+	}
+}
+
+func (service *Service) SetSemanticExtension(extension SemanticExtension) {
+	service.semanticExtensionMu.Lock()
+	defer service.semanticExtensionMu.Unlock()
+	service.semanticExtension = extension
+	service.semanticExtensionGeneration++
+	if extension == nil {
+		service.semanticWarmupStatus = "disabled"
+	} else if _, ok := extension.(interface{ Warmup(context.Context) error }); ok {
+		service.semanticWarmupStatus = "pending"
+	} else {
+		service.semanticWarmupStatus = "disabled"
+	}
+	if service.semanticMemo == nil {
+		service.semanticMemo = newSemanticExtensionMemo()
+		return
+	}
+	service.semanticMemo.clear()
+}
+
+func (service *Service) currentSemanticExtension() SemanticExtension {
+	service.semanticExtensionMu.RLock()
+	defer service.semanticExtensionMu.RUnlock()
+	return service.semanticExtension
+}
+
+func (service *Service) InitializeSemanticExtensionCache(ctx context.Context, keys *secretcrypto.Keyring) {
+	if service.semanticMemo == nil {
+		service.semanticMemo = newSemanticExtensionMemo()
+	}
+	if keys == nil || service.pool == nil {
+		service.semanticMemo.configurePersistence(ctx, keys, nil)
+		if keys != nil && service.pool == nil {
+			service.semanticMemo.mu.Lock()
+			service.semanticMemo.persistentStatus = "failed"
+			service.semanticMemo.mu.Unlock()
+			service.semanticMemo.logStoreFailure(ctx, "initialize semantic extension memo", errors.New("collection database is not configured"))
+		}
+		return
+	}
+	service.semanticMemo.configurePersistence(ctx, keys, postgresSemanticExtensionMemoStore{pool: service.pool})
+}
+
+func (service *Service) WarmSemanticExtension(ctx context.Context) error {
+	service.semanticExtensionMu.RLock()
+	extension := service.semanticExtension
+	generation := service.semanticExtensionGeneration
+	service.semanticExtensionMu.RUnlock()
+	warmable, ok := extension.(interface{ Warmup(context.Context) error })
+	if !ok || extension == nil {
+		service.semanticExtensionMu.Lock()
+		if service.semanticExtensionGeneration == generation { service.semanticWarmupStatus = "disabled" }
+		service.semanticExtensionMu.Unlock()
+		return nil
+	}
+	if service.semanticMemo == nil { service.semanticMemo = newSemanticExtensionMemo() }
+	service.semanticExtensionMu.Lock()
+	if service.semanticExtensionGeneration != generation {
+		service.semanticExtensionMu.Unlock()
+		return context.Canceled
+	}
+	service.semanticWarmupStatus = "pending"
+	service.semanticExtensionMu.Unlock()
+	err := service.semanticMemo.runWarmup(ctx, service.semanticMemo.warmupKey(extension), warmable.Warmup)
+	service.semanticExtensionMu.Lock()
+	if service.semanticExtensionGeneration == generation {
+		if err == nil { service.semanticWarmupStatus = "ready" } else { service.semanticWarmupStatus = "failed" }
+	}
+	service.semanticExtensionMu.Unlock()
+	return err
+}
+
+func (service *Service) SemanticExtensionOperationsStatus() SemanticExtensionOperationsStatus {
+	service.semanticExtensionMu.RLock()
+	enabled := service.semanticExtension != nil
+	warmupStatus := service.semanticWarmupStatus
+	service.semanticExtensionMu.RUnlock()
+	if warmupStatus == "" {
+		warmupStatus = "disabled"
+	}
+	status := SemanticExtensionOperationsStatus{Enabled: enabled, WarmupStatus: warmupStatus, PersistentStatus: "disabled"}
+	if service.semanticMemo == nil {
+		return status
+	}
+	service.semanticMemo.mu.Lock()
+	defer service.semanticMemo.mu.Unlock()
+	memo := service.semanticMemo
+	now := memo.nowTime()
+	for key, entry := range memo.entries {
+		if !now.Before(entry.expiresAt) {
+			delete(memo.entries, key)
+			if entry.persistent && memo.persistentEntries > 0 {
+				memo.persistentEntries--
+			}
+		}
+	}
+	status.PersistentStatus = memo.persistentStatus
+	status.MemoryEntries = len(memo.entries)
+	status.PersistentEntries = memo.persistentEntries
+	status.Hits = memo.metrics.hits
+	status.Misses = memo.metrics.misses
+	status.CoalescedWaiters = memo.metrics.coalescedWaiters
+	status.Executions = memo.metrics.executions
+	status.Successes = memo.metrics.successes
+	status.Timeouts = memo.metrics.timeouts
+	status.Failures = memo.metrics.failures
+	status.Cancellations = memo.metrics.cancellations
+	status.BusyFallbacks = memo.metrics.busyFallbacks
+	if memo.active != nil {
+		status.Active = 1
+	}
+	if memo.queued != nil {
+		status.Queued = 1
+	}
+	status.LatencyP50Milliseconds = memo.percentileLocked(50)
+	status.LatencyP95Milliseconds = memo.percentileLocked(95)
+	return status
+}
+
+func (service *Service) RunSemanticCatalog(ctx context.Context) {
+	service.semanticCatalog.Run(ctx)
+}
+
 func (service *Service) SetFanartEnricher(provider ArtworkMetadataProvider, resolver metadata.ExternalIDResolver, enricher FanartEnricher, logger *slog.Logger) {
 	if source, ok := service.providerSource.(*staticProviderSource); ok {
 		source.mu.Lock()
@@ -126,10 +295,7 @@ func (service *Service) SetFanartEnricher(provider ArtworkMetadataProvider, reso
 		source.providers = providers
 		source.mu.Unlock()
 	}
-	if logger == nil {
-		logger = slog.Default()
-	}
-	service.logger = logger
+	service.SetLogger(logger)
 }
 
 func (service *Service) List(ctx context.Context, principal auth.Principal) ([]Collection, error) {

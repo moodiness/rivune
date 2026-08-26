@@ -15,13 +15,14 @@ func validDocument() Document {
 	return Document{
 		Version:    DocumentVersion,
 		ExportedAt: time.Now().UTC(),
+		Identity: Identity{Name: "Portable profile", Avatar: Avatar{Kind: "preset", PresetID: "aurora"}},
 		Addons: []Addon{{
 			Key:          "sha256:" + strings.Repeat("a", 64),
 			TransportURL: "https://addon.example/manifest.json?token=secret",
 			Manifest:     json.RawMessage(`{"id":"org.example.portable","version":"1.0.0","name":"Portable","types":["movie"],"resources":["meta"],"catalogs":[]}`),
 			Enabled:      true,
 		}},
-		Collections: []PortableCollection{}, Titles: []Title{}, Library: []LibraryState{}, Progress: []ProgressState{}, Favorites: []FavoriteState{}, UserData: []UserDataState{}, TrackingPreferences: []TrackingPreference{},
+		Collections: []PortableCollection{}, Titles: []Title{}, Library: []LibraryState{}, Progress: []ProgressState{}, Favorites: []FavoriteState{}, UserData: []UserDataState{}, ContinueDismissals: []ContinueDismissal{}, TrackingPreferences: []TrackingPreference{},
 	}
 }
 
@@ -30,7 +31,7 @@ func TestValidateRejectsVersionBudgetAndDuplicateKeysBeforePersistence(t *testin
 		name   string
 		mutate func(*Document)
 	}{
-		{"version", func(value *Document) { value.Version = 2 }},
+		{"version", func(value *Document) { value.Version = 1 }},
 		{"duplicate addon", func(value *Document) { value.Addons = append(value.Addons, value.Addons[0]) }},
 		{"collection assignment", func(value *Document) {
 			value.Collections = []PortableCollection{{Key: "sha256:" + strings.Repeat("b", 64), Value: collection.SaveInput{ProfileIDs: []string{"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}}}}
@@ -81,7 +82,7 @@ func TestDocumentJSONRejectsMissingOrNullRequiredMembers(t *testing.T) {
 	if err := json.Unmarshal(encoded, &members); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"settings", "addons", "collections", "titles", "library", "progress", "favorites", "userData", "trackingPreferences"} {
+	for _, name := range []string{"identity", "settings", "addons", "collections", "titles", "library", "progress", "favorites", "userData", "continueDismissals", "trackingPreferences"} {
 		t.Run(name+" missing", func(t *testing.T) {
 			copy := make(map[string]json.RawMessage, len(members))
 			for key, value := range members {

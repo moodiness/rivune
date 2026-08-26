@@ -389,7 +389,7 @@ func TestPrepareResolveHandoffRefreshesRotatingTransportAndIsSingleUse(t *testin
 	streamBatch := func(rawURL string) addon.ResourceBatch {
 		return addon.ResourceBatch{Results: []addon.ResourceResult{{
 			AddonID: "addon-id", ManifestID: "manifest-id",
-			Payload: []byte(fmt.Sprintf(`{"streams":[{"name":"Stable source","url":%q,"behaviorHints":{"filename":"stable-source.mp4"}}]}`, rawURL)),
+			Payload: fmt.Appendf(nil, `{"streams":[{"name":"Stable source","url":%q,"behaviorHints":{"filename":"stable-source.mp4"}}]}`, rawURL),
 		}}}
 	}
 	fetcher := &preparationResourceFetcher{streamResponse: func(call int32) (addon.ResourceBatch, error) {
@@ -957,7 +957,7 @@ func TestBuildPreparedPlaybackSkipsExternalSubtitleFetchForBurnOnlyClient(t *tes
 }
 
 func TestBuildPreparedPlaybackFetchesExternalSubtitlesForNegotiatedAndLegacyClients(t *testing.T) {
-	for _, modes := range [][]string{nil, []string{"external"}, []string{"external", "burn"}} {
+	for _, modes := range [][]string{nil, {"external"}, {"external", "burn"}} {
 		fetcher := &preparationResourceFetcher{}
 		service := &Service{addons: fetcher}
 		_, err := service.buildPreparedPlayback(context.Background(), auth.Principal{}, sourceReference{

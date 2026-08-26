@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -113,6 +114,10 @@ func run(logger *slog.Logger) error {
 	shutdownContext, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 
+	httpRuntime, err := startHTTPServer(shutdownContext, server, api.WarmSemanticExtension, logger)
+	if err != nil {
+		return err
+	}
 	maintenanceContext, cancelMaintenance := context.WithCancel(shutdownContext)
 	maintenanceDone := make(chan struct{})
 	go func() {
@@ -144,15 +149,10 @@ func run(logger *slog.Logger) error {
 		cancelCompat()
 		<-compatDone
 	}()
-
-	serverError := make(chan error, 1)
-	go func() {
-		logger.Info("Rivune server listening", "address", cfg.ListenAddress, "version", version)
-		serverError <- server.ListenAndServe()
-	}()
+	defer httpRuntime.stopWarmup()
 
 	select {
-	case err := <-serverError:
+	case err := <-httpRuntime.serverError:
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
@@ -165,6 +165,53 @@ func run(logger *slog.Logger) error {
 			func() error { return server.Shutdown(gracefulContext) }, cancelCompat, compatDone,
 		)
 	}
+}
+
+type httpServerRuntime struct {
+	listener     net.Listener
+	serverError  <-chan error
+	cancelWarmup context.CancelFunc
+	warmupDone   <-chan struct{}
+}
+
+func startHTTPServer(
+	ctx context.Context,
+	server *http.Server,
+	warmup func(context.Context) error,
+	logger *slog.Logger,
+) (*httpServerRuntime, error) {
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen on %s: %w", server.Addr, err)
+	}
+	serverError := make(chan error, 1)
+	go func() {
+		logger.Info("Rivune server listening", "address", listener.Addr().String(), "version", version)
+		serverError <- server.Serve(listener)
+	}()
+	warmupContext, cancelWarmup := context.WithCancel(ctx)
+	warmupDone := make(chan struct{})
+	go func() {
+		defer close(warmupDone)
+		if warmup == nil {
+			return
+		}
+		if warmupErr := warmup(warmupContext); warmupErr != nil && !errors.Is(warmupErr, context.Canceled) {
+			logger.ErrorContext(warmupContext, "warm semantic extension", "error", warmupErr)
+		}
+	}()
+	return &httpServerRuntime{
+		listener: listener, serverError: serverError,
+		cancelWarmup: cancelWarmup, warmupDone: warmupDone,
+	}, nil
+}
+
+func (runtime *httpServerRuntime) stopWarmup() {
+	if runtime == nil {
+		return
+	}
+	runtime.cancelWarmup()
+	<-runtime.warmupDone
 }
 
 func newJellyfinCompatibilityContext() (context.Context, context.CancelFunc) {

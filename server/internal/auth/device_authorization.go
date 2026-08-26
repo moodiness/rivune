@@ -34,11 +34,12 @@ const (
 	deviceUserCodeAlphabet                            = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 	deviceUserCodeInsertAttempts                      = 5
 	maximumOutstandingDeviceAuthorizations            = 10_000
-	maximumOutstandingDeviceAuthorizationsPerSource   = 4
+	maximumOutstandingDeviceAuthorizationsPerSource   = 16
 	deviceAuthorizationProtectedReservePercent        = 10
 	deviceAuthorizationCleanupBatch                   = 500
 	deviceAuthorizationAdmissionLockID                = int64(7_249_863_113)
 	deviceAuthorizationSourceHashDomain               = "rivune/device-authorization/source/v1\x00"
+	deviceAuthorizationInstallationHashDomain         = "rivune/device-authorization/installation/v1\x00"
 	deviceAuthorizationSourceHashMissingAddressMarker = byte(0)
 	deviceAuthorizationSourceHashIPv4Marker           = byte(4)
 	deviceAuthorizationSourceHashIPv6Marker           = byte(6)
@@ -55,6 +56,15 @@ type DeviceAuthorization struct {
 	ExpiresAt  time.Time
 	Interval   time.Duration
 }
+
+type DeviceAuthorizationCapacityError struct {
+	RetryAfter time.Duration
+}
+
+func (e *DeviceAuthorizationCapacityError) Error() string {
+	return ErrDeviceAuthorizationCapacity.Error()
+}
+func (e *DeviceAuthorizationCapacityError) Unwrap() error { return ErrDeviceAuthorizationCapacity }
 
 type JellyfinQuickConnectInput struct {
 	ClientDeviceID string
@@ -92,8 +102,12 @@ type DeviceAuthorizationApproval struct {
 	InternalNote *string
 }
 
-func (s *Service) BeginDeviceAuthorization(ctx context.Context, deviceName, platform string) (DeviceAuthorization, error) {
-	return s.beginDeviceAuthorization(ctx, deviceAuthorizationPurposeNative, "", deviceName, platform, "")
+func (s *Service) BeginDeviceAuthorization(ctx context.Context, installationID, deviceName, platform string) (DeviceAuthorization, error) {
+	installationID = strings.TrimSpace(installationID)
+	if !validLength(installationID, 1, 128) {
+		return DeviceAuthorization{}, fmt.Errorf("%w: installationId must contain 1 to 128 characters", ErrInvalidInput)
+	}
+	return s.beginDeviceAuthorization(ctx, deviceAuthorizationPurposeNative, installationID, deviceName, platform, "")
 }
 
 func (s *Service) BeginJellyfinQuickConnect(ctx context.Context, input JellyfinQuickConnectInput) (DeviceAuthorization, error) {
@@ -126,10 +140,17 @@ func (s *Service) beginDeviceAuthorization(ctx context.Context, purpose, clientD
 		return DeviceAuthorization{}, ErrInvalidInput
 	}
 	if purpose == deviceAuthorizationPurposeNative {
-		clientDeviceID = ""
 		appVersion = ""
+	} else {
+		clientDeviceID = strings.TrimSpace(clientDeviceID)
 	}
 	sourceHash := deviceAuthorizationSourceHash(ClientIP(ctx))
+	var installationHash []byte
+	if purpose == deviceAuthorizationPurposeNative {
+		digest := deviceAuthorizationInstallationHash(clientDeviceID)
+		installationHash = digest[:]
+		clientDeviceID = ""
+	}
 
 	deviceCode, deviceCodeHash, err := newToken(deviceCodePrefix)
 	if err != nil {
@@ -148,11 +169,17 @@ func (s *Service) beginDeviceAuthorization(ctx context.Context, purpose, clientD
 	if _, err := tx.Exec(ctx, cleanupStaleDeviceAuthorizationsSQL, deviceAuthorizationCleanupBatch); err != nil {
 		return DeviceAuthorization{}, fmt.Errorf("clean device authorizations: %w", err)
 	}
+	if purpose == deviceAuthorizationPurposeNative {
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM device_authorizations
+			WHERE purpose = 'native' AND native_installation_hash = $1 AND consumed_at IS NULL
+		`, installationHash); err != nil {
+			return DeviceAuthorization{}, fmt.Errorf("replace native device authorization: %w", err)
+		}
+	}
 	var outstanding, sourceOutstanding int
 	if err := tx.QueryRow(ctx, `
-		SELECT
-			count(*),
-			count(*) FILTER (WHERE source_hash = $1)
+		SELECT count(*), count(*) FILTER (WHERE source_hash = $1)
 		FROM device_authorizations
 		WHERE consumed_at IS NULL AND expires_at > now()
 	`, sourceHash[:]).Scan(&outstanding, &sourceOutstanding); err != nil {
@@ -170,7 +197,13 @@ func (s *Service) beginDeviceAuthorization(ctx context.Context, purpose, clientD
 	if outstanding >= capacity ||
 		sourceOutstanding >= sourceCapacity ||
 		(outstanding >= generalCapacity && sourceOutstanding > 0) {
-		return DeviceAuthorization{}, ErrDeviceAuthorizationCapacity
+		retryAfter, err := deviceAuthorizationCapacityRetryAfter(
+			ctx, tx, sourceHash[:], outstanding, sourceOutstanding, capacity, sourceCapacity, generalCapacity, now,
+		)
+		if err != nil {
+			return DeviceAuthorization{}, fmt.Errorf("calculate device authorization retry delay: %w", err)
+		}
+		return DeviceAuthorization{}, &DeviceAuthorizationCapacityError{RetryAfter: retryAfter}
 	}
 
 	for range deviceUserCodeInsertAttempts {
@@ -181,10 +214,10 @@ func (s *Service) beginDeviceAuthorization(ctx context.Context, purpose, clientD
 		command, err := tx.Exec(ctx, `
 			INSERT INTO device_authorizations (
 				device_code_hash, user_code, device_name, platform, source_hash, expires_at,
-				purpose, initiating_client_device_id, initiating_app_version
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), NULLIF($9, ''))
+				purpose, native_installation_hash, initiating_client_device_id, initiating_app_version
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), NULLIF($10, ''))
 			ON CONFLICT DO NOTHING
-		`, deviceCodeHash, userCode, deviceName, platform, sourceHash[:], expiresAt, purpose, clientDeviceID, appVersion)
+		`, deviceCodeHash, userCode, deviceName, platform, sourceHash[:], expiresAt, purpose, installationHash, clientDeviceID, appVersion)
 		if err != nil {
 			return DeviceAuthorization{}, fmt.Errorf("create device authorization: %w", err)
 		}
@@ -203,6 +236,64 @@ func (s *Service) beginDeviceAuthorization(ctx context.Context, purpose, clientD
 		}, nil
 	}
 	return DeviceAuthorization{}, errors.New("could not allocate a unique device user code")
+}
+
+func deviceAuthorizationInstallationHash(installationID string) [sha256.Size]byte {
+	return sha256.Sum256([]byte(deviceAuthorizationInstallationHashDomain + installationID))
+}
+func deviceAuthorizationCapacityRetryAfter(
+	ctx context.Context,
+	tx pgx.Tx,
+	sourceHash []byte,
+	outstanding, sourceOutstanding, capacity, sourceCapacity, generalCapacity int,
+	now time.Time,
+) (time.Duration, error) {
+	var hardCapacityAt, sourceCapacityAt, generalCapacityAt, sourceInactiveAt *time.Time
+	if err := tx.QueryRow(ctx, `
+		WITH active AS MATERIALIZED (
+			SELECT source_hash, expires_at
+			FROM device_authorizations
+			WHERE consumed_at IS NULL AND expires_at > now()
+		)
+		SELECT
+			(SELECT expires_at FROM active ORDER BY expires_at OFFSET GREATEST($2::integer - $4::integer, 0) LIMIT 1),
+			(SELECT expires_at FROM active WHERE source_hash = $1 ORDER BY expires_at OFFSET GREATEST($3::integer - $5::integer, 0) LIMIT 1),
+			(SELECT expires_at FROM active ORDER BY expires_at OFFSET GREATEST($2::integer - $6::integer, 0) LIMIT 1),
+			(SELECT max(expires_at) FROM active WHERE source_hash = $1)
+	`, sourceHash, outstanding, sourceOutstanding, capacity, sourceCapacity, generalCapacity).Scan(
+		&hardCapacityAt, &sourceCapacityAt, &generalCapacityAt, &sourceInactiveAt,
+	); err != nil {
+		return 0, err
+	}
+
+	retryAt := now.Add(deviceAuthorizationTTL)
+	constrained := false
+	include := func(candidate *time.Time) {
+		if candidate == nil {
+			return
+		}
+		if !constrained || candidate.After(retryAt) {
+			retryAt = *candidate
+		}
+		constrained = true
+	}
+	if outstanding >= capacity {
+		include(hardCapacityAt)
+	}
+	if sourceOutstanding >= sourceCapacity {
+		include(sourceCapacityAt)
+	}
+	if outstanding >= generalCapacity && sourceOutstanding > 0 {
+		protectedAt := generalCapacityAt
+		if protectedAt == nil || sourceInactiveAt != nil && sourceInactiveAt.Before(*protectedAt) {
+			protectedAt = sourceInactiveAt
+		}
+		include(protectedAt)
+	}
+	if !constrained || !retryAt.After(now) {
+		return time.Second, nil
+	}
+	return retryAt.Sub(now), nil
 }
 
 // deviceAuthorizationGeneralCapacity preserves a small part of the hard cap
@@ -686,6 +777,14 @@ func (s *Service) createJellyfinQuickConnectSession(
 }
 
 func (s *Service) ExchangeDeviceAuthorization(ctx context.Context, deviceCode string) (TokenPair, error) {
+	return s.exchangeDeviceAuthorization(ctx, deviceCode, ClientKindNative)
+}
+
+func (s *Service) ExchangeWebDeviceAuthorization(ctx context.Context, deviceCode string) (TokenPair, error) {
+	return s.exchangeDeviceAuthorization(ctx, deviceCode, ClientKindWeb)
+}
+
+func (s *Service) exchangeDeviceAuthorization(ctx context.Context, deviceCode string, clientKind ClientKind) (TokenPair, error) {
 	deviceCode = strings.TrimSpace(deviceCode)
 	if !strings.HasPrefix(deviceCode, deviceCodePrefix) || len(deviceCode) <= len(deviceCodePrefix) {
 		return TokenPair{}, ErrInvalidDeviceCode
@@ -761,6 +860,9 @@ func (s *Service) ExchangeDeviceAuthorization(ctx context.Context, deviceCode st
 	if *approvedUserID != *discoveredApprovedUserID || approvedCategoryID == nil {
 		return TokenPair{}, ErrInvalidDeviceCode
 	}
+	if (clientKind == ClientKindWeb) != strings.EqualFold(platform, "web") {
+		return TokenPair{}, ErrInvalidDeviceCode
+	}
 	if err := requireAvailableDeviceSlot(ctx, tx, *approvedUserID); err != nil {
 		return TokenPair{}, err
 	}
@@ -783,8 +885,8 @@ func (s *Service) ExchangeDeviceAuthorization(ctx context.Context, deviceCode st
 	if err != nil {
 		return TokenPair{}, err
 	}
-	tokens, err := s.createSession(
-		ctx, tx, *approvedUserID, deviceID, AuthorizationScopeCategory, deviceCategory, now, pairedDeviceSessionExpiry(),
+	tokens, err := s.createSessionForClient(
+		ctx, tx, *approvedUserID, deviceID, AuthorizationScopeCategory, deviceCategory, now, pairedDeviceSessionExpiry(), clientKind,
 	)
 	if err != nil {
 		return TokenPair{}, err

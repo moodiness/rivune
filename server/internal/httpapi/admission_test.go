@@ -113,6 +113,9 @@ func TestPublicAdmissionUsesIPv4AndIPv6NetworkGranularity(t *testing.T) {
 }
 
 func TestDeviceCodeAdmissionReadsBodyBeforeTrackingSource(t *testing.T) {
+	if deviceCodeAdmissionSourceAttempts != 60 {
+		t.Fatalf("device-code attempt budget = %d, want 60", deviceCodeAdmissionSourceAttempts)
+	}
 	api := testAPI(&fakeInstanceService{})
 	api.auth = &fakeAuthService{deviceAuthorization: auth.DeviceAuthorization{
 		DeviceCode: "rivune_dc_test",
@@ -124,7 +127,7 @@ func TestDeviceCodeAdmissionReadsBodyBeforeTrackingSource(t *testing.T) {
 	body := &gatedRequestBody{
 		started: make(chan struct{}),
 		release: releaseBody,
-		reader:  strings.NewReader(`{"deviceName":"Television","platform":"tv"}`),
+		reader:  strings.NewReader(`{"installationId":"installation","deviceName":"Television","platform":"tv"}`),
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/device-code", nil)
 	request.Body = body

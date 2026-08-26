@@ -195,7 +195,7 @@ func TestAdministratorPasswordLoginUsesManagerProfileCategory(t *testing.T) {
 		Username: "login_admin_" + suffix, Password: "administrator-login-password",
 		DeviceName: "Private browser", Platform: "web",
 	}
-	tokens, err := service.Login(ctx, login)
+	tokens, err := service.LoginWeb(ctx, login)
 	if err != nil {
 		t.Fatalf("login administrator on new device: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestAdministratorPasswordLoginUsesManagerProfileCategory(t *testing.T) {
 		t.Fatalf("stage legacy default-category device: %v", err)
 	}
 	login.DeviceID = tokens.DeviceID
-	tokens, err = service.Login(ctx, login)
+	tokens, err = service.LoginWeb(ctx, login)
 	if err != nil {
 		t.Fatalf("login administrator on existing device: %v", err)
 	}

@@ -1,0 +1,6008 @@
+[
+  {
+    "id": "en-US-01",
+    "language": "en-US",
+    "query": "set among the stars",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "theme:space"
+    ]
+  },
+  {
+    "id": "en-US-02",
+    "language": "en-US",
+    "query": "terrifying and spooky",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:horror"
+    ]
+  },
+  {
+    "id": "en-US-03",
+    "language": "en-US",
+    "query": "something funny",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:comedy"
+    ]
+  },
+  {
+    "id": "en-US-04",
+    "language": "en-US",
+    "query": "battlefield stories",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:war"
+    ]
+  },
+  {
+    "id": "en-US-05",
+    "language": "en-US",
+    "query": "made in Japan",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:jp"
+    ]
+  },
+  {
+    "id": "en-US-06",
+    "language": "en-US",
+    "query": "from France",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:fr"
+    ]
+  },
+  {
+    "id": "en-US-07",
+    "language": "en-US",
+    "query": "a feature length film",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "media_type:movie"
+    ]
+  },
+  {
+    "id": "en-US-08",
+    "language": "en-US",
+    "query": "an episodic show",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "media_type:series"
+    ]
+  },
+  {
+    "id": "en-US-09",
+    "language": "en-US",
+    "query": "a scary story in outer space",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "theme:space",
+      "genre:horror"
+    ]
+  },
+  {
+    "id": "en-US-10",
+    "language": "en-US",
+    "query": "a funny movie",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:comedy",
+      "media_type:movie"
+    ]
+  },
+  {
+    "id": "en-US-11",
+    "language": "en-US",
+    "query": "a wartime series",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:war",
+      "media_type:series"
+    ]
+  },
+  {
+    "id": "en-US-12",
+    "language": "en-US",
+    "query": "Japanese comedy",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:jp",
+      "genre:comedy"
+    ]
+  },
+  {
+    "id": "en-US-13",
+    "language": "en-US",
+    "query": "French horror film",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:fr",
+      "genre:horror",
+      "media_type:movie"
+    ]
+  },
+  {
+    "id": "en-US-14",
+    "language": "en-US",
+    "query": "space television series",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "theme:space",
+      "media_type:series"
+    ]
+  },
+  {
+    "id": "en-US-15",
+    "language": "en-US",
+    "query": "Alien",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "en-US-16",
+    "language": "en-US",
+    "query": "War Horse",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "en-US-17",
+    "language": "en-US",
+    "query": "Horror Express",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "en-US-18",
+    "language": "en-US",
+    "query": "Space Jam",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "en-US-19",
+    "language": "en-US",
+    "query": "The French Dispatch",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "en-US-20",
+    "language": "en-US",
+    "query": "Japan Sinks",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "fr-FR-01",
+    "language": "fr-FR",
+    "query": "qui se déroule parmi les étoiles",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "theme:space"
+    ]
+  },
+  {
+    "id": "fr-FR-02",
+    "language": "fr-FR",
+    "query": "terrifiant et effrayant",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:horror"
+    ]
+  },
+  {
+    "id": "fr-FR-03",
+    "language": "fr-FR",
+    "query": "quelque chose de drôle",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:comedy"
+    ]
+  },
+  {
+    "id": "fr-FR-04",
+    "language": "fr-FR",
+    "query": "des histoires de champ de bataille",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:war"
+    ]
+  },
+  {
+    "id": "fr-FR-05",
+    "language": "fr-FR",
+    "query": "produit au Japon",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:jp"
+    ]
+  },
+  {
+    "id": "fr-FR-06",
+    "language": "fr-FR",
+    "query": "venu de France",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:fr"
+    ]
+  },
+  {
+    "id": "fr-FR-07",
+    "language": "fr-FR",
+    "query": "un long métrage",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "media_type:movie"
+    ]
+  },
+  {
+    "id": "fr-FR-08",
+    "language": "fr-FR",
+    "query": "une émission en épisodes",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "media_type:series"
+    ]
+  },
+  {
+    "id": "fr-FR-09",
+    "language": "fr-FR",
+    "query": "une histoire effrayante dans l'espace",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "theme:space",
+      "genre:horror"
+    ]
+  },
+  {
+    "id": "fr-FR-10",
+    "language": "fr-FR",
+    "query": "un film drôle",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:comedy",
+      "media_type:movie"
+    ]
+  },
+  {
+    "id": "fr-FR-11",
+    "language": "fr-FR",
+    "query": "une série en temps de guerre",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:war",
+      "media_type:series"
+    ]
+  },
+  {
+    "id": "fr-FR-12",
+    "language": "fr-FR",
+    "query": "une comédie japonaise",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:jp",
+      "genre:comedy"
+    ]
+  },
+  {
+    "id": "fr-FR-13",
+    "language": "fr-FR",
+    "query": "un film d'horreur français",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:fr",
+      "genre:horror",
+      "media_type:movie"
+    ]
+  },
+  {
+    "id": "fr-FR-14",
+    "language": "fr-FR",
+    "query": "une série télévisée spatiale",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "theme:space",
+      "media_type:series"
+    ]
+  },
+  {
+    "id": "fr-FR-15",
+    "language": "fr-FR",
+    "query": "Alien",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "fr-FR-16",
+    "language": "fr-FR",
+    "query": "Cheval de guerre",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "fr-FR-17",
+    "language": "fr-FR",
+    "query": "Le Train de l'horreur",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "fr-FR-18",
+    "language": "fr-FR",
+    "query": "Space Jam",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "fr-FR-19",
+    "language": "fr-FR",
+    "query": "The French Dispatch",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "fr-FR-20",
+    "language": "fr-FR",
+    "query": "La Submersion du Japon",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "de-DE-01",
+    "language": "de-DE",
+    "query": "zwischen den Sternen angesiedelt",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "theme:space"
+    ]
+  },
+  {
+    "id": "de-DE-02",
+    "language": "de-DE",
+    "query": "furchterregend und gruselig",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:horror"
+    ]
+  },
+  {
+    "id": "de-DE-03",
+    "language": "de-DE",
+    "query": "etwas Lustiges",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:comedy"
+    ]
+  },
+  {
+    "id": "de-DE-04",
+    "language": "de-DE",
+    "query": "Geschichten vom Schlachtfeld",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:war"
+    ]
+  },
+  {
+    "id": "de-DE-05",
+    "language": "de-DE",
+    "query": "in Japan produziert",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:jp"
+    ]
+  },
+  {
+    "id": "de-DE-06",
+    "language": "de-DE",
+    "query": "aus Frankreich",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:fr"
+    ]
+  },
+  {
+    "id": "de-DE-07",
+    "language": "de-DE",
+    "query": "ein abendfüllender Film",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "media_type:movie"
+    ]
+  },
+  {
+    "id": "de-DE-08",
+    "language": "de-DE",
+    "query": "eine episodische Sendung",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "media_type:series"
+    ]
+  },
+  {
+    "id": "de-DE-09",
+    "language": "de-DE",
+    "query": "eine gruselige Geschichte im Weltraum",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "theme:space",
+      "genre:horror"
+    ]
+  },
+  {
+    "id": "de-DE-10",
+    "language": "de-DE",
+    "query": "ein lustiger Film",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:comedy",
+      "media_type:movie"
+    ]
+  },
+  {
+    "id": "de-DE-11",
+    "language": "de-DE",
+    "query": "eine Serie in Kriegszeiten",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:war",
+      "media_type:series"
+    ]
+  },
+  {
+    "id": "de-DE-12",
+    "language": "de-DE",
+    "query": "japanische Komödie",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:jp",
+      "genre:comedy"
+    ]
+  },
+  {
+    "id": "de-DE-13",
+    "language": "de-DE",
+    "query": "französischer Horrorfilm",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:fr",
+      "genre:horror",
+      "media_type:movie"
+    ]
+  },
+  {
+    "id": "de-DE-14",
+    "language": "de-DE",
+    "query": "Weltraum-Fernsehserie",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "theme:space",
+      "media_type:series"
+    ]
+  },
+  {
+    "id": "de-DE-15",
+    "language": "de-DE",
+    "query": "Alien",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "de-DE-16",
+    "language": "de-DE",
+    "query": "Gefährten",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "de-DE-17",
+    "language": "de-DE",
+    "query": "Horror-Express",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "de-DE-18",
+    "language": "de-DE",
+    "query": "Space Jam",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "de-DE-19",
+    "language": "de-DE",
+    "query": "The French Dispatch",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "de-DE-20",
+    "language": "de-DE",
+    "query": "Japan sinkt",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "es-ES-01",
+    "language": "es-ES",
+    "query": "ambientado entre las estrellas",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "theme:space"
+    ]
+  },
+  {
+    "id": "es-ES-02",
+    "language": "es-ES",
+    "query": "aterrador y espeluznante",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:horror"
+    ]
+  },
+  {
+    "id": "es-ES-03",
+    "language": "es-ES",
+    "query": "algo divertido",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:comedy"
+    ]
+  },
+  {
+    "id": "es-ES-04",
+    "language": "es-ES",
+    "query": "historias del campo de batalla",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:war"
+    ]
+  },
+  {
+    "id": "es-ES-05",
+    "language": "es-ES",
+    "query": "hecho en Japón",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:jp"
+    ]
+  },
+  {
+    "id": "es-ES-06",
+    "language": "es-ES",
+    "query": "procedente de Francia",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:fr"
+    ]
+  },
+  {
+    "id": "es-ES-07",
+    "language": "es-ES",
+    "query": "un largometraje",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "media_type:movie"
+    ]
+  },
+  {
+    "id": "es-ES-08",
+    "language": "es-ES",
+    "query": "un programa por episodios",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "media_type:series"
+    ]
+  },
+  {
+    "id": "es-ES-09",
+    "language": "es-ES",
+    "query": "una historia de miedo en el espacio",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "theme:space",
+      "genre:horror"
+    ]
+  },
+  {
+    "id": "es-ES-10",
+    "language": "es-ES",
+    "query": "una película divertida",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:comedy",
+      "media_type:movie"
+    ]
+  },
+  {
+    "id": "es-ES-11",
+    "language": "es-ES",
+    "query": "una serie en tiempos de guerra",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:war",
+      "media_type:series"
+    ]
+  },
+  {
+    "id": "es-ES-12",
+    "language": "es-ES",
+    "query": "comedia japonesa",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:jp",
+      "genre:comedy"
+    ]
+  },
+  {
+    "id": "es-ES-13",
+    "language": "es-ES",
+    "query": "película francesa de terror",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:fr",
+      "genre:horror",
+      "media_type:movie"
+    ]
+  },
+  {
+    "id": "es-ES-14",
+    "language": "es-ES",
+    "query": "serie de televisión espacial",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "theme:space",
+      "media_type:series"
+    ]
+  },
+  {
+    "id": "es-ES-15",
+    "language": "es-ES",
+    "query": "Alien",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "es-ES-16",
+    "language": "es-ES",
+    "query": "Caballo de batalla",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "es-ES-17",
+    "language": "es-ES",
+    "query": "El tren del terror",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "es-ES-18",
+    "language": "es-ES",
+    "query": "Space Jam",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "es-ES-19",
+    "language": "es-ES",
+    "query": "La crónica francesa",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "es-ES-20",
+    "language": "es-ES",
+    "query": "Japón se hunde",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "it-IT-01",
+    "language": "it-IT",
+    "query": "ambientato tra le stelle",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "theme:space"
+    ]
+  },
+  {
+    "id": "it-IT-02",
+    "language": "it-IT",
+    "query": "terrificante e inquietante",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:horror"
+    ]
+  },
+  {
+    "id": "it-IT-03",
+    "language": "it-IT",
+    "query": "qualcosa di divertente",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:comedy"
+    ]
+  },
+  {
+    "id": "it-IT-04",
+    "language": "it-IT",
+    "query": "storie dal campo di battaglia",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:war"
+    ]
+  },
+  {
+    "id": "it-IT-05",
+    "language": "it-IT",
+    "query": "prodotto in Giappone",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:jp"
+    ]
+  },
+  {
+    "id": "it-IT-06",
+    "language": "it-IT",
+    "query": "proveniente dalla Francia",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:fr"
+    ]
+  },
+  {
+    "id": "it-IT-07",
+    "language": "it-IT",
+    "query": "un lungometraggio",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "media_type:movie"
+    ]
+  },
+  {
+    "id": "it-IT-08",
+    "language": "it-IT",
+    "query": "uno spettacolo a episodi",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "media_type:series"
+    ]
+  },
+  {
+    "id": "it-IT-09",
+    "language": "it-IT",
+    "query": "una storia spaventosa nello spazio",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "theme:space",
+      "genre:horror"
+    ]
+  },
+  {
+    "id": "it-IT-10",
+    "language": "it-IT",
+    "query": "un film divertente",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:comedy",
+      "media_type:movie"
+    ]
+  },
+  {
+    "id": "it-IT-11",
+    "language": "it-IT",
+    "query": "una serie in tempo di guerra",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:war",
+      "media_type:series"
+    ]
+  },
+  {
+    "id": "it-IT-12",
+    "language": "it-IT",
+    "query": "commedia giapponese",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:jp",
+      "genre:comedy"
+    ]
+  },
+  {
+    "id": "it-IT-13",
+    "language": "it-IT",
+    "query": "film horror francese",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:fr",
+      "genre:horror",
+      "media_type:movie"
+    ]
+  },
+  {
+    "id": "it-IT-14",
+    "language": "it-IT",
+    "query": "serie televisiva spaziale",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "theme:space",
+      "media_type:series"
+    ]
+  },
+  {
+    "id": "it-IT-15",
+    "language": "it-IT",
+    "query": "Alien",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "it-IT-16",
+    "language": "it-IT",
+    "query": "War Horse",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "it-IT-17",
+    "language": "it-IT",
+    "query": "Horror Express",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "it-IT-18",
+    "language": "it-IT",
+    "query": "Space Jam",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "it-IT-19",
+    "language": "it-IT",
+    "query": "The French Dispatch",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "it-IT-20",
+    "language": "it-IT",
+    "query": "Japan Sinks",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "pt-BR-01",
+    "language": "pt-BR",
+    "query": "ambientado entre as estrelas",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "theme:space"
+    ]
+  },
+  {
+    "id": "pt-BR-02",
+    "language": "pt-BR",
+    "query": "aterrorizante e assustador",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:horror"
+    ]
+  },
+  {
+    "id": "pt-BR-03",
+    "language": "pt-BR",
+    "query": "algo engraçado",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:comedy"
+    ]
+  },
+  {
+    "id": "pt-BR-04",
+    "language": "pt-BR",
+    "query": "histórias do campo de batalha",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:war"
+    ]
+  },
+  {
+    "id": "pt-BR-05",
+    "language": "pt-BR",
+    "query": "feito no Japão",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:jp"
+    ]
+  },
+  {
+    "id": "pt-BR-06",
+    "language": "pt-BR",
+    "query": "vindo da França",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:fr"
+    ]
+  },
+  {
+    "id": "pt-BR-07",
+    "language": "pt-BR",
+    "query": "um longa-metragem",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "media_type:movie"
+    ]
+  },
+  {
+    "id": "pt-BR-08",
+    "language": "pt-BR",
+    "query": "um programa em episódios",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "media_type:series"
+    ]
+  },
+  {
+    "id": "pt-BR-09",
+    "language": "pt-BR",
+    "query": "uma história assustadora no espaço",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "theme:space",
+      "genre:horror"
+    ]
+  },
+  {
+    "id": "pt-BR-10",
+    "language": "pt-BR",
+    "query": "um filme engraçado",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:comedy",
+      "media_type:movie"
+    ]
+  },
+  {
+    "id": "pt-BR-11",
+    "language": "pt-BR",
+    "query": "uma série em tempos de guerra",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "genre:war",
+      "media_type:series"
+    ]
+  },
+  {
+    "id": "pt-BR-12",
+    "language": "pt-BR",
+    "query": "comédia japonesa",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:jp",
+      "genre:comedy"
+    ]
+  },
+  {
+    "id": "pt-BR-13",
+    "language": "pt-BR",
+    "query": "filme francês de terror",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "country:fr",
+      "genre:horror",
+      "media_type:movie"
+    ]
+  },
+  {
+    "id": "pt-BR-14",
+    "language": "pt-BR",
+    "query": "série de televisão espacial",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [
+      "theme:space",
+      "media_type:series"
+    ]
+  },
+  {
+    "id": "pt-BR-15",
+    "language": "pt-BR",
+    "query": "Alien",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "pt-BR-16",
+    "language": "pt-BR",
+    "query": "Cavalo de Guerra",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "pt-BR-17",
+    "language": "pt-BR",
+    "query": "Expresso do Horror",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "pt-BR-18",
+    "language": "pt-BR",
+    "query": "Space Jam",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "pt-BR-19",
+    "language": "pt-BR",
+    "query": "A Crônica Francesa",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  },
+  {
+    "id": "pt-BR-20",
+    "language": "pt-BR",
+    "query": "Japão Submerso",
+    "candidates": [
+      {
+        "id": "theme:space",
+        "kind": "theme",
+        "label": "Space"
+      },
+      {
+        "id": "genre:horror",
+        "kind": "genre",
+        "label": "Horror"
+      },
+      {
+        "id": "genre:comedy",
+        "kind": "genre",
+        "label": "Comedy"
+      },
+      {
+        "id": "genre:war",
+        "kind": "genre",
+        "label": "War"
+      },
+      {
+        "id": "country:jp",
+        "kind": "country",
+        "label": "Japan"
+      },
+      {
+        "id": "country:fr",
+        "kind": "country",
+        "label": "France"
+      },
+      {
+        "id": "media_type:movie",
+        "kind": "media_type",
+        "label": "Movies"
+      },
+      {
+        "id": "media_type:series",
+        "kind": "media_type",
+        "label": "Series"
+      }
+    ],
+    "expected": [],
+    "properTitle": true
+  }
+]

@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -86,4 +90,134 @@ func TestCheckHealthRequiresSuccessfulEndpoint(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHTTPServerAcceptsReadinessWhileSemanticWarmupRuns(t *testing.T) {
+	started := make(chan struct{})
+	server := &http.Server{Addr: "127.0.0.1:0", Handler: http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/ready" {
+			http.NotFound(response, request)
+			return
+		}
+		response.WriteHeader(http.StatusOK)
+	})}
+	runtime, err := startHTTPServer(context.Background(), server, func(ctx context.Context) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	}, discardLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = server.Close()
+		runtime.stopWarmup()
+	})
+	<-started
+
+	response, err := (&http.Client{Timeout: time.Second}).Get("http://" + runtime.listener.Addr().String() + "/ready")
+	if err != nil {
+		t.Fatalf("request readiness during warmup: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("readiness during warmup = %s", response.Status)
+	}
+}
+
+func TestHTTPServerBindFailureDoesNotStartSemanticWarmup(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	warmupStarted := make(chan struct{}, 1)
+	server := &http.Server{Addr: occupied.Addr().String(), Handler: http.NotFoundHandler()}
+
+	runtime, err := startHTTPServer(context.Background(), server, func(context.Context) error {
+		warmupStarted <- struct{}{}
+		return nil
+	}, discardLogger())
+	if err == nil || runtime != nil {
+		if runtime != nil {
+			_ = server.Close()
+			runtime.stopWarmup()
+		}
+		t.Fatalf("bind result runtime=%#v error=%v", runtime, err)
+	}
+	select {
+	case <-warmupStarted:
+		t.Fatal("semantic warmup started after bind failure")
+	default:
+	}
+}
+
+func TestHTTPServerWarmupIsCanceledAndAwaited(t *testing.T) {
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	release := make(chan struct{})
+	server := &http.Server{Addr: "127.0.0.1:0", Handler: http.NotFoundHandler()}
+	runtime, err := startHTTPServer(context.Background(), server, func(ctx context.Context) error {
+		close(started)
+		<-ctx.Done()
+		close(canceled)
+		<-release
+		return ctx.Err()
+	}, discardLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	<-started
+	stopped := make(chan struct{})
+	go func() {
+		runtime.stopWarmup()
+		close(stopped)
+	}()
+	<-canceled
+	select {
+	case <-stopped:
+		t.Fatal("warmup stop returned before worker completed")
+	default:
+	}
+	close(release)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("warmup worker was not joined")
+	}
+}
+
+func TestSemanticWarmupFailureDoesNotStopHTTPServer(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	server := &http.Server{Addr: "127.0.0.1:0", Handler: http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusOK)
+	})}
+	runtime, err := startHTTPServer(context.Background(), server, func(context.Context) error {
+		return errors.New("warmup unavailable")
+	}, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = server.Close()
+		runtime.stopWarmup()
+	})
+	<-runtime.warmupDone
+	response, err := (&http.Client{Timeout: time.Second}).Get("http://" + runtime.listener.Addr().String() + "/ready")
+	if err != nil {
+		t.Fatalf("request after failed warmup: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("server after failed warmup = %s", response.Status)
+	}
+	if !strings.Contains(logs.String(), "warm semantic extension") || !strings.Contains(logs.String(), "warmup unavailable") {
+		t.Fatalf("warmup failure was not logged: %s", logs.String())
+	}
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 }

@@ -57,6 +57,54 @@ func TestNativePairingPersistenceMigrationExtendsActiveSessionsAndDefinesCleanup
 	}
 }
 
+func TestSemanticCatalogMigrationDefinesPersistentBoundedCacheIndexes(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000080_tmdb_semantic_catalog.sql")
+	if err != nil {
+		t.Fatalf("read semantic catalog migration: %v", err)
+	}
+	normalized := strings.Join(strings.Fields(string(contents)), " ")
+	for _, statement := range []string{
+		"CREATE TABLE tmdb_semantic_catalog",
+		"language text PRIMARY KEY",
+		"payload jsonb NOT NULL",
+		"CREATE INDEX tmdb_semantic_catalog_expiry_idx ON tmdb_semantic_catalog (expires_at, language)",
+		"CREATE INDEX tmdb_semantic_catalog_capacity_idx ON tmdb_semantic_catalog (updated_at DESC, language)",
+	} {
+		if !strings.Contains(normalized, statement) {
+			t.Fatalf("semantic catalog migration lacks %q: %s", statement, normalized)
+		}
+	}
+}
+
+func TestSemanticExtensionMemoMigrationDefinesPrivateBoundedCacheIndexes(t *testing.T) {
+	contents, err := migrationFiles.ReadFile("migrations/000081_semantic_extension_memo.sql")
+	if err != nil {
+		t.Fatalf("read semantic extension memo migration: %v", err)
+	}
+	normalized := strings.Join(strings.Fields(string(contents)), " ")
+	for _, statement := range []string{
+		"CREATE TABLE semantic_extension_memo",
+		"key_version integer NOT NULL CHECK (key_version > 0)",
+		"cache_key bytea NOT NULL CHECK (octet_length(cache_key) = 32)",
+		"selection text[] NOT NULL",
+		"cardinality(selection) <= 8",
+		"expires_at <= updated_at + interval '24 hours'",
+		"octet_length(array_to_string(selection, E'\\x1f')) <= 4096",
+		"PRIMARY KEY (key_version, cache_key)",
+		"CREATE INDEX semantic_extension_memo_expiry_idx ON semantic_extension_memo (expires_at, key_version, cache_key)",
+		"CREATE INDEX semantic_extension_memo_capacity_idx ON semantic_extension_memo (updated_at DESC, key_version, cache_key)",
+	} {
+		if !strings.Contains(normalized, statement) {
+			t.Fatalf("semantic extension memo migration lacks %q: %s", statement, normalized)
+		}
+	}
+	for _, forbidden := range []string{"query text", "language text", "model text", "error text"} {
+		if strings.Contains(normalized, forbidden) {
+			t.Fatalf("semantic extension memo migration exposes %q: %s", forbidden, normalized)
+		}
+	}
+}
+
 func TestTrackingOutboxBoundsMigrationDefinesAdmissionIndexes(t *testing.T) {
 	contents, err := migrationFiles.ReadFile("migrations/000052_tracking_outbox_bounds.sql")
 	if err != nil {

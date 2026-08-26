@@ -7,26 +7,33 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/collection"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 )
 
 type collectionMediaResponse struct {
-	ID               int64   `json:"id"`
-	MediaType        string  `json:"media_type"`
-	Title            string  `json:"title"`
-	Name             string  `json:"name"`
-	Overview         string  `json:"overview"`
-	ReleaseDate      string  `json:"release_date"`
-	FirstAirDate     string  `json:"first_air_date"`
-	PosterPath       string  `json:"poster_path"`
-	BackdropPath     string  `json:"backdrop_path"`
-	VoteAverage      float64 `json:"vote_average"`
-	VoteCount        int     `json:"vote_count"`
-	Popularity       float64 `json:"popularity"`
-	OriginalLanguage string  `json:"original_language"`
-	Job              string  `json:"job"`
+	ID               int64    `json:"id"`
+	MediaType        string   `json:"media_type"`
+	Title            string   `json:"title"`
+	Name             string   `json:"name"`
+	OriginalTitle    string   `json:"original_title"`
+	OriginalName     string   `json:"original_name"`
+	Overview         string   `json:"overview"`
+	ReleaseDate      string   `json:"release_date"`
+	FirstAirDate     string   `json:"first_air_date"`
+	PosterPath       string   `json:"poster_path"`
+	BackdropPath     string   `json:"backdrop_path"`
+	VoteAverage      *float64 `json:"vote_average"`
+	VoteCount        *int     `json:"vote_count"`
+	Popularity       float64  `json:"popularity"`
+	OriginalLanguage string   `json:"original_language"`
+	GenreIDs         []int64  `json:"genre_ids"`
+	OriginCountries  []string `json:"origin_country"`
+	Job              string   `json:"job"`
 }
 
 type collectionMediaPage struct {
@@ -67,6 +74,85 @@ type genresResponse struct {
 	} `json:"genres"`
 }
 
+type countriesResponse []struct {
+	Code        string `json:"iso_3166_1"`
+	EnglishName string `json:"english_name"`
+	NativeName  string `json:"native_name"`
+}
+
+func (client *Client) SemanticCatalogLanguages(ctx context.Context) ([]string, error) {
+	var response []string
+	if err := client.get(ctx, "/configuration/primary_translations", nil, &response); err != nil {
+		return nil, err
+	}
+	languages := make([]string, 0, len(response))
+	seen := make(map[string]struct{}, len(response))
+	for _, value := range response {
+		language := canonicalCatalogLanguage(value)
+		if language == "" {
+			continue
+		}
+		if _, duplicate := seen[language]; duplicate {
+			continue
+		}
+		seen[language] = struct{}{}
+		languages = append(languages, language)
+	}
+	sort.Strings(languages)
+	return languages, nil
+}
+
+func (client *Client) SemanticCatalogLocale(ctx context.Context, language string) (collection.SemanticCatalogLocale, error) {
+	language = canonicalCatalogLanguage(language)
+	if language == "" {
+		return collection.SemanticCatalogLocale{}, collection.ErrInvalidInput
+	}
+	movies, err := client.CollectionGenres(ctx, collection.MediaTypeMovie, language)
+	if err != nil {
+		return collection.SemanticCatalogLocale{}, err
+	}
+	series, err := client.CollectionGenres(ctx, collection.MediaTypeSeries, language)
+	if err != nil {
+		return collection.SemanticCatalogLocale{}, err
+	}
+	var response countriesResponse
+	if err := client.get(ctx, "/configuration/countries", url.Values{"language": {language}}, &response); err != nil {
+		return collection.SemanticCatalogLocale{}, err
+	}
+	countries := make([]collection.Country, 0, len(response))
+	for _, value := range response {
+		code := strings.ToUpper(strings.TrimSpace(value.Code))
+		if len(code) != 2 || strings.TrimSpace(value.NativeName) == "" {
+			continue
+		}
+		countries = append(countries, collection.Country{
+			Code: code, EnglishName: strings.TrimSpace(value.EnglishName), NativeName: strings.TrimSpace(value.NativeName),
+		})
+	}
+	return collection.SemanticCatalogLocale{MovieGenres: movies, SeriesGenres: series, Countries: countries}, nil
+}
+
+func canonicalCatalogLanguage(value string) string {
+	parts := strings.Split(strings.TrimSpace(value), "-")
+	if len(parts) == 1 && len(parts[0]) >= 2 && len(parts[0]) <= 3 && asciiLanguagePart(parts[0]) {
+		return strings.ToLower(parts[0])
+	}
+	if len(parts) == 2 && len(parts[0]) >= 2 && len(parts[0]) <= 3 && len(parts[1]) == 2 && asciiLanguagePart(parts[0]) && asciiLanguagePart(parts[1]) {
+		return strings.ToLower(parts[0]) + "-" + strings.ToUpper(parts[1])
+	}
+	return ""
+}
+
+func asciiLanguagePart(value string) bool {
+	for index := range len(value) {
+		character := value[index]
+		if character < 'A' || character > 'Z' && character < 'a' || character > 'z' {
+			return false
+		}
+	}
+	return true
+}
+
 func (client *Client) ResolveCollectionSource(ctx context.Context, source collection.TMDBSource, page int, language, region string) (collection.SourcePage, error) {
 	switch source.SourceType {
 	case "list":
@@ -80,6 +166,181 @@ func (client *Client) ResolveCollectionSource(ctx context.Context, source collec
 	default:
 		return collection.SourcePage{}, collection.ErrInvalidInput
 	}
+}
+
+func (client *Client) SearchCollectionTitles(ctx context.Context, title string, source collection.TMDBSource, page int, language, region string) (collection.SourcePage, error) {
+	title = strings.TrimSpace(title)
+	if title == "" || page < 1 || source.MediaType != collection.MediaTypeMovie && source.MediaType != collection.MediaTypeSeries {
+		return collection.SourcePage{}, collection.ErrInvalidInput
+	}
+	endpoint := "/search/movie"
+	if source.MediaType == collection.MediaTypeSeries {
+		endpoint = "/search/tv"
+	}
+	query := url.Values{
+		"include_adult": {"false"}, "language": {language}, "page": {strconv.Itoa(page)}, "query": {title},
+	}
+	if source.MediaType == collection.MediaTypeMovie && region != "" {
+		query.Set("region", region)
+	}
+	var response collectionMediaPage
+	if err := client.get(ctx, endpoint, query, &response); err != nil {
+		return collection.SourcePage{}, err
+	}
+	if err := addon.ConsumePayloadItems(ctx, len(response.Results)); err != nil {
+		return collection.SourcePage{}, err
+	}
+	exactTitleMatch := exactCollectionTitleMatch(title, response.Results, source.Filters)
+	if shouldFallbackCollectionOverviews(language) && collectionMediaNeedsOverview(response.Results) {
+		query.Set("language", englishCollectionLanguage)
+		var english collectionMediaPage
+		if err := client.get(ctx, endpoint, query, &english); err == nil {
+			mergeCollectionMediaOverviews(response.Results, english.Results, source.MediaType)
+		}
+	}
+	items := collectionItems(filterCollectionTitleResults(response.Results, source.Filters), source.MediaType)
+	totalPages := response.TotalPages
+	if totalPages < 1 {
+		totalPages = page
+	}
+	return collection.SourcePage{Items: items, ExactTitleMatch: exactTitleMatch, Page: page, HasMore: page < totalPages}, nil
+}
+
+func filterCollectionTitleResults(values []collectionMediaResponse, filters collection.TMDBFilters) []collectionMediaResponse {
+	filtered := make([]collectionMediaResponse, 0, len(values))
+	for _, value := range values {
+		if collectionTitleResultAllowed(value, filters) {
+			filtered = append(filtered, value)
+		}
+	}
+	return filtered
+}
+
+func collectionTitleResultAllowed(value collectionMediaResponse, filters collection.TMDBFilters) bool {
+	if len(filters.Genres) != 0 && !sharesInt64(filters.Genres, value.GenreIDs) {
+		return false
+	}
+	if len(filters.ExcludedGenres) != 0 && sharesInt64(filters.ExcludedGenres, value.GenreIDs) {
+		return false
+	}
+	if filters.OriginalLanguage != "" && !strings.EqualFold(filters.OriginalLanguage, value.OriginalLanguage) {
+		return false
+	}
+	if filters.OriginCountry != "" && len(value.OriginCountries) != 0 && !containsFold(value.OriginCountries, filters.OriginCountry) {
+		return false
+	}
+	releaseDate := value.ReleaseDate
+	if releaseDate == "" {
+		releaseDate = value.FirstAirDate
+	}
+	if filters.ReleaseDateFrom != "" && (releaseDate == "" || releaseDate < filters.ReleaseDateFrom) {
+		return false
+	}
+	if filters.ReleaseDateTo != "" && (releaseDate == "" || releaseDate > filters.ReleaseDateTo) {
+		return false
+	}
+	voteAverage := 0.0
+	if value.VoteAverage != nil {
+		voteAverage = *value.VoteAverage
+	}
+	if filters.VoteAverageMin != nil && voteAverage < *filters.VoteAverageMin {
+		return false
+	}
+	if filters.VoteAverageMax != nil && voteAverage > *filters.VoteAverageMax {
+		return false
+	}
+	voteCount := 0
+	if value.VoteCount != nil {
+		voteCount = *value.VoteCount
+	}
+	if filters.VoteCountMin != nil && voteCount < *filters.VoteCountMin {
+		return false
+	}
+	return true
+}
+
+func collectionTitleResultProvesFilters(value collectionMediaResponse, filters collection.TMDBFilters) bool {
+	if !collectionTitleResultAllowed(value, filters) {
+		return false
+	}
+	if len(filters.ExcludedGenres) != 0 && value.GenreIDs == nil {
+		return false
+	}
+	if filters.OriginCountry != "" && len(value.OriginCountries) == 0 {
+		return false
+	}
+	if (filters.VoteAverageMin != nil || filters.VoteAverageMax != nil) && value.VoteAverage == nil {
+		return false
+	}
+	if filters.VoteCountMin != nil && value.VoteCount == nil {
+		return false
+	}
+	if filters.Year != nil {
+		releaseDate := value.ReleaseDate
+		if releaseDate == "" {
+			releaseDate = value.FirstAirDate
+		}
+		if len(releaseDate) < 4 || releaseDate[:4] != strconv.Itoa(*filters.Year) {
+			return false
+		}
+	}
+	return true
+}
+
+func exactCollectionTitleMatch(title string, values []collectionMediaResponse, filters collection.TMDBFilters) bool {
+	if filters.RuntimeMin != nil || filters.RuntimeMax != nil || len(filters.Keywords) != 0 || len(filters.Companies) != 0 ||
+		len(filters.Networks) != 0 || filters.WatchRegion != "" || len(filters.WatchProviders) != 0 {
+		return false
+	}
+	wanted := normalizeCollectionTitle(title)
+	if wanted == "" {
+		return false
+	}
+	for _, value := range values {
+		if !collectionTitleResultProvesFilters(value, filters) {
+			continue
+		}
+		for _, candidate := range []string{value.Title, value.Name, value.OriginalTitle, value.OriginalName} {
+			if normalizeCollectionTitle(candidate) == wanted {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func normalizeCollectionTitle(value string) string {
+	decomposed := norm.NFD.String(cases.Fold().String(strings.TrimSpace(value)))
+	normalized := strings.Map(func(character rune) rune {
+		if unicode.Is(unicode.Mn, character) {
+			return -1
+		}
+		if unicode.IsLetter(character) || unicode.IsNumber(character) {
+			return character
+		}
+		return ' '
+	}, decomposed)
+	return strings.Join(strings.Fields(normalized), " ")
+}
+
+func sharesInt64(left, right []int64) bool {
+	for _, candidate := range left {
+		for _, value := range right {
+			if candidate == value {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsFold(values []string, target string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, target) {
+			return true
+		}
+	}
+	return false
 }
 
 func (client *Client) LookupCollectionSource(ctx context.Context, kind, query, language string, page int) ([]collection.LookupResult, error) {
@@ -279,6 +540,9 @@ func (client *Client) resolveTMDBDiscover(ctx context.Context, source collection
 
 func (client *Client) resolveTMDBDiscoverMedia(ctx context.Context, source collection.TMDBSource, page int, language, region string) (collection.SourcePage, error) {
 	filters := source.Filters
+	if !validCollectionRuntimeBounds(filters.RuntimeMin, filters.RuntimeMax) {
+		return collection.SourcePage{}, collection.ErrInvalidInput
+	}
 	query := url.Values{
 		"include_adult": {"false"}, "language": {language}, "page": {strconv.Itoa(page)},
 		"sort_by": {collectionSort(source.Sort, source.MediaType)},
@@ -287,6 +551,7 @@ func (client *Client) resolveTMDBDiscoverMedia(ctx context.Context, source colle
 		query.Set("region", region)
 	}
 	setIDs(query, "with_genres", filters.Genres)
+	setIDs(query, "without_genres", filters.ExcludedGenres)
 	setIDs(query, "with_keywords", filters.Keywords)
 	setIDs(query, "with_companies", filters.Companies)
 	if source.SourceType == "company" && source.TMDBID != nil {
@@ -300,6 +565,12 @@ func (client *Client) resolveTMDBDiscoverMedia(ctx context.Context, source colle
 	}
 	if filters.VoteCountMin != nil {
 		query.Set("vote_count.gte", strconv.Itoa(*filters.VoteCountMin))
+	}
+	if filters.RuntimeMin != nil {
+		query.Set("with_runtime.gte", strconv.Itoa(*filters.RuntimeMin))
+	}
+	if filters.RuntimeMax != nil {
+		query.Set("with_runtime.lte", strconv.Itoa(*filters.RuntimeMax))
 	}
 	if filters.OriginalLanguage != "" {
 		query.Set("with_original_language", filters.OriginalLanguage)
@@ -447,14 +718,20 @@ func collectionItems(values []collectionMediaResponse, requiredMediaType string)
 			released = value.FirstAirDate
 		}
 		voteAverage := value.VoteAverage
+		if voteAverage == nil {
+			voteAverage = new(float64)
+		}
 		voteCount := value.VoteCount
+		if voteCount == nil {
+			voteCount = new(int)
+		}
 		popularity := value.Popularity
 		raw, _ := json.Marshal(value)
 		items = append(items, collection.Item{
 			ID: "tmdb:" + strconv.FormatInt(value.ID, 10), MediaType: mediaType, Title: title,
 			PosterURL: collectionImageURL(value.PosterPath, "w500"), BackgroundURL: collectionImageURL(value.BackdropPath, "w1280"),
 			Description: value.Overview, ReleaseInfo: yearFromDate(released), Released: released,
-			VoteAverage: &voteAverage, VoteCount: &voteCount, Popularity: &popularity,
+			VoteAverage: voteAverage, VoteCount: voteCount, Popularity: &popularity,
 			ExternalIDs: map[string]string{"tmdb": strconv.FormatInt(value.ID, 10)}, Raw: raw,
 		})
 	}
@@ -517,6 +794,12 @@ func collectionSort(value, mediaType string) string {
 		return "primary_release_date.desc"
 	}
 	return value
+}
+func validCollectionRuntimeBounds(minimum, maximum *int) bool {
+	if minimum != nil && (*minimum < 1 || *minimum > 600) || maximum != nil && (*maximum < 1 || *maximum > 600) {
+		return false
+	}
+	return minimum == nil || maximum == nil || *minimum <= *maximum
 }
 
 func setIDs(query url.Values, key string, values []int64) {

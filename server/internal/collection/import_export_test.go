@@ -296,3 +296,19 @@ func TestCollectionImportDocumentBudgetBoundsAggregateStrings(t *testing.T) {
 		t.Fatalf("document above aggregate string limit = %v, want ErrInvalidInput", err)
 	}
 }
+
+func TestCollectionImportDocumentBudgetCountsExcludedGenres(t *testing.T) {
+	document := ExportDocument{
+		SchemaVersion: ExportSchemaVersion,
+		Collections: []SaveInput{{
+			Title: "Bounded",
+			Folders: []Folder{{Title: "Discover", Sources: []Source{{
+				Kind: SourceKindTMDB,
+				TMDB: &TMDBSource{Filters: TMDBFilters{ExcludedGenres: make([]int64, maximumImportFilterValues+1)}},
+			}}}},
+		}},
+	}
+	if err := validateImportDocumentBudget(document); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("excluded genres above aggregate filter limit = %v, want ErrInvalidInput", err)
+	}
+}

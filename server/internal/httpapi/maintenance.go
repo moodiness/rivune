@@ -31,9 +31,21 @@ func (a *API) RunMaintenance(ctx context.Context) {
 			a.calendarRefresh.Run(ctx)
 		}()
 	}
-	runMaintenance(ctx, a.logger, a.authMaintenance, a.playbackMaintenance, maintenanceInterval, a.operations, a.coordination)
+	var semanticCatalogDone <-chan struct{}
+	if a.semanticCatalog != nil {
+		done := make(chan struct{})
+		semanticCatalogDone = done
+		go func() {
+			defer close(done)
+			a.semanticCatalog.RunSemanticCatalog(ctx)
+		}()
+	}
+	runMaintenance(ctx, a.logger, a.authMaintenance, a.playbackMaintenance, maintenanceInterval, a.addonMaintenance, a.operations, a.coordination, a.mediaNotifications)
 	if calendarDone != nil {
 		<-calendarDone
+	}
+	if semanticCatalogDone != nil {
+		<-semanticCatalogDone
 	}
 }
 
@@ -80,7 +92,7 @@ func runMaintenancePass(ctx context.Context, logger *slog.Logger, authService au
 			continue
 		}
 		if err := operationsService.RunScheduled(ctx); err != nil && ctx.Err() == nil {
-			logger.Error("scheduled metadata refresh failed", "error", err)
+			logger.Error("scheduled maintenance task failed", "error", err)
 		}
 	}
 }

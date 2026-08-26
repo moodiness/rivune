@@ -347,6 +347,47 @@ func TestOperationalStatusHandlesEmptyAndPopulatedTables(t *testing.T) {
 	}
 }
 
+func TestOverviewReturnsSemanticExtensionSnapshotExactly(t *testing.T) {
+	pool := newOperationsPostgresPool(t, operationSchedulesTestDDL, metadataCacheTestDDL, operationalStatusTestDDL)
+	seedMetadataRefreshSchedule(t, pool, "en-US", 25)
+	want := SemanticExtensionOperationsStatus{
+		Enabled: true, WarmupStatus: "ready", PersistentStatus: "ready",
+		MemoryEntries: 3, PersistentEntries: 2, Hits: 11, Misses: 5, CoalescedWaiters: 4,
+		Executions: 6, Successes: 3, Timeouts: 1, Failures: 1, Cancellations: 1, BusyFallbacks: 2,
+		Active: 1, Queued: 1, LatencyP50Milliseconds: 18, LatencyP95Milliseconds: 91,
+	}
+	provider := &fakeSemanticExtensionStatusProvider{status: want}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	service := NewService(pool, &fakeMetadataRefresher{}, &fakeMaintenanceCleaner{}, &fakePlaybackMaintenance{}, provider, 30*time.Minute, logger)
+
+	overview, err := service.Overview(context.Background(), adminPrincipal())
+	if err != nil {
+		t.Fatalf("load operations overview: %v", err)
+	}
+	if !reflect.DeepEqual(overview.SemanticExtension, want) || provider.calls != 1 {
+		t.Fatalf("semantic extension snapshot = %+v calls=%d, want %+v once", overview.SemanticExtension, provider.calls, want)
+	}
+	encoded, err := json.Marshal(overview.SemanticExtension)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, private := range []string{"query", "model", "digest", "key", "error"} {
+		if strings.Contains(strings.ToLower(string(encoded)), private) {
+			t.Fatalf("semantic extension snapshot exposed private field %q: %s", private, encoded)
+		}
+	}
+}
+
+type fakeSemanticExtensionStatusProvider struct {
+	status SemanticExtensionOperationsStatus
+	calls  int
+}
+
+func (provider *fakeSemanticExtensionStatusProvider) SemanticExtensionOperationsStatus() SemanticExtensionOperationsStatus {
+	provider.calls++
+	return provider.status
+}
+
 func TestRunActionDispatchesToSelectedServices(t *testing.T) {
 	t.Run("housekeeping", func(t *testing.T) {
 		metadataService := &fakeMetadataRefresher{}
@@ -423,7 +464,7 @@ func TestRequireAdministratorRejectsCategoryScopedAdministrator(t *testing.T) {
 
 func newTestService(pool *pgxpool.Pool, metadataService MetadataRefresher, cleaner MaintenanceCleaner, playbackService PlaybackMaintenance) *Service {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewService(pool, metadataService, cleaner, playbackService, 30*time.Minute, logger)
+	return NewService(pool, metadataService, cleaner, playbackService, nil, 30*time.Minute, logger)
 }
 
 type fakeMetadataRefresher struct {

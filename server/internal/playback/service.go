@@ -61,6 +61,7 @@ type Service struct {
 	runtimeSettings                *runtimesettings.Source
 	mediaStorageBytes              atomic.Int64
 	references                     *sourceReferenceStore
+	failoverStartedAt              time.Time
 	probes                         *mediaProbeCache
 	preparations                   *playbackPreparationCache
 	targetSigningKey               [32]byte
@@ -98,11 +99,6 @@ const (
 	maximumPlaybackSessionAssetBytes       = 24 << 20
 	playbackSessionAdmissionLockID   int64 = 0x524956504c415953
 )
-
-type fetchedResources struct {
-	batch addon.ResourceBatch
-	err   error
-}
 
 func NewService(pool *pgxpool.Pool, addons ResourceFetcher, processor MediaProcessor, options MediaOptions) (*Service, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -142,7 +138,12 @@ func NewService(pool *pgxpool.Pool, addons ResourceFetcher, processor MediaProce
 		introDBClient: &http.Client{Transport: transport.Clone(), Timeout: 8 * time.Second}, introDBBaseURL: introDBDefaultBaseURL,
 		now: now, mediaOptions: options, hlsJobs: make(map[string]*hlsJob), targetSigningKey: targetSigningKey, targetCapabilityKey: targetCapabilityKey,
 		deliveryChildren: newDeliveryChildBudget(maximumDeliveryChildrenGlobal, maximumDeliveryChildrenPerProfile),
-		references:       newSourceReferenceStore(now), probes: newMediaProbeCache(now), preparations: newPlaybackPreparationCache(now),
+		references: newSourceReferenceStore(now), probes: newMediaProbeCache(now), preparations: newPlaybackPreparationCache(now), failoverStartedAt: now(),
+	}
+	if pool != nil {
+		if _, err := service.cleanupFailoversBatch(context.Background(), pool); err != nil {
+			return nil, err
+		}
 	}
 	service.mediaStorageBytes.Store(options.MaxStorageBytes)
 	return service, nil

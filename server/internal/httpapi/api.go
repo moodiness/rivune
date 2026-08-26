@@ -22,6 +22,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/addon"
+	"github.com/moodiness/rivune/server/internal/accessibility"
+	"github.com/moodiness/rivune/server/internal/addonincident"
 	artworkcache "github.com/moodiness/rivune/server/internal/artwork"
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/calendar"
@@ -34,10 +36,13 @@ import (
 	"github.com/moodiness/rivune/server/internal/instance"
 	"github.com/moodiness/rivune/server/internal/jellyfin"
 	"github.com/moodiness/rivune/server/internal/metadata"
+	"github.com/moodiness/rivune/server/internal/medianotification"
 	"github.com/moodiness/rivune/server/internal/netguard"
 	"github.com/moodiness/rivune/server/internal/operations"
 	"github.com/moodiness/rivune/server/internal/playback"
 	"github.com/moodiness/rivune/server/internal/portable"
+	"github.com/moodiness/rivune/server/internal/readingqueue"
+	"github.com/moodiness/rivune/server/internal/savedsearch"
 	"github.com/moodiness/rivune/server/internal/profile"
 	"github.com/moodiness/rivune/server/internal/providers"
 	"github.com/moodiness/rivune/server/internal/requestwork"
@@ -49,14 +54,18 @@ import (
 	"github.com/moodiness/rivune/server/internal/webui"
 )
 
-const protocolVersion = 20
+const protocolVersion = 22
 
 var nativeCapabilities = [...]string{
 	"bounded-aggregate-resources",
-	"profile-archives-v1",
+	"profile-archives-v2",
 	"request-correlation",
 	"local-recommendations",
+	"semantic-search",
 	"playback-coordination",
+	"playback-command-results",
+	"playback-explanations",
+	"addon-verifications",
 }
 
 type instanceService interface {
@@ -69,11 +78,14 @@ type instanceService interface {
 
 type authService interface {
 	Login(context.Context, auth.LoginInput) (auth.TokenPair, error)
+	LoginWeb(context.Context, auth.LoginInput) (auth.TokenPair, error)
 	LoginJellyfinProfile(context.Context, auth.JellyfinProfileLoginInput) (auth.JellyfinProfileLoginResult, error)
 	Refresh(context.Context, string) (auth.TokenPair, error)
+	RefreshWeb(context.Context, string) (auth.TokenPair, error)
 	Authenticate(context.Context, string) (auth.Principal, error)
 	Account(context.Context, auth.Principal) (auth.Account, error)
 	Logout(context.Context, auth.Principal) error
+	LogoutWeb(context.Context, string) error
 	Sessions(context.Context, auth.Principal) ([]auth.Session, error)
 	RevokeSession(context.Context, auth.Principal, string) error
 	ProfileSessions(context.Context, auth.Principal, string) ([]auth.Session, error)
@@ -82,9 +94,10 @@ type authService interface {
 	AcknowledgeSessionNotification(context.Context, auth.Principal, int64) error
 	BroadcastSessionNotification(context.Context, auth.Principal, string, string) (auth.NotificationBroadcast, error)
 	SendProfileSessionNotification(context.Context, auth.Principal, string, string, string) (auth.SessionNotification, error)
-	BeginDeviceAuthorization(context.Context, string, string) (auth.DeviceAuthorization, error)
+	BeginDeviceAuthorization(context.Context, string, string, string) (auth.DeviceAuthorization, error)
 	ApproveDeviceAuthorization(context.Context, auth.Principal, auth.DeviceAuthorizationApproval) error
 	ExchangeDeviceAuthorization(context.Context, string) (auth.TokenPair, error)
+	ExchangeWebDeviceAuthorization(context.Context, string) (auth.TokenPair, error)
 }
 
 type profileService interface {
@@ -143,7 +156,8 @@ type userService interface {
 
 type addonService interface {
 	Install(context.Context, auth.Principal, addon.InstallInput) (addon.ManagedAddon, error)
-	Preview(context.Context, auth.Principal, addon.InstallInput) (addon.AddonPreview, error)
+	VerifyCandidate(context.Context, auth.Principal, addon.VerificationInput) (addon.AddonVerification, error)
+	VerifyInstalled(context.Context, auth.Principal, string) (addon.AddonVerification, error)
 	List(context.Context, auth.Principal) ([]addon.InstalledAddon, error)
 	Diagnostics(context.Context, auth.Principal) (addon.Diagnostics, error)
 	Management(context.Context, auth.Principal, string) (addon.ManagedAddon, error)
@@ -156,6 +170,12 @@ type addonService interface {
 	FetchAll(context.Context, auth.Principal, addon.ResourcePath) (addon.ResourceBatch, error)
 	SearchCatalogs(context.Context, auth.Principal, string, addon.CatalogSearchInput) (addon.ResourceBatch, error)
 	FetchCatalogs(context.Context, auth.Principal, string, []addon.ExtraValue, bool) (addon.ResourceBatch, error)
+}
+
+type addonIncidentService interface {
+	List(context.Context, auth.Principal) (addonincident.List, error)
+	Detail(context.Context, auth.Principal, string) (addonincident.Detail, error)
+	Acknowledge(context.Context, auth.Principal, string) (addonincident.Incident, error)
 }
 
 type collectionService interface {
@@ -171,6 +191,19 @@ type collectionService interface {
 	ResolveFolder(context.Context, auth.Principal, string, string, int, int, string, string) (collection.ResolvedFolder, error)
 	LookupTMDB(context.Context, auth.Principal, string, string, string, int) ([]collection.LookupResult, error)
 	TMDBGenres(context.Context, auth.Principal, string, string) ([]collection.Genre, error)
+	SemanticSearch(context.Context, auth.Principal, collection.SemanticSearchInput) (collection.SemanticSearchPage, error)
+}
+
+type savedSearchService interface {
+	ListSavedSearches(context.Context, auth.Principal) ([]savedsearch.SavedSearch, error)
+	CreateSavedSearch(context.Context, auth.Principal, savedsearch.SavedSearchInput) (savedsearch.SavedSearch, error)
+	UpdateSavedSearch(context.Context, auth.Principal, string, savedsearch.SavedSearchInput) (savedsearch.SavedSearch, error)
+	DeleteSavedSearch(context.Context, auth.Principal, string, int64) error
+	ListSmartCollections(context.Context, auth.Principal) ([]savedsearch.SmartCollection, error)
+	CreateSmartCollection(context.Context, auth.Principal, savedsearch.SmartCollectionInput) (savedsearch.SmartCollection, error)
+	UpdateSmartCollection(context.Context, auth.Principal, string, savedsearch.SmartCollectionInput) (savedsearch.SmartCollection, error)
+	DeleteSmartCollection(context.Context, auth.Principal, string, int64) error
+	EvaluateSmartCollection(context.Context, auth.Principal, string, int, int) (savedsearch.SmartCollectionPage, error)
 }
 
 type calendarService interface {
@@ -182,6 +215,15 @@ type calendarService interface {
 	Feed(context.Context, string, bool) ([]byte, error)
 }
 
+type mediaNotificationService interface {
+	ListSubscriptions(context.Context, auth.Principal) ([]medianotification.Subscription, error)
+	Follow(context.Context, auth.Principal, string, medianotification.FollowInput) (medianotification.Subscription, error)
+	Unfollow(context.Context, auth.Principal, string) error
+	List(context.Context, auth.Principal, string, int) (medianotification.Page, error)
+	Acknowledge(context.Context, auth.Principal, string, string) error
+	RunScheduled(context.Context) error
+}
+
 type jellyfinCredentialService interface {
 	Status(context.Context, auth.Principal, string) (jellyfin.CredentialStatus, error)
 	Create(context.Context, auth.Principal, string) (jellyfin.ProfileCredential, error)
@@ -191,6 +233,14 @@ type jellyfinCredentialService interface {
 
 type calendarRefreshWorker interface {
 	Run(context.Context)
+}
+
+type semanticCatalogWorker interface {
+	RunSemanticCatalog(context.Context)
+}
+
+type semanticExtensionWorker interface {
+	WarmSemanticExtension(context.Context) error
 }
 
 type metadataService interface {
@@ -219,7 +269,7 @@ type watchstateService interface {
 	ClearProgress(context.Context, auth.Principal, string, int64) error
 	ContinueWatching(context.Context, auth.Principal, string, int) (watchstate.ContinuePage, error)
 	DismissContinue(context.Context, auth.Principal, string) error
-	Recommendations(context.Context, auth.Principal, int) (watchstate.RecommendationPage, error)
+	Recommendations(context.Context, auth.Principal, int, watchstate.RecommendationArtworkShape) (watchstate.RecommendationPage, error)
 }
 
 type trackingService interface {
@@ -236,6 +286,10 @@ type playbackService interface {
 	Markers(context.Context, auth.Principal, playback.MarkerInput) (playback.MarkerList, error)
 	Prepare(context.Context, auth.Principal, playback.PrepareInput) (playback.Preparation, error)
 	Resolve(context.Context, auth.Principal, playback.ResolveInput) (playback.Session, error)
+	CreateFailover(context.Context, auth.Principal, playback.CreateFailoverInput) (playback.FailoverState, error)
+	Failover(context.Context, auth.Principal, string) (playback.FailoverState, error)
+	AdvanceFailover(context.Context, auth.Principal, string, playback.AdvanceFailoverInput) (playback.FailoverState, error)
+	CancelFailover(context.Context, auth.Principal, string) error
 	Stop(context.Context, auth.Principal, string) error
 	Activity(context.Context, auth.Principal) (playback.Activity, error)
 	StopActivitySession(context.Context, auth.Principal, string) error
@@ -246,8 +300,9 @@ type coordinationService interface {
 	Heartbeat(context.Context, auth.Principal, coordination.DeviceHeartbeatInput) (coordination.Device, error)
 	Devices(context.Context, auth.Principal) (coordination.DeviceList, error)
 	SendCommand(context.Context, auth.Principal, string, coordination.CommandInput) (coordination.Command, error)
-	Commands(context.Context, auth.Principal, int64) (coordination.CommandList, error)
-	AcknowledgeCommand(context.Context, auth.Principal, int64) error
+	Commands(context.Context, auth.Principal, string) (coordination.CommandList, error)
+	CompleteCommand(context.Context, auth.Principal, string, coordination.CommandResultInput) (coordination.Command, error)
+	OutgoingCommand(context.Context, auth.Principal, string) (coordination.Command, error)
 	CreateRoom(context.Context, auth.Principal, coordination.CreateRoomInput) (coordination.Room, error)
 	JoinRoom(context.Context, auth.Principal, string) (coordination.Room, error)
 	Room(context.Context, auth.Principal, string) (coordination.Room, error)
@@ -267,6 +322,7 @@ type collectionArtworkPresenter interface {
 	PresentCollections(context.Context, []collection.Collection)
 	RestoreCollectionSaveInput(context.Context, *collection.SaveInput)
 	LocalizeCollectionLookupResults(context.Context, []collection.LookupResult)
+	PresentSemanticSearchPage(context.Context, *collection.SemanticSearchPage)
 }
 
 type catalogArtworkPresenter interface {
@@ -280,16 +336,34 @@ type databasePinger interface {
 type portableService interface {
 	Export(context.Context, auth.Principal, string) (portable.Document, error)
 	Import(context.Context, auth.Principal, string, portable.Document) (portable.ImportReport, error)
+	Create(context.Context, auth.Principal, portable.CreateInput) (portable.ImportReport, error)
+}
+
+type readingQueueService interface {
+	Queue(context.Context, auth.Principal, string) (readingqueue.Queue, error)
+	Add(context.Context, auth.Principal, string, readingqueue.AddInput) (readingqueue.Mutation, error)
+	Update(context.Context, auth.Principal, string, string, readingqueue.UpdateInput) (readingqueue.Mutation, error)
+	Reorder(context.Context, auth.Principal, string, readingqueue.ReorderInput) (readingqueue.Mutation, error)
+	Remove(context.Context, auth.Principal, string, string, readingqueue.MutationInput) (readingqueue.Mutation, error)
+	Consume(context.Context, auth.Principal, string, string, readingqueue.MutationInput) (readingqueue.Mutation, error)
+}
+
+type accessibilityService interface {
+	Get(context.Context, auth.Principal, string) (accessibility.Document, error)
+	Update(context.Context, auth.Principal, string, accessibility.UpdateInput) (accessibility.Document, error)
 }
 
 type API struct {
 	config                                  config.Config
 	addons                                  addonService
+	addonMaintenance                        operationsMaintenanceService
 	artwork                                 *artworkcache.Service
 	catalogArtwork                          catalogArtworkPresenter
 	collectionArtwork                       collectionArtworkPresenter
 	calendar                                calendarService
 	calendarRefresh                         calendarRefreshWorker
+	semanticCatalog                         semanticCatalogWorker
+	semanticExtensionWarmup                 semanticExtensionWorker
 	categories                              categoryService
 	pool                                    databasePinger
 	instances                               instanceService
@@ -321,9 +395,14 @@ type API struct {
 	playback                                playbackService
 	playbackMaintenance                     playbackMaintenanceService
 	operations                              operationsService
+	addonIncidents                          addonIncidentService
 	coordination                            coordinationService
 	portable                                portableService
+	readingQueue                            readingQueueService
+	accessibility                           accessibilityService
 	settings                                settingsService
+	savedSearches                            savedSearchService
+	mediaNotifications                      mediaNotificationService
 	integrationConfiguration                integrationSettingsService
 	runtimeSettings                         *runtimeSettingsCoordinator
 	users                                   userService
@@ -432,6 +511,9 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 	)
 
 	addonService := addon.NewService(pool, nil, logger)
+	addonService.SetVerificationEncryptionKeys(cfg.EncryptionKeys)
+	addonIncidentService := addonincident.NewService(pool)
+	addonService.SetIncidentObserver(addonIncidentService)
 	artworkService, err := artworkcache.New(pool, artworkcache.Options{
 		Directory:         cfg.ArtworkCacheDir,
 		MaxBytes:          runtimeSnapshot.ArtworkMaxStorageBytes,
@@ -465,15 +547,28 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 	}
 	collectionService := collection.NewServiceWithProviderSource(pool, addonService, providerRuntime)
 	collectionService.SetArtworkPresenter(artworkService)
+	collectionService.SetLogger(logger)
+	if cfg.SemanticOllamaURL != "" {
+		extension, extensionErr := collection.NewOllamaSemanticExtension(cfg.SemanticOllamaURL, cfg.SemanticOllamaModel, nil)
+		if extensionErr != nil {
+			return nil, fmt.Errorf("initialize local semantic extension: %w", extensionErr)
+		}
+		collectionService.SetSemanticExtension(extension)
+	}
+	collectionService.InitializeSemanticExtensionCache(ctx, cfg.EncryptionKeys)
 	watchstateService := watchstate.NewServiceWithRuntimeSettings(pool, runtimeSource, providerRuntime, trackingService)
 	coordinationService := coordination.NewService(pool, watchstateService)
 	profileManager := profile.NewServiceWithRuntimeSettings(pool, cfg.ProfileGrantTTL, runtimeSource)
 	instanceManager := instance.NewServiceWithRuntimeSettings(pool, cfg.SetupToken, runtimeSource)
 	portableService := portable.NewService(pool, runtimeSource)
+	readingQueueService := readingqueue.NewService(pool)
+	savedSearchService := savedsearch.NewService(pool, watchstateService)
+	mediaNotificationService := medianotification.NewService(pool, runtimeSource)
+	accessibilityService := accessibility.NewService(pool)
 	userManager := user.NewService(pool)
 	runtimeCoordinator := newRuntimeSettingsCoordinator(runtimeSource, settingsManager, artworkService, playbackService)
 	operationsService := operations.NewService(
-		pool, metadataService, authService, playbackService, maintenanceInterval, logger,
+		pool, metadataService, authService, playbackService, collectionService, maintenanceInterval, logger,
 	)
 	jellyfinCredentials, err := jellyfin.NewCredentialStore(pool, runtimeSource)
 	if err != nil {
@@ -484,11 +579,15 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 		catalogArtwork:           artworkService,
 		collectionArtwork:        artworkService,
 		addons:                   addonService,
+		addonMaintenance:        addonService,
+		addonIncidents:           addonIncidentService,
 		config:                   cfg,
 		calendar:                 calendarService,
 		calendarRefresh:          calendarService,
 		categories:               category.NewService(pool),
 		collections:              collectionService,
+		semanticCatalog:          collectionService,
+		semanticExtensionWarmup:  collectionService,
 		coordination:             coordinationService,
 		pool:                     pool,
 		instances:                instanceManager,
@@ -507,6 +606,10 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 		metadata:                 metadataService,
 		operations:               operationsService,
 		portable:                 portableService,
+		readingQueue:             readingQueueService,
+		accessibility:            accessibilityService,
+		savedSearches:            savedSearchService,
+		mediaNotifications:       mediaNotificationService,
 		version:                  version,
 		tracking:                 trackingService,
 		watchstate:               watchstateService,
@@ -547,6 +650,13 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slo
 	return api, nil
 }
 
+func (a *API) WarmSemanticExtension(ctx context.Context) error {
+	if a == nil || a.semanticExtensionWarmup == nil {
+		return nil
+	}
+	return a.semanticExtensionWarmup.WarmSemanticExtension(ctx)
+}
+
 func (a *API) forgetJellyfinCompatibilitySessions(sessionIDs []string) {
 	if a == nil || len(sessionIDs) == 0 {
 		return
@@ -577,6 +687,10 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/device-code/token", a.exchangeDeviceAuthorization)
 	mux.Handle("POST /api/v1/auth/device-code/approve", a.requireAuthentication(a.approveDeviceAuthorization))
 	mux.Handle("POST /api/v1/auth/logout", a.requireAuthentication(a.logout))
+	mux.HandleFunc("POST /api/v1/auth/web/login", a.webLogin)
+	mux.HandleFunc("POST /api/v1/auth/web/device-code/token", a.webExchangeDeviceAuthorization)
+	mux.HandleFunc("POST /api/v1/auth/web/refresh", a.webRefresh)
+	mux.HandleFunc("DELETE /api/v1/auth/web/refresh", a.webLogout)
 	mux.Handle("GET /api/v1/auth/me", a.requireAuthentication(a.me))
 	mux.Handle("GET /api/v1/auth/sessions", a.requireAuthentication(a.sessions))
 	mux.Handle("DELETE /api/v1/auth/sessions/{sessionId}", a.requireAuthentication(a.revokeSession))
@@ -610,9 +724,16 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("POST /api/v1/profiles/{profileId}/jellyfin-credential", a.requireAuthentication(a.createJellyfinCredential))
 	mux.Handle("POST /api/v1/profiles/{profileId}/jellyfin-credential/rotate", a.requireAuthentication(a.rotateJellyfinCredential))
 	mux.Handle("DELETE /api/v1/profiles/{profileId}/jellyfin-credential", a.requireAuthentication(a.revokeJellyfinCredential))
+	mux.Handle("POST /api/v1/profiles/archive", a.requireAuthentication(a.createProfileFromArchive))
 	mux.Handle("PUT /api/v1/profiles/{profileId}/avatar/preset", a.requireAuthentication(a.setProfileAvatarPreset))
 	mux.Handle("GET /api/v1/profiles/{profileId}/archive", a.requireAuthentication(a.exportProfileArchive))
 	mux.Handle("POST /api/v1/profiles/{profileId}/archive/import", a.requireAuthentication(a.importProfileArchive))
+	mux.Handle("GET /api/v1/profiles/{profileId}/queue", a.requireAuthentication(a.readingQueueItems))
+	mux.Handle("POST /api/v1/profiles/{profileId}/queue/items", a.requireAuthentication(a.addReadingQueueItem))
+	mux.Handle("PUT /api/v1/profiles/{profileId}/queue/order", a.requireAuthentication(a.reorderReadingQueue))
+	mux.Handle("PATCH /api/v1/profiles/{profileId}/queue/items/{itemId}", a.requireAuthentication(a.updateReadingQueueItem))
+	mux.Handle("DELETE /api/v1/profiles/{profileId}/queue/items/{itemId}", a.requireAuthentication(a.removeReadingQueueItem))
+	mux.Handle("POST /api/v1/profiles/{profileId}/queue/items/{itemId}/consume", a.requireAuthentication(a.consumeReadingQueueItem))
 	mux.Handle("GET /api/v1/settings", a.requireAuthentication(a.instanceSettings))
 	mux.Handle("PATCH /api/v1/settings", a.requireAuthentication(a.updateInstanceSettings))
 	mux.Handle("GET /api/v1/settings/integrations", a.requireAuthentication(a.integrationSettings))
@@ -623,11 +744,16 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /api/v1/operations", a.requireAuthentication(a.operationsOverview))
 	mux.Handle("PUT /api/v1/operations/schedules/metadata-refresh", a.requireAuthentication(a.updateMetadataRefreshSchedule))
 	mux.Handle("POST /api/v1/operations/actions/{action}", a.requireAuthentication(a.runOperationAction))
+	mux.Handle("GET /api/v1/operations/extension-incidents", a.requireAuthentication(a.listAddonIncidents))
+	mux.Handle("GET /api/v1/operations/extension-incidents/{incidentId}", a.requireAuthentication(a.addonIncidentDetail))
+	mux.Handle("POST /api/v1/operations/extension-incidents/{incidentId}/acknowledgement", a.requireAuthentication(a.acknowledgeAddonIncident))
 	mux.HandleFunc("GET /api/v1/artwork/{key}", a.artworkAsset)
 	mux.HandleFunc("HEAD /api/v1/artwork/{key}", a.artworkAsset)
 	mux.Handle("GET /api/v1/profiles/{profileId}/settings", a.requireAuthentication(a.profileSettings))
 	mux.Handle("PATCH /api/v1/profiles/{profileId}/settings", a.requireAuthentication(a.updateProfileSettings))
 	mux.Handle("GET /api/v1/profiles/{profileId}/settings/effective", a.requireAuthentication(a.effectiveSettings))
+	mux.Handle("GET /api/v1/profiles/{profileId}/accessibility-preferences", a.requireAuthentication(a.accessibilityPreferences))
+	mux.Handle("PUT /api/v1/profiles/{profileId}/accessibility-preferences", a.requireAuthentication(a.updateAccessibilityPreferences))
 	mux.Handle("GET /api/v1/profiles/{profileId}/tracking", a.requireAuthentication(a.trackingStatuses))
 	mux.Handle("POST /api/v1/profiles/{profileId}/tracking/{provider}/device-code", a.requireAuthentication(a.beginTrackingAuthorization))
 	mux.Handle("POST /api/v1/profiles/{profileId}/tracking/{provider}/device-code/{authorizationId}/token", a.requireAuthentication(a.completeTrackingAuthorization))
@@ -647,8 +773,9 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /api/v1/addons", a.requireAuthentication(a.listAddons))
 	mux.Handle("GET /api/v1/addons/diagnostics", a.requireAuthentication(a.addonDiagnostics))
 	mux.Handle("GET /api/v1/addons/{addonId}/management", a.requireAuthentication(a.addonManagement))
+	mux.Handle("POST /api/v1/addons/verifications", a.requireAuthentication(a.verifyAddonCandidate))
+	mux.Handle("POST /api/v1/addons/{addonId}/verifications", a.requireAuthentication(a.verifyInstalledAddon))
 	mux.Handle("POST /api/v1/addons", a.requireAuthentication(a.installAddon))
-	mux.Handle("POST /api/v1/addons/preview", a.requireAuthentication(a.previewAddon))
 	mux.Handle("PUT /api/v1/addons/order", a.requireAuthentication(a.reorderAddons))
 	mux.Handle("DELETE /api/v1/addons/{addonId}", a.requireAuthentication(a.removeAddon))
 	mux.Handle("POST /api/v1/addons/{addonId}/refresh", a.requireAuthentication(a.refreshAddon))
@@ -658,6 +785,7 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /api/v1/addons/resources/{resource}/{type}/{id}", a.requireAuthentication(a.fetchAllAddonResources))
 	mux.Handle("GET /api/v1/addons/catalogs/search/{type}", a.requireAuthentication(a.searchAddonCatalogs))
 	mux.Handle("GET /api/v1/addons/discover", a.requireAuthentication(a.discoverAddonCatalogs))
+	mux.Handle("POST /api/v1/search/semantic", a.requireAuthentication(a.semanticSearch))
 	mux.Handle("GET /api/v1/collections", a.requireAuthentication(a.listCollections))
 	mux.Handle("POST /api/v1/collections", a.requireAuthentication(a.createCollection))
 	mux.Handle("PUT /api/v1/collections/order", a.requireAuthentication(a.reorderCollections))
@@ -670,12 +798,25 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/collections/{collectionId}", a.requireAuthentication(a.updateCollection))
 	mux.Handle("DELETE /api/v1/collections/{collectionId}", a.requireAuthentication(a.deleteCollection))
 	mux.Handle("GET /api/v1/collections/{collectionId}/folders/{folderId}/items", a.requireAuthentication(a.resolveCollectionFolder))
+	mux.Handle("GET /api/v1/saved-searches", a.requireAuthentication(a.listSavedSearches))
+	mux.Handle("POST /api/v1/saved-searches", a.requireAuthentication(a.createSavedSearch))
+	mux.Handle("PUT /api/v1/saved-searches/{savedSearchId}", a.requireAuthentication(a.updateSavedSearch))
+	mux.Handle("DELETE /api/v1/saved-searches/{savedSearchId}", a.requireAuthentication(a.deleteSavedSearch))
+	mux.Handle("GET /api/v1/smart-collections", a.requireAuthentication(a.listSmartCollections))
+	mux.Handle("POST /api/v1/smart-collections", a.requireAuthentication(a.createSmartCollection))
+	mux.Handle("PUT /api/v1/smart-collections/{smartCollectionId}", a.requireAuthentication(a.updateSmartCollection))
+	mux.Handle("DELETE /api/v1/smart-collections/{smartCollectionId}", a.requireAuthentication(a.deleteSmartCollection))
+	mux.Handle("GET /api/v1/smart-collections/{smartCollectionId}/items", a.requireAuthentication(a.smartCollectionItems))
 	mux.Handle("POST /api/v1/titles/resolve", a.requireAuthentication(a.resolveTitle))
 	mux.Handle("POST /api/v1/titles/custom-series/resolve", a.requireAuthentication(a.resolveCustomSeries))
 	mux.Handle("POST /api/v1/playback/sources", a.requireAuthentication(a.playbackSources))
 	mux.Handle("GET /api/v1/playback/markers", a.requireAuthentication(a.playbackMarkers))
 	mux.Handle("POST /api/v1/playback/prepare", a.requireAuthentication(a.preparePlayback))
 	mux.Handle("POST /api/v1/playback/resolve", a.requireAuthentication(a.resolvePlayback))
+	mux.Handle("POST /api/v1/playback/failovers", a.requireAuthentication(a.createPlaybackFailover))
+	mux.Handle("GET /api/v1/playback/failovers/{failoverId}", a.requireAuthentication(a.getPlaybackFailover))
+	mux.Handle("POST /api/v1/playback/failovers/{failoverId}/advance", a.requireAuthentication(a.advancePlaybackFailover))
+	mux.Handle("DELETE /api/v1/playback/failovers/{failoverId}", a.requireAuthentication(a.cancelPlaybackFailover))
 	mux.Handle("DELETE /api/v1/playback/sessions/{sessionId}", a.requireAuthentication(a.stopPlayback))
 	mux.Handle("GET /api/v1/playback/activity", a.requireAuthentication(a.playbackActivity))
 	mux.Handle("DELETE /api/v1/playback/activity/sessions/{sessionId}", a.requireAuthentication(a.stopPlaybackActivitySession))
@@ -685,7 +826,8 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /api/v1/playback/devices", a.requireAuthentication(a.playbackDevices))
 	mux.Handle("POST /api/v1/playback/devices/{sessionId}/commands", a.requireAuthentication(a.sendPlaybackCommand))
 	mux.Handle("GET /api/v1/playback/commands", a.requireAuthentication(a.playbackCommands))
-	mux.Handle("POST /api/v1/playback/commands/{commandId}/ack", a.requireAuthentication(a.acknowledgePlaybackCommand))
+	mux.Handle("PUT /api/v1/playback/commands/incoming/{operationId}/result", a.requireAuthentication(a.completePlaybackCommand))
+	mux.Handle("GET /api/v1/playback/commands/outgoing/{operationId}", a.requireAuthentication(a.outgoingPlaybackCommand))
 	mux.Handle("POST /api/v1/playback/rooms", a.requireAuthentication(a.createPlaybackRoom))
 	mux.Handle("POST /api/v1/playback/rooms/join", a.requireAuthentication(a.joinPlaybackRoom))
 	mux.Handle("GET /api/v1/playback/rooms/{roomId}", a.requireAuthentication(a.playbackRoom))
@@ -703,6 +845,11 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("POST /api/v1/library/membership", a.requireAuthentication(a.tvLibraryMembership))
 	mux.Handle("PUT /api/v1/library/{titleId}", a.requireAuthentication(a.addLibrary))
 	mux.Handle("DELETE /api/v1/library/{titleId}", a.requireAuthentication(a.removeLibrary))
+	mux.Handle("GET /api/v1/media-notification-subscriptions", a.requireAuthentication(a.mediaNotificationSubscriptions))
+	mux.Handle("PUT /api/v1/media-notification-subscriptions/{titleId}", a.requireAuthentication(a.followMediaNotifications))
+	mux.Handle("DELETE /api/v1/media-notification-subscriptions/{titleId}", a.requireAuthentication(a.unfollowMediaNotifications))
+	mux.Handle("GET /api/v1/media-notifications", a.requireAuthentication(a.mediaNotificationInbox))
+	mux.Handle("POST /api/v1/media-notifications/{notificationId}/acknowledgement", a.requireAuthentication(a.acknowledgeMediaNotification))
 	mux.Handle("GET /api/v1/recommendations", a.requireAuthentication(a.recommendations))
 	mux.Handle("POST /api/v1/progress/batch", a.requireAuthentication(a.getProgressBatch))
 	mux.Handle("GET /api/v1/progress/{titleId}", a.requireAuthentication(a.getProgress))
@@ -898,7 +1045,13 @@ func (a *API) middleware(next http.Handler) http.Handler {
 				}
 			}
 			status := observed.status
-			if status == 0 {
+			outcome := "completed"
+			if r.Context().Err() != nil {
+				outcome = "canceled"
+				if status == 0 {
+					status = 499
+				}
+			} else if status == 0 {
 				status = http.StatusOK
 			}
 			work := counters.Snapshot()
@@ -907,6 +1060,7 @@ func (a *API) middleware(next http.Handler) http.Handler {
 				slog.String("route", nativeRequestRoute(r)),
 				slog.String("method", r.Method),
 				slog.Int("status", status),
+				slog.String("outcome", outcome),
 				slog.Duration("duration", time.Since(started)),
 				slog.Int64("db_call_count", work.DBCalls),
 				slog.Duration("db_duration", work.DBDuration),

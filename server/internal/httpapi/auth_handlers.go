@@ -174,7 +174,7 @@ func maintenanceExemptRequest(r *http.Request) bool {
 	return r.Method == http.MethodPost && strings.HasPrefix(path, "/api/v1/profiles/") && strings.HasSuffix(path, "/select")
 }
 func profileArchiveRequest(path string) bool {
-	return strings.HasPrefix(path, "/api/v1/profiles/") &&
+	return path == "/api/v1/profiles/archive" || strings.HasPrefix(path, "/api/v1/profiles/") &&
 		(strings.HasSuffix(path, "/archive") || strings.HasSuffix(path, "/archive/import"))
 }
 
@@ -506,9 +506,9 @@ func newTokenResponse(tokens auth.TokenPair) tokenResponse {
 	return tokenResponse{
 		TokenType:             "Bearer",
 		AccessToken:           tokens.AccessToken,
-		AccessTokenExpiresAt:  tokens.AccessExpiresAt,
+		AccessTokenExpiresAt:  tokens.AccessExpiresAt.UTC(),
 		RefreshToken:          tokens.RefreshToken,
-		RefreshTokenExpiresAt: tokens.RefreshExpiresAt,
+		RefreshTokenExpiresAt: tokens.RefreshExpiresAt.UTC(),
 		SessionID:             tokens.SessionID,
 		DeviceID:              tokens.DeviceID,
 		AuthorizationScope:    tokens.AuthorizationScope,

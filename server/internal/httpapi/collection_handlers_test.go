@@ -57,6 +57,9 @@ type fakeCollectionService struct {
 	genreLanguage      string
 	genreValues        []collection.Genre
 	genreErr           error
+	semanticInput      collection.SemanticSearchInput
+	semanticValue      collection.SemanticSearchPage
+	semanticErr        error
 }
 
 func (fake *fakeCollectionService) List(context.Context, auth.Principal) ([]collection.Collection, error) {
@@ -121,6 +124,10 @@ func (fake *fakeCollectionService) TMDBGenres(_ context.Context, _ auth.Principa
 	fake.genreMediaType, fake.genreLanguage = mediaType, language
 	return fake.genreValues, fake.genreErr
 }
+func (fake *fakeCollectionService) SemanticSearch(_ context.Context, _ auth.Principal, input collection.SemanticSearchInput) (collection.SemanticSearchPage, error) {
+	fake.semanticInput = input
+	return fake.semanticValue, fake.semanticErr
+}
 
 type fakeCollectionArtworkPresenter struct {
 	presentCalls int
@@ -143,6 +150,12 @@ func (*fakeCollectionArtworkPresenter) RestoreCollectionSaveInput(context.Contex
 }
 
 func (*fakeCollectionArtworkPresenter) LocalizeCollectionLookupResults(context.Context, []collection.LookupResult) {
+}
+
+func (*fakeCollectionArtworkPresenter) PresentSemanticSearchPage(_ context.Context, page *collection.SemanticSearchPage) {
+	for index := range page.Items {
+		page.Items[index].PosterURL = "/api/v1/artwork/semantic-poster"
+	}
 }
 
 func TestCollectionExportAndImportRoutes(t *testing.T) {
@@ -457,6 +470,50 @@ func TestReorderCollectionsReturnsStableForbiddenResponse(t *testing.T) {
 	decodeResponse(t, response, &body)
 	if body.Error.Code != "collection_forbidden" {
 		t.Fatalf("reorder error code = %q, want collection_forbidden", body.Error.Code)
+	}
+}
+
+func TestSemanticSearchForwardsIntentAndReturnsArtworkLocalizedItems(t *testing.T) {
+	service := &fakeCollectionService{semanticValue: collection.SemanticSearchPage{
+		Intents:    []collection.SemanticSearchIntent{{ID: "genre:war", Kind: "genre", Value: "war", Label: "War"}},
+		TitleQuery: "film de guerre", MediaTypes: []string{"movie"}, Page: 1,
+		Items: []collection.Item{{ID: "tmdb:42", MediaType: "movie", Title: "War Movie", PosterURL: "https://images.example/poster.jpg", ExternalIDs: map[string]string{"tmdb": "42"}, Sources: []collection.SourceReference{}}},
+	}}
+	api := collectionAPI(service)
+	presenter := &fakeCollectionArtworkPresenter{}
+	api.collectionArtwork = presenter
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/search/semantic", strings.NewReader(`{"query":"film de guerre","mediaType":"movie","language":"fr-FR","region":"FR","page":1,"limit":24,"excludedIntentIds":["theme:space"]}`))
+	request.Header.Set("Authorization", "Bearer access")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	api.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("semantic search status = %d: %s", response.Code, response.Body.String())
+	}
+	if service.semanticInput.Query != "film de guerre" || service.semanticInput.MediaType != "movie" || service.semanticInput.Language != "fr-FR" ||
+		service.semanticInput.Region != "FR" || service.semanticInput.Page != 1 || service.semanticInput.Limit != 24 || !reflect.DeepEqual(service.semanticInput.ExcludedIntentIDs, []string{"theme:space"}) {
+		t.Fatalf("semantic search input mismatch: %+v", service.semanticInput)
+	}
+	var page collection.SemanticSearchPage
+	decodeResponse(t, response, &page)
+	if len(page.Items) != 1 || page.Items[0].PosterURL != "/api/v1/artwork/semantic-poster" {
+		t.Fatalf("semantic search response was not localized: %+v", page)
+	}
+	validateContractResponse(t, loadOpenAPIContract(t), "/search/semantic", nil, request, response)
+}
+
+func TestSemanticSearchCancellationDoesNotWriteServerError(t *testing.T) {
+	service := &fakeCollectionService{semanticErr: context.Canceled}
+	api := collectionAPI(service)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/search/semantic", strings.NewReader(`{"query":"space films"}`)).WithContext(ctx)
+	request.Header.Set("Authorization", "Bearer access")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	api.Handler().ServeHTTP(response, request)
+	if response.Code == http.StatusInternalServerError || response.Body.Len() != 0 {
+		t.Fatalf("canceled semantic request wrote status %d body %q", response.Code, response.Body.String())
 	}
 }
 

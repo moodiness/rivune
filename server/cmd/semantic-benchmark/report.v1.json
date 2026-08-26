@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "corpusVersion": "semantic-extension-v1",
+  "corpusDigest": "sha256:847945165489802831aa4cf53cc286e108b8bfe94d406e9a016851852b8e98f8",
+  "seed": 42,
+  "repetitions": 3,
+  "gate": {
+    "minimumExactAccuracy": 0.85,
+    "minimumLanguageAccuracy": 0.75,
+    "maximumProperTitleFalsePositives": 0,
+    "maximumP95Milliseconds": 15000,
+    "requireDeterminism": true
+  },
+  "models": [
+    {
+      "model": "qwen3:0.6b",
+      "digest": "7df6b6e09427a769808717c0a93cadc4ae99ed4eb8bf5ca557c90846becea435",
+      "exactAccuracy": 0,
+      "precision": 0.13148148148148148,
+      "recall": 0.5634920634920635,
+      "f1": 0.2132132132132132,
+      "properTitleFalsePositives": 161,
+      "failures": 26,
+      "deterministic": false,
+      "minimumObservedLanguageAccuracy": 0,
+      "p95Milliseconds": 20002.168875,
+      "passed": false
+    },
+    {
+      "model": "qwen3:1.7b",
+      "digest": "8f68893c685c3ddff2aa3fffce2aa60a30bb2da65ca488b61fff134a4d1730e7",
+      "exactAccuracy": 0.05,
+      "precision": 0.2147239263803681,
+      "recall": 0.2777777777777778,
+      "f1": 0.24221453287197234,
+      "properTitleFalsePositives": 36,
+      "failures": 0,
+      "deterministic": false,
+      "minimumObservedLanguageAccuracy": 0.05,
+      "p95Milliseconds": 2485.096041,
+      "passed": false
+    },
+    {
+      "model": "qwen3:4b",
+      "digest": "359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7",
+      "exactAccuracy": 0.08333333333333333,
+      "precision": 0.35051546391752575,
+      "recall": 0.2698412698412698,
+      "f1": 0.3049327354260089,
+      "properTitleFalsePositives": 30,
+      "failures": 74,
+      "deterministic": false,
+      "minimumObservedLanguageAccuracy": 0,
+      "p95Milliseconds": 20007.468042,
+      "passed": false
+    }
+  ],
+  "selectedModel": null,
+  "passed": false,
+  "decision": "Disable the optional semantic model by default; no benchmark candidate met the pre-registered quality, false-positive, latency, and determinism gate."
+}

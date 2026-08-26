@@ -4,6 +4,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/moodiness/rivune/server/internal/collection"
 	"github.com/moodiness/rivune/server/internal/metadata"
 	"github.com/moodiness/rivune/server/internal/playback"
 )
@@ -81,14 +82,17 @@ type PlaybackStatus struct {
 	Transcoding int64 `json:"transcoding"`
 }
 
+type SemanticExtensionOperationsStatus = collection.SemanticExtensionOperationsStatus
+
 type OperationsOverview struct {
-	MetadataCache               MetadataCacheStatus     `json:"metadataCache"`
-	MetadataRefresh             MetadataRefreshSchedule `json:"metadataRefresh"`
-	PostgreSQLPool              PostgreSQLPoolStatus    `json:"postgresqlPool"`
-	TrackingOutbox              TrackingOutboxStatus    `json:"trackingOutbox"`
-	Addons                      AddonStatus             `json:"addons"`
-	Playback                    PlaybackStatus          `json:"playback"`
-	HousekeepingIntervalMinutes int                     `json:"housekeepingIntervalMinutes"`
+	MetadataCache               MetadataCacheStatus               `json:"metadataCache"`
+	MetadataRefresh             MetadataRefreshSchedule           `json:"metadataRefresh"`
+	PostgreSQLPool              PostgreSQLPoolStatus              `json:"postgresqlPool"`
+	TrackingOutbox              TrackingOutboxStatus              `json:"trackingOutbox"`
+	Addons                      AddonStatus                       `json:"addons"`
+	Playback                    PlaybackStatus                    `json:"playback"`
+	SemanticExtension           SemanticExtensionOperationsStatus `json:"semanticExtension"`
+	HousekeepingIntervalMinutes int                               `json:"housekeepingIntervalMinutes"`
 }
 
 type MetadataCacheClearResult struct {

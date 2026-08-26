@@ -237,6 +237,15 @@ func (service *Service) RestoreCollectionSaveInputs(ctx context.Context, inputs 
 	service.restoreSourceURLs(ctx, values)
 }
 
+func (service *Service) PresentSemanticSearchPage(ctx context.Context, page *collection.SemanticSearchPage) {
+	if page == nil {
+		return
+	}
+	resolved := collection.ResolvedFolder{Items: page.Items, SourcePosterURLs: map[string]string{}}
+	service.PresentResolvedFolder(ctx, &resolved)
+	page.Items = resolved.Items
+}
+
 func (service *Service) PresentResolvedFolder(ctx context.Context, resolved *collection.ResolvedFolder) {
 	if resolved == nil {
 		return
@@ -473,6 +482,17 @@ func (service *Service) LocalizeContinuePage(ctx context.Context, value *watchst
 	values := make([]*string, 0, len(value.Items)*3)
 	for index := range value.Items {
 		values = append(values, &value.Items[index].PosterURL, &value.Items[index].BackgroundURL, &value.Items[index].EpisodeStillURL)
+	}
+	service.localizeStrings(ctx, values...)
+}
+
+func (service *Service) LocalizeRecommendationPage(ctx context.Context, value *watchstate.RecommendationPage) {
+	if value == nil {
+		return
+	}
+	values := make([]*string, 0, len(value.Items)*2)
+	for index := range value.Items {
+		values = append(values, &value.Items[index].Item.PosterURL, &value.Items[index].Item.BackgroundURL)
 	}
 	service.localizeStrings(ctx, values...)
 }

@@ -54,6 +54,8 @@ type Config struct {
 	MediaTempDir             string
 	ArtworkCacheDir          string
 	LANArtworkOrigins        []string
+	SemanticOllamaURL        string
+	SemanticOllamaModel      string
 }
 
 func (Config) MarshalJSON() ([]byte, error) {
@@ -110,6 +112,8 @@ func Load() (Config, error) {
 		VideoDevice:             defaultVideoDevice,
 		ArtworkCacheDir:         envOrDefault("RIVUNE_ARTWORK_CACHE_DIR", "/var/lib/rivune/artwork"),
 		MediaTempDir:            strings.TrimSpace(os.Getenv("RIVUNE_MEDIA_TEMP_DIR")),
+		SemanticOllamaURL:       strings.TrimSpace(os.Getenv("RIVUNE_SEMANTIC_OLLAMA_URL")),
+		SemanticOllamaModel:     strings.TrimSpace(os.Getenv("RIVUNE_SEMANTIC_OLLAMA_MODEL")),
 	}
 
 	var err error
@@ -135,6 +139,9 @@ func Load() (Config, error) {
 	cfg.LANArtworkOrigins, err = loadLANArtworkOrigins(os.Getenv("RIVUNE_LAN_ARTWORK_ORIGINS"))
 	if err != nil {
 		return Config{}, err
+	}
+	if (cfg.SemanticOllamaURL == "") != (cfg.SemanticOllamaModel == "") {
+		return Config{}, errors.New("RIVUNE_SEMANTIC_OLLAMA_URL and RIVUNE_SEMANTIC_OLLAMA_MODEL must be configured together")
 	}
 
 	if cfg.PublicURL != "" {
