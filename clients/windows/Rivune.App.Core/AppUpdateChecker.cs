@@ -32,13 +32,17 @@ internal sealed record AppUpdateCheckResult(
 internal static partial class AppUpdateChecker
 {
     private const int MaximumManifestResponseBytes = 256 * 1024;
+    private const int MaximumSignatureResponseBytes = 4 * 1024;
+    private const string UpdateSignatureAlgorithm = "ecdsa-p256-sha256";
+    private const string UpdateSigningKeyId = "4e9b15a0b6aed77908f3686fbf05a0a9c322ad846662eb758f56d4e65c22796f";
+    private const string UpdateSigningPublicKey = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEacg8w48bnbKqa/KOJd070if0/100iHsU+o6ecokqIS6p7thhZb1ZR9YawxW7HuoEs5k6dW9sTCOyMjUcsgAQww==";
     private const int MaximumRedirects = 5;
     private const long MaximumPackageBytes = 2L * 1024 * 1024 * 1024 - 1;
     private static readonly TimeSpan AutomaticCheckInterval = TimeSpan.FromHours(24);
     private static readonly Uri ManifestEndpoint = new("https://github.com/moodiness/rivune/releases/latest/download/rivune-update.json");
+    private static readonly Uri SignatureEndpoint = new(ManifestEndpoint.AbsoluteUri + ".sig");
     private static readonly HttpClient SharedPackageClient = CreatePackageClient();
     private static readonly HttpClient SharedClient = CreateClient();
-
     public static Task<AppUpdateCheckResult> CheckAsync(
         string currentVersion,
         CancellationToken cancellationToken = default) =>
@@ -168,13 +172,29 @@ internal static partial class AppUpdateChecker
         HttpClient client,
         string currentVersion,
         CancellationToken cancellationToken = default) =>
-        CheckAsync(client, currentVersion, RuntimeInformation.ProcessArchitecture, cancellationToken);
+        CheckAsync(client, currentVersion, RuntimeInformation.ProcessArchitecture, verifySignature: true, cancellationToken);
 
-    internal static async Task<AppUpdateCheckResult> CheckAsync(
+    internal static Task<AppUpdateCheckResult> CheckAsync(
         HttpClient client,
         string currentVersion,
         Architecture processArchitecture,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        CheckAsync(client, currentVersion, processArchitecture, verifySignature: true, cancellationToken);
+
+    internal static Task<AppUpdateCheckResult> CheckUnsignedForTestingAsync(
+        HttpClient client,
+        string currentVersion,
+        Architecture processArchitecture,
+        CancellationToken cancellationToken = default) =>
+        CheckAsync(client, currentVersion, processArchitecture, verifySignature: false, cancellationToken);
+
+
+    private static async Task<AppUpdateCheckResult> CheckAsync(
+        HttpClient client,
+        string currentVersion,
+        Architecture processArchitecture,
+        bool verifySignature,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(client);
         var (architecture, executableFileName) = processArchitecture switch
@@ -186,6 +206,11 @@ internal static partial class AppUpdateChecker
         };
         var current = ParseSemanticVersion(currentVersion, "The installed Rivune version is invalid.");
         var payload = await FetchManifestAsync(client, cancellationToken).ConfigureAwait(false);
+        if (verifySignature)
+        {
+            var signature = await FetchAssetAsync(client, SignatureEndpoint, "rivune-update.json.sig", MaximumSignatureResponseBytes, cancellationToken).ConfigureAwait(false);
+            VerifyManifestSignature(payload, signature);
+        }
 
         JsonDocument document;
         try
@@ -253,6 +278,49 @@ internal static partial class AppUpdateChecker
                 releaseUri,
                 package,
                 Compare(current, latest) < 0);
+        }
+    }
+
+    internal static void VerifyManifestSignature(byte[] manifest, byte[] sidecar)
+    {
+        ArgumentNullException.ThrowIfNull(manifest);
+        ArgumentNullException.ThrowIfNull(sidecar);
+        if (sidecar.Length is 0 or > MaximumSignatureResponseBytes)
+            throw new InvalidOperationException("The Rivune update signature size is invalid.");
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(sidecar, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = 4 });
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidOperationException("The Rivune update signature is not valid JSON.", exception);
+        }
+        using (document)
+        {
+            var root = document.RootElement;
+            RejectDuplicateProperties(root, "signature sidecar");
+            RequireProperties(root, "signature sidecar", "schemaVersion", "algorithm", "keyId", "manifestSha256", "signature");
+            if (root.EnumerateObject().Count() != 5)
+                throw new InvalidOperationException("The Rivune update signature has unsupported fields.");
+            if (root.GetProperty("schemaVersion").ValueKind != JsonValueKind.Number || root.GetProperty("schemaVersion").GetRawText() != "1" ||
+                RequiredString(root, "algorithm", "signature sidecar") != UpdateSignatureAlgorithm ||
+                RequiredString(root, "keyId", "signature sidecar") != UpdateSigningKeyId)
+                throw new InvalidOperationException("The Rivune update signature contract is not trusted.");
+            var digest = Convert.ToHexStringLower(SHA256.HashData(manifest));
+            if (RequiredString(root, "manifestSha256", "signature sidecar") != digest)
+                throw new InvalidOperationException("The Rivune update manifest digest does not match its signature.");
+            var encodedSignature = RequiredString(root, "signature", "signature sidecar");
+            byte[] signature;
+            try { signature = Convert.FromBase64String(encodedSignature); }
+            catch (FormatException exception) { throw new InvalidOperationException("The Rivune update signature is not valid base64.", exception); }
+            if (Convert.ToBase64String(signature) != encodedSignature)
+                throw new InvalidOperationException("The Rivune update signature is not canonical base64.");
+            using var verifier = ECDsa.Create();
+            verifier.ImportSubjectPublicKeyInfo(Convert.FromBase64String(UpdateSigningPublicKey), out var consumed);
+            if (consumed != Convert.FromBase64String(UpdateSigningPublicKey).Length ||
+                !verifier.VerifyData(manifest, signature, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence))
+                throw new InvalidOperationException("The Rivune update manifest signature is invalid.");
         }
     }
 
@@ -403,6 +471,42 @@ internal static partial class AppUpdateChecker
         throw new InvalidOperationException("The Rivune update manifest was redirected too many times.");
     }
 
+    private static async Task<byte[]> FetchAssetAsync(HttpClient client, Uri initialUri, string fileName, int maximumBytes, CancellationToken cancellationToken)
+    {
+        var uri = initialUri;
+        for (var redirectCount = 0; redirectCount <= MaximumRedirects; redirectCount++)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+            request.Headers.Accept.ParseAdd("application/json");
+            request.Headers.UserAgent.ParseAdd("Rivune-Windows-Update/2.0");
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            if (response.RequestMessage?.RequestUri is { } finalUri && finalUri != uri && !IsExpectedMetadataRedirectUri(finalUri, fileName))
+                throw new InvalidOperationException("The Rivune update metadata was redirected to an untrusted host.");
+            if (IsRedirect(response.StatusCode))
+            {
+                if (redirectCount == MaximumRedirects || response.Headers.Location is not { } location ||
+                    !Uri.TryCreate(uri, location, out var redirectUri) || !IsExpectedMetadataRedirectUri(redirectUri, fileName))
+                    throw new InvalidOperationException("The Rivune update metadata was redirected to an untrusted host.");
+                uri = redirectUri;
+                continue;
+            }
+            if (!response.IsSuccessStatusCode)
+                throw new InvalidOperationException($"The Rivune update metadata returned HTTP {(int)response.StatusCode}.");
+            if (response.Content.Headers.ContentLength is long length && length > maximumBytes)
+                throw new InvalidOperationException("The Rivune update metadata is too large.");
+            return await ReadBoundedAsync(response.Content, maximumBytes, "The Rivune update metadata is too large.", cancellationToken).ConfigureAwait(false);
+        }
+        throw new InvalidOperationException("The Rivune update metadata was redirected too many times.");
+    }
+
+    private static bool IsExpectedMetadataRedirectUri(Uri uri, string fileName)
+    {
+        if (uri.Scheme != Uri.UriSchemeHttps || !uri.IsDefaultPort || !string.IsNullOrEmpty(uri.UserInfo) || !string.IsNullOrEmpty(uri.Fragment)) return false;
+        if (uri.Host is "release-assets.githubusercontent.com" or "objects.githubusercontent.com") return true;
+        if (uri.Host != "github.com" || !string.IsNullOrEmpty(uri.Query)) return false;
+        return Regex.IsMatch(uri.AbsolutePath, $"^/moodiness/rivune/releases/download/v[^/]+/{Regex.Escape(fileName)}$");
+    }
+
     private static async Task DownloadPackageCoreAsync(
         HttpClient client,
         WindowsUpdatePackage package,
@@ -511,7 +615,10 @@ internal static partial class AppUpdateChecker
         (uri.Host.Equals("release-assets.githubusercontent.com", StringComparison.OrdinalIgnoreCase) ||
          uri.Host.Equals("objects.githubusercontent.com", StringComparison.OrdinalIgnoreCase));
 
-    private static async Task<byte[]> ReadBoundedAsync(HttpContent content, CancellationToken cancellationToken)
+    private static Task<byte[]> ReadBoundedAsync(HttpContent content, CancellationToken cancellationToken) =>
+        ReadBoundedAsync(content, MaximumManifestResponseBytes, "The Rivune update manifest is too large.", cancellationToken);
+
+    private static async Task<byte[]> ReadBoundedAsync(HttpContent content, int maximumBytes, string tooLargeMessage, CancellationToken cancellationToken)
     {
         await using var input = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         using var output = new MemoryStream();
@@ -522,8 +629,8 @@ internal static partial class AppUpdateChecker
             {
                 var read = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken).ConfigureAwait(false);
                 if (read == 0) break;
-                if (output.Length + read > MaximumManifestResponseBytes)
-                    throw new InvalidOperationException("The Rivune update manifest is too large.");
+                if (output.Length + read > maximumBytes)
+                    throw new InvalidOperationException(tooLargeMessage);
                 output.Write(buffer, 0, read);
             }
             return output.ToArray();

@@ -40,6 +40,119 @@ public sealed partial class MainPage
     private Guid? _preferredSourceAddonId;
     private readonly HashSet<int> _autoSkippedMarkerIndexes = [];
     private Task<IReadOnlyList<ExternalPlayerApp>>? _externalPlayersTask;
+    private readonly PlaybackFailoverController _playbackFailover = new();
+    private bool _automaticFailoverInProgress;
+
+    private async Task StartPlaybackFailoverAsync(PlaybackSourceOption selected, CancellationToken cancellationToken)
+    {
+        var client = _state.Client;
+        if (client is null) return;
+        var candidates = _sourceOptions
+            .OrderByDescending(option => ReferenceEquals(option, selected))
+            .Select(option => option.SourceRef)
+            .Distinct(StringComparer.Ordinal)
+            .Take(8)
+            .ToArray();
+        if (candidates.Length < 2) return;
+        try
+        {
+            await _playbackFailover.StartAsync(client, candidates, selected.SourceRef, maximumAttempts: 3, cancellationToken);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch
+        {
+            // Playback remains available without pretending the failover state was synchronized.
+        }
+    }
+
+    private async Task<bool> TryAutomaticPlaybackFailoverAsync(PlaybackFailoverError error, double failedPositionSeconds)
+    {
+        var client = _state.Client;
+        if (client is null || _automaticFailoverInProgress || !PlaybackFailoverController.CanAdvance(error)) return false;
+        _automaticFailoverInProgress = true;
+        try
+        {
+            var next = await _playbackFailover.AdvanceAsync(client, error, failedPositionSeconds, _state.Token);
+            await EndPlaybackAsync(completed: false, returnToDashboard: false);
+            if (next is not { Status: PlaybackFailoverStatus.Active, CurrentSourceRef: { } sourceRef }) return false;
+            var option = _sourceOptions.FirstOrDefault(value => StringComparer.Ordinal.Equals(value.SourceRef, sourceRef));
+            if (option is null) return false;
+            SetPlayerStatus("Trying the next source…", busy: true, liveSetting: AutomationLiveSetting.Assertive);
+            var startSeconds = (int)Math.Clamp(next.PositionSeconds, 0, 86400);
+            _state.SelectedSource = option;
+            _state.Preparation = await client.PreparePlaybackAsync(sourceRef, startSeconds, _state.Token);
+            var session = await client.ResolvePlaybackAsync(sourceRef, _progressTitleId.ToString("D"), startSeconds: startSeconds, cancellationToken: _state.Token);
+            var resolved = session.Sources.FirstOrDefault(source => source.Id == session.SelectedSourceId && source.Compatible && source.Url is not null);
+            if (resolved?.Url is null)
+            {
+                await client.StopPlaybackAsync(session.Id, CancellationToken.None);
+                return false;
+            }
+            lock (_endingSync)
+            {
+                _endingTask = null;
+                _playerReturnTask = null;
+                _diagnosticPlaybackActive = false;
+            }
+            _playbackCompleted = false;
+            _state.PlaybackSession = session;
+            _preferredAudioTrack = session.SelectedAudioTrack;
+            _preferredSubtitleId = session.SelectedSubtitleId;
+            await ShowPlayerAsync(resolved, startSeconds);
+            SetPlayerStatus("Playback continued with another source.", liveSetting: AutomationLiveSetting.Polite);
+            return true;
+        }
+        catch (OperationCanceledException) { return false; }
+        catch (RivuneServerException exception) when (exception.StatusCode == 409)
+        {
+            SetPlayerStatus("Source recovery changed on another device. Choose a source again.", liveSetting: AutomationLiveSetting.Assertive);
+            return false;
+        }
+        catch
+        {
+            SetPlayerStatus("The next source could not be opened.", liveSetting: AutomationLiveSetting.Assertive);
+            return false;
+        }
+        finally
+        {
+            _automaticFailoverInProgress = false;
+        }
+    }
+    private async Task ApplyPlaybackAccessibilityAsync(RivuneApiClient client, PlaybackSession session, PlaybackSource source, CancellationToken cancellationToken)
+    {
+        var preferences = _protocolV22.Accessibility;
+        if (preferences is null && _state.Profile is { Id: var profileId })
+        {
+            try
+            {
+                preferences = await client.GetProfileAccessibilityPreferencesAsync(profileId, cancellationToken);
+                _protocolV22.ApplyAccessibility(preferences);
+                ApplyProfileAccessibility(preferences);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch { return; }
+        }
+        if (preferences is null) return;
+        var effective = _profileAccessibilityEffective;
+        if (effective is null) return;
+        if (preferences.Captions == CaptionsPreference.Off) _preferredSubtitleId = null;
+        else if (effective.Value.CaptionsEnabled && _preferredSubtitleId is null)
+            _preferredSubtitleId = session.Subtitles.FirstOrDefault(subtitle => subtitle.Default == true)?.Id ?? session.Subtitles.FirstOrDefault()?.Id;
+        if (effective.Value.AudioDescription && source.Media is { } media)
+        {
+            var described = media.AudioTracks.FirstOrDefault(track =>
+                track.Title?.Contains("audio description", StringComparison.OrdinalIgnoreCase) == true ||
+                track.Title?.Contains("descriptive", StringComparison.OrdinalIgnoreCase) == true);
+            if (described is not null) _preferredAudioTrack = described.Index;
+        }
+    }
+
+    private async Task CancelPlaybackFailoverAsync()
+    {
+        if (_state.Client is not { } client) return;
+        try { await _playbackFailover.CancelAsync(client, CancellationToken.None); }
+        catch { }
+    }
 
     private sealed record ExternalPlayerApp(string Name, string ExecutablePath);
     private sealed record ExternalPlayerSpec(string Name, string[] ExecutableNames, string[] RelativePaths);

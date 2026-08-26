@@ -19,6 +19,11 @@ internal enum DiagnosticEventCode
     CatalogRefreshStarted,
     CatalogRefreshSucceeded,
     CatalogRefreshFailed,
+    SearchStarted,
+    SearchSucceeded,
+    SearchPartial,
+    SearchFailed,
+    SearchCanceled,
     PlaybackStarted,
     PlaybackStopped,
     PlaybackFailed,
@@ -26,11 +31,45 @@ internal enum DiagnosticEventCode
     UpdateAvailable,
     UpdateUpToDate,
     UpdateCheckFailed,
+    UpdateDownloadFailed,
+    UpdateDownloadCanceled,
+    UpdatePackageCanceled,
+    UpdateApplyCanceled,
+    UpdatePackageFailed,
+    UpdateApplyFailed,
     DiagnosticExportSucceeded,
     DiagnosticExportFailed,
 }
 
-internal sealed record DiagnosticEvent(DateTimeOffset Timestamp, DiagnosticEventCode Code);
+internal sealed record DiagnosticEvent(DateTimeOffset Timestamp, DiagnosticEventCode Code, long? OperationId = null);
+
+internal enum AppUpdateFailurePhase
+{
+    Download,
+    Package,
+    Apply,
+}
+
+internal static class AppUpdateFailureDiagnostics
+{
+    internal static DiagnosticEventCode TerminalCode(AppUpdateFailurePhase phase) => phase switch
+    {
+        AppUpdateFailurePhase.Download => DiagnosticEventCode.UpdateDownloadFailed,
+        AppUpdateFailurePhase.Package => DiagnosticEventCode.UpdatePackageFailed,
+        AppUpdateFailurePhase.Apply => DiagnosticEventCode.UpdateApplyFailed,
+        _ => throw new ArgumentOutOfRangeException(nameof(phase)),
+    };
+
+    internal static DiagnosticEventCode TerminalCode(AppUpdateFailurePhase phase, bool canceled) => canceled
+        ? phase switch
+        {
+            AppUpdateFailurePhase.Download => DiagnosticEventCode.UpdateDownloadCanceled,
+            AppUpdateFailurePhase.Package => DiagnosticEventCode.UpdatePackageCanceled,
+            AppUpdateFailurePhase.Apply => DiagnosticEventCode.UpdateApplyCanceled,
+            _ => throw new ArgumentOutOfRangeException(nameof(phase)),
+        }
+        : TerminalCode(phase);
+}
 
 internal sealed class DiagnosticsBuffer
 {
@@ -52,11 +91,16 @@ internal sealed class DiagnosticsBuffer
         _now = now ?? (() => DateTimeOffset.UtcNow);
     }
 
-    internal void Record(DiagnosticEventCode code) => Record(code, _now());
+    internal void Record(DiagnosticEventCode code) => Record(code, _now(), operationId: null);
 
-    internal void Record(DiagnosticEventCode code, DateTimeOffset timestamp)
+    internal void Record(DiagnosticEventCode code, long operationId) => Record(code, _now(), operationId);
+
+    internal void Record(DiagnosticEventCode code, DateTimeOffset timestamp) => Record(code, timestamp, operationId: null);
+
+    internal void Record(DiagnosticEventCode code, DateTimeOffset timestamp, long? operationId)
     {
-        var diagnosticEvent = new DiagnosticEvent(timestamp, code);
+        if (operationId is <= 0) throw new ArgumentOutOfRangeException(nameof(operationId));
+        var diagnosticEvent = new DiagnosticEvent(timestamp, code, operationId);
         var buffered = new BufferedEvent(
             diagnosticEvent,
             Encoding.UTF8.GetByteCount(DiagnosticsReport.SerializedEventLine(diagnosticEvent)));
@@ -68,6 +112,12 @@ internal sealed class DiagnosticsBuffer
             _events.Enqueue(buffered);
             _bytes += buffered.Bytes;
         }
+    }
+
+    internal DiagnosticOperation BeginOperation(long operationId, DiagnosticEventCode started)
+    {
+        Record(started, operationId);
+        return new DiagnosticOperation(this, operationId);
     }
 
     internal IReadOnlyList<DiagnosticEvent> Snapshot()
@@ -82,6 +132,28 @@ internal sealed class DiagnosticsBuffer
             _events.Clear();
             _bytes = 0;
         }
+    }
+}
+
+internal sealed class DiagnosticOperation
+{
+    private readonly DiagnosticsBuffer _buffer;
+    private readonly long _operationId;
+    private int _completed;
+
+    internal DiagnosticOperation(DiagnosticsBuffer buffer, long operationId)
+    {
+        _buffer = buffer;
+        _operationId = operationId;
+    }
+
+    internal long Id => _operationId;
+
+    internal bool Complete(DiagnosticEventCode terminal)
+    {
+        if (Interlocked.Exchange(ref _completed, 1) != 0) return false;
+        _buffer.Record(terminal, _operationId);
+        return true;
     }
 }
 
@@ -167,7 +239,7 @@ internal static class DiagnosticsReport
     }
 
     internal static string SerializedEventLine(DiagnosticEvent diagnosticEvent) =>
-        $"{FormatTimestamp(diagnosticEvent.Timestamp)} {StableCode(diagnosticEvent.Code)}\n";
+        $"{FormatTimestamp(diagnosticEvent.Timestamp)} {StableCode(diagnosticEvent.Code)}{(diagnosticEvent.OperationId is { } operationId ? $" op={operationId:x16}" : string.Empty)}\n";
 
     private static string StableCode(DiagnosticEventCode code) => code switch
     {
@@ -178,6 +250,11 @@ internal static class DiagnosticsReport
         DiagnosticEventCode.CatalogRefreshStarted => "CATALOG_REFRESH_STARTED",
         DiagnosticEventCode.CatalogRefreshSucceeded => "CATALOG_REFRESH_SUCCEEDED",
         DiagnosticEventCode.CatalogRefreshFailed => "CATALOG_REFRESH_FAILED",
+        DiagnosticEventCode.SearchStarted => "SEARCH_STARTED",
+        DiagnosticEventCode.SearchSucceeded => "SEARCH_SUCCEEDED",
+        DiagnosticEventCode.SearchPartial => "SEARCH_PARTIAL",
+        DiagnosticEventCode.SearchFailed => "SEARCH_FAILED",
+        DiagnosticEventCode.SearchCanceled => "SEARCH_CANCELED",
         DiagnosticEventCode.PlaybackStarted => "PLAYBACK_STARTED",
         DiagnosticEventCode.PlaybackStopped => "PLAYBACK_STOPPED",
         DiagnosticEventCode.PlaybackFailed => "PLAYBACK_FAILED",
@@ -185,6 +262,12 @@ internal static class DiagnosticsReport
         DiagnosticEventCode.UpdateAvailable => "UPDATE_AVAILABLE",
         DiagnosticEventCode.UpdateUpToDate => "UPDATE_UP_TO_DATE",
         DiagnosticEventCode.UpdateCheckFailed => "UPDATE_CHECK_FAILED",
+        DiagnosticEventCode.UpdateDownloadFailed => "UPDATE_DOWNLOAD_FAILED",
+        DiagnosticEventCode.UpdateDownloadCanceled => "UPDATE_DOWNLOAD_CANCELED",
+        DiagnosticEventCode.UpdatePackageCanceled => "UPDATE_PACKAGE_CANCELED",
+        DiagnosticEventCode.UpdateApplyCanceled => "UPDATE_APPLY_CANCELED",
+        DiagnosticEventCode.UpdatePackageFailed => "UPDATE_PACKAGE_FAILED",
+        DiagnosticEventCode.UpdateApplyFailed => "UPDATE_APPLY_FAILED",
         DiagnosticEventCode.DiagnosticExportSucceeded => "DIAGNOSTIC_EXPORT_SUCCEEDED",
         DiagnosticEventCode.DiagnosticExportFailed => "DIAGNOSTIC_EXPORT_FAILED",
         _ => throw new ArgumentOutOfRangeException(nameof(code)),

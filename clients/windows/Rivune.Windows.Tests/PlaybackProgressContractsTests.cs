@@ -18,7 +18,7 @@ public sealed class PlaybackProgressContractsTests
     };
 
     [Fact]
-    public void MetadataAndMarkerModelsDecodeRequiredV20Fields()
+    public void MetadataAndMarkerModelsDecodeRequiredV22Fields()
     {
         const string movieJson = """
         {"id":"11111111-1111-4111-8111-111111111111","mediaType":"movie","title":"Movie","originalTitle":"Movie","originalLanguage":"en","overview":"Overview","genres":[],"cast":[{"id":"42","name":"Actor","character":"Lead","profileUrl":"/actor.jpg"}],"voteAverage":8.5,"voteCount":10,"externalIds":{}}
@@ -58,7 +58,7 @@ public sealed class PlaybackProgressContractsTests
     }
 
     [Fact]
-    public async Task V20MethodsUseRequiredPathsQueriesAndBodies()
+    public async Task V22MethodsUseRequiredPathsQueriesAndBodies()
     {
         var handler = new ContractHandler();
         using var client = CreateClient(handler);
@@ -209,31 +209,40 @@ public sealed class PlaybackProgressContractsTests
         using var client = CreateClient(handler);
         var token = TestContext.Current.CancellationToken;
         var sessionId = Guid.Parse("77777777-7777-4777-8777-777777777777");
+        var operationId = Guid.Parse("99999999-9999-4999-8999-999999999999");
         var roomId = Guid.Parse("88888888-8888-4888-8888-888888888888");
         var item = new CoordinatedPlaybackItem { TitleId = TitleId, MediaType = "movie", ResourceId = "opaque", Title = "Movie" };
 
         await client.UpdatePlaybackDeviceAsync(new PlaybackDeviceHeartbeatInput { Capabilities = ["remote-control"], State = new PlaybackDeviceState { Status = "paused", Item = item, PositionMilliseconds = 1000, DurationMilliseconds = 10000 } }, token);
         await client.GetPlaybackDevicesAsync(token);
-        await client.SendPlaybackCommandAsync(sessionId, new PlaybackCommandInput { Command = "load", Item = item, PositionMilliseconds = 1000 }, token);
-        await client.GetPlaybackCommandsAsync(9, token);
-        await client.AcknowledgePlaybackCommandAsync(10, token);
+        await client.SendPlaybackCommandAsync(sessionId, new PlaybackCommandInput { OperationId = operationId, Command = PlaybackCommandKind.Load, Mode = PlaybackLoadMode.Handoff, TargetRevision = 7, Item = item, PositionMilliseconds = 1000 }, token);
+        await client.GetPlaybackCommandsAsync(operationId, token);
+        await client.PutPlaybackCommandResultAsync(operationId, new PlaybackOperationResultInput { Status = PlaybackOperationStatus.Applied, Code = PlaybackOperationCode.Applied }, token);
+        await client.GetOutgoingPlaybackCommandAsync(operationId, token);
         await client.CreatePlaybackRoomAsync(new PlaybackRoomCreateInput { Item = item, State = "paused", PositionMilliseconds = 1000, DurationMilliseconds = 10000 }, token);
         await client.JoinPlaybackRoomAsync("23456789AB", token);
         await client.GetPlaybackRoomAsync(roomId, token);
         await client.UpdatePlaybackRoomAsync(roomId, new PlaybackRoomUpdateInput { State = "playing", PositionMilliseconds = 2000, DurationMilliseconds = 10000, ExpectedVersion = 1 }, token);
         await client.LeavePlaybackRoomAsync(roomId, token);
-        var recommendations = await client.GetLocalRecommendationsAsync(12, token);
+        var recommendations = await client.GetLocalRecommendationsAsync(12, artworkShape: "poster", cancellationToken: token);
+        var archive = await client.ExportProfileArchiveAsync(TitleId, token);
+        await client.MergeProfileArchiveAsync(TitleId, archive, token);
+        await client.CreateProfileFromArchiveAsync(Guid.Parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), archive, token);
 
         Assert.Equal("Because you like Drama", Assert.Single(recommendations.Items).Reason);
         AssertRequest(handler, HttpMethod.Put, "/api/v1/playback/device", "");
         AssertRequest(handler, HttpMethod.Get, "/api/v1/playback/devices", "");
         AssertRequest(handler, HttpMethod.Post, $"/api/v1/playback/devices/{sessionId:D}/commands", "");
-        AssertRequest(handler, HttpMethod.Get, "/api/v1/playback/commands", "after=9");
-        AssertRequest(handler, HttpMethod.Post, "/api/v1/playback/commands/10/ack", "");
+        AssertRequest(handler, HttpMethod.Get, "/api/v1/playback/commands", $"after={operationId:D}");
+        AssertRequest(handler, HttpMethod.Put, $"/api/v1/playback/commands/incoming/{operationId:D}/result", "");
+        AssertRequest(handler, HttpMethod.Get, $"/api/v1/playback/commands/outgoing/{operationId:D}", "");
         AssertRequest(handler, HttpMethod.Post, "/api/v1/playback/rooms", "");
         AssertRequest(handler, HttpMethod.Post, "/api/v1/playback/rooms/join", "");
         Assert.Equal(3, handler.Requests.Count(request => request.Path == $"/api/v1/playback/rooms/{roomId:D}"));
-        AssertRequest(handler, HttpMethod.Get, "/api/v1/recommendations", "limit=12");
+        AssertRequest(handler, HttpMethod.Get, "/api/v1/recommendations", "limit=12&artworkShape=poster");
+        AssertRequest(handler, HttpMethod.Get, $"/api/v1/profiles/{TitleId:D}/archive", "");
+        AssertRequest(handler, HttpMethod.Post, $"/api/v1/profiles/{TitleId:D}/archive/import", "");
+        AssertRequest(handler, HttpMethod.Post, "/api/v1/profiles/archive", "");
     }
 
     private static CapturedRequest AssertRequest(
@@ -262,7 +271,7 @@ public sealed class PlaybackProgressContractsTests
         {
             if (request.RequestUri!.AbsolutePath == "/.well-known/rivune")
             {
-                return JsonResponse("""{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1/","setupRequired":false,"setupCompleted":true,"demoAvailable":false,"timezone":"UTC","interfaceLanguage":"en"}""");
+                return JsonResponse("""{"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1/","setupRequired":false,"setupCompleted":true,"demoAvailable":false,"timezone":"UTC","interfaceLanguage":"en"}""");
             }
 
             Requests.Add(new CapturedRequest(
@@ -305,7 +314,10 @@ public sealed class PlaybackProgressContractsTests
             "/api/v1/playback/devices" => JsonResponse("{\"devices\":[]}"),
             var path when path.Contains("/playback/devices/", StringComparison.Ordinal) => JsonResponse(CommandJson, HttpStatusCode.Created),
             "/api/v1/playback/commands" => JsonResponse("{\"commands\":[]}"),
-            var path when path.EndsWith("/ack", StringComparison.Ordinal) => new HttpResponseMessage(HttpStatusCode.NoContent),
+            var path when path.Contains("/playback/commands/", StringComparison.Ordinal) => JsonResponse(CommandJson),
+            var path when path.EndsWith("/archive/import", StringComparison.Ordinal) => JsonResponse(ArchiveReportJson),
+            "/api/v1/profiles/archive" => JsonResponse(ArchiveReportJson, HttpStatusCode.Created),
+            var path when path.EndsWith("/archive", StringComparison.Ordinal) => JsonResponse(ArchiveJson),
             "/api/v1/playback/rooms" => JsonResponse(RoomJson, request.Method == HttpMethod.Post ? HttpStatusCode.Created : HttpStatusCode.OK),
             "/api/v1/playback/rooms/join" => JsonResponse(RoomJson),
             var path when path.Contains("/playback/rooms/", StringComparison.Ordinal) => request.Method == HttpMethod.Delete ? new HttpResponseMessage(HttpStatusCode.NoContent) : JsonResponse(RoomJson),
@@ -313,8 +325,10 @@ public sealed class PlaybackProgressContractsTests
             _ => base.DefaultResponse(request),
         };
 
-        private const string DeviceJson = "{\"sessionId\":\"55555555-5555-4555-8555-555555555555\",\"deviceId\":\"66666666-6666-4666-8666-666666666666\",\"name\":\"Device\",\"platform\":\"windows\",\"capabilities\":[\"remote-control\"],\"state\":{\"status\":\"idle\",\"positionMilliseconds\":0,\"durationMilliseconds\":0},\"current\":true,\"lastSeenAt\":\"2099-01-01T00:00:00Z\"}";
-        private const string CommandJson = "{\"id\":10,\"command\":\"play\",\"senderDeviceName\":\"Sender\",\"createdAt\":\"2099-01-01T00:00:00Z\",\"expiresAt\":\"2099-01-01T00:02:00Z\"}";
+        private const string DeviceJson = "{\"sessionId\":\"55555555-5555-4555-8555-555555555555\",\"deviceId\":\"66666666-6666-4666-8666-666666666666\",\"name\":\"Device\",\"platform\":\"windows\",\"capabilities\":[\"remote-control\"],\"state\":{\"status\":\"idle\",\"positionMilliseconds\":0,\"durationMilliseconds\":0},\"revision\":7,\"current\":true,\"lastSeenAt\":\"2099-01-01T00:00:00Z\"}";
+        private const string CommandJson = "{\"operationId\":\"99999999-9999-4999-8999-999999999999\",\"command\":\"load\",\"mode\":\"handoff\",\"targetRevision\":7,\"senderDeviceName\":\"Sender\",\"status\":\"applied\",\"resultCode\":\"applied\",\"createdAt\":\"2099-01-01T00:00:00Z\",\"expiresAt\":\"2099-01-01T00:02:00Z\"}";
+        private const string ArchiveJson = "{\"version\":2,\"exportedAt\":\"2026-08-26T00:00:00Z\",\"identity\":{\"name\":\"Viewer\",\"description\":null,\"isChild\":false,\"avatar\":{\"kind\":\"preset\",\"presetId\":\"blue\"}},\"settings\":{},\"addons\":[],\"collections\":[],\"titles\":[],\"library\":[],\"progress\":[],\"favorites\":[],\"userData\":[],\"continueDismissals\":[],\"trackingPreferences\":[]}";
+        private const string ArchiveReportJson = "{\"mode\":\"merge\",\"profileId\":\"11111111-1111-4111-8111-111111111111\",\"sections\":[{\"section\":\"settings\",\"created\":0,\"updated\":1,\"unchanged\":0}],\"trackingAccountsUpdated\":0}";
         private const string RoomJson = "{\"id\":\"88888888-8888-4888-8888-888888888888\",\"joinCode\":\"23456789AB\",\"item\":{\"titleId\":\"11111111-1111-4111-8111-111111111111\",\"mediaType\":\"movie\",\"resourceId\":\"opaque\",\"title\":\"Movie\"},\"state\":\"paused\",\"positionMilliseconds\":1000,\"durationMilliseconds\":10000,\"version\":1,\"updatedAt\":\"2099-01-01T00:00:00Z\",\"expiresAt\":\"2099-01-01T08:00:00Z\",\"members\":[]}";
     }
     private static string ProgressJson(long version) => $$"""

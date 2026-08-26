@@ -14,10 +14,12 @@ public sealed class DiscoveryCapabilitiesTests
     public void CapabilityIdentifiersExposeStableWireValues()
     {
         Assert.Equal("bounded-aggregate-resources", DiscoveryCapabilityIdentifiers.BoundedAggregateResources);
-        Assert.Equal("profile-archives-v1", DiscoveryCapabilityIdentifiers.ProfileArchivesV1);
+        Assert.Equal("profile-archives-v2", DiscoveryCapabilityIdentifiers.ProfileArchivesV2);
         Assert.Equal("request-correlation", DiscoveryCapabilityIdentifiers.RequestCorrelation);
         Assert.Equal("local-recommendations", DiscoveryCapabilityIdentifiers.LocalRecommendations);
+        Assert.Equal("semantic-search", DiscoveryCapabilityIdentifiers.SemanticSearch);
         Assert.Equal("playback-coordination", DiscoveryCapabilityIdentifiers.PlaybackCoordination);
+        Assert.Equal("playback-command-results", DiscoveryCapabilityIdentifiers.PlaybackCommandResults);
     }
 
     [Fact]
@@ -25,12 +27,12 @@ public sealed class DiscoveryCapabilitiesTests
     {
         var omitted = JsonSerializer.Deserialize<Discovery>(DiscoveryBody(null), JsonOptions)!;
         var normalized = JsonSerializer.Deserialize<Discovery>(
-            DiscoveryBody("[\"profile-archives-v1\",\"future-feature\",\"profile-archives-v1\",\"UPPERCASE\",null,{}]"),
+            DiscoveryBody("[\"profile-archives-v2\",\"future-feature\",\"profile-archives-v2\",\"UPPERCASE\",null,{}]"),
             JsonOptions)!;
 
         Assert.Empty(omitted.Capabilities);
-        Assert.Equal(new[] { "profile-archives-v1", "future-feature" }, normalized.Capabilities);
-        Assert.True(normalized.SupportsProfileArchivesV1);
+        Assert.Equal(new[] { "profile-archives-v2", "future-feature" }, normalized.Capabilities);
+        Assert.True(normalized.SupportsProfileArchivesV2);
     }
 
     [Fact]
@@ -39,14 +41,14 @@ public sealed class DiscoveryCapabilitiesTests
         var discovery = await DiscoverAsync();
 
         Assert.Empty(discovery.Capabilities);
-        Assert.False(discovery.Supports(DiscoveryCapability.ProfileArchivesV1));
-        Assert.False(discovery.SupportsProfileArchivesV1);
+        Assert.False(discovery.Supports(DiscoveryCapability.ProfileArchivesV2));
+        Assert.False(discovery.SupportsProfileArchivesV2);
     }
 
     [Theory]
     [InlineData("null")]
     [InlineData("{}")]
-    [InlineData("\"profile-archives-v1\"")]
+    [InlineData("\"profile-archives-v2\"")]
     public async Task NullOrWrongShapeCapabilitiesDecodeAsEmpty(string capabilitiesJson)
     {
         var discovery = await DiscoverAsync(capabilitiesJson);
@@ -58,18 +60,20 @@ public sealed class DiscoveryCapabilitiesTests
     public async Task CapabilitiesAreNormalizedAndRecognizedQueriesIgnoreUnknowns()
     {
         const string capabilitiesJson = """
-            ["profile-archives-v1","future-feature","bounded-aggregate-resources","request-correlation","profile-archives-v1","","UPPERCASE","leading-","two--hyphens","has_underscore",null,7,{}]
+            ["profile-archives-v2","future-feature","bounded-aggregate-resources","request-correlation","semantic-search","playback-command-results","profile-archives-v2","","UPPERCASE","leading-","two--hyphens","has_underscore",null,7,{}]
             """;
 
         var discovery = await DiscoverAsync(capabilitiesJson);
 
         Assert.Equal(
-            new[] { "profile-archives-v1", "future-feature", "bounded-aggregate-resources", "request-correlation" },
+            new[] { "profile-archives-v2", "future-feature", "bounded-aggregate-resources", "request-correlation", "semantic-search", "playback-command-results" },
             discovery.Capabilities);
-        Assert.True(discovery.Supports(DiscoveryCapability.ProfileArchivesV1));
-        Assert.True(discovery.SupportsProfileArchivesV1);
+        Assert.True(discovery.Supports(DiscoveryCapability.ProfileArchivesV2));
+        Assert.True(discovery.SupportsProfileArchivesV2);
         Assert.True(discovery.Supports(DiscoveryCapability.BoundedAggregateResources));
         Assert.True(discovery.Supports(DiscoveryCapability.RequestCorrelation));
+        Assert.True(discovery.Supports(DiscoveryCapability.SemanticSearch));
+        Assert.True(discovery.Supports(DiscoveryCapability.PlaybackCommandResults));
         Assert.False(discovery.Supports((DiscoveryCapability)int.MaxValue));
     }
 
@@ -103,7 +107,7 @@ public sealed class DiscoveryCapabilitiesTests
     }
 
     private static string DiscoveryBody(string? capabilitiesJson) => $$"""
-        {"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1/","setupRequired":false,"setupCompleted":true,"demoAvailable":false,"timezone":"UTC","interfaceLanguage":"en"{{(capabilitiesJson is null ? string.Empty : ",\"capabilities\":" + capabilitiesJson)}}}
+        {"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1/","setupRequired":false,"setupCompleted":true,"demoAvailable":false,"timezone":"UTC","interfaceLanguage":"en"{{(capabilitiesJson is null ? string.Empty : ",\"capabilities\":" + capabilitiesJson)}}}
         """;
 
     private sealed class DiscoveryHandler(string responseBody) : HttpMessageHandler
@@ -111,9 +115,9 @@ public sealed class DiscoveryCapabilitiesTests
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StringContent(responseBody, Encoding.UTF8, "application/json"),
-        });
+            {
+                Content = new StringContent(responseBody, Encoding.UTF8, "application/json"),
+            });
     }
 
     private sealed class EmptyCredentialStore : ICredentialStore

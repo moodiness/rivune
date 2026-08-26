@@ -216,7 +216,7 @@ public sealed class SettingsContractsTests
         {
             if (request.RequestUri!.AbsolutePath == "/.well-known/rivune")
             {
-                return JsonResponse("""{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"setupCompleted":true,"demoAvailable":false,"timezone":"UTC","interfaceLanguage":"en"}""");
+                return JsonResponse("""{"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1","setupRequired":false,"setupCompleted":true,"demoAvailable":false,"timezone":"UTC","interfaceLanguage":"en"}""");
             }
 
             ApiRequests.Add((request.Method, request.RequestUri.AbsolutePath, request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken)));
