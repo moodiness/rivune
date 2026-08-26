@@ -18,7 +18,7 @@ internal static class RivuneLanService
 
     public static DiscoveredRivuneServer? Parse(string serviceName, IReadOnlyDictionary<string, string> attributes)
     {
-        if (!attributes.TryGetValue("protocol", out var protocol) || protocol != "20" ||
+        if (!attributes.TryGetValue("protocol", out var protocol) || protocol != RivuneProtocol.Version.ToString() ||
             !attributes.TryGetValue("url", out var rawAddress) || rawAddress.Length is 0 or > 255 ||
             !Uri.TryCreate(rawAddress.Trim(), UriKind.Absolute, out var supplied) ||
             !string.IsNullOrEmpty(supplied.UserInfo) ||

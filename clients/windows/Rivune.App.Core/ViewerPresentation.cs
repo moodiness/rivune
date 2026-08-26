@@ -46,6 +46,26 @@ internal sealed record MediaTarget
     public int DurationSeconds { get; init; }
 }
 
+internal static class PlaybackDecisionPresentation
+{
+    public static IReadOnlyList<string> Reasons(PlaybackDecision? decision)
+    {
+        if (decision is null || decision.Reasons.Count == 0) return [];
+        return decision.Reasons.Select(reason => reason switch
+        {
+            PlaybackDecisionDetailReason.ContainerNotSupported => "The source container is not supported directly.",
+            PlaybackDecisionDetailReason.VideoCodecNotSupported => "The video codec is not supported directly.",
+            PlaybackDecisionDetailReason.AudioCodecNotSupported => "The audio codec is not supported directly.",
+            PlaybackDecisionDetailReason.ResolutionLimit => "The source exceeds this network's resolution limit.",
+            PlaybackDecisionDetailReason.BitrateLimit => "The source exceeds this network's bitrate limit.",
+            PlaybackDecisionDetailReason.HdrNotSupported => "HDR conversion is required for this display.",
+            _ => throw new ArgumentOutOfRangeException(nameof(reason)),
+        }).ToArray();
+    }
+
+    public static string Summary(PlaybackDecision? decision) => string.Join(" ", Reasons(decision));
+}
+
 internal static class PlaybackCoordinationMapping
 {
     public static CoordinatedPlaybackItem CoordinatedItem(this MediaTarget target, Guid titleId, string? title = null) => new()
@@ -102,12 +122,18 @@ internal static class MediaTargetMapping
     public static MediaTarget ToMediaTarget(this CollectionItem item)
     {
         var addonSource = item.Sources.FirstOrDefault(source => source.AddonId is not null);
+        var provider = new[] { "tmdb", "imdb", "tvdb", "trakt" }
+            .FirstOrDefault(candidate => item.ExternalIds.TryGetValue(candidate, out var value) && !string.IsNullOrWhiteSpace(value));
+        Guid? titleId = Guid.TryParse(item.Id, out var parsedTitleId) ? parsedTitleId : null;
         return new MediaTarget
         {
             Id = item.Id,
             ResourceId = item.Id,
             MediaType = item.MediaType,
             Title = item.Title,
+            TitleId = titleId,
+            Provider = provider,
+            ExternalId = provider is null ? null : item.ExternalIds[provider],
             ExternalIds = item.ExternalIds,
             SourceAddonId = addonSource?.AddonId,
             SourceCatalogId = addonSource?.CatalogId,
@@ -347,6 +373,270 @@ internal static class MediaTargetMapping
         element.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False
             ? value.GetBoolean()
             : null;
+}
+
+internal readonly record struct SemanticSearchOutcome(SemanticSearchPage? Page, bool Failed);
+internal readonly record struct SemanticAddonSearchOutcome<T>(SemanticSearchOutcome Semantic, T Addon);
+
+internal static class SemanticSearchPolicy
+{
+    public static readonly TimeSpan DefaultDeadline = TimeSpan.FromSeconds(12);
+
+    public static async Task<SemanticSearchOutcome> FetchAsync(
+        bool enabled,
+        Func<CancellationToken, Task<SemanticSearchPage>> fetch,
+        CancellationToken cancellationToken,
+        TimeSpan? deadline = null)
+    {
+        if (!enabled) return new SemanticSearchOutcome(null, false);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(deadline ?? DefaultDeadline);
+        try
+        {
+            var operation = fetch(timeout.Token);
+            return new SemanticSearchOutcome(await operation.WaitAsync(timeout.Token).ConfigureAwait(false), false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return new SemanticSearchOutcome(null, true);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return new SemanticSearchOutcome(null, true);
+        }
+    }
+
+    public static async Task<SemanticAddonSearchOutcome<T>> SearchAddonsAsync<T>(
+        bool semanticEnabled,
+        IReadOnlyList<string> configuredTypes,
+        string originalQuery,
+        Func<CancellationToken, Task<SemanticSearchPage>> semanticFetch,
+        Func<IReadOnlyList<string>, string, CancellationToken, Task<T>> addonFetch,
+        CancellationToken cancellationToken,
+        TimeSpan? semanticDeadline = null,
+        IProgress<T>? progress = null,
+        IProgress<SemanticSearchOutcome>? semanticProgress = null)
+    {
+        using var speculativeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var speculative = addonFetch(configuredTypes, originalQuery, speculativeCancellation.Token);
+        var speculativeProgress = ReportAddonWhenReadyAsync(speculative, progress, cancellationToken);
+        SemanticSearchOutcome semantic;
+        try
+        {
+            semantic = await FetchAsync(
+                semanticEnabled,
+                semanticFetch,
+                cancellationToken,
+                semanticDeadline).ConfigureAwait(false);
+            semanticProgress?.Report(semantic);
+        }
+        catch
+        {
+            speculativeCancellation.Cancel();
+            try
+            {
+                await speculative.ConfigureAwait(false);
+            }
+            catch
+            {
+            }
+            await speculativeProgress.ConfigureAwait(false);
+            throw;
+        }
+
+        var finalTypes = SelectTypes(configuredTypes, semantic.Page?.MediaTypes);
+        var finalQuery = AddonQuery(originalQuery, semantic.Page);
+        if (SamePlan(configuredTypes, originalQuery, finalTypes, finalQuery))
+        {
+            var addon = await speculative.ConfigureAwait(false);
+            await speculativeProgress.ConfigureAwait(false);
+            return new SemanticAddonSearchOutcome<T>(semantic, addon);
+        }
+
+        speculativeCancellation.Cancel();
+        try
+        {
+            await speculative.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+        await speculativeProgress.ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        var finalAddon = await addonFetch(finalTypes, finalQuery, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        progress?.Report(finalAddon);
+        return new SemanticAddonSearchOutcome<T>(semantic, finalAddon);
+    }
+
+    private static async Task ReportAddonWhenReadyAsync<T>(Task<T> operation, IProgress<T>? progress, CancellationToken cancellationToken)
+    {
+        if (progress is null) return;
+        try
+        {
+            var value = await operation.ConfigureAwait(false);
+            if (!cancellationToken.IsCancellationRequested) progress.Report(value);
+        }
+        catch
+        {
+        }
+    }
+
+    private static bool SamePlan(
+        IReadOnlyList<string> leftTypes,
+        string leftQuery,
+        IReadOnlyList<string> rightTypes,
+        string rightQuery) =>
+        StringComparer.Ordinal.Equals(leftQuery, rightQuery) &&
+        leftTypes.SequenceEqual(rightTypes, StringComparer.OrdinalIgnoreCase);
+
+
+    public static IReadOnlyList<string> SelectTypes(
+        IReadOnlyList<string> configuredTypes,
+        IReadOnlyList<string>? inferredTypes)
+    {
+        if (inferredTypes is null || inferredTypes.Count == 0) return configuredTypes;
+        var inferred = inferredTypes.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var intersection = configuredTypes.Where(inferred.Contains).ToArray();
+        return intersection.Length == 0 ? configuredTypes : intersection;
+    }
+
+    public static string AddonQuery(string originalQuery, SemanticSearchPage? semanticPage)
+    {
+        var residual = semanticPage?.TitleQuery.Trim();
+        return residual is { Length: >= 2 } ? residual : originalQuery;
+    }
+
+    public static bool AccumulatePartial(bool previous, bool reset, bool current) =>
+        current || !reset && previous;
+
+    public static IReadOnlyList<MediaTarget> Merge(
+        IEnumerable<MediaTarget> existing,
+        IEnumerable<MediaTarget> direct,
+        IEnumerable<MediaTarget> semantic)
+    {
+        var output = existing.ToList();
+        var seen = output.SelectMany(TargetIdentity).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var target in direct.Concat(semantic))
+        {
+            var identities = TargetIdentity(target);
+            if (identities.Any(seen.Contains)) continue;
+            seen.UnionWith(identities);
+            output.Add(target);
+        }
+        return output;
+    }
+
+    public static IReadOnlyList<string> TargetIdentity(MediaTarget target)
+    {
+        var identities = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (provider, value) in target.ExternalIds)
+        {
+            if (!string.IsNullOrWhiteSpace(provider) && !string.IsNullOrWhiteSpace(value))
+                identities.Add($"{provider.Trim()}:{value.Trim()}");
+        }
+        var separator = target.Id.IndexOf(':');
+        if (separator > 0 && separator < target.Id.Length - 1)
+        {
+            var provider = target.Id[..separator];
+            if (provider.Equals("tmdb", StringComparison.OrdinalIgnoreCase) ||
+                provider.Equals("imdb", StringComparison.OrdinalIgnoreCase) ||
+                provider.Equals("tvdb", StringComparison.OrdinalIgnoreCase) ||
+                provider.Equals("trakt", StringComparison.OrdinalIgnoreCase))
+                identities.Add($"{provider}:{target.Id[(separator + 1)..]}");
+        }
+        else if (target.Id.StartsWith("tt", StringComparison.OrdinalIgnoreCase))
+        {
+            identities.Add($"imdb:{target.Id}");
+        }
+        if (identities.Count == 0) identities.Add(target.Identity());
+        return identities.ToArray();
+    }
+}
+
+internal static class ProgressiveSearchPolicy
+{
+    public const int MaximumTypes = 16;
+    public const int MaximumConcurrency = 4;
+
+    public static IReadOnlyList<string> NormalizeTypes(IEnumerable<string> types, out bool truncated)
+    {
+        ArgumentNullException.ThrowIfNull(types);
+        var normalized = types
+            .Where(type => !string.IsNullOrWhiteSpace(type))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(MaximumTypes + 1)
+            .ToArray();
+        truncated = normalized.Length > MaximumTypes;
+        return truncated ? normalized[..MaximumTypes] : normalized;
+    }
+
+    public static async Task<T?[]> CollectOrderedAsync<T>(
+        IReadOnlyList<Func<CancellationToken, Task<T?>>> fetches,
+        CancellationToken cancellationToken,
+        IProgress<T?[]>? progress = null,
+        int maximumConcurrency = MaximumConcurrency)
+        where T : class
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(maximumConcurrency, 1);
+        var results = new T?[fetches.Count];
+        using var concurrency = new SemaphoreSlim(Math.Min(maximumConcurrency, Math.Max(1, fetches.Count)));
+        var pending = fetches
+            .Select((fetch, index) => (Index: index, Task: RunBoundedAsync(fetch, concurrency, cancellationToken)))
+            .ToList();
+
+        while (pending.Count > 0)
+        {
+            var completedTask = await Task.WhenAny(pending.Select(entry => entry.Task)).ConfigureAwait(false);
+            var completedIndex = pending.FindIndex(entry => ReferenceEquals(entry.Task, completedTask));
+            var completed = pending[completedIndex];
+            pending.RemoveAt(completedIndex);
+            results[completed.Index] = await completed.Task.ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (results[completed.Index] is not null) progress?.Report((T?[])results.Clone());
+        }
+
+        return results;
+    }
+
+    private static async Task<T?> RunBoundedAsync<T>(
+        Func<CancellationToken, Task<T?>> fetch,
+        SemaphoreSlim concurrency,
+        CancellationToken cancellationToken) where T : class
+    {
+        await concurrency.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { return await fetch(cancellationToken).ConfigureAwait(false); }
+        finally { concurrency.Release(); }
+    }
+}
+
+internal static class IncrementalViewerPresentation
+{
+    public static IReadOnlyList<MediaTarget> Additions<TItem>(
+        IEnumerable<TItem> existingItems,
+        Func<TItem, MediaTarget?> targetForItem,
+        IEnumerable<MediaTarget> desiredTargets)
+    {
+        var identities = existingItems
+            .Select(targetForItem)
+            .Where(target => target is not null)
+            .SelectMany(target => SemanticSearchPolicy.TargetIdentity(target!))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var additions = new List<MediaTarget>();
+        foreach (var target in desiredTargets)
+        {
+            var targetIdentities = SemanticSearchPolicy.TargetIdentity(target);
+            if (targetIdentities.Any(identities.Contains)) continue;
+            identities.UnionWith(targetIdentities);
+            additions.Add(target);
+        }
+        return additions;
+    }
 }
 
 internal static class ViewerDatePresentation
