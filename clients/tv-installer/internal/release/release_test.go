@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -74,7 +75,15 @@ func newFixture(t *testing.T) *releaseFixture {
 		}
 	}))
 	fixture.server = server
-	fixture.client = &Client{HTTP: server.Client(), APIEndpoint: server.URL + "/api", ReleasePagePrefix: server.URL + "/release/", DownloadPrefix: server.URL + "/download/"}
+	fixture.client = &Client{
+		HTTP: server.Client(), APIEndpoint: server.URL + "/api", ReleasePagePrefix: server.URL + "/release/", DownloadPrefix: server.URL + "/download/",
+		VerifyManifestSignature: func(manifest, sidecar []byte) error {
+			if string(sidecar) != digest(manifest) {
+				return errors.New("fixture signature mismatch")
+			}
+			return nil
+		},
+	}
 	for index, name := range ExpectedAssetNames {
 		fixture.files[name] = []byte(name + " fixture")
 		fixture.release.Assets = append(fixture.release.Assets, githubAsset{ID: int64(index + 1), Name: name, State: "uploaded"})
@@ -93,6 +102,7 @@ func (fixture *releaseFixture) refresh(t *testing.T) {
 	tizen := fixture.packageValue("tizen", TizenPackageName, "wgt", "5.5", "RivuneTV01.Rivune")
 	manifest := map[string]any{"schemaVersion": 3, "channel": "stable", "version": "2.0.0", "tagName": "v2.0.0", "publishedAt": fixture.release.PublishedAt, "releaseUrl": fixture.release.HTMLURL, "packages": map[string]any{"android": map[string]any{}, "ios": map[string]any{}, "tvos": map[string]any{}, "visionos": map[string]any{}, "macos": map[string]any{}, "webos": webOS, "tizen": tizen, "tvRuntime": map[string]any{}, "windows": map[string]any{}}}
 	fixture.files[ManifestName], _ = json.Marshal(manifest)
+	fixture.files[ManifestSignatureName] = []byte(digest(fixture.files[ManifestName]))
 	for index := range fixture.release.Assets {
 		asset := &fixture.release.Assets[index]
 		value := fixture.files[asset.Name]
