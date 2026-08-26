@@ -15,7 +15,7 @@ import (
 
 func webAuthRequest(method, target string, body []byte) *http.Request {
 	request := httptest.NewRequest(method, target, bytes.NewReader(body))
-	request.Header.Set("Origin", "https://rivune.test")
+	request.Header.Set("Origin", "https://media.example")
 	request.Header.Set("Sec-Fetch-Site", "same-origin")
 	request.Header.Set(webCSRFHeader, "1")
 	request.Header.Set("Content-Type", "application/json")
@@ -31,7 +31,7 @@ func TestWebLoginSetsHostOnlyStrictCookieWithoutRefreshInBody(t *testing.T) {
 	}}
 	api := testAPI(&fakeInstanceService{})
 	api.auth = service
-	request := webAuthRequest(http.MethodPost, "https://rivune.test/api/v1/auth/web/login", []byte(`{"username":"admin","password":"secret","device":{"name":"Browser","platform":"web"}}`))
+	request := webAuthRequest(http.MethodPost, "https://media.example/api/v1/auth/web/login", []byte(`{"username":"admin","password":"secret","device":{"name":"Browser","platform":"web"}}`))
 	response := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(response, request)
@@ -58,10 +58,10 @@ func TestWebLoginSetsHostOnlyStrictCookieWithoutRefreshInBody(t *testing.T) {
 
 func TestWebAuthRequestMatrix(t *testing.T) {
 	tests := []struct {
-		name, target, origin, fetchSite, csrf, remote, forwardedProto, forwardedHost string
-		trusted                                                               []netip.Prefix
-		want                                                                  int
-		secure                                                                bool
+		name, target, origin, fetchSite, csrf, remote, forwardedProto, forwardedHost, publicURL string
+		trusted                                                                                 []netip.Prefix
+		want                                                                                    int
+		secure                                                                                  bool
 	}{
 		{name: "https same origin", target: "https://rivune.test/api/v1/auth/web/refresh", origin: "https://rivune.test", fetchSite: "same-origin", csrf: "1", want: http.StatusNoContent, secure: true},
 		{name: "localhost http", target: "http://localhost:8080/api/v1/auth/web/refresh", origin: "http://localhost:8080", fetchSite: "same-origin", csrf: "1", want: http.StatusNoContent},
@@ -72,12 +72,15 @@ func TestWebAuthRequestMatrix(t *testing.T) {
 		{name: "origin mismatch", target: "https://rivune.test/api/v1/auth/web/refresh", origin: "https://evil.test", fetchSite: "same-origin", csrf: "1", want: http.StatusForbidden},
 		{name: "untrusted proxy spoof", target: "http://192.168.1.20/api/v1/auth/web/refresh", origin: "https://rivune.test", fetchSite: "same-origin", csrf: "1", remote: "198.51.100.20:1234", forwardedProto: "https", forwardedHost: "rivune.test", want: http.StatusForbidden},
 		{name: "trusted proxy", target: "http://10.0.0.2/api/v1/auth/web/refresh", origin: "https://rivune.test", fetchSite: "same-origin", csrf: "1", remote: "10.0.0.2:1234", forwardedProto: "https", forwardedHost: "rivune.test", trusted: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}, want: http.StatusNoContent, secure: true},
+		{name: "configured public origin behind rewritten proxy", target: "http://rivune:8080/api/v1/auth/web/refresh", origin: "https://rivune.domain.com", fetchSite: "same-origin", csrf: "1", remote: "192.0.2.10:1234", publicURL: "https://rivune.domain.com", want: http.StatusNoContent, secure: true},
+		{name: "configured public origin rejects forwarded spoof", target: "http://10.0.0.2/api/v1/auth/web/refresh", origin: "https://evil.test", fetchSite: "same-origin", csrf: "1", remote: "10.0.0.2:1234", forwardedProto: "https", forwardedHost: "evil.test", publicURL: "https://rivune.domain.com", trusted: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}, want: http.StatusForbidden},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			api := testAPI(&fakeInstanceService{})
 			api.auth = &fakeAuthService{refreshTokens: auth.TokenPair{AccessToken: "rivune_at_new", RefreshToken: "rivune_rt_new", AccessExpiresAt: time.Now().Add(time.Minute), RefreshExpiresAt: time.Now().Add(time.Hour)}}
 			api.config.TrustedProxies = test.trusted
+			api.config.PublicURL = test.publicURL
 			request := httptest.NewRequest(http.MethodDelete, test.target, nil)
 			request.Header.Set("Origin", test.origin)
 			request.Header.Set("Sec-Fetch-Site", test.fetchSite)
@@ -109,7 +112,7 @@ func TestWebRefreshRejectsDuplicateCookie(t *testing.T) {
 	service := &fakeAuthService{}
 	api := testAPI(&fakeInstanceService{})
 	api.auth = service
-	request := webAuthRequest(http.MethodPost, "https://rivune.test/api/v1/auth/web/refresh", nil)
+	request := webAuthRequest(http.MethodPost, "https://media.example/api/v1/auth/web/refresh", nil)
 	request.Header.Add("Cookie", webRefreshCookieName+"=rivune_rt_one; "+webRefreshCookieName+"=rivune_rt_two")
 	response := httptest.NewRecorder()
 
