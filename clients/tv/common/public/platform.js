@@ -107,6 +107,7 @@
         hdrFormats: [],
         processingModes: ["direct", "remux", "transcode_audio", "transcode"],
         maximumHeight: 2160,
+        maximumVideoBitrateKbps: 20000,
         maximumAudioChannels: 8,
         subtitleModes: ["external", "burn"]
       };

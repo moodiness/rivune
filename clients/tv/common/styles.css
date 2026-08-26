@@ -134,6 +134,10 @@ img { display: block; }
 .tv-content__header h1 { margin: 0; font-size: 42px; letter-spacing: -1.2px; }
 .tv-content__header p { margin: 10px 0 0; color: var(--muted); font-size: 17px; }
 .tv-content__header .tv-actions { flex: 0 0 auto; margin-left: 30px; }
+.tv-update-notice { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 28px; padding: 20px 24px; border: 2px solid var(--accent); border-radius: 18px; background: rgba(30, 47, 77, .94); }
+.tv-update-notice > div:first-child { display: flex; flex-direction: column; gap: 6px; }
+.tv-update-notice strong { font-size: 21px; }
+.tv-update-notice span { color: var(--muted); }
 
 .tv-section { margin-top: 42px; }
 .tv-section:first-child { margin-top: 0; }
@@ -188,6 +192,10 @@ img { display: block; }
 .tv-episode__copy span { display: block; margin-top: 8px; color: var(--muted); }
 .tv-episode__copy p { margin: 9px 0 0; color: #9ea4b2; line-height: 1.4; }
 .tv-episode:focus { border-color: #fff; background: var(--surface-focus); transform: scale(1.015); box-shadow: 0 18px 45px rgba(0,0,0,.45); }
+.tv-coordination-card { max-width: 1100px; margin-top: 24px; padding: 18px; border: 2px solid var(--line); border-radius: 16px; background: rgba(17,20,27,.82); outline: 0; }
+.tv-coordination-card:focus-within, .tv-coordination-card:focus { border-color: #fff; background: var(--surface-focus); }
+.tv-coordination-card h2 { margin: 0 0 13px; font-size: 20px; }
+.tv-coordination-target { display: flex; gap: 8px; margin: 6px; }
 
 .tv-modal { position: fixed; inset: 0; z-index: 70; display: flex; align-items: center; justify-content: center; padding: 70px; background: rgba(3,4,7,.84); }
 .tv-modal__card { width: 760px; max-height: 86vh; padding: 30px; overflow-y: auto; border: 1px solid var(--line); border-radius: 24px; background: #11141b; box-shadow: 0 35px 100px rgba(0,0,0,.68); }
@@ -213,7 +221,8 @@ img { display: block; }
 .tv-player__surface { position: absolute; inset: 0; overflow: hidden; }
 .tv-native-video, .tv-player__surface video, .tv-player__surface object { width: 100%; height: 100%; object-fit: contain; background: #000; }
 .tv-player__chrome { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: flex-end; padding: 58px 70px; background: linear-gradient(0deg, rgba(0,0,0,.94), rgba(0,0,0,.15) 48%, transparent 72%); transition: opacity 180ms ease; }
-.tv-player__chrome.is-hidden { opacity: 0; pointer-events: none; }
+.tv-player__chrome.is-hidden { visibility: hidden; opacity: 0; pointer-events: none; }
+.tv-player:focus { outline: 0; }
 .tv-player__chrome h1 { margin: 0 0 24px; font-size: 31px; text-shadow: 0 2px 12px #000; }
 .tv-player__timeline { display: flex; align-items: center; margin-bottom: 24px; }
 .tv-player__timeline span { width: 70px; flex: 0 0 70px; color: #e1e3e9; font-variant-numeric: tabular-nums; }
@@ -223,6 +232,15 @@ img { display: block; }
 .tv-player__controls { display: flex; align-items: center; margin: -7px; }
 .tv-player__controls .tv-button { margin: 7px; }
 .tv-player__status { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 20px 28px; border-radius: 16px; background: rgba(0,0,0,.72); font-size: 20px; }
+.tv-playback-decision { display: flex; min-width: 320px; max-width: 560px; flex-direction: column; margin: 7px; padding: 12px 16px; border: 2px solid rgba(255,255,255,.24); border-radius: 14px; background: rgba(17,20,27,.86); color: #fff; text-align: left; outline: 0; }
+.tv-playback-decision strong, .tv-playback-decision span, .tv-playback-decision small { display: block; }
+.tv-playback-decision span, .tv-playback-decision small { margin-top: 4px; color: #b8beca; }
+.tv-playback-decision:focus { border-color: #fff; background: #fff; color: #11131a; transform: scale(1.02); }
+.tv-playback-decision:focus span, .tv-playback-decision:focus small { color: #4c5260; }
+.tv-player__remote { display: flex; flex-basis: 100%; flex-wrap: wrap; margin-top: 12px; }
+.tv-player__remote-device { display: flex; align-items: center; margin: 6px; padding: 8px; border: 1px solid rgba(255,255,255,.2); border-radius: 14px; background: rgba(0,0,0,.5); }
+.tv-player__remote-device > strong { margin: 0 8px; }
+.tv-player__remote-device .tv-button { margin: 4px; }
 .tv-track-list { display: flex; flex-wrap: wrap; margin: -6px; }
 .tv-track-list .tv-button { margin: 6px; }
 

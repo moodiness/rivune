@@ -1,6 +1,59 @@
-import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from "react";
+import { useEffect, useId, useRef, type ButtonHTMLAttributes, type HTMLAttributes, type ReactNode, type RefObject } from "react";
+import { focusFirst } from "./focus";
 import { t } from "./i18n";
 
+type InertState = { count: number; initial: boolean; inertAttribute: boolean; ariaHidden: string | null };
+const inertStates = new WeakMap<HTMLElement, InertState>();
+
+function inertOutside(scope: HTMLElement): () => void {
+  const affected: HTMLElement[] = [];
+  let current = scope;
+  while (current.parentElement) {
+    const parent = current.parentElement;
+    for (const sibling of Array.from(parent.children)) {
+      if (!(sibling instanceof HTMLElement) || sibling === current) continue;
+      const existing = inertStates.get(sibling);
+      if (existing) existing.count += 1;
+      else inertStates.set(sibling, { count: 1, initial: Boolean(sibling.inert), inertAttribute: sibling.hasAttribute("inert"), ariaHidden: sibling.getAttribute("aria-hidden") });
+      sibling.inert = true;
+      sibling.setAttribute("inert", "");
+      sibling.setAttribute("aria-hidden", "true");
+      affected.push(sibling);
+    }
+    if (parent === document.body) break;
+    current = parent;
+  }
+  return () => {
+    for (const element of affected) {
+      const state = inertStates.get(element);
+      if (!state) continue;
+      state.count -= 1;
+      if (state.count > 0) continue;
+      element.inert = state.initial;
+      if (!state.inertAttribute) element.removeAttribute("inert");
+      if (state.ariaHidden === null) element.removeAttribute("aria-hidden");
+      else element.setAttribute("aria-hidden", state.ariaHidden);
+      inertStates.delete(element);
+    }
+  };
+}
+export function useOverlayFocus(scopeRef: RefObject<HTMLElement | null>): void {
+  const invokerRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const scope = scopeRef.current;
+    if (!scope) return;
+    invokerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const restoreBackground = inertOutside(scope);
+    focusFirst(scope);
+    return () => {
+      restoreBackground();
+      const invoker = invokerRef.current;
+      window.requestAnimationFrame(() => {
+        if (invoker?.isConnected) invoker.focus();
+      });
+    };
+  }, [scopeRef]);
+}
 export type IconName = "back" | "calendar" | "check" | "close" | "home" | "library" | "pause" | "play" | "search" | "settings" | "skipBack" | "skipForward" | "source" | "user";
 
 const paths: Record<IconName, string> = {
@@ -48,11 +101,18 @@ export function EmptyState({ title, body, action }: { title: string; body?: stri
 }
 
 export function ErrorPanel({ message, onRetry, onClose }: { message: string; onRetry?: () => void; onClose?: () => void }) {
-  return <section className="tv-error" role="alert"><div><strong>{t("error.title")}</strong><p>{message}</p></div><div className="tv-actions">{onRetry && <TvButton tone="primary" onClick={onRetry}>{t("common.retry")}</TvButton>}{onClose && <TvButton onClick={onClose}>{t("common.close")}</TvButton>}</div></section>;
+  const scopeRef = useRef<HTMLElement>(null);
+  const titleId = useId();
+  const messageId = useId();
+  useOverlayFocus(scopeRef);
+  return <section ref={scopeRef} className="tv-error" role="alertdialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={messageId} data-tv-focus-scope="true"><div><strong id={titleId}>{t("error.title")}</strong><p id={messageId}>{message}</p></div><div className="tv-actions">{onRetry && <TvButton tone="primary" data-tv-error-primary="true" onClick={onRetry}>{t("common.retry")}</TvButton>}{onClose && <TvButton data-tv-error-primary={onRetry ? undefined : "true"} data-tv-dismiss-scope="true" onClick={onClose}>{t("common.close")}</TvButton>}</div></section>;
 }
 
 export function Modal({ title, children, onClose, className = "" }: { title: string; children: ReactNode; onClose: () => void; className?: string }) {
-  return <div className="tv-modal" role="dialog" aria-modal="true" aria-label={title}><div className={`tv-modal__card ${className}`.trim()}><header><h2>{title}</h2><TvButton icon="close" tone="quiet" aria-label={t("common.close")} onClick={onClose}>{t("common.close")}</TvButton></header>{children}</div></div>;
+  const scopeRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useOverlayFocus(scopeRef);
+  return <div ref={scopeRef} className="tv-modal" role="dialog" aria-modal="true" aria-labelledby={titleId} data-tv-focus-scope="true"><div className={`tv-modal__card ${className}`.trim()}><header><h2 id={titleId}>{title}</h2><TvButton icon="close" tone="quiet" aria-label={t("common.close")} data-tv-dismiss-scope="true" onClick={onClose}>{t("common.close")}</TvButton></header>{children}</div></div>;
 }
 
 export function formatTime(seconds: number): string {
