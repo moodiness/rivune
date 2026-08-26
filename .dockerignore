@@ -3,6 +3,7 @@
 .env
 .env.*
 secrets
+backups
 server/bin
 server/coverage.out
 clients

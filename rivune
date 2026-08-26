@@ -305,7 +305,7 @@ setup_environment() {
 
   umask 077
   cleanup_setup() {
-    if [[ -n "${temporary_environment}" ]]; then
+    if [[ -n "${temporary_environment:-}" ]]; then
       rm -f -- "${temporary_environment}"
     fi
   }
