@@ -15,7 +15,7 @@ Requirements: Docker Engine with Compose v2, Bash, and OpenSSL. macOS also needs
 ```sh
 git clone https://github.com/moodiness/rivune.git
 cd rivune
-./rivune setup --public-url https://media.example.com --version 1.13.1
+./rivune setup --public-url https://media.example.com --version 1.13.2
 ./rivune up
 ./rivune doctor
 ```

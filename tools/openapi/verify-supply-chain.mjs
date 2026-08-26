@@ -51,7 +51,8 @@ requireMatch(candidate, /candidate-release\.json[\s\S]*candidate_release_inputs:
 if (/--locked-mode/.test(candidate) || /--locked-mode/.test(gate)) {
   throw new Error('dotnet publish must enable RestoreLockedMode as an MSBuild property.');
 }
-requireMatch(candidate, /-p:RestoreLockedMode=true/, 'Release candidate Windows publishes do not enforce locked restore mode.');
+requireMatch(candidate, /candidate-windows:[\s\S]*-p:NuGetLockFilePath=\$lockFile[\s\S]*-p:RestoreLockedMode=true[\s\S]*-p:NuGetLockFilePath=packages\.win-x86\.lock\.json[\s\S]*-p:RestoreLockedMode=true/, 'Release candidate Windows publishes do not enforce their runtime-specific lock files.');
+requireMatch(candidate, /candidate-update-tool:[\s\S]*working-directory: clients\/update[\s\S]*CGO_ENABLED=0 go build[\s\S]*artifact_dir/, 'Release candidate update verifier is not built from its Go module.');
 requireMatch(gate, /runs-on: macos-26[\s\S]*swift test/, 'Swift validation must use the macOS 26 SDK required by the Apple UI.');
 requireMatch(gate, /-p:RestoreLockedMode=true/, 'Release gate Windows publishes do not enforce locked restore mode.');
 requireMatch(gate, /candidate-release-assets:[\s\S]*candidate-release-inputs\/candidate-release\.json[\s\S]*candidate-update-tool\/candidate-update-tool\.json/, 'Release gate does not consume the exact candidate Windows, Android, and verifier artifacts.');
