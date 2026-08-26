@@ -993,7 +993,7 @@ test("playback coordination suspends hidden work and slows idle command polling"
   const initialPolls = rivune.matching("/api/v1/playback/commands", "GET").length;
   await page.clock.runFor(29_000);
   expect(rivune.matching("/api/v1/playback/commands", "GET")).toHaveLength(initialPolls);
-  expect(rivune.matching("/api/v1/playback/device", "PUT").length).toBeGreaterThan(initialHeartbeats);
+  await expect.poll(() => rivune.matching("/api/v1/playback/device", "PUT").length).toBeGreaterThan(initialHeartbeats);
 
   await page.evaluate(() => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
