@@ -251,7 +251,7 @@ final class CredentialSecurityTests: XCTestCase {
         do {
             _ = try await client.refreshSession()
             XCTFail("A transient refresh failure must be surfaced")
-        } catch RivuneAPIError.server(let status, _, _) {
+        } catch RivuneAPIError.server(let status, _, _, _) {
             XCTAssertEqual(status, 503)
         }
 
@@ -282,7 +282,7 @@ final class CredentialSecurityTests: XCTestCase {
         do {
             _ = try await client.refreshSession()
             XCTFail("An invalid refresh token must be rejected")
-        } catch RivuneAPIError.server(let status, let code, _) {
+        } catch RivuneAPIError.server(let status, let code, _, _) {
             XCTAssertEqual(status, 401)
             XCTAssertEqual(code, "invalid_refresh_token")
         }
@@ -351,7 +351,7 @@ final class CredentialSecurityTests: XCTestCase {
                 device: LoginDevice(name: "iPhone", platform: "iOS")
             )
             XCTFail("The fixture should reject the login after receiving it")
-        } catch RivuneAPIError.server(let status, _, _) {
+        } catch RivuneAPIError.server(let status, _, _, _) {
             XCTAssertEqual(status, 401)
         }
         XCTAssertEqual(loginTransport.recordedRequests().map(\.url?.path), ["/.well-known/rivune", "/api/v1/auth/login"])
@@ -371,7 +371,7 @@ final class CredentialSecurityTests: XCTestCase {
         do {
             _ = try await authenticatedClient.currentAccount()
             XCTFail("The fixture should reject the authenticated request after receiving it")
-        } catch RivuneAPIError.server(let status, _, _) {
+        } catch RivuneAPIError.server(let status, _, _, _) {
             XCTAssertEqual(status, 401)
         } catch RivuneAPIError.notAuthenticated {
             // The automatic refresh was also rejected after both HTTP requests reached the transport.
@@ -408,7 +408,7 @@ final class CredentialSecurityTests: XCTestCase {
         do {
             try await client.logout()
             XCTFail("The remote revocation failure must still be reported")
-        } catch RivuneAPIError.server(let status, _, _) {
+        } catch RivuneAPIError.server(let status, _, _, _) {
             XCTAssertEqual(status, 500)
         }
 
@@ -512,10 +512,11 @@ final class CredentialSecurityTests: XCTestCase {
         do {
             _ = try await exactClient.discover()
             XCTFail("The bounded error body must still be decoded")
-        } catch RivuneAPIError.server(let status, let code, _) {
+        } catch RivuneAPIError.server(let status, let code, _, _) {
             XCTAssertEqual(status, 500)
             XCTAssertEqual(code, "controlled")
         }
+
 
         ChunkedURLProtocol.configure(
             oversizedChunkedPlan(status: 500, prefix: errorBody)
@@ -526,6 +527,22 @@ final class CredentialSecurityTests: XCTestCase {
             ChunkedURLProtocol.deliveredByteCount(),
             URLSessionTransport.maximumResponseBodyBytes + 1
         )
+    }
+    func testServerErrorExposesRetryAfterSeconds() async throws {
+        let client = try RivuneAPIClient(
+            serverURL: URL(string: "https://retry-after.test")!,
+            transport: RetryAfterTransport(),
+            credentialStore: IssuerScopedCredentialStore()
+        )
+
+        do {
+            _ = try await client.beginDeviceAuthorization(installationId: "installation", deviceName: "iPhone", platform: "ios")
+            XCTFail("The capacity response must be surfaced")
+        } catch RivuneAPIError.server(let status, let code, _, let retryAfterSeconds) {
+            XCTAssertEqual(status, 429)
+            XCTAssertEqual(code, "device_code_capacity")
+            XCTAssertEqual(retryAfterSeconds, 17)
+        }
     }
 
     func testInjectedSessionAuthenticationDelegateDecidesTLSChallengesExactlyOnce() {
@@ -660,7 +677,7 @@ final class CredentialSecurityTests: XCTestCase {
             do {
                 _ = try await client.discover()
                 XCTFail("status \(status) must be parsed as an error")
-            } catch RivuneAPIError.server(let receivedStatus, let code, _) {
+            } catch RivuneAPIError.server(let receivedStatus, let code, _, _) {
                 XCTAssertEqual(receivedStatus, status)
                 XCTAssertEqual(code, "http_\(status)")
             } catch {
@@ -704,7 +721,7 @@ final class CredentialSecurityTests: XCTestCase {
 
     private func discoveryBody() -> Data {
         Data("""
-        {"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
+        {"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
         """.utf8)
     }
 
@@ -788,6 +805,32 @@ private actor IssuerScopedCredentialStore: CredentialStore {
     }
 }
 
+private struct RetryAfterTransport: HTTPTransport {
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        if request.url?.path == "/.well-known/rivune" {
+            let body = Data("""
+            {"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
+            """.utf8)
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (body, response)
+        }
+
+        let body = Data(#"{"error":{"code":"device_code_capacity","message":"busy"}}"#.utf8)
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 429,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json", "Retry-After": "17"]
+        )!
+        return (body, response)
+    }
+}
+
 private final class CredentialSecurityTransport: HTTPTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var requests: [URLRequest] = []
@@ -802,7 +845,7 @@ private final class CredentialSecurityTransport: HTTPTransport, @unchecked Senda
             requests.append(request)
         }
         let body = Data("""
-        {"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"\(apiBaseURL)","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
+        {"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"\(apiBaseURL)","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
         """.utf8)
         let response = HTTPURLResponse(
             url: request.url!,
@@ -881,7 +924,7 @@ private actor GenerationReplayTransport: HTTPTransport {
         case "/.well-known/rivune":
             status = 200
             body = Data("""
-            {"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
+            {"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
             """.utf8)
         case "/api/v1/auth/logout":
             status = 204
@@ -987,7 +1030,7 @@ private actor ControlledAuthTransport: HTTPTransport {
         case "/.well-known/rivune":
             status = 200
             body = Data("""
-            {"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
+            {"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
             """.utf8)
         case "/api/v1/auth/logout":
             status = logoutStatus
@@ -1202,7 +1245,7 @@ private final class RedirectURLProtocol: URLProtocol {
 
         guard request.url == plan.originalURL else {
             let body = Data("""
-            {"name":"Unsafe redirect","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
+            {"name":"Unsafe redirect","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
             """.utf8)
             let response = HTTPURLResponse(
                 url: request.url!,

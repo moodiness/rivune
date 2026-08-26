@@ -5,7 +5,7 @@ import RivuneAppCore
 struct RivuneIOSApp: App {
     var body: some Scene {
         WindowGroup {
-            RivuneRootView(interfaceFamily: .touch)
+            RivuneIOSRootView()
         }
     }
 }

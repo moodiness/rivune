@@ -34,7 +34,7 @@ final class DiagnosticsTests: XCTestCase {
         Server origin: https://media.example:8443
         Server name: Living Room
         Server version: 10.2.0
-        Server protocol: 20
+        Server protocol: 22
         Startup tab: library
         Preferred player: external
         Embedded player: mpv
@@ -42,7 +42,8 @@ final class DiagnosticsTests: XCTestCase {
         Accent color: rose
         Frame-rate matching: enabled
         Video aspect: zoom
-        Wi-Fi quality: balanced
+        Local quality: balanced
+        Remote Wi-Fi quality: balanced
         Mobile quality: economy
         Events:
         1970-01-01T00:00:01Z APP_STARTED
@@ -84,6 +85,21 @@ final class DiagnosticsTests: XCTestCase {
         ])
     }
 
+    func testSearchLifecycleEventsNeverContainQuerySecrets() {
+        let report = RivuneDiagnosticsReport.build(input(events: [
+            RivuneDiagnosticEvent(timestampMilliseconds: 1_000, code: .searchStarted),
+            RivuneDiagnosticEvent(timestampMilliseconds: 2_000, code: .searchPartial),
+            RivuneDiagnosticEvent(timestampMilliseconds: 3_000, code: .searchCanceled),
+        ]))
+
+        XCTAssertTrue(report.contains("SEARCH_STARTED"))
+        XCTAssertTrue(report.contains("SEARCH_PARTIAL"))
+        XCTAssertTrue(report.contains("SEARCH_CANCELED"))
+        XCTAssertFalse(report.contains("access_token"))
+        XCTAssertFalse(report.contains("private-profile"))
+        XCTAssertFalse(report.contains("diagnostic-token"))
+    }
+
     private func input(
         appVersion: String = "1.2.3",
         deviceModel: String = "iPhone17,1",
@@ -100,7 +116,7 @@ final class DiagnosticsTests: XCTestCase {
             serverAddress: "https://diagnostic-user:diagnostic-password@media.example:8443/private-profile?access_token=diagnostic-token#diagnostic-fragment",
             serverDisplayName: "Living Room",
             serverVersion: "10.2.0",
-            serverProtocolVersion: 20,
+            serverProtocolVersion: 22,
             startupTab: "library",
             preferredPlayer: "external",
             embeddedPlayer: "mpv",
@@ -108,7 +124,8 @@ final class DiagnosticsTests: XCTestCase {
             accentColor: "rose",
             frameRateMatching: "enabled",
             videoAspect: "zoom",
-            wifiQuality: "balanced",
+            localQuality: "balanced",
+            remoteWifiQuality: "balanced",
             mobileQuality: "economy",
             events: events
         )

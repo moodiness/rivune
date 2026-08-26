@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -6,6 +7,7 @@ import RivuneAPI
 
 private let rivuneAppleUpdateCheckInterval: TimeInterval = 24 * 60 * 60
 let rivuneMaximumAppleUpdateManifestBytes = 256 * 1_024
+let rivuneMaximumAppleUpdateSignatureBytes = 4 * 1_024
 private let rivuneMaximumAppleUpdatePackageBytes: Int64 = 512 * 1_024 * 1_024
 
 public struct RivuneAppleUpdate: Identifiable, Equatable, Sendable {
@@ -162,6 +164,7 @@ final class RivuneAppleUpdateChecker: RivuneAppleUpdateChecking {
     private static let maximumRedirects = 5
     private let transport: any HTTPTransport
     private let platform: RivuneAppleUpdatePlatform
+    private let verifySignature: @Sendable (Data, Data) throws -> Void
 
     convenience init(platform: RivuneAppleUpdatePlatform = .current) {
         let configuration = URLSessionConfiguration.ephemeral
@@ -181,24 +184,51 @@ final class RivuneAppleUpdateChecker: RivuneAppleUpdateChecking {
         )
     }
 
-    init(transport: any HTTPTransport, platform: RivuneAppleUpdatePlatform = .current) {
+    init(
+        transport: any HTTPTransport,
+        platform: RivuneAppleUpdatePlatform = .current,
+        verifySignature: (@Sendable (Data, Data) throws -> Void)? = nil
+    ) {
         self.transport = transport
         self.platform = platform
+        self.verifySignature = verifySignature ?? { manifest, sidecar in
+            try RivuneAppleUpdateSignatureVerifier.verify(manifest: manifest, sidecar: sidecar)
+        }
     }
 
     func check(currentVersion: String) async throws -> RivuneAppleUpdateCheckResult {
         guard RivuneSemanticVersion(currentVersion) != nil else {
             throw RivuneAppleUpdateError.invalidCurrentVersion
         }
+        let manifest = try await fetchAsset(
+            from: Self.manifestURL,
+            fileName: "rivune-update.json",
+            maximumBytes: rivuneMaximumAppleUpdateManifestBytes
+        )
+        guard let signatureURL = URL(string: Self.manifestURL.absoluteString + ".sig") else {
+            throw RivuneAppleUpdateError.invalidManifest
+        }
+        let signature = try await fetchAsset(
+            from: signatureURL,
+            fileName: "rivune-update.json.sig",
+            maximumBytes: rivuneMaximumAppleUpdateSignatureBytes
+        )
+        try verifySignature(manifest, signature)
+        return try RivuneAppleUpdateManifestParser.parse(
+            manifest,
+            currentVersion: currentVersion,
+            platform: platform
+        )
+    }
 
-        var url = Self.manifestURL
+    private func fetchAsset(from initialURL: URL, fileName: String, maximumBytes: Int) async throws -> Data {
+        var url = initialURL
         for redirectCount in 0...Self.maximumRedirects {
             var request = URLRequest(url: url)
             request.httpMethod = "GET"
             request.timeoutInterval = 20
             request.setValue("application/json", forHTTPHeaderField: "Accept")
             request.setValue("Rivune-Apple-Update/2.0", forHTTPHeaderField: "User-Agent")
-
             let (data, response): (Data, HTTPURLResponse)
             do {
                 (data, response) = try await transport.data(for: request)
@@ -206,26 +236,17 @@ final class RivuneAppleUpdateChecker: RivuneAppleUpdateChecking {
                 throw RivuneAppleUpdateError.responseTooLarge
             }
             guard response.url == url else { throw RivuneAppleUpdateError.untrustedRedirect }
-
             switch response.statusCode {
             case 200:
-                guard Self.isAllowedFinalManifestURL(url), data.count <= rivuneMaximumAppleUpdateManifestBytes else {
-                    throw data.count > rivuneMaximumAppleUpdateManifestBytes
-                        ? RivuneAppleUpdateError.responseTooLarge
-                        : RivuneAppleUpdateError.untrustedRedirect
+                guard Self.isAllowedFinalAssetURL(url, fileName: fileName), data.count <= maximumBytes else {
+                    throw data.count > maximumBytes ? RivuneAppleUpdateError.responseTooLarge : RivuneAppleUpdateError.untrustedRedirect
                 }
-                return try RivuneAppleUpdateManifestParser.parse(
-                    data,
-                    currentVersion: currentVersion,
-                    platform: platform
-                )
+                return data
             case 301, 302, 303, 307, 308:
-                guard redirectCount < Self.maximumRedirects else {
-                    throw RivuneAppleUpdateError.tooManyRedirects
-                }
+                guard redirectCount < Self.maximumRedirects else { throw RivuneAppleUpdateError.tooManyRedirects }
                 guard let location = response.value(forHTTPHeaderField: "Location"),
                       let redirected = URL(string: location, relativeTo: url)?.absoluteURL,
-                      Self.isAllowedManifestRedirectURL(redirected) else {
+                      Self.isAllowedAssetRedirectURL(redirected, fileName: fileName) else {
                     throw RivuneAppleUpdateError.untrustedRedirect
                 }
                 url = redirected
@@ -243,7 +264,7 @@ final class RivuneAppleUpdateChecker: RivuneAppleUpdateChecking {
         return lastSuccessfulCheck > now || now.timeIntervalSince(lastSuccessfulCheck) >= rivuneAppleUpdateCheckInterval
     }
 
-    private static func isAllowedManifestRedirectURL(_ url: URL) -> Bool {
+    private static func isAllowedAssetRedirectURL(_ url: URL, fileName: String) -> Bool {
         guard isPlainHTTPSURL(url) else { return false }
         if isGitHubAssetURL(url) { return true }
         guard url.host?.lowercased() == "github.com", url.query == nil else { return false }
@@ -253,14 +274,15 @@ final class RivuneAppleUpdateChecker: RivuneAppleUpdateChecking {
               parts[1] == "rivune",
               parts[2] == "releases",
               parts[3] == "download",
-              parts[5] == "rivune-update.json",
+              parts[5] == fileName,
               parts[4].hasPrefix("v"),
               RivuneSemanticVersion(String(parts[4].dropFirst())) != nil else { return false }
         return true
     }
 
-    private static func isAllowedFinalManifestURL(_ url: URL) -> Bool {
-        url == manifestURL || isAllowedManifestRedirectURL(url)
+    private static func isAllowedFinalAssetURL(_ url: URL, fileName: String) -> Bool {
+        let expectedLatest = fileName == "rivune-update.json" ? manifestURL : URL(string: manifestURL.absoluteString + ".sig")
+        return url == expectedLatest || isAllowedAssetRedirectURL(url, fileName: fileName)
     }
 
     private static func isGitHubAssetURL(_ url: URL) -> Bool {
@@ -275,6 +297,52 @@ final class RivuneAppleUpdateChecker: RivuneAppleUpdateChecking {
             components.user == nil &&
             components.password == nil &&
             components.fragment == nil
+    }
+}
+
+private struct RivuneAppleUpdateSignature: Decodable {
+    let schemaVersion: Int
+    let algorithm: String
+    let keyId: String
+    let manifestSha256: String
+    let signature: String
+}
+
+enum RivuneAppleUpdateSignatureVerifier {
+    private static let algorithm = "ecdsa-p256-sha256"
+    private static let keyId = "4e9b15a0b6aed77908f3686fbf05a0a9c322ad846662eb758f56d4e65c22796f"
+    private static let publicKey = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEacg8w48bnbKqa/KOJd070if0/100iHsU+o6ecokqIS6p7thhZb1ZR9YawxW7HuoEs5k6dW9sTCOyMjUcsgAQww=="
+
+    static func verify(manifest: Data, sidecar: Data) throws {
+        guard !sidecar.isEmpty, sidecar.count <= rivuneMaximumAppleUpdateSignatureBytes else {
+            throw RivuneAppleUpdateError.responseTooLarge
+        }
+        guard let text = String(data: sidecar, encoding: .utf8) else {
+            throw RivuneAppleUpdateError.invalidManifest
+        }
+        let object: Any
+        let expectedFields = ["schemaVersion", "algorithm", "keyId", "manifestSha256", "signature"]
+        for field in expectedFields where text.components(separatedBy: "\"\(field)\"").count != 2 {
+            throw RivuneAppleUpdateError.invalidManifest
+        }
+        do { object = try JSONSerialization.jsonObject(with: sidecar) }
+        catch { throw RivuneAppleUpdateError.invalidManifest }
+        guard let dictionary = object as? [String: Any],
+              Set(dictionary.keys) == Set(expectedFields),
+              let value = try? JSONDecoder().decode(RivuneAppleUpdateSignature.self, from: sidecar),
+              value.schemaVersion == 1,
+              value.algorithm == algorithm,
+              value.keyId == keyId,
+              value.manifestSha256 == SHA256.hash(data: manifest).map({ String(format: "%02x", $0) }).joined(),
+              let publicKeyData = Data(base64Encoded: publicKey),
+              publicKeyData.base64EncodedString() == publicKey,
+              let signatureData = Data(base64Encoded: value.signature),
+              signatureData.base64EncodedString() == value.signature,
+              let verifier = try? P256.Signing.PublicKey(derRepresentation: publicKeyData),
+              let signature = try? P256.Signing.ECDSASignature(derRepresentation: signatureData),
+              verifier.isValidSignature(signature, for: manifest) else {
+            throw RivuneAppleUpdateError.invalidManifest
+        }
     }
 }
 
