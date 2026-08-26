@@ -23,7 +23,7 @@ public enum RivuneLANService {
     public static let type = "_rivune._tcp"
 
     public static func parse(serviceName: String, attributes: [String: String]) -> DiscoveredRivuneServer? {
-        guard attributes["protocol"]?.trimmingCharacters(in: .whitespacesAndNewlines) == "20",
+        guard attributes["protocol"]?.trimmingCharacters(in: .whitespacesAndNewlines) == String(RivuneProtocol.version),
               let rawAddress = attributes["url"]?.trimmingCharacters(in: .whitespacesAndNewlines),
               rawAddress.utf8.count <= 255,
               let supplied = URL(string: rawAddress),

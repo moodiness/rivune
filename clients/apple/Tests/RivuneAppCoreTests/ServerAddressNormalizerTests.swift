@@ -40,3 +40,20 @@ final class AccentPreferenceTests: XCTestCase {
         XCTAssertEqual(RivuneAppModel(defaults: defaults).accent, .rose)
     }
 }
+
+@MainActor
+final class RecommendationLayoutPreferenceTests: XCTestCase {
+    func testLayoutDefaultsToPortraitAndPersistsSelection() {
+        let suite = "RecommendationLayoutPreferenceTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let model = RivuneAppModel(defaults: defaults)
+        XCTAssertEqual(model.recommendationLayout, .portrait)
+
+        model.setRecommendationLayout(.landscape)
+
+        XCTAssertEqual(model.recommendationLayout, .landscape)
+        XCTAssertEqual(RivuneAppModel(defaults: defaults).recommendationLayout, .landscape)
+    }
+}
