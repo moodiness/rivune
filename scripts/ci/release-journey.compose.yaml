@@ -47,7 +47,7 @@ services:
       - --assets
       - /assets
       - --public-origin
-      - http://172.29.254.10:8081
+      - http://11.254.0.10:8081
     volumes:
       - type: bind
         source: ${RIVUNE_SOURCE_ROOT:?missing source root}/scripts/ci/release-journey-fixture.py
@@ -60,6 +60,8 @@ services:
     networks:
       default:
         ipv4_address: 172.29.254.10
+      media:
+        ipv4_address: 11.254.0.10
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=2).read()"]
       interval: 2s
@@ -76,6 +78,11 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
     depends_on:
       fixture:
         condition: service_healthy
@@ -95,7 +102,11 @@ services:
       RIVUNE_TRAKT_CLIENT_SECRET: ""
       RIVUNE_SIMKL_CLIENT_ID: ""
     ports:
-      - "127.0.0.1::8080"
+      - "127.0.0.1:${RIVUNE_RELEASE_PORT:?missing release port}:8080"
+    networks:
+      - default
+      - media
+      - published
     volumes:
       - artwork:/var/lib/rivune/artwork
       - media:/var/lib/rivune/media
@@ -119,3 +130,10 @@ networks:
     ipam:
       config:
         - subnet: 172.29.254.0/24
+  # Internal public-address simulation exercises the production public-only media egress guard without Internet dependencies.
+  media:
+    internal: true
+    ipam:
+      config:
+        - subnet: 11.254.0.0/24
+  published:

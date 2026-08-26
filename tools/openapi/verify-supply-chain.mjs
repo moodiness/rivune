@@ -37,6 +37,9 @@ const candidate = read('.github/workflows/release-candidate.yml');
 const gate = read('.github/workflows/release-gate.yml');
 const release = read('.github/workflows/release.yml');
 const candidateGateJob = candidate.match(/\n  ci:[\s\S]*?\n  apple-assets:/)?.[0] ?? '';
+const releaseJourneyCompose = read('scripts/ci/release-journey.compose.yaml');
+const releaseJourneyScript = read('scripts/ci/release-journey.sh');
+const releaseJourneyRivune = releaseJourneyCompose.match(/\n  rivune:[\s\S]*?\nvolumes:/)?.[0] ?? '';
 if (count(candidate, /uses: docker\/build-push-action@/g) !== 1) {
   throw new Error('Release candidate workflow must build the multi-architecture image exactly once.');
 }
@@ -57,6 +60,10 @@ requireMatch(gate, /runs-on: macos-26[\s\S]*swift test/, 'Swift validation must 
 requireMatch(gate, /-p:RestoreLockedMode=true/, 'Release gate Windows publishes do not enforce locked restore mode.');
 requireMatch(gate, /candidate-release-assets:[\s\S]*candidate-release-inputs\/candidate-release\.json[\s\S]*candidate-update-tool\/candidate-update-tool\.json/, 'Release gate does not consume the exact candidate Windows, Android, and verifier artifacts.');
 requireMatch(gate, /RIVUNE_IMAGE: rivune-ci:current[\s\S]*scripts\/ci\/migrations\.sh[\s\S]*RIVUNE_IMAGE: rivune-ci:current[\s\S]*scripts\/ci\/reverse-proxy-smoke\.sh/, 'Migration and proxy smokes do not share the pulled candidate image.');
+requireMatch(releaseJourneyRivune, /cap_drop:\n      - ALL\n    cap_add:\n      - CHOWN\n      - DAC_OVERRIDE\n      - SETGID\n      - SETUID/, 'Release journey Rivune container cannot initialize its persistent volumes with the production capability set.');
+requireMatch(releaseJourneyRivune, /ports:\n      - "127\.0\.0\.1:\$\{RIVUNE_RELEASE_PORT:\?missing release port\}:8080"[\s\S]*networks:\n      - default\n      - media\n      - published/, 'Release journey does not bind Rivune to loopback through its published network and isolated media network.');
+requireMatch(releaseJourneyScript, /release_port=.*node -e[\s\S]*RIVUNE_RELEASE_PORT=\$\{release_port\}[\s\S]*rivune_port="\$\{release_port\}"/, 'Release journey does not select and propagate its loopback port.');
+requireMatch(releaseJourneyCompose, /--public-origin\n      - http:\/\/11\.254\.0\.10:8081[\s\S]*?    networks:\n      default:\n        ipv4_address: 172\.29\.254\.10\n      media:\n        ipv4_address: 11\.254\.0\.10[\s\S]*\nnetworks:\n  default:\n    internal: true[\s\S]*\n  media:\n    internal: true\n    ipam:\n      config:\n        - subnet: 11\.254\.0\.0\/24\n  published:\s*$/, 'Release journey lacks an isolated public-address media fixture and the non-internal network Docker requires for loopback publication.');
 requireMatch(release, /candidate-assets:[\s\S]*github\.event\.workflow_run\.id[\s\S]*candidate-release\.json/, 'Release publication does not adopt the exact cross-workflow candidate bytes.');
 if (/dotnet publish|:app:assembleRelease/.test(release)) throw new Error('Release workflow recompiles Windows or Android after the candidate gate.');
 requireMatch(release, /RIVUNE_RELEASE_IMAGE: ghcr\.io\/\$\{\{ github\.repository \}\}@\$\{\{ needs\.publish\.outputs\.image_digest \}\}/, 'Release journey does not use the immutable tested digest.');

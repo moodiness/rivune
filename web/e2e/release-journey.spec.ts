@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { expect, request, test, type APIRequestContext, type APIResponse, type Page } from "@playwright/test";
 
 const baseURL = process.env.RIVUNE_RELEASE_BASE_URL;
@@ -130,11 +131,11 @@ test("published image completes setup, pairing, add-on search, and playback", as
     data: {
       mediaType: "movie",
       provider: "addon",
-      externalId: "release-demo",
+      externalId: `sha256:${createHash("sha256").update(`${installed.id}\0movie\0release-demo`).digest("hex")}`,
       resourceId: "release-demo",
       title: "Release Journey",
       releaseInfo: "2026",
-      released: "2026-01-01T00:00:00.000Z",
+      released: "2026-01-01",
       sourceAddonId: installed.id,
       sourceCatalogId: "release-search",
       sourceName: "Release Journey Fixture",
