@@ -36,6 +36,7 @@ for (const workflow of workflows) {
 const candidate = read('.github/workflows/release-candidate.yml');
 const gate = read('.github/workflows/release-gate.yml');
 const release = read('.github/workflows/release.yml');
+const candidateGateJob = candidate.match(/\n  ci:[\s\S]*?\n  apple-assets:/)?.[0] ?? '';
 if (count(candidate, /uses: docker\/build-push-action@/g) !== 1) {
   throw new Error('Release candidate workflow must build the multi-architecture image exactly once.');
 }
@@ -43,6 +44,7 @@ if (count(release, /uses: docker\/build-push-action@/g) !== 0) {
   throw new Error('Release publication must never rebuild the tested candidate image.');
 }
 requireMatch(candidate, /candidate_image: ghcr\.io\/\$\{\{ github\.repository \}\}@\$\{\{ needs\.build-candidate\.outputs\.digest \}\}/, 'Release gate does not receive the candidate digest.');
+requireMatch(candidateGateJob, /permissions:\n      contents: read\n      actions: read\n      packages: read[\s\S]*uses: \.\/\.github\/workflows\/release-gate\.yml/, 'Release candidate caller must grant actions: read to the reusable candidate artifact verifier.');
 requireMatch(candidate, /candidate-windows:[\s\S]*dotnet publish[\s\S]*candidate-windows-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/, 'Final Windows bytes are not built and described before the candidate succeeds.');
 requireMatch(candidate, /candidate-release-assets:[\s\S]*:app:assembleRelease[\s\S]*candidate-unsigned-android-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/, 'Final unsigned Android bytes are not built and described before the candidate succeeds.');
 requireMatch(candidate, /candidate-release\.json[\s\S]*candidate_release_inputs:[\s\S]*candidate_unsigned_android:[\s\S]*release_version_name:[\s\S]*release_version_code:/, 'Candidate artifacts, digests, and release identity are not passed into the gate.');
