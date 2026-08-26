@@ -33,6 +33,8 @@ Prefer spacing, tone, and a 1dp hairline over shadows. Artwork is never tinted t
 - Stop decorative animation when system animation is disabled.
 - Use wrapping or scrolling instead of shrinking text or targets.
 
+Protocol 22 adds profile-scoped accessibility preferences. Clients preserve the server's optimistic `revision` and map only these closed values: reduced motion (`system`, `reduce`, `no-preference`), contrast (`system`, `more`, `standard`), text scale (`100`, `115`, `130`), captions (`system`, `on`, `off`), audio description (boolean), and focus indicators (`standard`, `enhanced`). `system` defers to the native platform setting; an explicit profile choice must not be described as enabling a caption, audio-description, contrast, or motion capability that the current media, operating system, or device does not provide.
+
 Phone is the compact reference surface. Tablets add width and spacing instead of scaling everything. TV requires explicit directional focus. Wide layouts use bounded content widths.
 
 ## Cross-platform contract
