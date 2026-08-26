@@ -101,8 +101,9 @@ final class AppleUpdateCheckerTests: XCTestCase {
             .init(status: 302, headers: ["Location": versionedManifest.absoluteString]),
             .init(status: 302, headers: ["Location": releaseAsset.absoluteString]),
             .init(status: 200, data: manifestData(version: "1.11.4")),
+            .init(status: 200, data: Data("fixture-sidecar".utf8)),
         ])
-        let checker = RivuneAppleUpdateChecker(transport: transport, platform: .tvos)
+        let checker = RivuneAppleUpdateChecker(transport: transport, platform: .tvos, verifySignature: { _, _ in })
 
         guard case .available(let update) = try await checker.check(currentVersion: "1.11.3") else {
             return XCTFail("Expected a tvOS update")
@@ -111,7 +112,7 @@ final class AppleUpdateCheckerTests: XCTestCase {
         let requestedURLs = await transport.requestedURLs()
         XCTAssertEqual(
             requestedURLs,
-            [RivuneAppleUpdateChecker.manifestURL, versionedManifest, releaseAsset]
+            [RivuneAppleUpdateChecker.manifestURL, versionedManifest, releaseAsset, URL(string: RivuneAppleUpdateChecker.manifestURL.absoluteString + ".sig")!]
         )
 
         let rejected = ScriptedAppleUpdateTransport([
@@ -143,6 +144,19 @@ final class AppleUpdateCheckerTests: XCTestCase {
         }
         let requestCount = await transport.requestedURLs().count
         XCTAssertEqual(requestCount, 6)
+    }
+
+    func testSignatureVerifierRejectsAlteredBytesKeyAndMalformedSignature() throws {
+        let manifest = Data("fixture".utf8)
+        let valid = Data("{\"schemaVersion\":1,\"algorithm\":\"ecdsa-p256-sha256\",\"keyId\":\"4e9b15a0b6aed77908f3686fbf05a0a9c322ad846662eb758f56d4e65c22796f\",\"manifestSha256\":\"f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d\",\"signature\":\"MEUCID/exybli2HXWsp9h4iFZIXCTAlvZZcaizBj+dIOfOfRAiEAuxdEPEnwG3MWFlChfZ8NfUvHp+QRoLKu4NXhyFQYNBM=\"}".utf8)
+        XCTAssertNoThrow(try RivuneAppleUpdateSignatureVerifier.verify(manifest: manifest, sidecar: valid))
+        XCTAssertThrowsError(try RivuneAppleUpdateSignatureVerifier.verify(manifest: manifest + Data([0x20]), sidecar: valid))
+        let invalid = Data("{\"schemaVersion\":1,\"algorithm\":\"ecdsa-p256-sha256\",\"keyId\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"manifestSha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"signature\":\"%%%\"}".utf8)
+        XCTAssertThrowsError(try RivuneAppleUpdateSignatureVerifier.verify(manifest: manifest, sidecar: invalid))
+        XCTAssertThrowsError(try RivuneAppleUpdateSignatureVerifier.verify(
+            manifest: manifest,
+            sidecar: Data(repeating: 0x20, count: rivuneMaximumAppleUpdateSignatureBytes + 1)
+        ))
     }
 
     func testAutomaticChecksAreLimitedToOncePerDay() {

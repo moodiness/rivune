@@ -5,7 +5,7 @@ final class LanServerDiscoveryTests: XCTestCase {
     func testParsesSecureAndTrustedLANAnnouncements() throws {
         let secure = try XCTUnwrap(RivuneLANService.parse(
             serviceName: "Living room",
-            attributes: ["protocol": "20", "url": "https://media.example.com", "version": "1.10.0"]
+            attributes: ["protocol": "22", "url": "https://media.example.com", "version": "1.10.0"]
         ))
         XCTAssertEqual(secure.name, "Living room")
         XCTAssertEqual(secure.address.absoluteString, "https://media.example.com")
@@ -14,7 +14,7 @@ final class LanServerDiscoveryTests: XCTestCase {
 
         let local = try XCTUnwrap(RivuneLANService.parse(
             serviceName: "Bedroom",
-            attributes: ["protocol": "20", "url": "http://192.168.1.20:8080/"]
+            attributes: ["protocol": "22", "url": "http://192.168.1.20:8080/"]
         ))
         XCTAssertEqual(local.address.absoluteString, "http://192.168.1.20:8080")
         XCTAssertFalse(local.usesSecureTransport)
@@ -29,9 +29,9 @@ final class LanServerDiscoveryTests: XCTestCase {
             "https://media.example.com?token=secret",
             "ftp://media.example.com",
         ] {
-            XCTAssertNil(RivuneLANService.parse(serviceName: "Hostile", attributes: ["protocol": "20", "url": address]), address)
+            XCTAssertNil(RivuneLANService.parse(serviceName: "Hostile", attributes: ["protocol": "22", "url": address]), address)
         }
-        XCTAssertNil(RivuneLANService.parse(serviceName: "Old", attributes: ["protocol": "19", "url": "https://media.example.com"]))
+        XCTAssertNil(RivuneLANService.parse(serviceName: "Old", attributes: ["protocol": "21", "url": "https://media.example.com"]))
         XCTAssertNil(RivuneLANService.parse(serviceName: "Missing", attributes: [:]))
     }
 }

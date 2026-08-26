@@ -196,20 +196,22 @@ struct RivuneMediaDetailView: View {
                 ForEach(model.playbackDevices) { device in
                     HStack {
                         Button("Play on \(device.name)") { model.handoffPlayback(to: device) }
-                        Button("Play") { model.controlPlayback(on: device, command: "play") }
-                        Button("Pause") { model.controlPlayback(on: device, command: "pause") }
-                        Button("Match position") { model.controlPlayback(on: device, command: "seek") }
-                        Button("Stop", role: .destructive) { model.controlPlayback(on: device, command: "stop") }
+                        Button("Play a copy") { model.playCopy(to: device) }
+                        Button("Play") { model.controlPlayback(on: device, command: .play) }
+                        Button("Pause") { model.controlPlayback(on: device, command: .pause) }
+                        Button("Match position") { model.controlPlayback(on: device, command: .seek) }
+                        Button("Stop", role: .destructive) { model.controlPlayback(on: device, command: .stop) }
                     }
                 }
 #else
                 Menu {
                     ForEach(model.playbackDevices) { device in
                         Button("Play on \(device.name)") { model.handoffPlayback(to: device) }
-                        Button("Play \(device.name)") { model.controlPlayback(on: device, command: "play") }
-                        Button("Pause \(device.name)") { model.controlPlayback(on: device, command: "pause") }
-                        Button("Match position on \(device.name)") { model.controlPlayback(on: device, command: "seek") }
-                        Button("Stop \(device.name)", role: .destructive) { model.controlPlayback(on: device, command: "stop") }
+                        Button("Play a copy on \(device.name)") { model.playCopy(to: device) }
+                        Button("Play \(device.name)") { model.controlPlayback(on: device, command: .play) }
+                        Button("Pause \(device.name)") { model.controlPlayback(on: device, command: .pause) }
+                        Button("Match position on \(device.name)") { model.controlPlayback(on: device, command: .seek) }
+                        Button("Stop \(device.name)", role: .destructive) { model.controlPlayback(on: device, command: .stop) }
                     }
                 } label: { Label(rivuneLocalized("Play on another device"), systemImage: "airplayvideo") }
                 .rivuneGlassButton()
@@ -338,7 +340,7 @@ struct RivuneMediaDetailView: View {
 
     private func actionRow(_ detail: RivuneMediaDetail) -> some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 240), spacing: 10)], alignment: .leading, spacing: 10) {
-            if detail.target.mediaType != "series", !model.automaticallyShowStreams {
+            if detail.target.mediaType != "series" {
                 Button(action: model.loadPlaybackSources) {
                     Label(rivuneLocalized(detail.progress?.positionSeconds ?? 0 > 0 ? "Resume" : "Play"), systemImage: "play.fill")
                         .foregroundStyle(.primary)
@@ -355,6 +357,16 @@ struct RivuneMediaDetailView: View {
                         .frame(maxWidth: .infinity, minHeight: 22, alignment: .center)
                 }.rivuneGlassButton()
             }
+            Button(action: model.addCurrentMediaToQueue) {
+                Label("Add to queue", systemImage: "text.badge.plus")
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, minHeight: 22)
+            }.rivuneGlassButton()
+            Button(action: model.followCurrentMediaNotifications) {
+                Label("Follow releases", systemImage: "bell.badge")
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, minHeight: 22)
+            }.rivuneGlassButton()
             Button(action: model.toggleWatched) {
                 let watched = detail.target.mediaType == "series"
                     ? model.seriesEpisodesWatched == true
@@ -986,19 +998,76 @@ struct RivuneInternalPlayerView: View {
     let presentation: RivunePlaybackPresentation
     @ObservedObject var model: RivuneAppModel
 
-    @ViewBuilder var body: some View {
+    var body: some View {
         let active = model.playbackPresentation.flatMap { $0.id == presentation.id ? $0 : nil } ?? presentation
-        if active.engine == .mpv {
-            RivuneMPVInternalPlayerView(presentation: active, model: model)
-        } else {
-            RivuneNativeInternalPlayerView(presentation: active, model: model)
+        ZStack(alignment: .top) {
+            Group {
+                if active.engine == .mpv {
+                    RivuneMPVInternalPlayerView(presentation: active, model: model)
+                } else {
+                    RivuneNativeInternalPlayerView(presentation: active, model: model)
+                }
+            }
+            if model.playbackFailoverLoading || model.playbackFailoverNotice != nil {
+                RivunePlaybackFailoverStatusView(model: model)
+                    .padding(.top, 24)
+                    .zIndex(50)
+            }
         }
     }
+}
+
+private struct RivunePlaybackFailoverStatusView: View {
+    @ObservedObject var model: RivuneAppModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if model.playbackFailoverLoading { ProgressView() }
+            Image(systemName: model.playbackFailoverLoading ? "arrow.triangle.2.circlepath" : "checkmark.circle.fill")
+            Text(model.playbackFailoverNotice ?? "Trying another source…")
+                .font(.callout.weight(.semibold))
+            if !model.playbackFailoverLoading {
+                Button("Dismiss", action: model.dismissPlaybackFailoverNotice)
+                    .accessibilityLabel("Dismiss playback source status")
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(.regularMaterial, in: Capsule())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(model.playbackFailoverNotice ?? "Trying another playback source")
+        .onChange(of: model.playbackFailoverNotice) { notice in
+            if let notice { rivuneAnnouncePlaybackStatus(notice) }
+        }
+        .modifier(RivuneAssertiveLiveRegionModifier())
+    }
+}
+
+private struct RivuneAssertiveLiveRegionModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        content.accessibilityAddTraits(.updatesFrequently)
+    }
+}
+
+private func rivuneAnnouncePlaybackStatus(_ message: String) {
+    #if canImport(UIKit)
+    UIAccessibility.post(notification: .announcement, argument: message)
+    #elseif canImport(AppKit)
+    NSAccessibility.post(
+        element: NSApplication.shared,
+        notification: .announcementRequested,
+        userInfo: [
+            .announcement: message,
+            .priority: NSAccessibilityPriorityLevel.high.rawValue,
+        ])
+    #endif
 }
 
 private struct RivunePlayerChrome<Options: View>: View {
     let title: String
     let badge: String?
+    let reasonText: String?
     let playing: Bool
     @Binding private var position: Double
     let duration: Double
@@ -1014,6 +1083,7 @@ private struct RivunePlayerChrome<Options: View>: View {
     init(
         title: String,
         badge: String? = nil,
+        reasonText: String? = nil,
         playing: Bool,
         position: Binding<Double>,
         duration: Double,
@@ -1028,6 +1098,7 @@ private struct RivunePlayerChrome<Options: View>: View {
     ) {
         self.title = title
         self.badge = badge
+        self.reasonText = reasonText
         self.playing = playing
         _position = position
         self.duration = duration
@@ -1041,13 +1112,25 @@ private struct RivunePlayerChrome<Options: View>: View {
         self.options = options()
     }
 
+    @ViewBuilder
     var body: some View {
+#if os(iOS)
+        iOSChrome
+#else
+        legacyChrome
+#endif
+    }
+
+    private var legacyChrome: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 playerButton(systemImage: "xmark", label: "Close player", action: close)
-                Text(title)
-                    .font(.headline)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.headline).lineLimit(1)
+                    if let reasonText {
+                        Text(reasonText).font(.caption).foregroundStyle(Color.white.opacity(0.78)).lineLimit(2)
+                    }
+                }
                 if let badge {
                     Text(badge)
                         .font(.caption2.weight(.bold))
@@ -1116,6 +1199,101 @@ private struct RivunePlayerChrome<Options: View>: View {
         }
     }
 
+#if os(iOS)
+    private var iOSChrome: some View {
+        GeometryReader { proxy in
+            let compactHeight = proxy.size.height < 430
+            VStack(spacing: 0) {
+                HStack(spacing: 12) {
+                    iOSIconButton(systemImage: "xmark", label: "Close player", action: close)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title)
+                            .font(.headline)
+                            .foregroundStyle(RivuneIOSTheme.primaryText)
+                            .lineLimit(1)
+                        if let badge {
+                            Text(badge)
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(RivuneIOSTheme.secondaryText)
+                        }
+                        if let reasonText {
+                            Text(reasonText)
+                                .font(.caption)
+                                .foregroundStyle(RivuneIOSTheme.secondaryText)
+                                .lineLimit(2)
+                        }
+                    }
+                    Spacer(minLength: 12)
+                    iOSIconButton(systemImage: "pip.enter", label: "Mini player", action: minimize)
+                }
+                .padding(.horizontal, compactHeight ? 14 : 20)
+                .padding(.top, compactHeight ? 8 : 14)
+
+                Spacer(minLength: 6)
+
+                HStack(spacing: compactHeight ? 14 : 22) {
+                    iOSTransportButton(systemImage: "gobackward.10", label: "Back 10 seconds", action: seekBackward)
+                    Button(action: togglePlayback) {
+                        Image(systemName: playing ? "pause.fill" : "play.fill")
+                            .font(.system(size: compactHeight ? 25 : 30, weight: .bold))
+                            .foregroundStyle(Color.black.opacity(0.86))
+                            .frame(width: compactHeight ? 58 : 70, height: compactHeight ? 58 : 70)
+                            .background(RivuneIOSTheme.primaryText, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(rivuneLocalized(playing ? "Pause" : "Play"))
+                    iOSTransportButton(systemImage: "goforward.10", label: "Forward 10 seconds", action: seekForward)
+                    if let nextEpisode {
+                        iOSTransportButton(systemImage: "forward.end.fill", label: "Next episode", action: nextEpisode)
+                    }
+                }
+
+                Spacer(minLength: 6)
+
+                VStack(spacing: compactHeight ? 6 : 10) {
+                    Slider(value: $position, in: 0...max(duration, 1), onEditingChanged: scrubbingChanged)
+                        .tint(RivuneIOSTheme.ember)
+                    HStack {
+                        Text(formatTime(position))
+                        Spacer()
+                        Text("−\(formatTime(max(duration - position, 0)))")
+                    }
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(RivuneIOSTheme.secondaryText)
+                    HStack(spacing: 8) { options }
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .padding(.horizontal, compactHeight ? 16 : 22)
+                .padding(.bottom, compactHeight ? 8 : 16)
+            }
+        }
+    }
+
+    private func iOSIconButton(systemImage: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.headline)
+                .frame(width: 48, height: 48)
+        }
+        .rivuneIOSIconButton()
+        .accessibilityLabel(rivuneLocalized(label))
+    }
+
+    private func iOSTransportButton(systemImage: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 23, weight: .semibold))
+                .foregroundStyle(RivuneIOSTheme.primaryText)
+                .frame(width: 48, height: 48)
+                .background(Color.black.opacity(0.44), in: Circle())
+                .overlay { Circle().stroke(Color.white.opacity(0.18), lineWidth: 1) }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(rivuneLocalized(label))
+    }
+#endif
+
     private func playerButton(systemImage: String, label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
@@ -1150,7 +1328,17 @@ private struct RivunePlayerChrome<Options: View>: View {
 private struct RivunePlayerOptionControlModifier: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
-#if os(macOS)
+#if os(iOS)
+        content
+            .buttonStyle(.plain)
+            .foregroundStyle(RivuneIOSTheme.primaryText)
+            .frame(width: 48, height: 44)
+            .background(Color.black.opacity(0.44), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
+            }
+#elseif os(macOS)
         content
             .buttonStyle(.plain)
             .frame(width: 36, height: 30)
@@ -1168,7 +1356,11 @@ private struct RivunePlayerOptionControlModifier: ViewModifier {
 private struct RivuneMiniPlayerControlModifier: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
-#if os(macOS)
+#if os(iOS)
+        content
+            .buttonStyle(.plain)
+            .foregroundStyle(RivuneIOSTheme.primaryText)
+#elseif os(macOS)
         content.rivuneGlassButton()
 #else
         content.buttonStyle(.plain)
@@ -1179,7 +1371,11 @@ private struct RivuneMiniPlayerControlModifier: ViewModifier {
 private struct RivunePlayerActionButtonModifier: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
-#if os(macOS)
+#if os(iOS)
+        content
+            .rivuneGlassButton(prominent: true)
+            .tint(RivuneIOSTheme.ember)
+#elseif os(macOS)
         content.rivuneGlassButton()
 #else
         content.rivuneGlassButton(prominent: true)
@@ -1190,7 +1386,9 @@ private struct RivunePlayerActionButtonModifier: ViewModifier {
 private struct RivunePlayerOptionsContainerModifier: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
-#if os(macOS)
+#if os(iOS)
+        content
+#elseif os(macOS)
         content
 #else
         content.rivuneGlassButton()
@@ -1242,7 +1440,8 @@ private struct RivuneNativeInternalPlayerView: View {
     init(presentation: RivunePlaybackPresentation, model: RivuneAppModel) {
         self.presentation = presentation
         self.model = model
-        _sessionAspect = State(initialValue: model.videoAspect)
+        _sessionAspect = State(initialValue: presentation.videoAspect)
+        _playbackSpeed = State(initialValue: presentation.playbackSpeed)
     }
     private let playerTimer = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
 
@@ -1270,6 +1469,7 @@ private struct RivuneNativeInternalPlayerView: View {
                 .ignoresSafeArea()
                 RivunePlayerChrome(
                     title: activePresentation.title,
+                    reasonText: activePresentation.playbackDecisionSummary,
                     playing: playing,
                     position: Binding(get: { position }, set: { position = $0 }),
                     duration: duration,
@@ -1282,11 +1482,7 @@ private struct RivuneNativeInternalPlayerView: View {
                     scrubbingChanged: { editing in
                         scrubbing = editing
                         if !editing {
-                            player.seek(
-                                to: CMTime(seconds: position, preferredTimescale: 600),
-                                toleranceBefore: .zero,
-                                toleranceAfter: .zero
-                            )
+                            seekPlayer(to: position, precise: true)
                             scheduleControlsHide()
                         }
                     }
@@ -1395,7 +1591,7 @@ private struct RivuneNativeInternalPlayerView: View {
                     }
                     .disabled(model.playbackOptionLoading)
                 }
-                .transition(.opacity)
+                .rivuneTransition(.opacity)
             }
             if let marker = activeMarker {
                 Button { skip(marker) } label: {
@@ -1404,8 +1600,9 @@ private struct RivuneNativeInternalPlayerView: View {
                         .padding(.horizontal, 8)
                 }
                 .rivunePlayerActionButton()
-                .padding(24)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(.horizontal, 22)
+                .padding(.bottom, 132)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             }
             if let failureMessage {
                 RivunePlaybackFailureView(
@@ -1415,12 +1612,14 @@ private struct RivuneNativeInternalPlayerView: View {
                 )
             }
         }
-        .animation(.easeOut(duration: 0.18), value: controlsVisible)
-        .task(id: "\(activePresentation.url.absoluteString)|\(loadAttempt)") {
+        .rivuneAnimation(.easeOut(duration: 0.18), value: controlsVisible)
+        .task(id: "\(activePresentation.url.absoluteString)|\(activePresentation.startSeconds)|\(activePresentation.timelineStartSeconds)|\(activePresentation.mediaTimeline?.rawValue ?? "unknown")|\(loadAttempt)") {
             let current = activePresentation
             failureMessage = nil
             activatePlaybackAudioSession()
             let wasPlaying = player.timeControlStatus == .playing || player.currentItem == nil
+            player.appliesMediaSelectionCriteriaAutomatically =
+                model.accessibilityPreferences?.captions == .system
             let item = AVPlayerItem(url: current.url)
             audioGroup = nil
             subtitleGroup = nil
@@ -1428,11 +1627,12 @@ private struct RivuneNativeInternalPlayerView: View {
             subtitleOptions = []
             item.preferredPeakBitRate = preferredPeakBitRate
             player.replaceCurrentItem(with: item)
-            if current.startSeconds > 0 {
-                await player.seek(to: CMTime(seconds: Double(current.startSeconds), preferredTimescale: 600))
+            let mediaStartSeconds = current.mediaPlaybackPosition(absoluteSeconds: Double(current.startSeconds))
+            if mediaStartSeconds > 0 {
+                await player.seek(to: CMTime(seconds: mediaStartSeconds, preferredTimescale: 600))
             }
-            position = Double(current.startSeconds)
-            duration = Double(current.durationSeconds ?? 0)
+            position = current.absolutePlaybackPosition(mediaSeconds: mediaStartSeconds)
+            duration = current.resolvedPlaybackDuration(mediaDurationSeconds: 0)
             if wasPlaying { player.playImmediately(atRate: Float(playbackSpeed)) }
             playing = wasPlaying
             applyRoomState()
@@ -1444,9 +1644,12 @@ private struct RivuneNativeInternalPlayerView: View {
             audioOptions = loadedAudioGroup?.options ?? []
             subtitleGroup = loadedSubtitleGroup
             subtitleOptions = loadedSubtitleGroup?.options ?? []
+            applyAccessibilityMediaSelection()
         }
         .onReceive(playerTimer) { _ in updatePlaybackState() }
         .onChange(of: playing) { _ in model.updateCoordinationPlayback(position: position, duration: duration, playing: playing) }
+        .onChange(of: sessionAspect) { value in model.updatePlaybackSession(videoAspect: value) }
+        .onChange(of: playbackSpeed) { value in model.updatePlaybackSession(playbackSpeed: value) }
         .onChange(of: model.pendingPlaybackCommands.first?.id) { _ in applyRemoteCommand() }
         .onChange(of: model.activePlaybackRoom?.version) { _ in applyRoomState() }
         .onDisappear { controlsTask?.cancel(); if !finished && !handoffToMPV { finish(completed: false) } }
@@ -1458,12 +1661,9 @@ private struct RivuneNativeInternalPlayerView: View {
     }
 
     private var preferredPeakBitRate: Double {
-        switch model.playbackQuality {
-        case .automatic: return 0
-        case .economy: return 2_000_000
-        case .balanced: return 8_000_000
-        case .maximum: return 30_000_000
-        }
+        let limit = RivuneNetworkQualityPolicy.limit(
+            quality: model.playbackQuality, networkClass: model.networkClass)
+        return limit.maximumVideoBitrateKbps.map { Double($0) * 1_000 } ?? 0
     }
 
     private func updatePlaybackState() {
@@ -1471,28 +1671,49 @@ private struct RivuneNativeInternalPlayerView: View {
             handlePlaybackFailure(item.error ?? player.error)
             return
         }
-        let seconds = player.currentTime().seconds
-        if seconds.isFinite, !scrubbing { position = max(seconds, 0) }
-        let observedDuration = player.currentItem?.duration.seconds ?? .nan
-        let itemDuration = observedDuration.isFinite && observedDuration > 0 ? observedDuration : Double(activePresentation.durationSeconds ?? 0)
-        if itemDuration > 0 { duration = itemDuration }
+        if !scrubbing { position = currentAbsolutePosition }
+        let observedDuration = currentAbsoluteDuration
+        if observedDuration > 0 { duration = observedDuration }
         playing = player.timeControlStatus == .playing
+        if playing { model.markPlaybackFirstFrame(presentationID: activePresentation.id) }
         model.updateCoordinationPlayback(position: position, duration: duration, playing: playing)
-        updateMarker(at: seconds)
+        updateMarker(at: position)
+    }
+
+    private var currentAbsolutePosition: Double {
+        let mediaSeconds = player.currentTime().seconds
+        return mediaSeconds.isFinite ? activePresentation.absolutePlaybackPosition(mediaSeconds: mediaSeconds) : position
+    }
+
+    private var currentAbsoluteDuration: Double {
+        activePresentation.resolvedPlaybackDuration(mediaDurationSeconds: player.currentItem?.duration.seconds ?? .nan)
+    }
+
+    private func seekPlayer(to absoluteSeconds: Double, precise: Bool = false) {
+        let mediaSeconds = activePresentation.mediaPlaybackPosition(absoluteSeconds: absoluteSeconds)
+        let target = CMTime(seconds: mediaSeconds, preferredTimescale: 600)
+        if precise { player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) }
+        else { player.seek(to: target) }
     }
     private func handlePlaybackFailure(_ error: Error?) {
         guard failureMessage == nil, !handoffToMPV, !finished else { return }
         model.recordPlaybackFailure()
-        let detail = error?.localizedDescription
-            ?? player.currentItem?.errorLog()?.events.last?.errorComment
-            ?? "The media format or server response was rejected"
+        if model.attemptPlaybackFailover(
+            error: .sourceFailed, position: Int(position), duration: max(Int(duration), Int(position)))
+        {
+            player.pause()
+            playing = false
+            controlsVisible = true
+            return
+        }
         if activePresentation.fallbackAllowed {
             handoffToMPV = true
             player.pause()
+
             player.replaceCurrentItem(with: nil)
             model.fallbackPlaybackToMPV(position: Int(position), duration: max(Int(duration), Int(position)))
         } else {
-            failureMessage = rivuneLocalizedFormat("Apple player could not play this stream: %@. Choose MPV under Settings > Player for broader format support.", detail)
+            failureMessage = "This source could not be played. Try another source or choose MPV in Player settings."
             player.pause()
             playing = false
             controlsVisible = true
@@ -1500,6 +1721,28 @@ private struct RivuneNativeInternalPlayerView: View {
     }
 
 
+    private func applyAccessibilityMediaSelection() {
+        guard let preferences = model.accessibilityPreferences else { return }
+        if preferences.audioDescription, let audioGroup,
+            let described = audioOptions.first(where: {
+                $0.hasMediaCharacteristic(.describesVideoForAccessibility)
+            })
+        {
+            player.currentItem?.select(described, in: audioGroup)
+        }
+        guard let subtitleGroup else { return }
+        switch preferences.captions {
+        case .system:
+            break
+        case .on:
+            let caption = subtitleOptions.first(where: {
+                $0.hasMediaCharacteristic(.transcribesSpokenDialogForAccessibility)
+            }) ?? subtitleOptions.first
+            player.currentItem?.select(caption, in: subtitleGroup)
+        case .off:
+            player.currentItem?.select(nil, in: subtitleGroup)
+        }
+    }
     private func select(_ option: AVMediaSelectionOption?, in group: AVMediaSelectionGroup?) {
         guard let group else { return }
         player.currentItem?.select(option, in: group)
@@ -1523,9 +1766,8 @@ private struct RivuneNativeInternalPlayerView: View {
         guard !finished else { return }
         finished = true
         controlsTask?.cancel()
-        let rawDuration = player.currentItem?.duration.seconds ?? Double(activePresentation.durationSeconds ?? 0)
-        let finalDuration = Int(rawDuration.isFinite ? rawDuration : Double(activePresentation.durationSeconds ?? 0))
-        let finalPosition = Int(player.currentTime().seconds.isFinite ? player.currentTime().seconds : position)
+        let finalPosition = Int(currentAbsolutePosition)
+        let finalDuration = Int(currentAbsoluteDuration)
         player.pause()
         model.minimizePlayback(position: finalPosition, duration: max(finalDuration, finalPosition))
     }
@@ -1600,11 +1842,11 @@ private struct RivuneNativeInternalPlayerView: View {
     private func applyRemoteCommand() {
         guard let command = model.pendingPlaybackCommands.first else { return }
         switch command.command {
-        case "play": player.playImmediately(atRate: Float(playbackSpeed))
-        case "pause": player.pause()
-        case "seek": if let milliseconds = command.positionMilliseconds { player.seek(to: CMTime(seconds: Double(milliseconds) / 1_000, preferredTimescale: 600)) }
-        case "stop": finish(completed: false)
-        default: break
+        case .play: player.playImmediately(atRate: Float(playbackSpeed))
+        case .pause: player.pause()
+        case .seek: if let milliseconds = command.positionMilliseconds { seekPlayer(to: Double(milliseconds) / 1_000) }
+        case .stop: finish(completed: false)
+        case .load: break
         }
         model.consumePlaybackCommand()
     }
@@ -1613,7 +1855,7 @@ private struct RivuneNativeInternalPlayerView: View {
         guard let room = model.activePlaybackRoom,
               !room.currentMemberIsHost else { return }
         let target = Double(room.positionMilliseconds) / 1_000
-        if abs(position - target) > 1.5 { player.seek(to: CMTime(seconds: target, preferredTimescale: 600)) }
+        if abs(position - target) > 1.5 { seekPlayer(to: target) }
         switch room.state {
         case "playing": player.playImmediately(atRate: Float(playbackSpeed)); playing = true
         case "paused": player.pause(); playing = false
@@ -1625,7 +1867,7 @@ private struct RivuneNativeInternalPlayerView: View {
     private func seek(by offset: Double) {
         let destination = min(max(position + offset, 0), max(duration, 0))
         position = destination
-        player.seek(to: CMTime(seconds: destination, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        seekPlayer(to: destination, precise: true)
         scheduleControlsHide()
     }
 
@@ -1649,7 +1891,7 @@ private struct RivuneNativeInternalPlayerView: View {
     private func skip(_ marker: PlaybackMarker) {
         consumedMarkers.insert(markerKey(marker))
         activeMarker = nil
-        player.seek(to: CMTime(seconds: marker.endSeconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        seekPlayer(to: marker.endSeconds, precise: true)
     }
 
     private func shouldAutoSkip(_ type: PlaybackMarkerType) -> Bool {
@@ -1671,9 +1913,8 @@ private struct RivuneNativeInternalPlayerView: View {
         guard !finished, activePresentation.nextEpisode != nil else { return }
         finished = true
         controlsTask?.cancel()
-        let rawDuration = player.currentItem?.duration.seconds ?? Double(activePresentation.durationSeconds ?? 0)
-        let finalDuration = Int(rawDuration.isFinite ? rawDuration : Double(activePresentation.durationSeconds ?? 0))
-        let finalPosition = Int(player.currentTime().seconds.isFinite ? player.currentTime().seconds : position)
+        let finalPosition = Int(currentAbsolutePosition)
+        let finalDuration = Int(currentAbsoluteDuration)
         player.pause()
         model.playNextEpisode(position: finalPosition, duration: max(finalDuration, finalPosition))
     }
@@ -1682,9 +1923,8 @@ private struct RivuneNativeInternalPlayerView: View {
         guard !finished else { return }
         finished = true
         controlsTask?.cancel()
-        let rawDuration = player.currentItem?.duration.seconds ?? Double(activePresentation.durationSeconds ?? 0)
-        let finalDuration = Int(rawDuration.isFinite ? rawDuration : Double(activePresentation.durationSeconds ?? 0))
-        let finalPosition = Int(player.currentTime().seconds.isFinite ? player.currentTime().seconds : position)
+        let finalPosition = Int(currentAbsolutePosition)
+        let finalDuration = Int(currentAbsoluteDuration)
         player.pause()
         model.playbackFinished(position: finalPosition, duration: max(finalDuration, finalPosition), completed: completed)
     }
@@ -1711,7 +1951,8 @@ private struct RivuneMPVInternalPlayerView: View {
     init(presentation: RivunePlaybackPresentation, model: RivuneAppModel) {
         self.presentation = presentation
         self.model = model
-        _sessionAspect = State(initialValue: model.videoAspect)
+        _sessionAspect = State(initialValue: presentation.videoAspect)
+        _playbackSpeed = State(initialValue: presentation.playbackSpeed)
         _selectedAudioTrack = State(initialValue: presentation.selectedAudioTrack)
         _selectedSubtitleId = State(initialValue: presentation.selectedSubtitleId)
     }
@@ -1721,7 +1962,7 @@ private struct RivuneMPVInternalPlayerView: View {
     }
 
     private var loadIdentifier: String {
-        "\(activePresentation.url.absoluteString)|\(activePresentation.startSeconds)|\(loadAttempt)"
+        "\(activePresentation.url.absoluteString)|\(activePresentation.startSeconds)|\(activePresentation.timelineStartSeconds)|\(activePresentation.mediaTimeline?.rawValue ?? "unknown")|\(loadAttempt)"
     }
 
     var body: some View {
@@ -1744,6 +1985,7 @@ private struct RivuneMPVInternalPlayerView: View {
                 RivunePlayerChrome(
                     title: activePresentation.title,
                     badge: "MPV",
+                    reasonText: activePresentation.playbackDecisionSummary,
                     playing: player.playing,
                     position: Binding(
                         get: { player.position },
@@ -1853,7 +2095,7 @@ private struct RivuneMPVInternalPlayerView: View {
 #endif
                     }
                 }
-                .transition(.opacity)
+                .rivuneTransition(.opacity)
             }
             if player.buffering && failureMessage == nil {
                 ProgressView("Buffering…").padding(18).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
@@ -1865,8 +2107,9 @@ private struct RivuneMPVInternalPlayerView: View {
                         .padding(.horizontal, 8)
                 }
                 .rivunePlayerActionButton()
-                .padding(24)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(.horizontal, 22)
+                .padding(.bottom, 132)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             }
             if let failureMessage {
                 RivunePlaybackFailureView(
@@ -1876,7 +2119,7 @@ private struct RivuneMPVInternalPlayerView: View {
                 )
             }
         }
-        .animation(.easeOut(duration: 0.18), value: controlsVisible)
+        .rivuneAnimation(.easeOut(duration: 0.18), value: controlsVisible)
         .task(id: loadIdentifier) {
             activatePlaybackAudioSession()
             failureMessage = nil
@@ -1885,6 +2128,8 @@ private struct RivuneMPVInternalPlayerView: View {
             player.load(
                 url: activePresentation.url,
                 startSeconds: activePresentation.startSeconds,
+                timelineOffsetSeconds: activePresentation.timelineOffsetSeconds,
+                durationSeconds: activePresentation.durationSeconds,
                 selectedAudioTrack: selectedAudioTrack,
                 selectedSubtitleURL: selectedSubtitle().flatMap(subtitleURL)
             )
@@ -1897,8 +2142,22 @@ private struct RivuneMPVInternalPlayerView: View {
             updateMarker(at: value)
             model.updateCoordinationPlayback(position: value, duration: player.duration, playing: player.playing)
         }
-        .onReceive(player.$playing) { active in model.updateCoordinationPlayback(position: player.position, duration: player.duration, playing: active) }
-        .onReceive(player.$failureMessage.compactMap { $0 }) { failureMessage = $0; controlsVisible = true; model.recordPlaybackFailure() }
+        .onReceive(player.$playing) { active in
+            model.updateCoordinationPlayback(position: player.position, duration: player.duration, playing: active)
+            if active { model.markPlaybackFirstFrame(presentationID: activePresentation.id) }
+        }
+        .onChange(of: sessionAspect) { value in model.updatePlaybackSession(videoAspect: value) }
+        .onChange(of: playbackSpeed) { value in model.updatePlaybackSession(playbackSpeed: value) }
+        .onReceive(player.$failureMessage.compactMap { $0 }) { message in
+            controlsVisible = true
+            model.recordPlaybackFailure()
+            if !model.attemptPlaybackFailover(
+                error: .sourceFailed, position: Int(player.position),
+                duration: max(Int(player.duration), Int(player.position)))
+            {
+                failureMessage = "This source could not be played by MPV."
+            }
+        }
         .onChange(of: model.pendingPlaybackCommands.first?.id) { _ in applyRemoteCommand() }
         .onChange(of: model.activePlaybackRoom?.version) { _ in applyRoomState() }
         .onReceive(player.$ended.filter { $0 }) { _ in
@@ -1973,11 +2232,11 @@ private struct RivuneMPVInternalPlayerView: View {
     private func applyRemoteCommand() {
         guard let command = model.pendingPlaybackCommands.first else { return }
         switch command.command {
-        case "play": player.play()
-        case "pause": player.pause()
-        case "seek": if let milliseconds = command.positionMilliseconds { player.seek(to: Double(milliseconds) / 1_000) }
-        case "stop": finish(completed: false)
-        default: break
+        case .play: player.play()
+        case .pause: player.pause()
+        case .seek: if let milliseconds = command.positionMilliseconds { player.seek(to: Double(milliseconds) / 1_000) }
+        case .stop: finish(completed: false)
+        case .load: break
         }
         model.consumePlaybackCommand()
     }
@@ -2117,12 +2376,19 @@ struct RivuneMiniPlayerView: View {
     let presentation: RivunePlaybackPresentation
     @ObservedObject var model: RivuneAppModel
 
-    @ViewBuilder var body: some View {
+    var body: some View {
         let active = model.minimizedPlaybackPresentation.flatMap { $0.id == presentation.id ? $0 : nil } ?? presentation
-        if active.engine == .mpv {
-            RivuneMPVMiniPlayerView(presentation: active, model: model)
-        } else {
-            RivuneNativeMiniPlayerView(presentation: active, model: model)
+        ZStack(alignment: .top) {
+            Group {
+                if active.engine == .mpv {
+                    RivuneMPVMiniPlayerView(presentation: active, model: model)
+                } else {
+                    RivuneNativeMiniPlayerView(presentation: active, model: model)
+                }
+            }
+            if model.playbackFailoverLoading || model.playbackFailoverNotice != nil {
+                RivunePlaybackFailoverStatusView(model: model).scaleEffect(0.82)
+            }
         }
     }
 }
@@ -2140,10 +2406,14 @@ private struct RivuneNativeMiniPlayerView: View {
     @State private var loadAttempt = 0
     private let timer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
+    private var loadIdentifier: String {
+        "\(presentation.url.absoluteString)|\(presentation.startSeconds)|\(presentation.timelineStartSeconds)|\(presentation.mediaTimeline?.rawValue ?? "unknown")|\(loadAttempt)"
+    }
+
     var body: some View {
         ZStack {
             Color.black
-            RivuneNativePlayer(player: player, aspect: model.videoAspect, frameRateMatching: model.frameRateMatching)
+            RivuneNativePlayer(player: player, aspect: presentation.videoAspect, frameRateMatching: model.frameRateMatching)
             LinearGradient(colors: [.black.opacity(0.58), .clear, .black.opacity(0.78)], startPoint: .top, endPoint: .bottom)
             VStack {
                 HStack {
@@ -2182,17 +2452,18 @@ private struct RivuneNativeMiniPlayerView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.white.opacity(0.18), lineWidth: 1) }
         .shadow(color: .black.opacity(0.55), radius: 18, y: 8)
-        .task(id: loadAttempt) {
+        .task(id: loadIdentifier) {
             activatePlaybackAudioSession()
             failureMessage = nil
             let item = AVPlayerItem(url: presentation.url)
             player.replaceCurrentItem(with: item)
-            if presentation.startSeconds > 0 {
-                await player.seek(to: CMTime(seconds: Double(presentation.startSeconds), preferredTimescale: 600))
+            let mediaStartSeconds = presentation.mediaPlaybackPosition(absoluteSeconds: Double(presentation.startSeconds))
+            if mediaStartSeconds > 0 {
+                await player.seek(to: CMTime(seconds: mediaStartSeconds, preferredTimescale: 600))
             }
-            position = Double(presentation.startSeconds)
-            duration = Double(presentation.durationSeconds ?? 0)
-            player.play()
+            position = presentation.absolutePlaybackPosition(mediaSeconds: mediaStartSeconds)
+            duration = presentation.resolvedPlaybackDuration(mediaDurationSeconds: 0)
+            player.playImmediately(atRate: Float(presentation.playbackSpeed))
             playing = true
             model.updateCoordinationPlayback(position: position, duration: duration, playing: playing)
             applyRoomState()
@@ -2203,11 +2474,12 @@ private struct RivuneNativeMiniPlayerView: View {
                 handlePlaybackFailure(item.error ?? player.error)
                 return
             }
-            let seconds = player.currentTime().seconds
-            if seconds.isFinite { position = max(seconds, 0) }
-            let observed = player.currentItem?.duration.seconds ?? .nan
-            if observed.isFinite && observed > 0 { duration = observed }
+            let mediaSeconds = player.currentTime().seconds
+            if mediaSeconds.isFinite { position = presentation.absolutePlaybackPosition(mediaSeconds: mediaSeconds) }
+            let observedDuration = presentation.resolvedPlaybackDuration(mediaDurationSeconds: player.currentItem?.duration.seconds ?? .nan)
+            if observedDuration > 0 { duration = observedDuration }
             playing = player.timeControlStatus == .playing
+            if playing { model.markPlaybackFirstFrame(presentationID: presentation.id) }
             model.updateCoordinationPlayback(position: position, duration: duration, playing: playing)
         }
         .onChange(of: model.pendingPlaybackCommands.first?.id) { _ in applyRemoteCommand() }
@@ -2225,37 +2497,42 @@ private struct RivuneNativeMiniPlayerView: View {
     private func handlePlaybackFailure(_ error: Error?) {
         guard failureMessage == nil, !handoff, !finished else { return }
         model.recordPlaybackFailure()
-        let detail = error?.localizedDescription ?? "The media format or server response was rejected"
+        if model.attemptPlaybackFailover(
+            error: .sourceFailed, position: Int(position), duration: max(Int(duration), Int(position)),
+            minimized: true)
+        {
+            player.pause()
+            playing = false
+            return
+        }
         if presentation.fallbackAllowed {
             handoff = true
             player.pause()
             player.replaceCurrentItem(with: nil)
             model.fallbackMinimizedPlaybackToMPV(position: Int(position), duration: max(Int(duration), Int(position)))
         } else {
-            failureMessage = rivuneLocalizedFormat("Apple player: %@", detail)
+            failureMessage = "This source could not be played."
             player.pause()
             playing = false
         }
     }
 
     private func togglePlayback() {
-        if playing { player.pause() } else { player.play() }
+        if playing { player.pause() } else { player.playImmediately(atRate: Float(presentation.playbackSpeed)) }
         playing.toggle()
     }
 
     private func applyRemoteCommand() {
         guard let command = model.pendingPlaybackCommands.first else { return }
         switch command.command {
-        case "play": player.play(); playing = true
-        case "pause": player.pause(); playing = false
-        case "seek":
+        case .play: player.play(); playing = true
+        case .pause: player.pause(); playing = false
+        case .seek:
             if let milliseconds = command.positionMilliseconds {
-                let target = Double(milliseconds) / 1_000
-                player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
-                position = target
+                seekPlayer(to: Double(milliseconds) / 1_000)
             }
-        case "stop": finish(completed: false)
-        default: return
+        case .stop: finish(completed: false)
+        case .load: break
         }
         model.updateCoordinationPlayback(position: position, duration: duration, playing: playing)
         model.consumePlaybackCommand()
@@ -2265,7 +2542,7 @@ private struct RivuneNativeMiniPlayerView: View {
         guard let room = model.activePlaybackRoom, !room.currentMemberIsHost else { return }
         let target = Double(room.positionMilliseconds) / 1_000
         if abs(position - target) > 1.5 {
-            player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
+            seekPlayer(to: target)
             position = target
         }
         switch room.state {
@@ -2275,6 +2552,11 @@ private struct RivuneNativeMiniPlayerView: View {
         default: break
         }
         model.updateCoordinationPlayback(position: position, duration: duration, playing: playing)
+    }
+
+    private func seekPlayer(to absoluteSeconds: Double) {
+        let mediaSeconds = presentation.mediaPlaybackPosition(absoluteSeconds: absoluteSeconds)
+        player.seek(to: CMTime(seconds: mediaSeconds, preferredTimescale: 600))
     }
     private func playNextEpisode() {
         guard !finished, presentation.nextEpisode != nil else { return }
@@ -2310,7 +2592,7 @@ private struct RivuneMPVMiniPlayerView: View {
     var body: some View {
         ZStack {
             Color.black
-            RivuneMPVPlayerSurface(controller: player, aspect: model.videoAspect)
+            RivuneMPVPlayerSurface(controller: player, aspect: presentation.videoAspect)
             LinearGradient(colors: [.black.opacity(0.58), .clear, .black.opacity(0.78)], startPoint: .top, endPoint: .bottom)
             VStack {
                 HStack {
@@ -2357,10 +2639,13 @@ private struct RivuneMPVMiniPlayerView: View {
             player.load(
                 url: presentation.url,
                 startSeconds: presentation.startSeconds,
+                timelineOffsetSeconds: presentation.timelineOffsetSeconds,
+                durationSeconds: presentation.durationSeconds,
                 selectedAudioTrack: presentation.selectedAudioTrack,
                 selectedSubtitleURL: selectedSubtitle?.url.flatMap(model.resolvedResourceURL)
             )
-            player.setAspect(model.videoAspect)
+            player.setSpeed(presentation.playbackSpeed)
+            player.setAspect(presentation.videoAspect)
             applyRoomState()
             applyRemoteCommand()
         }
@@ -2369,10 +2654,19 @@ private struct RivuneMPVMiniPlayerView: View {
         }
         .onReceive(player.$playing) { active in
             model.updateCoordinationPlayback(position: player.position, duration: player.duration, playing: active)
+            if active { model.markPlaybackFirstFrame(presentationID: presentation.id) }
         }
         .onChange(of: model.pendingPlaybackCommands.first?.id) { _ in applyRemoteCommand() }
         .onChange(of: model.activePlaybackRoom?.version) { _ in applyRoomState() }
-        .onReceive(player.$failureMessage.compactMap { $0 }) { failureMessage = $0; model.recordPlaybackFailure() }
+        .onReceive(player.$failureMessage.compactMap { $0 }) { message in
+            model.recordPlaybackFailure()
+            if !model.attemptPlaybackFailover(
+                error: .sourceFailed, position: Int(player.position),
+                duration: max(Int(player.duration), Int(player.position)), minimized: true)
+            {
+                failureMessage = "This source could not be played by MPV."
+            }
+        }
         .onReceive(player.$ended.filter { $0 }) { _ in
             if presentation.nextEpisode != nil && model.autoplayNextEpisode { playNextEpisode() }
             else { finish(completed: true) }
@@ -2386,11 +2680,11 @@ private struct RivuneMPVMiniPlayerView: View {
     private func applyRemoteCommand() {
         guard let command = model.pendingPlaybackCommands.first else { return }
         switch command.command {
-        case "play": player.play()
-        case "pause": player.pause()
-        case "seek": if let milliseconds = command.positionMilliseconds { player.seek(to: Double(milliseconds) / 1_000) }
-        case "stop": finish(completed: false)
-        default: return
+        case .play: player.play()
+        case .pause: player.pause()
+        case .seek: if let milliseconds = command.positionMilliseconds { player.seek(to: Double(milliseconds) / 1_000) }
+        case .stop: finish(completed: false)
+        case .load: break
         }
         model.updateCoordinationPlayback(position: player.position, duration: player.duration, playing: player.playing)
         model.consumePlaybackCommand()
@@ -2433,6 +2727,7 @@ private struct RivuneMPVMiniPlayerView: View {
         model.minimizedPlaybackFinished(position: Int(player.position), duration: max(Int(player.duration), Int(player.position)), completed: completed)
     }
 }
+
 
 private func activatePlaybackAudioSession() {
 #if canImport(UIKit) && !os(macOS)
