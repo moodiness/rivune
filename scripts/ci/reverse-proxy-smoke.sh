@@ -129,7 +129,7 @@ start_nginx
 
 https_request --fail --silent --show-error \
   "https://localhost/.well-known/rivune" \
-  | docker run --rm -i "${PYTHON_IMAGE}" python -c 'import json,sys; value=json.load(sys.stdin); assert value["apiBaseUrl"] == "https://localhost/api/v1"; assert value["protocolVersion"] == 20; assert value["interfaceLanguage"] == "en"'
+  | docker run --rm -i "${PYTHON_IMAGE}" python -c 'import json,sys; value=json.load(sys.stdin); assert value["apiBaseUrl"] == "https://localhost/api/v1"; assert value["protocolVersion"] == 22; assert value["interfaceLanguage"] == "en"'
 
 https_request --fail --silent --show-error "https://localhost/health" \
   | docker run --rm -i "${PYTHON_IMAGE}" python -c 'import json,sys; value=json.load(sys.stdin); assert value["status"] == "ok"; assert value["database"] == "ok"'

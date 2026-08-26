@@ -3,6 +3,60 @@
 BACKUP_MANIFEST_MAX_BYTES=4096
 BACKUP_DEFAULT_MAX_BYTES=1099511627776
 
+# age is the only supported producer encryption format. Its streaming overhead is
+# bounded (one 16-byte tag per 64 KiB chunk, plus a deliberately generous header
+# allowance) separately from the decrypted PostgreSQL archive limit.
+backup_ciphertext_limit() {
+  local plaintext_limit chunks
+  plaintext_limit="$(backup_archive_limit)" || return
+  chunks="$(( (plaintext_limit + 65535) / 65536 ))"
+  printf '%s' "$(( plaintext_limit + chunks * 16 + 1048576 ))"
+}
+require_age() {
+  if ! command -v age >/dev/null 2>&1 || ! command -v age-keygen >/dev/null 2>&1; then
+    backup_error "age and age-keygen are required for encrypted PostgreSQL backups"
+    return
+  fi
+}
+
+require_age_recipient_file() {
+  local recipient_path="$1"
+  local archive_directory="$2"
+  local -a recipients
+  require_age || return
+  require_backup_key "${recipient_path}" "${archive_directory}" "age recipient" || return
+  SECURE_BACKUP_RECIPIENT_FILE="${SECURE_BACKUP_KEY_FILE}"
+  mapfile -t recipients < <(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' \
+    "${SECURE_BACKUP_RECIPIENT_FILE}")
+  if (( ${#recipients[@]} != 1 )) || [[ ! "${recipients[0]}" =~ ^age1[0-9a-z]+$ ]]; then
+    backup_error "Age recipient file must contain exactly one native age recipient"
+    return
+  fi
+  BACKUP_AGE_RECIPIENT="${recipients[0]}"
+  BACKUP_AGE_RECIPIENT_KEY_ID="$(printf '%s\n' "${BACKUP_AGE_RECIPIENT}" | openssl dgst -sha256 -r | cut -d ' ' -f 1)"
+}
+
+require_age_identity_file() {
+  local identity_path="$1"
+  local archive_directory="$2"
+  local derived_recipient
+  require_age || return
+  require_backup_key "${identity_path}" "${archive_directory}" "age identity" || return
+  SECURE_BACKUP_IDENTITY_FILE="${SECURE_BACKUP_KEY_FILE}"
+  exec 3< "${SECURE_BACKUP_IDENTITY_FILE}"
+  derived_recipient="$(age-keygen -y /dev/fd/3 2>/dev/null)" || {
+    exec 3<&-
+    backup_error "Age identity file is invalid"
+    return
+  }
+  exec 3<&-
+  if [[ ! "${derived_recipient}" =~ ^age1[0-9a-z]+$ ]]; then
+    backup_error "Age identity file is invalid"
+    return
+  fi
+  BACKUP_AGE_RECIPIENT_KEY_ID="$(printf '%s\n' "${derived_recipient}" | openssl dgst -sha256 -r | cut -d ' ' -f 1)"
+}
+
 backup_error() {
   printf '%s\n' "$1" >&2
   return 1
@@ -263,20 +317,38 @@ backup_private_key_id() {
 parse_authenticated_manifest() {
   local manifest_path="$1"
   local -a lines
+  local maximum
   mapfile -t lines < "${manifest_path}"
   MANIFEST_FORMAT=""
   MANIFEST_ARCHIVE_SIZE=""
+  MANIFEST_RECIPIENT_KEY_ID=""
 
-  if (( ${#lines[@]} == 9 )) && \
-     [[ "${lines[0]}" == 'format=rivune-backup-manifest-v2' ]] && \
+  if (( ${#lines[@]} == 10 )) && \
+     [[ "${lines[0]}" == 'format=rivune-backup-manifest-v3-age' ]] && \
      [[ "${lines[1]}" == lineage=* ]] && \
      [[ "${lines[2]}" == sequence=* ]] && \
      [[ "${lines[3]}" == backup_id=* ]] && \
      [[ "${lines[4]}" == created_at=* ]] && \
      [[ "${lines[5]}" == archive_name=* ]] && \
-     [[ "${lines[6]}" == archive_size=* ]] && \
-     [[ "${lines[7]}" == archive_sha256=* ]] && \
-     [[ "${lines[8]}" == signing_key_id=* ]]; then
+     [[ "${lines[6]}" == ciphertext_size=* ]] && \
+     [[ "${lines[7]}" == ciphertext_sha256=* ]] && \
+     [[ "${lines[8]}" == recipient_key_id=* ]] && \
+     [[ "${lines[9]}" == signing_key_id=* ]]; then
+    MANIFEST_FORMAT=v3-age
+    MANIFEST_ARCHIVE_SIZE="${lines[6]#ciphertext_size=}"
+    MANIFEST_ARCHIVE_SHA256="${lines[7]#ciphertext_sha256=}"
+    MANIFEST_RECIPIENT_KEY_ID="${lines[8]#recipient_key_id=}"
+    MANIFEST_SIGNING_KEY_ID="${lines[9]#signing_key_id=}"
+  elif (( ${#lines[@]} == 9 )) && \
+       [[ "${lines[0]}" == 'format=rivune-backup-manifest-v2' ]] && \
+       [[ "${lines[1]}" == lineage=* ]] && \
+       [[ "${lines[2]}" == sequence=* ]] && \
+       [[ "${lines[3]}" == backup_id=* ]] && \
+       [[ "${lines[4]}" == created_at=* ]] && \
+       [[ "${lines[5]}" == archive_name=* ]] && \
+       [[ "${lines[6]}" == archive_size=* ]] && \
+       [[ "${lines[7]}" == archive_sha256=* ]] && \
+       [[ "${lines[8]}" == signing_key_id=* ]]; then
     MANIFEST_FORMAT=v2
     MANIFEST_ARCHIVE_SIZE="${lines[6]#archive_size=}"
     MANIFEST_ARCHIVE_SHA256="${lines[7]#archive_sha256=}"
@@ -303,7 +375,6 @@ parse_authenticated_manifest() {
   MANIFEST_BACKUP_ID="${lines[3]#backup_id=}"
   MANIFEST_CREATED_AT="${lines[4]#created_at=}"
   MANIFEST_ARCHIVE_NAME="${lines[5]#archive_name=}"
-
   require_backup_token "${MANIFEST_LINEAGE}" "Backup lineage" || return
   if [[ ! "${MANIFEST_SEQUENCE}" =~ ^[1-9][0-9]{0,17}$ ]] || \
      [[ ! "${MANIFEST_BACKUP_ID}" =~ ^[0-9a-f]{32}$ ]] || \
@@ -315,8 +386,15 @@ parse_authenticated_manifest() {
     return
   fi
 
-  if [[ "${MANIFEST_FORMAT}" == v2 ]]; then
-    local maximum
+  if [[ "${MANIFEST_FORMAT}" == v3-age ]]; then
+    maximum="$(backup_ciphertext_limit)" || return
+    if [[ ! "${MANIFEST_ARCHIVE_SIZE}" =~ ^[1-9][0-9]{0,17}$ ]] || \
+       (( MANIFEST_ARCHIVE_SIZE > maximum )) || \
+       [[ ! "${MANIFEST_RECIPIENT_KEY_ID}" =~ ^[0-9a-f]{64}$ ]]; then
+      backup_error "Authenticated encrypted backup metadata is outside the configured safety limit"
+      return
+    fi
+  elif [[ "${MANIFEST_FORMAT}" == v2 ]]; then
     maximum="$(backup_archive_limit)" || return
     if [[ ! "${MANIFEST_ARCHIVE_SIZE}" =~ ^[1-9][0-9]{0,17}$ ]] || \
        (( MANIFEST_ARCHIVE_SIZE > maximum )); then
@@ -339,7 +417,7 @@ stage_authenticated_manifest() {
   AUTHENTICATED_BACKUP_FILE=""
   AUTHENTICATED_MANIFEST_FILE="$(mktemp "${staging_directory}/rivune-authenticated-manifest.XXXXXXXX")"
   AUTHENTICATED_SIGNATURE_FILE="$(mktemp "${staging_directory}/rivune-authenticated-signature.XXXXXXXX")"
-  chmod 600 -- "${AUTHENTICATED_MANIFEST_FILE}" "${AUTHENTICATED_SIGNATURE_FILE}"
+  chmod 600 "${AUTHENTICATED_MANIFEST_FILE}" "${AUTHENTICATED_SIGNATURE_FILE}"
   if ! stage_bounded_repository_file "${manifest_path}" \
        "${AUTHENTICATED_MANIFEST_FILE}" "${BACKUP_MANIFEST_MAX_BYTES}" || \
      ! stage_bounded_repository_file "${signature_path}" \
@@ -374,9 +452,34 @@ stage_authenticated_archive() {
   local archive_path="$1"
   local staging_directory archive_limit archive_digest
   staging_directory="$(backup_staging_directory)" || return
-  AUTHENTICATED_BACKUP_FILE="$(mktemp "${staging_directory}/rivune-authenticated-backup.XXXXXXXX.dump")"
-  chmod 600 -- "${AUTHENTICATED_BACKUP_FILE}"
 
+  if [[ "${MANIFEST_FORMAT}" == v3-age ]]; then
+    AUTHENTICATED_BACKUP_FILE=""
+    AUTHENTICATED_CIPHERTEXT_FILE="$(mktemp "${staging_directory}/rivune-authenticated-ciphertext.XXXXXXXX.age")"
+    chmod 600 "${AUTHENTICATED_CIPHERTEXT_FILE}"
+    if ! stage_repository_file_exact "${archive_path}" "${AUTHENTICATED_CIPHERTEXT_FILE}" \
+         "${MANIFEST_ARCHIVE_SIZE}"; then
+      cleanup_authenticated_backup
+      backup_error "Encrypted backup staging failed"
+      return
+    fi
+    archive_digest="$(openssl dgst -sha256 -r "${AUTHENTICATED_CIPHERTEXT_FILE}" | cut -d ' ' -f 1)"
+    if [[ "${archive_digest}" != "${MANIFEST_ARCHIVE_SHA256}" ]]; then
+      cleanup_authenticated_backup
+      backup_error "Encrypted backup authentication failed"
+      return
+    fi
+    if [[ "${BACKUP_AGE_RECIPIENT_KEY_ID:-}" != "${MANIFEST_RECIPIENT_KEY_ID}" ]]; then
+      cleanup_authenticated_backup
+      backup_error "Age identity does not match the signed backup recipient"
+      return
+    fi
+    return
+  fi
+
+  # Explicit legacy imports retain their historical private staging semantics.
+  AUTHENTICATED_BACKUP_FILE="$(mktemp "${staging_directory}/rivune-authenticated-legacy.XXXXXXXX.dump")"
+  chmod 600 "${AUTHENTICATED_BACKUP_FILE}"
   if [[ "${MANIFEST_FORMAT}" == v2 ]]; then
     if ! stage_repository_file_exact "${archive_path}" "${AUTHENTICATED_BACKUP_FILE}" \
          "${MANIFEST_ARCHIVE_SIZE}"; then
@@ -397,12 +500,51 @@ stage_authenticated_archive() {
       return
     fi
   fi
-
   archive_digest="$(openssl dgst -sha256 -r "${AUTHENTICATED_BACKUP_FILE}" | cut -d ' ' -f 1)"
   if [[ "${archive_digest}" != "${MANIFEST_ARCHIVE_SHA256}" ]]; then
     cleanup_authenticated_backup
     backup_error "Backup archive authentication failed"
     return
+  fi
+}
+
+stream_authenticated_backup() {
+  if [[ "${MANIFEST_FORMAT:-}" != v3-age ]]; then
+    cat -- "${AUTHENTICATED_BACKUP_FILE}"
+    return
+  fi
+  local plaintext_limit extra decrypt_status decrypt_pid
+  plaintext_limit="$(backup_archive_limit)" || return
+  exec 4< "${SECURE_BACKUP_IDENTITY_FILE}"
+  coproc BACKUP_DECRYPT {
+    age --decrypt --identity /dev/fd/4 "${AUTHENTICATED_CIPHERTEXT_FILE}"
+  }
+  decrypt_pid="${BACKUP_DECRYPT_PID}"
+  exec 5<&"${BACKUP_DECRYPT[0]}"
+  exec 4<&-
+  if ! dd bs=1048576 count="${plaintext_limit}" iflag=fullblock,count_bytes \
+       status=none <&5; then
+    exec 5<&-
+    kill "${decrypt_pid}" 2>/dev/null || true
+    wait "${decrypt_pid}" 2>/dev/null || true
+    return 1
+  fi
+  if IFS= read -r -n 1 extra <&5; then
+    exec 5<&-
+    kill "${decrypt_pid}" 2>/dev/null || true
+    wait "${decrypt_pid}" 2>/dev/null || true
+    backup_error "Decrypted backup exceeds the configured safety limit"
+    return 1
+  fi
+  exec 5<&-
+  if wait "${decrypt_pid}"; then
+    decrypt_status=0
+  else
+    decrypt_status=$?
+  fi
+  if (( decrypt_status != 0 )); then
+    backup_error "Encrypted backup decryption failed"
+    return 1
   fi
 }
 
@@ -423,7 +565,7 @@ stage_legacy_authenticated_backup() {
   AUTHENTICATED_BACKUP_FILE="$(mktemp "${staging_directory}/rivune-authenticated-backup.XXXXXXXX.dump")"
   AUTHENTICATED_MANIFEST_FILE=""
   AUTHENTICATED_SIGNATURE_FILE="$(mktemp "${staging_directory}/rivune-authenticated-signature.XXXXXXXX")"
-  chmod 600 -- "${AUTHENTICATED_BACKUP_FILE}" "${AUTHENTICATED_SIGNATURE_FILE}"
+  chmod 600 "${AUTHENTICATED_BACKUP_FILE}" "${AUTHENTICATED_SIGNATURE_FILE}"
   if ! stage_bounded_repository_file "${signature_path}" \
        "${AUTHENTICATED_SIGNATURE_FILE}" "${BACKUP_MANIFEST_MAX_BYTES}" || \
      ! reserve_and_stage_repository_file "${archive_path}" \
@@ -444,12 +586,14 @@ stage_legacy_authenticated_backup() {
 }
 
 cleanup_authenticated_backup() {
+  [[ -z "${AUTHENTICATED_CIPHERTEXT_FILE:-}" ]] || rm -f -- "${AUTHENTICATED_CIPHERTEXT_FILE}"
   [[ -z "${AUTHENTICATED_BACKUP_FILE:-}" ]] || rm -f -- "${AUTHENTICATED_BACKUP_FILE}"
   [[ -z "${AUTHENTICATED_MANIFEST_FILE:-}" ]] || rm -f -- "${AUTHENTICATED_MANIFEST_FILE}"
   [[ -z "${AUTHENTICATED_SIGNATURE_FILE:-}" ]] || rm -f -- "${AUTHENTICATED_SIGNATURE_FILE}"
   AUTHENTICATED_BACKUP_FILE=""
   AUTHENTICATED_MANIFEST_FILE=""
   AUTHENTICATED_SIGNATURE_FILE=""
+  AUTHENTICATED_CIPHERTEXT_FILE=""
 }
 
 require_backup_state_location() {
@@ -506,7 +650,7 @@ lock_backup_state() {
   umask 077
   if command -v flock >/dev/null 2>&1; then
     exec 9>> "${lock_file}"
-    chmod 600 -- "${lock_file}"
+    chmod 600 "${lock_file}"
     if [[ ! -f "${lock_file}" || "$(stat -c '%u' -- "${lock_file}")" != "$(id -u)" ]]; then
       exec 9>&-
       backup_error "Backup state lock is unsafe"
@@ -518,7 +662,7 @@ lock_backup_state() {
   fi
   if command -v lockf >/dev/null 2>&1; then
     exec 9>> "${lock_file}"
-    chmod 600 -- "${lock_file}"
+    chmod 600 "${lock_file}"
     if [[ ! -f "${lock_file}" || "$(stat -c '%u' -- "${lock_file}")" != "$(id -u)" ]]; then
       exec 9>&-
       backup_error "Backup state lock is unsafe"
@@ -586,7 +730,7 @@ write_backup_state() {
   state_parent="$(dirname "${SECURE_BACKUP_STATE_FILE}")"
   state_name="$(basename "${SECURE_BACKUP_STATE_FILE}")"
   temporary="$(mktemp --tmpdir="${state_parent}" -- ".${state_name}.partial.XXXXXXXX")"
-  chmod 600 -- "${temporary}"
+  chmod 600 "${temporary}"
   printf '%s\n' \
     'format=rivune-backup-state-v1' \
     "lineage=${lineage}" \
@@ -657,7 +801,7 @@ record_restore_audit() {
   fi
   umask 077
   touch -- "${audit_file}"
-  chmod 600 -- "${audit_file}"
+  chmod 600 "${audit_file}"
   if [[ ! -f "${audit_file}" || "$(stat -c '%u' -- "${audit_file}")" != "$(id -u)" || \
         $(( 8#$(stat -c '%a' -- "${audit_file}") & 0077 )) != 0 ]]; then
     backup_error "Restore audit log is unsafe"
@@ -679,6 +823,25 @@ enforce_current_restore_policy() {
         "${MANIFEST_BACKUP_ID}" != "${STATE_LATEST_BACKUP_ID}" || \
         "${MANIFEST_ARCHIVE_SHA256}" != "${STATE_LATEST_ARCHIVE_SHA256}" ]]; then
     backup_error "Backup is not the current trusted generation"
+    return
+  fi
+}
+
+enforce_legacy_manifest_restore_policy() {
+  local expected_backup_id="$1"
+  if [[ "${expected_backup_id}" != "${MANIFEST_BACKUP_ID}" ]]; then
+    backup_error "Backup does not match the operator-selected backup ID"
+    return
+  fi
+  load_backup_state "${MANIFEST_LINEAGE}" || return
+  if (( MANIFEST_SEQUENCE > STATE_LATEST_SEQUENCE )); then
+    backup_error "Legacy backup generation is newer than trusted state"
+    return
+  fi
+  if (( MANIFEST_SEQUENCE == STATE_LATEST_SEQUENCE )) && \
+     { [[ "${MANIFEST_BACKUP_ID}" != "${STATE_LATEST_BACKUP_ID}" ]] || \
+       [[ "${MANIFEST_ARCHIVE_SHA256}" != "${STATE_LATEST_ARCHIVE_SHA256}" ]]; }; then
+    backup_error "Legacy backup does not match the current trusted generation"
     return
   fi
 }

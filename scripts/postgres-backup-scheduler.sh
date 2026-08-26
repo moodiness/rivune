@@ -48,7 +48,7 @@ if [[ -L "${LOCK_FILE}" ]]; then
 fi
 if command -v flock >/dev/null 2>&1; then
   exec 9>> "${LOCK_FILE}"
-  chmod 600 -- "${LOCK_FILE}"
+  chmod 600 "${LOCK_FILE}"
   if [[ ! -f "${LOCK_FILE}" ]] || ! flock -n -x 9; then
     echo "Another Rivune backup scheduler owns ${LOCK_FILE}" >&2
     exit 1
@@ -57,7 +57,7 @@ if command -v flock >/dev/null 2>&1; then
   SCHEDULER_LOCK_KIND=flock
 elif command -v lockf >/dev/null 2>&1; then
   exec 9>> "${LOCK_FILE}"
-  chmod 600 -- "${LOCK_FILE}"
+  chmod 600 "${LOCK_FILE}"
   if [[ ! -f "${LOCK_FILE}" ]] || ! lockf -s -t 0 9; then
     echo "Another Rivune backup scheduler owns ${LOCK_FILE}" >&2
     exit 1
@@ -84,7 +84,7 @@ prune_backups() {
   local -a archives=()
   local excess index archive
   shopt -s nullglob
-  archives=("${BACKUP_DIRECTORY}"/rivune-scheduled-????????T??????Z-*.dump)
+  archives=("${BACKUP_DIRECTORY}"/rivune-scheduled-????????T??????Z-*.age)
   shopt -u nullglob
   if (( ${#archives[@]} > 1 )); then
     mapfile -t archives < <({ printf '%s\n' "${archives[@]}" | sort; } 9>&-)
@@ -105,7 +105,7 @@ prune_backups() {
 run_backup() {
   local timestamp archive result backup_id
   timestamp="$(date -u +%Y%m%dT%H%M%SZ 9>&-)"
-  archive="${BACKUP_DIRECTORY}/rivune-scheduled-${timestamp}-$$.dump"
+  archive="${BACKUP_DIRECTORY}/rivune-scheduled-${timestamp}-$$.age"
   result="$("${SCRIPT_DIR}/postgres-backup.sh" "${archive}" 9>&-)"
   printf '%s\n' "${result}"
   if [[ ! "${result}" =~ id=([0-9a-f]{32})([[:space:]]|$) ]]; then

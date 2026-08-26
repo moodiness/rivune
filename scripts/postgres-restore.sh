@@ -10,6 +10,7 @@ usage() {
   echo "       $0 --allow-rollback ID BACKUP_FILE" >&2
   echo "       $0 --initialize-state ID BACKUP_FILE" >&2
   echo "       $0 --allow-legacy SHA256 BACKUP_FILE" >&2
+  echo "       $0 --allow-legacy-manifest ID BACKUP_FILE" >&2
   exit 64
 }
 if (( $# != 3 )); then
@@ -19,7 +20,7 @@ RESTORE_MODE="$1"
 OPERATOR_EXPECTATION="$2"
 BACKUP_FILE="$3"
 case "${RESTORE_MODE}" in
-  --expect-backup-id|--allow-rollback|--initialize-state)
+  --expect-backup-id|--allow-rollback|--initialize-state|--allow-legacy-manifest)
     [[ "${OPERATOR_EXPECTATION}" =~ ^[0-9a-f]{32}$ ]] || usage
     ;;
   --allow-legacy)
@@ -36,6 +37,7 @@ SIGNATURE_FILE="${BACKUP_FILE}.sig"
 : "${RIVUNE_RESTORE_PASSWORD:?RIVUNE_RESTORE_PASSWORD is required}"
 require_backup_key "${RIVUNE_BACKUP_VERIFY_KEY_FILE:-}" "${BACKUP_DIR}" "verification"
 require_backup_signature "${SIGNATURE_FILE}"
+SECURE_BACKUP_VERIFY_KEY_FILE="${SECURE_BACKUP_KEY_FILE}"
 
 AUTHENTICATED_BACKUP_FILE=""
 # shellcheck disable=SC2034 # Assigned and consumed by postgres-backup-auth.sh.
@@ -150,6 +152,8 @@ cleanup() {
   fi
   exit "${status}"
 }
+trap 'exit 130' INT
+trap 'exit 143' TERM
 trap 'cleanup "$?"' EXIT
 
 if [[ "${RESTORE_MODE}" == --allow-legacy ]]; then
@@ -159,7 +163,7 @@ if [[ "${RESTORE_MODE}" == --allow-legacy ]]; then
   fi
   require_backup_token "${RIVUNE_BACKUP_LINEAGE:-}" "RIVUNE_BACKUP_LINEAGE"
   stage_legacy_authenticated_backup "${BACKUP_FILE}" "${SECURE_BACKUP_SIGNATURE_FILE}" \
-    "${SECURE_BACKUP_KEY_FILE}" "${OPERATOR_EXPECTATION}"
+    "${SECURE_BACKUP_VERIFY_KEY_FILE}" "${OPERATOR_EXPECTATION}"
   require_backup_state_location "${RIVUNE_BACKUP_STATE_FILE:-}" "${BACKUP_DIR}" true
   lock_backup_state
   STATE_LOCKED=true
@@ -172,7 +176,18 @@ if [[ "${RESTORE_MODE}" == --allow-legacy ]]; then
 else
   require_backup_manifest "${MANIFEST_FILE}"
   stage_authenticated_manifest "${BACKUP_FILE}" "${SECURE_BACKUP_MANIFEST_FILE}" \
-    "${SECURE_BACKUP_SIGNATURE_FILE}" "${SECURE_BACKUP_KEY_FILE}"
+    "${SECURE_BACKUP_SIGNATURE_FILE}" "${SECURE_BACKUP_VERIFY_KEY_FILE}"
+  if [[ "${MANIFEST_FORMAT}" == v3-age ]]; then
+    require_age_identity_file "${RIVUNE_BACKUP_AGE_IDENTITY_FILE:-}" "${BACKUP_DIR}"
+  fi
+  if [[ "${MANIFEST_FORMAT}" == v3-age && "${RESTORE_MODE}" == --allow-legacy-manifest ]]; then
+    backup_error "Legacy manifest authorization cannot be used for an encrypted backup"
+    exit 1
+  fi
+  if [[ "${MANIFEST_FORMAT}" != v3-age && "${RESTORE_MODE}" != --allow-legacy-manifest ]]; then
+    backup_error "Plaintext manifested backups require explicit legacy authorization"
+    exit 1
+  fi
   if [[ "${OPERATOR_EXPECTATION}" != "${MANIFEST_BACKUP_ID}" ]]; then
     backup_error "Backup does not match the operator-selected backup ID"
     exit 1
@@ -184,6 +199,12 @@ else
       lock_backup_state
       STATE_LOCKED=true
       enforce_current_restore_policy "${OPERATOR_EXPECTATION}"
+      ;;
+    --allow-legacy-manifest)
+      require_backup_state_location "${RIVUNE_BACKUP_STATE_FILE:-}" "${BACKUP_DIR}" false
+      lock_backup_state
+      STATE_LOCKED=true
+      enforce_legacy_manifest_restore_policy "${OPERATOR_EXPECTATION}"
       ;;
     --allow-rollback)
       require_backup_state_location "${RIVUNE_BACKUP_STATE_FILE:-}" "${BACKUP_DIR}" false
@@ -237,13 +258,15 @@ fi
 
 # PostgreSQL parses only the private snapshot, after authentication, expectation,
 # lineage, freshness policy, and any exceptional authorization have succeeded.
-docker compose exec -T postgres pg_restore --list \
-  < "${AUTHENTICATED_BACKUP_FILE}" >/dev/null
+stream_authenticated_backup \
+  | docker compose exec -T postgres pg_restore --list >/dev/null
 
 # The state lock remains held across parsing. Re-read the trusted state immediately
 # before creating an isolated database so an inconsistent replacement fails closed.
 if [[ "${RESTORE_MODE}" == --expect-backup-id ]]; then
   enforce_current_restore_policy "${OPERATOR_EXPECTATION}"
+elif [[ "${RESTORE_MODE}" == --allow-legacy-manifest ]]; then
+  enforce_legacy_manifest_restore_policy "${OPERATOR_EXPECTATION}"
 elif [[ "${RESTORE_MODE}" != --allow-legacy ]]; then
   load_backup_state "${MANIFEST_LINEAGE}"
 fi
@@ -267,15 +290,15 @@ DROP DATABASE IF EXISTS :"staging_database" WITH (FORCE);
 CREATE DATABASE :"staging_database" OWNER rivune_owner;
 SQL
 staging_created=true
-
-PGPASSWORD="${RIVUNE_RESTORE_PASSWORD}" docker compose exec -T -e PGPASSWORD postgres \
-  pg_restore --host 127.0.0.1 \
-  --username rivune_restore \
-  --role rivune_owner \
-  --dbname "${STAGING_DATABASE}" \
-  --exit-on-error \
-  --no-owner \
-  --no-privileges < "${AUTHENTICATED_BACKUP_FILE}"
+stream_authenticated_backup \
+  | PGPASSWORD="${RIVUNE_RESTORE_PASSWORD}" docker compose exec -T -e PGPASSWORD postgres \
+      pg_restore --host 127.0.0.1 \
+      --username rivune_restore \
+      --role rivune_owner \
+      --dbname "${STAGING_DATABASE}" \
+      --exit-on-error \
+      --no-owner \
+      --no-privileges
 
 PGPASSWORD="${RIVUNE_RESTORE_PASSWORD}" docker compose exec -T -e PGPASSWORD postgres \
   psql --host 127.0.0.1 --username rivune_restore --dbname "${STAGING_DATABASE}" \

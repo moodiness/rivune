@@ -41,6 +41,13 @@ clients/windows/**/obj/
 NUL.*
 **/NUL.*
 
+# Operator backup material contains private database state and credentials.
+backups/
+
+# Local SourceKit/Xcode build-server state
+buildServer.json
+**/.compile
+
 # Editors and operating systems
 .idea/
 .vscode/

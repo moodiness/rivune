@@ -45,14 +45,16 @@ fi
 
 require_backup_token "${RIVUNE_BACKUP_LINEAGE:-}" "RIVUNE_BACKUP_LINEAGE"
 require_backup_key "${RIVUNE_BACKUP_SIGNING_KEY_FILE:-}" "${BACKUP_DIR}" "signing"
+SECURE_BACKUP_SIGNING_KEY_FILE="${SECURE_BACKUP_KEY_FILE}"
 require_backup_state_location "${RIVUNE_BACKUP_STATE_FILE:-}" "${BACKUP_DIR}" true
-if ! openssl pkey -in "${SECURE_BACKUP_KEY_FILE}" -check -noout >/dev/null 2>&1; then
+require_age_recipient_file "${RIVUNE_BACKUP_AGE_RECIPIENT_FILE:-}" "${BACKUP_DIR}"
+if ! openssl pkey -in "${SECURE_BACKUP_SIGNING_KEY_FILE}" -check -noout >/dev/null 2>&1; then
   echo "Backup signing key is not a valid private key" >&2
   exit 1
 fi
 reserve_backup_sequence "${RIVUNE_BACKUP_LINEAGE}"
 
-TMP_FILE=""
+TMP_CIPHERTEXT=""
 TMP_MANIFEST=""
 TMP_SIGNATURE=""
 TMP_PUBLIC_KEY=""
@@ -60,7 +62,7 @@ MANIFEST_PUBLISHED=false
 SIGNATURE_PUBLISHED=false
 ARCHIVE_PUBLISHED=false
 cleanup() {
-  [[ -z "${TMP_FILE}" ]] || rm -f -- "${TMP_FILE}"
+  [[ -z "${TMP_CIPHERTEXT}" ]] || rm -f -- "${TMP_CIPHERTEXT}"
   [[ -z "${TMP_MANIFEST}" ]] || rm -f -- "${TMP_MANIFEST}"
   [[ -z "${TMP_SIGNATURE}" ]] || rm -f -- "${TMP_SIGNATURE}"
   [[ -z "${TMP_PUBLIC_KEY}" ]] || rm -f -- "${TMP_PUBLIC_KEY}"
@@ -70,23 +72,25 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-TMP_FILE="$(mktemp --tmpdir="${BACKUP_DIR}" -- ".${BACKUP_NAME}.partial.XXXXXXXX")"
+TMP_CIPHERTEXT="$(mktemp --tmpdir="${BACKUP_DIR}" -- ".${BACKUP_NAME}.partial.XXXXXXXX")"
 TMP_MANIFEST="$(mktemp --tmpdir="${BACKUP_DIR}" -- ".${BACKUP_NAME}.manifest.partial.XXXXXXXX")"
 TMP_SIGNATURE="$(mktemp --tmpdir="${BACKUP_DIR}" -- ".${BACKUP_NAME}.sig.partial.XXXXXXXX")"
-TMP_PUBLIC_KEY="$(mktemp "${TMPDIR:-/tmp}/rivune-backup-public-key.XXXXXXXX.pem")"
-for temporary_file in "${TMP_FILE}" "${TMP_MANIFEST}" "${TMP_SIGNATURE}" "${TMP_PUBLIC_KEY}"; do
+TMP_PUBLIC_KEY="$(mktemp "${TMPDIR:-/tmp}/rivune-backup-public-key.XXXXXXXX")"
+for temporary_file in "${TMP_CIPHERTEXT}" "${TMP_MANIFEST}" "${TMP_SIGNATURE}" "${TMP_PUBLIC_KEY}"; do
   if [[ -L "${temporary_file}" || ! -f "${temporary_file}" || \
         "$(stat -c '%u' -- "${temporary_file}")" != "$(id -u)" ]]; then
     echo "Failed to create a secure backup temporary file" >&2
     exit 1
   fi
-  chmod 600 -- "${temporary_file}"
+  chmod 600 "${temporary_file}"
 done
 
-ARCHIVE_LIMIT="$(backup_archive_limit)"
-FILE_BLOCK_LIMIT="$(( (ARCHIVE_LIMIT + 1023) / 1024 ))"
-exec 3> "${TMP_FILE}"
+CIPHERTEXT_LIMIT="$(backup_ciphertext_limit)"
+FILE_BLOCK_LIMIT="$(( (CIPHERTEXT_LIMIT + 1023) / 1024 ))"
+exec 3> "${TMP_CIPHERTEXT}"
 (
   ulimit -f "${FILE_BLOCK_LIMIT}"
   docker compose exec -T postgres pg_dump \
@@ -95,45 +99,53 @@ exec 3> "${TMP_FILE}"
     --format=custom \
     --compress=9 \
     --no-owner \
-    --no-privileges >&3
+    --no-privileges \
+    | age --encrypt --recipients-file "${SECURE_BACKUP_RECIPIENT_FILE}" >&3
 )
 exec 3>&-
 
-require_bounded_archive "${TMP_FILE}"
-ARCHIVE_SIZE="$(stat -c '%s' -- "${TMP_FILE}")"
-ARCHIVE_SHA256="$(openssl dgst -sha256 -r "${TMP_FILE}" | cut -d ' ' -f 1)"
+require_repository_archive "${TMP_CIPHERTEXT}"
+ARCHIVE_SIZE="$(stat -c '%s' -- "${TMP_CIPHERTEXT}")"
+if (( ARCHIVE_SIZE > CIPHERTEXT_LIMIT )); then
+  backup_error "Encrypted backup size is outside the configured safety limit"
+  exit 1
+fi
+ARCHIVE_SHA256="$(openssl dgst -sha256 -r "${TMP_CIPHERTEXT}" | cut -d ' ' -f 1)"
 BACKUP_ID="$(openssl rand -hex 16)"
 CREATED_AT="$(date -u +%Y%m%dT%H%M%SZ)"
-SIGNING_KEY_ID="$(backup_private_key_id "${SECURE_BACKUP_KEY_FILE}")"
+SIGNING_KEY_ID="$(backup_private_key_id "${SECURE_BACKUP_SIGNING_KEY_FILE}")"
+RECIPIENT_KEY_ID="${BACKUP_AGE_RECIPIENT_KEY_ID}"
 if [[ ! "${SIGNING_KEY_ID}" =~ ^[0-9a-f]{64}$ ]]; then
   echo "Failed to identify backup signing key" >&2
   exit 1
 fi
 printf '%s\n' \
-  'format=rivune-backup-manifest-v2' \
+  'format=rivune-backup-manifest-v3-age' \
   "lineage=${RIVUNE_BACKUP_LINEAGE}" \
   "sequence=${RESERVED_BACKUP_SEQUENCE}" \
   "backup_id=${BACKUP_ID}" \
   "created_at=${CREATED_AT}" \
   "archive_name=${BACKUP_NAME}" \
-  "archive_size=${ARCHIVE_SIZE}" \
-  "archive_sha256=${ARCHIVE_SHA256}" \
+  "ciphertext_size=${ARCHIVE_SIZE}" \
+  "ciphertext_sha256=${ARCHIVE_SHA256}" \
+  "recipient_key_id=${RECIPIENT_KEY_ID}" \
   "signing_key_id=${SIGNING_KEY_ID}" > "${TMP_MANIFEST}"
 
-openssl dgst -sha256 -sign "${SECURE_BACKUP_KEY_FILE}" \
+openssl dgst -sha256 -sign "${SECURE_BACKUP_SIGNING_KEY_FILE}" \
   -out "${TMP_SIGNATURE}" "${TMP_MANIFEST}"
-openssl pkey -in "${SECURE_BACKUP_KEY_FILE}" -pubout -out "${TMP_PUBLIC_KEY}"
+openssl pkey -in "${SECURE_BACKUP_SIGNING_KEY_FILE}" -pubout -out "${TMP_PUBLIC_KEY}"
 openssl pkeyutl -verify -pubin -inkey "${TMP_PUBLIC_KEY}" \
   -sigfile "${TMP_SIGNATURE}" -rawin -digest sha256 \
   -in "${TMP_MANIFEST}" >/dev/null
 parse_authenticated_manifest "${TMP_MANIFEST}"
 [[ "${MANIFEST_ARCHIVE_SHA256}" == "${ARCHIVE_SHA256}" ]]
 [[ "${MANIFEST_ARCHIVE_SIZE}" == "${ARCHIVE_SIZE}" ]]
+[[ "${MANIFEST_RECIPIENT_KEY_ID}" == "${RECIPIENT_KEY_ID}" ]]
 [[ "${MANIFEST_SIGNING_KEY_ID}" == "$(backup_public_key_id "${TMP_PUBLIC_KEY}")" ]]
 
-exec 3< "${TMP_FILE}"
-docker compose exec -T postgres pg_restore --list <&3 >/dev/null
-exec 3<&-
+# The producer validates the encrypted stream without ever materializing the
+# PostgreSQL archive. Disposable restore verification exercises decryption.
+[[ "$(dd if="${TMP_CIPHERTEXT}" bs=1 count=21 status=none)" == 'age-encryption.org/v1' ]]
 
 if ! ln -- "${TMP_SIGNATURE}" "${SIGNATURE_FILE}"; then
   echo "Backup destination was claimed concurrently" >&2
@@ -147,12 +159,12 @@ if ! ln -- "${TMP_MANIFEST}" "${MANIFEST_FILE}"; then
 fi
 MANIFEST_PUBLISHED=true
 rm -f -- "${TMP_MANIFEST}"
-if ! ln -- "${TMP_FILE}" "${BACKUP_FILE}"; then
+if ! ln -- "${TMP_CIPHERTEXT}" "${BACKUP_FILE}"; then
   echo "Backup destination was claimed concurrently" >&2
   exit 1
 fi
 ARCHIVE_PUBLISHED=true
-rm -f -- "${TMP_FILE}"
+rm -f -- "${TMP_CIPHERTEXT}"
 commit_backup_generation "${RIVUNE_BACKUP_LINEAGE}" "${RESERVED_BACKUP_SEQUENCE}" \
   "${BACKUP_ID}" "${ARCHIVE_SHA256}"
 rm -f -- "${TMP_PUBLIC_KEY}"

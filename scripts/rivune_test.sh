@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "$(uname -s)" == Darwin ]]; then
+  for gnubin in /opt/homebrew/opt/coreutils/libexec/gnubin /usr/local/opt/coreutils/libexec/gnubin; do
+    if [[ -d "${gnubin}" ]]; then
+      PATH="${gnubin}:${PATH}"
+      break
+    fi
+  done
+fi
+
 # Most cases exercise platform-neutral behavior and inject command doubles.
 # The dedicated macOS case overrides this value explicitly.
 export OSTYPE=linux-gnu
