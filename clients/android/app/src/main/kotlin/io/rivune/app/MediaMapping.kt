@@ -31,6 +31,15 @@ internal fun CollectionItem.toMediaTarget(): MediaTarget {
         released = released,
     )
 }
+internal fun CollectionItem.toSemanticMediaTarget(): MediaTarget {
+    val provider = listOf("tmdb", "imdb", "tvdb", "trakt").firstOrNull { !externalIds[it].isNullOrBlank() }
+    return toMediaTarget().copy(
+        titleId = id.toUuidOrNull(),
+        provider = provider,
+        externalId = provider?.let(externalIds::get),
+    )
+}
+
 
 internal fun titleReleaseDate(value: String?): String? {
     val normalized = value?.trim()?.takeIf(String::isNotEmpty) ?: return null

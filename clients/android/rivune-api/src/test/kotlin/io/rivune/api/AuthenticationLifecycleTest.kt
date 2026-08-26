@@ -525,7 +525,7 @@ private class BlockingAuthTransport : Interceptor {
 
     private companion object {
         val JSON_MEDIA_TYPE = "application/json".toMediaType()
-        const val DISCOVERY_JSON = """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}"""
+        const val DISCOVERY_JSON = """{"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}"""
         const val PROFILE_SELECTION_JSON = """{"profile":{"id":"44444444-4444-4444-8444-444444444444","name":"Viewer","description":null,"categoryId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","category":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","name":"Default","color":null,"icon":null},"isChild":false,"hasPin":false,"canManage":true,"enabled":true,"availableFrom":null,"availableUntil":null,"accessStartTime":null,"accessEndTime":null,"accessTimezone":"UTC","accessible":true,"avatar":{"kind":"preset","presetId":"one","url":"/api/v1/avatar"}},"expiresAt":"2026-08-12T12:00:00Z","profileContext":"context-one"}"""
     }
 }

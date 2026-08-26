@@ -216,8 +216,6 @@
     <string name="preferences_aspect_fit">Ajustar</string>
     <string name="preferences_aspect_fill">Rellenar</string>
     <string name="preferences_aspect_zoom">Zoom</string>
-    <string name="preferences_wifi_quality">Calidad por Wi-Fi</string>
-    <string name="preferences_wifi_quality_body">Limita las transmisiones por Wi-Fi y Ethernet. Sin una fuente directa apta o acceso a la transcodificación, es posible que la reproducción no esté disponible.</string>
     <string name="preferences_mobile_quality">Calidad con datos móviles</string>
     <string name="preferences_mobile_quality_body">Limita las transmisiones por redes móviles y otras redes no locales. Sin una fuente directa apta o acceso a la transcodificación, es posible que la reproducción no esté disponible.</string>
     <string name="preferences_quality_automatic">Automática</string>
@@ -402,4 +400,19 @@
     <string name="error_session_expired">Tu sesión ha caducado. Vuelve a vincular este dispositivo.</string>
     <string name="error_no_profiles">No hay perfiles disponibles para este dispositivo.</string>
     <string name="error_logout_failed">Rivune no pudo desconectar por completo la sesión de este dispositivo.</string>
+    <string name="viewer_coordination_devices_title">Reproducir en otro dispositivo</string>
+    <string name="viewer_coordination_play">Reproducir</string>
+    <string name="viewer_coordination_pause">Pausar</string>
+    <string name="viewer_coordination_match_position">Sincronizar posición</string>
+    <string name="viewer_coordination_stop">Detener</string>
+    <string name="viewer_coordination_room_start">Crear sala compartida</string>
+    <string name="viewer_coordination_room_join">Unirse a una sala</string>
+    <string name="viewer_coordination_room_label">Sala %1$s</string>
+    <string name="viewer_coordination_room_default">Sala compartida</string>
+    <plurals name="viewer_coordination_watching_count"><item quantity="one">%1$d persona viendo</item><item quantity="other">%1$d personas viendo</item></plurals>
+    <string name="viewer_coordination_room_leave">Salir</string>
+    <string name="viewer_coordination_join_title">Unirse a la sala compartida</string>
+    <string name="viewer_coordination_room_code">Código de la sala</string>
+    <string name="viewer_coordination_join_confirm">Unirse</string>
+    <string name="viewer_coordination_cancel">Cancelar</string>
 </resources>

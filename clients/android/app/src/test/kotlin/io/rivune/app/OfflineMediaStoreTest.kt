@@ -126,7 +126,7 @@ class OfflineMediaStoreTest {
             val secondDirectory = java.io.File(root, second).apply { mkdirs() }
             java.io.File(secondDirectory, "$id.rvn").writeBytes(byteArrayOf(1))
             java.io.File(secondDirectory, "manifest.json").writeText(
-                """[{"id":"$id","titleId":"$titleId","title":"Saved","fileName":"$id.rvn","container":"mp4","sizeBytes":1,"createdAtEpochMs":1,"posterUrl":""}]""",
+                """[{"id":"$id","titleId":"$titleId","title":"Saved","fileName":"$id.rvn","container":"mp4","sizeBytes":1,"createdAtEpochMs":${System.currentTimeMillis()},"posterUrl":""}]""",
             )
             store.lock()
 
@@ -138,4 +138,86 @@ class OfflineMediaStoreTest {
             root.deleteRecursively()
         }
     }
+    @Test
+    fun deviceQuotaCountsArchivesAndReservationsAcrossProfilesAtExactBoundary() {
+        val root = createTempDirectory("rivune-offline-quota").toFile()
+        try {
+            val store = OfflineMediaStore(root, testing = true)
+            val firstScope = store.registerProfile("https://one.example", java.util.UUID.randomUUID(), "One", false, null)
+            val firstReservation = java.util.UUID.randomUUID()
+            assertTrue(store.reserve(firstReservation, 10, 10))
+            assertFalse(store.reserve(java.util.UUID.randomUUID(), 1, 10))
+            store.releaseReservation(firstReservation)
+            java.io.File(root, firstScope).resolve("existing.rvn").writeBytes(ByteArray(10))
+            assertTrue(store.reserve(java.util.UUID.randomUUID(), 0, 10))
+            assertFalse(store.reserve(java.util.UUID.randomUUID(), 1, 10))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun corruptManifestPreventsAnyOrphanOrPartialCleanup() {
+        val root = createTempDirectory("rivune-offline-corrupt").toFile()
+        try {
+            val store = OfflineMediaStore(root, testing = true)
+            val scope = store.registerProfile("https://one.example", java.util.UUID.randomUUID(), "One", false, null)
+            val directory = java.io.File(root, scope)
+            val archive = directory.resolve("orphan.rvn").apply { writeBytes(byteArrayOf(1)) }
+            val partial = directory.resolve(".orphan.partial").apply { writeBytes(byteArrayOf(2)) }
+            directory.resolve("manifest.json").writeText("not-json")
+
+            store.cleanupOrphans(scope)
+
+            assertTrue(archive.isFile)
+            assertTrue(partial.isFile)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun expirationDeletesArchivePersistsManifestAndReturnsQuotaAtBoundary() {
+        val root = createTempDirectory("rivune-offline-expiry").toFile()
+        try {
+            val store = OfflineMediaStore(root, testing = true)
+            val scope = store.registerProfile("https://one.example", java.util.UUID.randomUUID(), "One", false, null)
+            val mediaId = java.util.UUID.randomUUID()
+            val titleId = java.util.UUID.randomUUID()
+            val directory = java.io.File(root, scope)
+            val archive = directory.resolve("$mediaId.rvn").apply { writeBytes(ByteArray(10)) }
+            directory.resolve("manifest.json").writeText(
+                """[{"id":"$mediaId","titleId":"$titleId","title":"Saved","fileName":"$mediaId.rvn","container":"mp4","sizeBytes":10,"createdAtEpochMs":1000,"posterUrl":""}]""",
+            )
+            val boundary = 1000L + 24L * 60L * 60L * 1_000L
+            val ready = store.items(scope, expirationDays = 1, nowEpochMs = boundary - 1).single()
+            assertEquals(OfflineMediaState.READY, ready.state)
+            assertTrue(archive.isFile)
+
+            assertTrue(store.items(scope, expirationDays = 1, nowEpochMs = boundary).isEmpty())
+            assertFalse(archive.exists())
+            assertEquals("[]", directory.resolve("manifest.json").readText())
+            assertTrue(store.reserve(java.util.UUID.randomUUID(), 10, 10))
+            assertFailsWith<IllegalStateException> { store.mediaUri(scope, ready.copy(state = OfflineMediaState.EXPIRED)) }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun unknownLengthReservationScansCommittedArchivesOnlyOnceAcrossLargeStream() {
+        val root = createTempDirectory("rivune-offline-reservation-scan").toFile()
+        try {
+            val store = OfflineMediaStore(root, testing = true)
+            val operation = java.util.UUID.randomUUID()
+            assertTrue(store.reserve(operation, 0, 32L * 1024 * 1024))
+            repeat(64) { chunk ->
+                assertTrue(store.updateReservation(operation, (chunk + 1L) * 256L * 1024L, 32L * 1024 * 1024))
+            }
+            assertEquals(1, store.archiveScanCount)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
 }

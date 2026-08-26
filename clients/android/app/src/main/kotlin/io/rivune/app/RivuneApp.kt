@@ -148,6 +148,8 @@ import io.rivune.app.ui.theme.RivuneSpacing
 import io.rivune.app.ui.theme.RivuneTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 
 @Composable
 internal fun RivuneRoot(
@@ -172,6 +174,8 @@ internal fun RivuneRoot(
     var automaticallyRequestedLocalNetworkServer by rememberSaveable { mutableStateOf<String?>(null) }
     var diagnosticPreview by remember { mutableStateOf<String?>(null) }
     var discoveryRequested by rememberSaveable { mutableStateOf(false) }
+    var pendingArchiveExport by remember { mutableStateOf<String?>(null) }
+    var archiveImportCreate by rememberSaveable { mutableStateOf(false) }
     var discoveredServers by remember { mutableStateOf(emptyList<DiscoveredRivuneServer>()) }
     val lanDiscovery = remember(activity) { LanServerDiscovery(activity) }
     val localNetworkPermissionLauncher = rememberLauncherForActivityResult(
@@ -226,6 +230,44 @@ internal fun RivuneRoot(
             }
         }
     }
+    val archiveExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json"),
+    ) { uri ->
+        val document = pendingArchiveExport
+        pendingArchiveExport = null
+        if (uri != null && document != null) activityCoroutineScope.launch {
+            runCatching {
+                activity.contentResolver.openOutputStream(uri, "w")?.use { output ->
+                    output.write(document.toByteArray(Charsets.UTF_8))
+                } ?: error("Archive destination unavailable")
+            }
+        }
+    }
+    val archiveImportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) activityCoroutineScope.launch {
+            val archive = runCatching {
+                val bytes = activity.contentResolver.openInputStream(uri)?.use { input ->
+                    val output = java.io.ByteArrayOutputStream()
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                        require(output.size() <= 16 * 1024 * 1024) { "Archive too large" }
+                    }
+                    output.toByteArray()
+                } ?: error("Archive unavailable")
+                Json.parseToJsonElement(bytes.decodeToString()).jsonObject.also { document ->
+                    require(document["version"]?.toString() == "2") { "Unsupported archive" }
+                    require(document["identity"] is kotlinx.serialization.json.JsonObject) { "Missing identity" }
+                    require(document["continueDismissals"] is kotlinx.serialization.json.JsonArray) { "Missing dismissals" }
+                }
+            }.getOrNull()
+            if (archive != null) viewModel.importProfileArchive(archive, archiveImportCreate)
+        }
+    }
     val inlineFailure = state.destination == AppDestination.Server ||
         state.destination == AppDestination.Pairing ||
         state.destination == AppDestination.Profiles ||
@@ -263,6 +305,7 @@ internal fun RivuneRoot(
         accentColor = appPreferences.accentColor,
         animationPreference = appPreferences.animationPreference,
         systemAnimationsEnabled = systemAnimationsEnabled,
+        accessibility = state.viewer.features.accessibility,
     ) {
         val motionPolicy = LocalRivuneMotionPolicy.current
         Surface(
@@ -334,11 +377,27 @@ internal fun RivuneRoot(
                             onAccentColor = application.appPreferences::setAccentColor,
                             onFrameRateMatching = application.appPreferences::setFrameRateMatching,
                             onVideoAspect = application.appPreferences::setVideoAspect,
-                            onWifiQuality = application.appPreferences::setWifiQuality,
+                            onLocalQuality = application.appPreferences::setLocalQuality,
+                            onRemoteWifiQuality = application.appPreferences::setRemoteWifiQuality,
                             onMobileQuality = application.appPreferences::setMobileQuality,
                             onAutomaticallyShowStreams = application.appPreferences::setAutomaticallyShowStreams,
                             onAutoSkipIntro = application.appPreferences::setAutoSkipIntro,
+                            onOfflineQuotaBytes = application.appPreferences::setOfflineQuotaBytes,
+                            onOfflineExpirationDays = application.appPreferences::setOfflineExpirationDays,
+                            onDownloadOnMobile = application.appPreferences::setDownloadOnMobile,
                             onAutoSkipRecap = application.appPreferences::setAutoSkipRecap,
+                            onExportProfileArchive = {
+                                viewModel.exportActiveProfileArchive { archive ->
+                                    if (archive != null) {
+                                        pendingArchiveExport = archive.toString()
+                                        archiveExportLauncher.launch("rivune-profile-v2.json")
+                                    }
+                                }
+                            },
+                            onImportProfileArchive = { create ->
+                                archiveImportCreate = create
+                                archiveImportLauncher.launch(arrayOf("application/json", "application/octet-stream"))
+                            },
                             onAutoSkipOutro = application.appPreferences::setAutoSkipOutro,
                             onChangeServer = viewModel::disconnectServer,
                             onOpenExternalUrl = { url ->
@@ -448,7 +507,11 @@ internal fun RivuneRoot(
                 state = updateState,
                 isTv = state.isTv,
                 onDownload = updates::download,
+                onCancelDownload = updates::cancelDownload,
+                onCancelInstallPreparation = updates::cancelInstallPreparation,
                 onInstall = { updates.install(activity) },
+                notificationPermissionRequired = updates.notificationPermissionRequired(),
+                onEnableNotifications = { updates.requestNotificationPermission(activity) },
                 onDismiss = updates::dismiss,
             )
         }
@@ -494,7 +557,8 @@ private fun diagnosticReportInput(
         accentColor = preferences.accentColor,
         frameRateMatching = preferences.frameRateMatching.preferenceValue,
         videoAspect = preferences.videoAspect.preferenceValue,
-        wifiQuality = preferences.wifiQuality.preferenceValue,
+        localQuality = preferences.localQuality.preferenceValue,
+        remoteWifiQuality = preferences.remoteWifiQuality.preferenceValue,
         mobileQuality = preferences.mobileQuality.preferenceValue,
         events = events,
     )
@@ -578,17 +642,21 @@ private fun AppUpdateDialog(
     state: AppUpdateState,
     isTv: Boolean,
     onDownload: () -> Unit,
+    onCancelDownload: () -> Unit,
+    onCancelInstallPreparation: () -> Unit,
     onInstall: () -> Unit,
+    notificationPermissionRequired: Boolean,
+    onEnableNotifications: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val visible = state is AppUpdateState.Available || state is AppUpdateState.Downloading ||
-        state is AppUpdateState.ReadyToInstall || state is AppUpdateState.NeedsPermission ||
-        state is AppUpdateState.Installing || state is AppUpdateState.Error || state is AppUpdateState.UpToDate
+    val visible = shouldShowUpdateDialog(state)
     val motionPolicy = LocalRivuneMotionPolicy.current
     val confirmFocus = remember { FocusRequester() }
+    val cancelFocus = remember { FocusRequester() }
     LaunchedEffect(state, isTv) {
-        if (isTv && visible && state !is AppUpdateState.Downloading && state !is AppUpdateState.Installing) {
-            confirmFocus.requestFocus()
+        if (isTv && visible) {
+            if (shouldFocusUpdateCancel(state)) cancelFocus.requestFocus()
+            else if (state !is AppUpdateState.Installing) confirmFocus.requestFocus()
         }
     }
     if (!visible) return
@@ -605,27 +673,39 @@ private fun AppUpdateDialog(
         is AppUpdateState.Downloading -> stringResource(R.string.update_downloading)
         is AppUpdateState.ReadyToInstall -> stringResource(R.string.update_ready_body)
         is AppUpdateState.NeedsPermission -> stringResource(R.string.update_permission_body)
+        is AppUpdateState.PreparingInstallation -> stringResource(R.string.update_preparing_install)
         is AppUpdateState.Installing -> stringResource(R.string.update_installing)
         is AppUpdateState.Error -> stringResource(R.string.update_error_body)
+        else -> ""
     }
     AlertDialog(
-        onDismissRequest = {
-            if (state !is AppUpdateState.Downloading && state !is AppUpdateState.Installing) onDismiss()
-        },
+        onDismissRequest = { if (canDismissUpdateDialog(state)) onDismiss() },
         icon = { Icon(Icons.Rounded.SystemUpdate, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
         title = { Text(title) },
         text = {
-            Row(horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.md), verticalAlignment = Alignment.CenterVertically) {
-                if (
-                    motionPolicy.ambientAnimations &&
-                    (state is AppUpdateState.Downloading || state is AppUpdateState.Installing)
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(RivuneSpacing.xl),
-                        strokeWidth = RivuneDimensions.focusRing,
+            Column(
+                modifier = Modifier.semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
+                verticalArrangement = Arrangement.spacedBy(RivuneSpacing.md),
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(RivuneSpacing.md), verticalAlignment = Alignment.CenterVertically) {
+                    if (
+                        motionPolicy.ambientAnimations &&
+                        (state is AppUpdateState.Downloading || state is AppUpdateState.PreparingInstallation || state is AppUpdateState.Installing)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(RivuneSpacing.xl),
+                            strokeWidth = RivuneDimensions.focusRing,
+                        )
+                    }
+                    Text(body)
+                }
+                if (state is AppUpdateState.Available && notificationPermissionRequired && !isTv) {
+                    RivuneTextButton(
+                        label = stringResource(R.string.update_enable_notifications),
+                        onClick = onEnableNotifications,
+                        isTv = false,
                     )
                 }
-                Text(body)
             }
         },
         confirmButton = {
@@ -642,6 +722,18 @@ private fun AppUpdateDialog(
                     label = stringResource(R.string.error_dismiss), onClick = onDismiss, isTv = isTv,
                     modifier = Modifier.focusRequester(confirmFocus),
                 )
+                is AppUpdateState.Downloading -> RivunePrimaryButton(
+                    label = stringResource(R.string.update_cancel_download),
+                    onClick = onCancelDownload,
+                    isTv = isTv,
+                    modifier = Modifier.focusRequester(cancelFocus),
+                )
+                is AppUpdateState.PreparingInstallation -> RivunePrimaryButton(
+                    label = stringResource(R.string.update_cancel_install),
+                    onClick = onCancelInstallPreparation,
+                    isTv = isTv,
+                    modifier = Modifier.focusRequester(cancelFocus),
+                )
                 else -> Unit
             }
         },
@@ -654,6 +746,17 @@ private fun AppUpdateDialog(
         shape = RivuneShapes.extraLarge,
     )
 }
+
+internal fun shouldFocusUpdateCancel(state: AppUpdateState): Boolean =
+    state is AppUpdateState.Downloading || state is AppUpdateState.PreparingInstallation
+
+internal fun canDismissUpdateDialog(state: AppUpdateState): Boolean =
+    state !is AppUpdateState.Downloading && state !is AppUpdateState.PreparingInstallation && state !is AppUpdateState.Installing
+
+internal fun shouldShowUpdateDialog(state: AppUpdateState): Boolean =
+    state is AppUpdateState.Available && state.showNotice || state is AppUpdateState.Downloading ||
+        state is AppUpdateState.ReadyToInstall || state is AppUpdateState.NeedsPermission ||
+        state is AppUpdateState.PreparingInstallation || state is AppUpdateState.Error || state is AppUpdateState.UpToDate
 
 @Composable
 private fun LoadingScreen() {
@@ -902,10 +1005,8 @@ internal fun ServerScreen(
             onClick = submit,
             modifier = Modifier
                 .fillMaxWidth()
-                .focusRequester(submitFocus)
-                .focusProperties { up = discoveryFocus; down = updateFocus }
-                .testTag(RivuneTestTags.ServerSubmit),
-            enabled = server.isNotBlank(),
+                .focusRequester(submitFocus),
+            enabled = !isBusy,
             isTv = isTv,
             loading = isBusy,
             loadingDescription = stringResource(R.string.server_loading_description),
@@ -915,7 +1016,7 @@ internal fun ServerScreen(
             label = stringResource(R.string.update_check),
             onClick = onCheckForUpdates,
             enabled = updateState !is AppUpdateState.Checking && updateState !is AppUpdateState.Downloading &&
-                updateState !is AppUpdateState.Installing,
+                updateState !is AppUpdateState.PreparingInstallation && updateState !is AppUpdateState.Installing,
             isTv = isTv,
             icon = Icons.Rounded.SystemUpdate,
             modifier = Modifier

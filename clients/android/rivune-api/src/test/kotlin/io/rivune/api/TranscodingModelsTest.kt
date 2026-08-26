@@ -3,6 +3,7 @@ package io.rivune.api
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertFails
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -12,6 +13,16 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class TranscodingModelsTest {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
+
+    @Test
+    fun playbackCommandVocabularyIsClosed() {
+        val values = listOf("load", "play", "pause", "seek", "stop")
+        assertEquals(
+            PlaybackCommandType.entries,
+            values.map { json.decodeFromString<PlaybackCommandType>("\"$it\"") },
+        )
+        assertFails { json.decodeFromString<PlaybackCommandType>("\"skip\"") }
+    }
 
     @Test
     fun capabilitiesEncodeServerOutputDeclarations() {
@@ -64,7 +75,7 @@ class TranscodingModelsTest {
             {
               "id":"22222222-2222-4222-8222-222222222222",
               "selectedSourceId":"source-1","selectedAudioTrack":2,"selectedSubtitleId":"subtitle-1",
-              "sources":[{"id":"source-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","mode":"transcode","protocol":"hls","mediaTimeline":"relative","compatible":true,"decision":{"reason":"subtitle_burn_required","videoAction":"transcode","audioAction":"copy","subtitleAction":"burn","toneMapping":false,"source":{"container":"matroska","videoCodec":"hevc","height":2160,"videoBitrateKbps":24000,"hdrFormat":"dolby_vision"},"target":{"protocol":"hls","container":"mpegts","videoCodec":"h264","audioCodec":"aac","height":1080,"videoBitDepth":8,"videoBitrateKbps":12000},"futureDecisionField":true}}],
+              "sources":[{"id":"source-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","mode":"transcode","protocol":"hls","mediaTimeline":"relative","compatible":true,"decision":{"reason":"subtitle_burn_required","reasons":["subtitle_burn_required","video_codec_not_supported"],"videoAction":"transcode","audioAction":"copy","subtitleAction":"burn","toneMapping":false,"source":{"container":"matroska","videoCodec":"hevc","height":2160,"videoBitrateKbps":24000,"hdrFormat":"dolby_vision"},"target":{"protocol":"hls","container":"mpegts","videoCodec":"h264","audioCodec":"aac","height":1080,"videoBitDepth":8,"videoBitrateKbps":12000},"futureDecisionField":true}}],
               "subtitles":[{"id":"subtitle-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","default":true,"delivery":"burn","futureSubtitleField":"ignored"}],
               "providerErrors":[{"addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","code":"future_provider_code","message":"future"}],
               "expiresAt":"2026-08-03T12:00:00Z","futureSessionField":"ignored"
@@ -73,7 +84,8 @@ class TranscodingModelsTest {
 
         assertEquals(2, session.selectedAudioTrack)
         assertEquals("subtitle-1", session.selectedSubtitleId)
-        assertEquals(PlaybackDecisionReason.SUBTITLE_BURN_REQUIRED, session.sources.first().decision?.reason)
+        assertEquals(PlaybackDecisionOutcome.SUBTITLE_BURN_REQUIRED, session.sources.first().decision?.reason)
+        assertEquals(listOf(PlaybackDecisionReason.SUBTITLE_BURN_REQUIRED, PlaybackDecisionReason.VIDEO_CODEC_NOT_SUPPORTED), session.sources.first().decision?.reasons)
         assertEquals("dolby_vision", session.sources.first().decision?.source?.hdrFormat)
         assertEquals(12_000, session.sources.first().decision?.target?.videoBitrateKbps)
         assertEquals(8, session.sources.first().decision?.target?.videoBitDepth)
@@ -91,7 +103,7 @@ class TranscodingModelsTest {
               "diagnostics":{"ffmpegVersion":"7.1","ffprobeVersion":"7.1","hardwareAcceleration":"software","videoEncoder":"libx264","preferredVideoCodec":"h264","encodeCodecs":["h264"],"decodeCodecs":["h264","hevc"],"hevcMain10":true,"qualityPreset":"balanced","hardwareToneMap":false,"toneMapBackend":"software","transcodeThreads":4,"maximumReadRate":2.5,"totals":{"started":8,"succeeded":6,"failed":1,"softwareFallbacks":2},"pools":{"process":{"active":1,"limit":2},"probe":{"active":1,"limit":4},"subtitle":{"active":0,"limit":2},"trickplay":{"active":0,"limit":1}}},
               "sessions":[{
                 "id":"22222222-2222-4222-8222-222222222222","title":"Contract Movie","mediaType":"movie","mode":"transcode",
-                "decision":{"reason":"video_transcode_required","videoAction":"transcode","audioAction":"transcode","subtitleAction":"none","toneMapping":true,"target":{"videoCodec":"h264","height":1080,"videoBitrateKbps":12000}},
+                "decision":{"reason":"video_transcode_required","reasons":["video_codec_not_supported"],"videoAction":"transcode","audioAction":"transcode","subtitleAction":"none","toneMapping":true,"target":{"videoCodec":"h264","height":1080,"videoBitrateKbps":12000}},
                 "username":"admin","profileId":"44444444-4444-4444-8444-444444444444","profile":"Admin","device":"Pixel","platform":"android",
                 "processing":true,"positionSeconds":120,"durationSeconds":7200,
                 "createdAt":"2026-08-03T10:00:00Z","lastSeenAt":"2026-08-03T10:01:00Z","expiresAt":"2026-08-03T12:00:00Z"

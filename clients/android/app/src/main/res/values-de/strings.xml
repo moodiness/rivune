@@ -216,8 +216,6 @@
     <string name="preferences_aspect_fit">Einpassen</string>
     <string name="preferences_aspect_fill">Ausfüllen</string>
     <string name="preferences_aspect_zoom">Zoom</string>
-    <string name="preferences_wifi_quality">Wi-Fi-Qualität</string>
-    <string name="preferences_wifi_quality_body">Begrenzt Streams über Wi-Fi und Ethernet. Ohne geeignete direkte Quelle oder Transkodierungszugriff ist die Wiedergabe möglicherweise nicht verfügbar.</string>
     <string name="preferences_mobile_quality">Qualität bei mobilen Daten</string>
     <string name="preferences_mobile_quality_body">Begrenzt Streams über Mobilfunk und andere nicht lokale Netzwerke. Ohne geeignete direkte Quelle oder Transkodierungszugriff ist die Wiedergabe möglicherweise nicht verfügbar.</string>
     <string name="preferences_quality_automatic">Automatisch</string>
@@ -402,4 +400,19 @@
     <string name="error_session_expired">Deine Sitzung ist abgelaufen. Kopple dieses Gerät erneut.</string>
     <string name="error_no_profiles">Für dieses Gerät sind keine Profile verfügbar.</string>
     <string name="error_logout_failed">Rivune konnte die Sitzung dieses Geräts nicht vollständig trennen.</string>
+    <string name="viewer_coordination_devices_title">Auf einem anderen Gerät wiedergeben</string>
+    <string name="viewer_coordination_play">Wiedergeben</string>
+    <string name="viewer_coordination_pause">Pause</string>
+    <string name="viewer_coordination_match_position">Position abgleichen</string>
+    <string name="viewer_coordination_stop">Stoppen</string>
+    <string name="viewer_coordination_room_start">Watchparty starten</string>
+    <string name="viewer_coordination_room_join">Raum beitreten</string>
+    <string name="viewer_coordination_room_label">Raum %1$s</string>
+    <string name="viewer_coordination_room_default">Watchparty</string>
+    <plurals name="viewer_coordination_watching_count"><item quantity="one">%1$d Person schaut zu</item><item quantity="other">%1$d Personen schauen zu</item></plurals>
+    <string name="viewer_coordination_room_leave">Verlassen</string>
+    <string name="viewer_coordination_join_title">Watchparty beitreten</string>
+    <string name="viewer_coordination_room_code">Raumcode</string>
+    <string name="viewer_coordination_join_confirm">Beitreten</string>
+    <string name="viewer_coordination_cancel">Abbrechen</string>
 </resources>

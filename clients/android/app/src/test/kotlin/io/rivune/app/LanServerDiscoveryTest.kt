@@ -12,7 +12,7 @@ class LanServerDiscoveryTest {
         val secure = discoveredRivuneServer(
             serviceName = "Living room",
             attributes = mapOf(
-                "protocol" to "20".encodeToByteArray(),
+                "protocol" to "22".encodeToByteArray(),
                 "url" to "https://media.example.com".encodeToByteArray(),
                 "version" to "1.10.0".encodeToByteArray(),
             ),
@@ -25,7 +25,7 @@ class LanServerDiscoveryTest {
         val local = discoveredRivuneServer(
             serviceName = "Bedroom",
             attributes = mapOf(
-                "protocol" to "20".encodeToByteArray(),
+                "protocol" to "22".encodeToByteArray(),
                 "url" to "http://192.168.1.20:8080/".encodeToByteArray(),
             ),
         )
@@ -47,7 +47,7 @@ class LanServerDiscoveryTest {
                 discoveredRivuneServer(
                     serviceName = "Hostile",
                     attributes = mapOf(
-                        "protocol" to "20".encodeToByteArray(),
+                        "protocol" to "22".encodeToByteArray(),
                         "url" to address.encodeToByteArray(),
                     ),
                 ),
@@ -58,7 +58,7 @@ class LanServerDiscoveryTest {
             discoveredRivuneServer(
                 serviceName = "Old",
                 attributes = mapOf(
-                    "protocol" to "19".encodeToByteArray(),
+                    "protocol" to "21".encodeToByteArray(),
                     "url" to "https://media.example.com".encodeToByteArray(),
                 ),
             ),
@@ -72,7 +72,7 @@ class LanServerDiscoveryTest {
             discoveredRivuneServer(
                 "Malformed",
                 mapOf(
-                    "protocol" to "20".encodeToByteArray(),
+                    "protocol" to "22".encodeToByteArray(),
                     "url" to byteArrayOf(0xc3.toByte(), 0x28),
                 ),
             ),

@@ -11,6 +11,7 @@ import io.rivune.api.EffectiveSettings
 import io.rivune.api.EffectiveSettingsSources
 import io.rivune.api.SettingsValues
 import io.rivune.api.Season
+import io.rivune.api.SemanticSearchIntent
 import io.rivune.api.Trailer
 import java.util.UUID
 import io.rivune.api.LocalRecommendation
@@ -73,6 +74,7 @@ data class MediaTarget(
     val seriesImdbId: String? = null,
     val runtimeMinutes: Int? = null,
     val rating: Double? = null,
+    val queueItemId: UUID? = null,
 )
 
 data class MediaDetailState(
@@ -104,6 +106,7 @@ internal fun PlaybackRoom.preservingJoinCode(previous: PlaybackRoom): PlaybackRo
 data class SearchState(
     val query: String = "",
     val items: List<MediaTarget> = emptyList(),
+    val intents: List<SemanticSearchIntent> = emptyList(),
     val page: Int = 0,
     val hasMore: Boolean = false,
     val partial: Boolean = false,
@@ -197,6 +200,10 @@ data class PlayerPresentation(
     val externalPlayer: ExternalPlayerApp? = null,
     val nextEpisode: MediaTarget? = null,
     val markers: List<io.rivune.api.PlaybackMarker> = emptyList(),
+    val decisionReasons: List<io.rivune.api.PlaybackDecisionReason> = emptyList(),
+    val queueItemId: UUID? = null,
+    val failover: io.rivune.api.PlaybackFailoverState? = null,
+    val failoverAdvancing: Boolean = false,
 )
 internal fun PlayerPresentation.coordinatedItem(): CoordinatedPlaybackItem = CoordinatedPlaybackItem(
     titleId = titleId,
@@ -214,6 +221,19 @@ internal fun shouldAutomaticallyFallbackToMpv(
     presentation.engine == EmbeddedPlayerEngine.MEDIA3 &&
     presentation.fallbackAllowed &&
     failure.fallbackEligible
+
+internal fun PlayerEngineFailure.playbackFailoverError(): io.rivune.api.PlaybackFailoverError? = when {
+    !fallbackEligible -> null
+    reason == PlayerEngineFailureReason.STARTUP_TIMEOUT -> io.rivune.api.PlaybackFailoverError.SOURCE_TIMEOUT
+    reason == PlayerEngineFailureReason.PLAYBACK_ERROR -> io.rivune.api.PlaybackFailoverError.SOURCE_FAILED
+    else -> null
+}
+
+internal fun PlayerPresentation.canAdvancePlaybackFailover(failure: PlayerEngineFailure): Boolean =
+    !failoverAdvancing &&
+        failover?.status == io.rivune.api.PlaybackFailoverStatus.ACTIVE &&
+        failover.attemptCount < failover.maximumAttempts &&
+        failure.playbackFailoverError() != null
 
 internal fun PlayerPresentation.fallbackToMpv(
     failure: PlayerEngineFailure,
@@ -248,6 +268,35 @@ data class ProfilePreferencesState(
         get() = effective?.sources
 }
 
+enum class V22FeatureKind { QUEUE, SAVED_SEARCHES, SMART_COLLECTIONS, INCIDENTS, INBOX, ACCESSIBILITY }
+
+data class V22LoadState(
+    val loading: Boolean = false,
+    val loaded: Boolean = false,
+    val failure: UiFailure? = null,
+)
+
+data class V22FeatureState(
+    val queue: io.rivune.api.ReadingQueue? = null,
+    val savedSearches: List<io.rivune.api.SavedSearch> = emptyList(),
+    val smartCollections: List<io.rivune.api.SmartCollection> = emptyList(),
+    val smartCollectionPage: io.rivune.api.SmartCollectionPage? = null,
+    val incidents: List<io.rivune.api.AddonIncident> = emptyList(),
+    val notifications: List<io.rivune.api.MediaNotification> = emptyList(),
+    val notificationSubscriptions: List<io.rivune.api.MediaNotificationSubscription> = emptyList(),
+    val accessibility: io.rivune.api.AccessibilityPreferencesDocument? = null,
+    val queueLoad: V22LoadState = V22LoadState(),
+    val savedSearchLoad: V22LoadState = V22LoadState(),
+    val smartCollectionLoad: V22LoadState = V22LoadState(),
+    val incidentLoad: V22LoadState = V22LoadState(),
+    val inboxLoad: V22LoadState = V22LoadState(),
+    val accessibilityLoad: V22LoadState = V22LoadState(),
+    val mutationInFlight: Boolean = false,
+    val failure: UiFailure? = null,
+    val conflict: Boolean = false,
+)
+
+
 
 data class HomeHeroSlide(
     val item: io.rivune.api.CollectionItem,
@@ -263,6 +312,7 @@ data class ViewerState(
     val pendingPlaybackCommands: List<PlaybackCommand> = emptyList(),
     val playbackCoordinationAvailable: Boolean = false,
     val offlineItems: List<OfflineMediaItem> = emptyList(),
+    val offlineDownloadState: OfflineMediaState? = null,
     val offlineDownloadActive: Boolean = false,
     val offlineDownloadBytes: Long = 0,
     val playbackDevices: List<PlaybackDevice> = emptyList(),
@@ -278,6 +328,7 @@ data class ViewerState(
     val preferences: ProfilePreferencesState? = null,
     val loading: ViewerLoading? = null,
     val inlineFailure: UiFailure? = null,
+    val features: V22FeatureState = V22FeatureState(),
 )
 
 internal fun Episode.toMediaTarget(series: Series, fallback: MediaTarget): MediaTarget {

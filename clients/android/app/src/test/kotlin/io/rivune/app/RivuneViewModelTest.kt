@@ -167,6 +167,7 @@ class RivuneViewModelTest {
         assertIs<AppDestination.Pairing>(viewModel.state.value.destination)
         assertEquals("ABCD-EFGH", viewModel.state.value.pairing?.userCode)
         assertEquals("android", gateway.authorizationPlatform)
+        assertTrue(runCatching { UUID.fromString(gateway.authorizationInstallationId) }.isSuccess)
         assertEquals("https://media.example.com", store.value)
         assertEquals("Family server", viewModel.state.value.serverName)
         assertEquals("20.0.0", viewModel.state.value.serverVersion)
@@ -191,6 +192,20 @@ class RivuneViewModelTest {
         assertEquals(0, gateway.playbackHeartbeatRequests)
         assertEquals(0, gateway.playbackDeviceListRequests)
         assertEquals(0, gateway.localRecommendationRequests)
+    }
+
+    @Test
+    fun recommendationsRequestLandscapeArtwork() = runTest(dispatcher) {
+        val gateway = FakeGateway(
+            discovery = discovery(capabilities = listOf("local-recommendations")),
+            restored = true,
+            account = account(profile(), active = true),
+        )
+        viewModel(FakeServerStore("https://saved.example.com"), gateway)
+
+        advanceUntilIdle()
+
+        assertEquals(io.rivune.api.RecommendationArtworkShape.LANDSCAPE, gateway.localRecommendationArtworkShape)
     }
 
     @Test
@@ -2549,7 +2564,7 @@ class RivuneViewModelTest {
             FakeServerStore("https://saved.example.com"),
             gateway,
             externalPlaybackSupport = support,
-            playbackNetwork = PlaybackNetwork.MOBILE_OR_METERED,
+            playbackNetwork = NetworkClass.MOBILE,
         )
         advanceUntilIdle()
 
@@ -3128,6 +3143,361 @@ class RivuneViewModelTest {
         assertEquals("tt1234567", result.resourceId)
         assertEquals("Film", result.title)
         assertEquals(addonId, result.sourceAddonId)
+        assertTrue(gateway.semanticRequests.isEmpty())
+    }
+
+    @Test
+    fun semanticSearchUsesResidualQueryInferredTypesAndKeepsFirstRepresentative() = runTest(dispatcher) {
+        val gateway = semanticSearchGateway()
+        gateway.semanticPages = mapOf(
+            1 to semanticPage(
+                items = listOf(
+                    mediaItem("tmdb:1", "Semantic duplicate").copy(externalIds = mapOf("imdb" to "tt1234567", "tmdb" to "1")),
+                    mediaItem("tmdb:2", "Semantic unique").copy(externalIds = mapOf("tmdb" to "2")),
+                ),
+                mediaTypes = listOf("movie"),
+                hasMore = true,
+            ),
+        )
+        gateway.searchPages = mapOf(0 to addonSearchBatch("movie", "tt1234567", "Direct title"))
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+
+        viewModel.selectViewerTab(ViewerTab.SEARCH)
+        advanceUntilIdle()
+        viewModel.search("film Dune de guerre")
+        advanceUntilIdle()
+
+        val search = viewModel.state.value.viewer.search
+        assertEquals(listOf("Semantic duplicate", "Semantic unique"), search.items.map(MediaTarget::title))
+        assertEquals("tmdb", search.items.first().provider)
+        assertEquals("1", search.items.first().externalId)
+        assertEquals(listOf("genre:war"), search.intents.map { it.id })
+        assertEquals(Triple("movie", "Dune", 0), gateway.addonSearchRequests.last())
+        assertTrue(gateway.addonSearchRequests.dropLast(1).all { it.second == "film Dune de guerre" })
+        assertEquals(1, gateway.semanticRequests.single().page)
+        assertEquals(24, gateway.semanticRequests.single().limit)
+        assertTrue(search.hasMore)
+        assertFalse(search.partial)
+    }
+
+    @Test
+    fun searchPublishesFirstTypeImmediatelyCoalescesLaterTypesAndKeepsLoading() = runTest(dispatcher) {
+        val gateway = semanticSearchGateway(types = listOf("movie", "series", "tv"))
+        gateway.semanticDelayMillis = 100
+        gateway.semanticPages = mapOf(
+            1 to semanticPage(emptyList(), mediaTypes = listOf("movie", "series", "tv")),
+        )
+        gateway.searchDelaysByType = mapOf("series" to 10, "tv" to 15)
+        gateway.searchPagesByType = mapOf(
+            "movie" to addonSearchBatch("movie", "movie-1", "Movie"),
+            "series" to addonSearchBatch("series", "series-1", "Series"),
+            "tv" to addonSearchBatch("tv", "tv-1", "Channel"),
+        )
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+        viewModel.selectViewerTab(ViewerTab.SEARCH)
+        advanceUntilIdle()
+
+        viewModel.search("Dune")
+        runCurrent()
+
+        assertEquals(listOf("Movie"), viewModel.state.value.viewer.search.items.map(MediaTarget::title))
+        assertEquals(ViewerLoading.SEARCH, viewModel.state.value.viewer.loading)
+
+        advanceTimeBy(15)
+        runCurrent()
+        assertEquals(listOf("Movie"), viewModel.state.value.viewer.search.items.map(MediaTarget::title))
+        assertEquals(ViewerLoading.SEARCH, viewModel.state.value.viewer.loading)
+
+        advanceTimeBy(27)
+        runCurrent()
+        assertEquals(
+            listOf("Movie", "Series", "Channel"),
+            viewModel.state.value.viewer.search.items.map(MediaTarget::title),
+        )
+        assertEquals(ViewerLoading.SEARCH, viewModel.state.value.viewer.loading)
+
+        advanceUntilIdle()
+        assertEquals(
+            listOf("Movie", "Series", "Channel"),
+            viewModel.state.value.viewer.search.items.map(MediaTarget::title),
+        )
+        assertNull(viewModel.state.value.viewer.loading)
+    }
+
+    @Test
+    fun semanticFirstDuplicateKeepsPublishedRepresentativeOrderAndKey() = runTest(dispatcher) {
+        val gateway = semanticSearchGateway(types = listOf("movie"))
+        val semanticDuplicate = mediaItem("tmdb:42", "Semantic first").copy(
+            externalIds = mapOf("imdb" to "tt7654321", "tmdb" to "42"),
+        )
+        gateway.semanticPages = mapOf(
+            1 to semanticPage(
+                listOf(semanticDuplicate, mediaItem("tmdb:7", "Semantic second")),
+            ),
+        )
+        gateway.searchDelayMillis = 100
+        gateway.searchPages = mapOf(0 to addonSearchBatch("movie", "tt7654321", "Direct duplicate"))
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+        viewModel.selectViewerTab(ViewerTab.SEARCH)
+        advanceUntilIdle()
+
+        viewModel.search("Dune")
+        runCurrent()
+
+        val published = viewModel.state.value.viewer.search.items
+        assertEquals(listOf("Semantic first", "Semantic second"), published.map(MediaTarget::title))
+        val publishedFirst = published.first()
+        val publishedKey = searchMediaTargetKey(publishedFirst)
+        assertEquals(
+            publishedKey,
+            searchMediaTargetKey(MediaTarget(id = "tt7654321", mediaType = "movie", title = "Direct duplicate")),
+        )
+        assertEquals(ViewerLoading.SEARCH, viewModel.state.value.viewer.loading)
+
+        advanceUntilIdle()
+
+        val completed = viewModel.state.value.viewer.search.items
+        assertEquals(listOf("Semantic first", "Semantic second"), completed.map(MediaTarget::title))
+        assertEquals(publishedFirst, completed.first())
+        assertEquals(publishedKey, searchMediaTargetKey(completed.first()))
+        assertNull(viewModel.state.value.viewer.loading)
+    }
+    @Test
+    fun opaqueResultsWithSameIdFromDifferentSourcesHaveDistinctPresentationKeys() {
+        val first = MediaTarget(
+            id = "shared-id",
+            mediaType = "movie",
+            title = "First source",
+            sourceAddonId = UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            sourceCatalogId = "search",
+        )
+        val second = first.copy(
+            title = "Second source",
+            sourceAddonId = UUID.fromString("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        )
+
+        assertFalse(searchMediaTargetKey(first) == searchMediaTargetKey(second))
+    }
+
+
+    @Test
+    fun coordinationCadenceUsesActiveAndIdleIntervals() {
+        val viewModel = viewModel(FakeServerStore(), FakeGateway())
+
+        assertEquals(2_000L, viewModel.coordinationDelayMilliseconds(active = true))
+        assertEquals(15_000L, viewModel.coordinationDelayMilliseconds(active = false))
+    }
+
+    @Test
+    fun coordinationSuspendsInBackgroundAndRestartsPresenceOnForeground() = runTest(dispatcher) {
+        val gateway = FakeGateway(
+            discovery = discovery(),
+            restored = true,
+            account = account(profile(hasPin = false), active = true),
+            collections = listOf(collection()),
+        )
+        val delays = mutableListOf<Long>()
+        val viewModel = viewModel(
+            FakeServerStore("https://saved.example.com"),
+            gateway,
+            awaitCoordinationTick = { delayMillis ->
+                delays += delayMillis
+                kotlinx.coroutines.awaitCancellation()
+            },
+        )
+        runCurrent()
+
+        assertEquals(1, gateway.playbackHeartbeatRequests)
+        assertEquals(listOf(15_000L), delays)
+        viewModel.coordinationForegroundChanged(false)
+        runCurrent()
+        assertEquals(1, gateway.playbackHeartbeatRequests)
+
+        viewModel.coordinationForegroundChanged(true)
+        runCurrent()
+        assertEquals(2, gateway.playbackHeartbeatRequests)
+        assertEquals(listOf(15_000L, 15_000L), delays)
+    }
+
+    @Test
+    fun searchTypeBoundingIsStableDeduplicatedAndReportsTruncation() {
+        val (types, truncated) = boundedStableSearchTypes(
+            listOf(" Movie ", "series", "movie") + (2..20).map { "type$it" },
+        )
+
+        assertEquals(listOf("movie", "series") + (2..15).map { "type$it" }, types)
+        assertTrue(truncated)
+    }
+
+    @Test
+    fun searchFanoutUsesAtMostSixteenRequestsAndFourConcurrentCalls() = runTest(dispatcher) {
+        val gateway = semanticSearchGateway(types = (0 until 20).map { "type$it" })
+        gateway.semanticFailure = RivuneApiException.Server(404, "not_found", "Unsupported")
+        gateway.searchDelayMillis = 1_000
+        gateway.searchPages = mapOf(0 to addonSearchBatch("movie", "result", "Result"))
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+        viewModel.selectViewerTab(ViewerTab.SEARCH)
+        advanceUntilIdle()
+
+        viewModel.search("bounded query")
+        advanceUntilIdle()
+
+        assertEquals(16, gateway.addonSearchRequests.size)
+        assertEquals(4, gateway.maxConcurrentAddonSearches)
+        assertTrue(viewModel.state.value.viewer.search.partial)
+    }
+
+    @Test
+    fun semanticSearchDeduplicatesProviderIdentitiesWithoutReplacingFirstResult() = runTest(dispatcher) {
+        val gateway = semanticSearchGateway(types = listOf("movie"))
+        gateway.semanticPages = mapOf(
+            1 to semanticPage(
+                listOf(mediaItem("tmdb:42", "Semantic duplicate").copy(externalIds = mapOf("imdb" to "tt7654321", "tmdb" to "42"))),
+            ),
+        )
+        gateway.searchPages = mapOf(0 to addonSearchBatch("movie", "tt7654321", "Direct exact match"))
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+        viewModel.selectViewerTab(ViewerTab.SEARCH)
+        advanceUntilIdle()
+
+        viewModel.search("film Dune de guerre")
+        advanceUntilIdle()
+
+        assertEquals(listOf("Semantic duplicate"), viewModel.state.value.viewer.search.items.map(MediaTarget::title))
+    }
+
+    @Test
+    fun inferredTypesWithoutConfiguredIntersectionKeepOrdinaryCatalogTypes() = runTest(dispatcher) {
+        val gateway = semanticSearchGateway()
+        gateway.semanticPages = mapOf(1 to semanticPage(emptyList(), mediaTypes = listOf("anime")))
+        gateway.searchPages = mapOf(
+            0 to io.rivune.api.AddonResourceBatch(
+                results = listOf(addonSearchBatch("movie", "movie-1", "Configured result").results.single()),
+                errors = emptyList(),
+            ),
+        )
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+        viewModel.selectViewerTab(ViewerTab.SEARCH)
+        advanceUntilIdle()
+
+        viewModel.search("anime Dune")
+        advanceUntilIdle()
+
+        assertEquals(listOf("movie", "series"), gateway.addonSearchRequests.map { it.first })
+        assertTrue(gateway.addonSearchRequests.all { it.second == "Dune" })
+        assertEquals(listOf("Configured result"), viewModel.state.value.viewer.search.items.map(MediaTarget::title))
+    }
+
+    @Test
+    fun semanticSearchTimeoutReusesAddonSearchStartedBeforeDeadline() = runTest(dispatcher) {
+        val gateway = semanticSearchGateway()
+        gateway.semanticDelayMillis = 13_000
+        gateway.searchPages = mapOf(
+            0 to io.rivune.api.AddonResourceBatch(
+                results = listOf(addonSearchBatch("movie", "movie-1", "Fallback").results.single()),
+                errors = emptyList(),
+            ),
+        )
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+        viewModel.selectViewerTab(ViewerTab.SEARCH)
+        advanceUntilIdle()
+
+        viewModel.search("slow semantic query")
+        runCurrent()
+        assertEquals(listOf("movie", "series"), gateway.addonSearchRequests.map { it.first })
+        assertTrue(gateway.addonSearchRequests.all { it.second == "slow semantic query" })
+        assertEquals(listOf("Fallback"), viewModel.state.value.viewer.search.items.map(MediaTarget::title))
+        assertEquals(ViewerLoading.SEARCH, viewModel.state.value.viewer.loading)
+        advanceTimeBy(11_999)
+        runCurrent()
+        assertEquals(ViewerLoading.SEARCH, viewModel.state.value.viewer.loading)
+        advanceTimeBy(1)
+        advanceUntilIdle()
+
+        val search = viewModel.state.value.viewer.search
+        assertEquals(listOf("Fallback"), search.items.map(MediaTarget::title))
+        assertEquals(listOf("movie", "series"), gateway.addonSearchRequests.map { it.first })
+        assertTrue(search.partial)
+        assertNull(viewModel.state.value.viewer.loading)
+    }
+    @Test
+    fun semanticSearchErrorFallsBackWithoutLosingAddonResults() = runTest(dispatcher) {
+        val gateway = semanticSearchGateway(types = listOf("movie"))
+        gateway.semanticFailure = RivuneApiException.Server(404, "not_found", "Unsupported")
+        gateway.searchPages = mapOf(0 to addonSearchBatch("movie", "movie-fallback", "Ordinary result"))
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+        viewModel.selectViewerTab(ViewerTab.SEARCH)
+        advanceUntilIdle()
+
+        viewModel.search("ordinary query")
+        advanceUntilIdle()
+
+        val search = viewModel.state.value.viewer.search
+        assertEquals(listOf("Ordinary result"), search.items.map(MediaTarget::title))
+        assertEquals(listOf(Triple("movie", "ordinary query", 0)), gateway.addonSearchRequests)
+        assertTrue(search.partial)
+        assertNull(viewModel.state.value.viewer.inlineFailure)
+    }
+
+
+    @Test
+    fun semanticSearchPagingPreservesItemsIntentsAndPartialState() = runTest(dispatcher) {
+        val gateway = semanticSearchGateway(types = listOf("movie"))
+        gateway.semanticPages = mapOf(
+            1 to semanticPage(listOf(mediaItem("tmdb:1", "First")), hasMore = true, partial = true),
+            2 to semanticPage(listOf(mediaItem("tmdb:2", "Second")), page = 2, hasMore = false),
+        )
+        gateway.searchPages = mapOf(
+            0 to addonSearchBatch("movie", "movie-direct", "Direct"),
+            24 to io.rivune.api.AddonResourceBatch(emptyList(), emptyList()),
+        )
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+        viewModel.selectViewerTab(ViewerTab.SEARCH)
+        advanceUntilIdle()
+        viewModel.search("film Dune de guerre")
+        advanceUntilIdle()
+
+        viewModel.loadMoreSearch()
+        advanceUntilIdle()
+
+        val search = viewModel.state.value.viewer.search
+        assertEquals(listOf("First", "Direct", "Second"), search.items.map(MediaTarget::title))
+        assertEquals(listOf("genre:war"), search.intents.map { it.id })
+        assertEquals(2, search.page)
+        assertFalse(search.hasMore)
+        assertEquals(listOf(0, 24), gateway.addonSearchRequests.map { it.third })
+        assertEquals(listOf(1, 2), gateway.semanticRequests.map { it.page })
+    }
+
+    @Test
+    fun replacingSearchCancelsSemanticAndSpeculativeAddonWork() = runTest(dispatcher) {
+        val gateway = semanticSearchGateway(types = listOf("movie"))
+        gateway.semanticDelayMillis = 10_000
+        gateway.searchDelayMillis = 10_000
+        gateway.searchPages = mapOf(0 to addonSearchBatch("movie", "result", "Result"))
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+        viewModel.selectViewerTab(ViewerTab.SEARCH)
+        advanceUntilIdle()
+
+        viewModel.search("first query")
+        runCurrent()
+        viewModel.search("")
+        runCurrent()
+
+        assertTrue(gateway.semanticCancelled)
+        assertEquals(1, gateway.addonSearchCancellations)
+        assertEquals("", viewModel.state.value.viewer.search.query)
+        assertNull(viewModel.state.value.viewer.loading)
     }
 
     @Test
@@ -3150,10 +3520,9 @@ class RivuneViewModelTest {
                 searchable = true,
             ),
         )
-        gateway.searchPages = mapOf(
-            0 to io.rivune.api.AddonResourceBatch(results = emptyList(), errors = emptyList()),
-        )
+        gateway.searchPages = mapOf(0 to addonSearchBatch("movie", "stale", "Stale result"))
         gateway.searchDelayMillis = 1_000
+        gateway.searchIgnoresCancellation = true
         val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
         advanceUntilIdle()
 
@@ -3179,6 +3548,7 @@ class RivuneViewModelTest {
             "android",
             capabilities,
             io.rivune.api.PlaybackDeviceState("idle"),
+            1,
             current,
             "2099-01-01T00:00:00Z",
         )
@@ -3195,6 +3565,26 @@ class RivuneViewModelTest {
             ),
         )
     }
+    @Test
+    fun playbackCommandTtlExpiresAtExactBoundary() {
+        val viewModel = viewModel(FakeServerStore(), FakeGateway())
+        val expiry = "2026-08-26T12:00:00Z"
+        assertFalse(viewModel.playbackCommandExpired(expiry, Instant.parse("2026-08-26T11:59:59.999Z")))
+        assertTrue(viewModel.playbackCommandExpired(expiry, Instant.parse(expiry)))
+        assertTrue(viewModel.playbackCommandExpired("invalid", Instant.EPOCH))
+    }
+
+    @Test
+    fun playbackOperationLedgerRemainsDurableInMeaningAndBoundedBeyondTtl() {
+        val store = MemoryPlaybackOperationStore()
+        val ids = (0..256).map { index -> UUID(0, index.toLong() + 1) }
+        ids.forEach { id ->
+            store.put(id, StoredPlaybackOperation(io.rivune.api.PlaybackCommandStatus.APPLIED, io.rivune.api.PlaybackCommandResultCode.APPLIED))
+        }
+        assertNull(store.get(ids.first()))
+        assertNotNull(store.get(ids.last()))
+    }
+
 
     @Test
     fun terminalRoomIntentAlwaysPreemptsPeriodicHostProgress() {
@@ -3237,7 +3627,7 @@ class RivuneViewModelTest {
             val directory = java.io.File(root, scope)
             java.io.File(directory, "$mediaId.rvn").writeBytes(byteArrayOf(1))
             java.io.File(directory, "manifest.json").writeText(
-                """[{"id":"$mediaId","titleId":"$titleId","title":"Saved","fileName":"$mediaId.rvn","container":"mp4","sizeBytes":1,"createdAtEpochMs":1,"posterUrl":""}]""",
+                """[{"id":"$mediaId","titleId":"$titleId","title":"Saved","fileName":"$mediaId.rvn","container":"mp4","sizeBytes":1,"createdAtEpochMs":${System.currentTimeMillis()},"posterUrl":""}]""",
             )
             offlineStore.lock()
             val viewModel = viewModel(FakeServerStore(), FakeGateway(), offlineMediaStore = offlineStore)
@@ -3344,6 +3734,106 @@ class RivuneViewModelTest {
             fixture.root.deleteRecursively()
         }
     }
+    @Test
+    fun readingQueueMutationRetriesWithStableOperationAndAdvancesCasRevision() = runTest(dispatcher) {
+        val viewerProfile = profile()
+        val titleId = UUID.randomUUID()
+        val gateway = FakeGateway(restored = true, account = account(viewerProfile, active = true), collections = listOf(collection()))
+        gateway.v22Queue = io.rivune.api.ReadingQueue(4, emptyList())
+        gateway.failFirstQueueAdd = true
+        gateway.resolvedTitle = io.rivune.api.TitleReference(titleId, io.rivune.api.TitleMediaType.MOVIE, "imdb", "tt1234567", "tt1234567", "Film")
+        gateway.movieResult = io.rivune.api.Movie(
+            titleId, io.rivune.api.MediaType.MOVIE, "Film", "Film", "en", "Overview", "2026-08-26",
+            genres = emptyList(), cast = emptyList(), voteAverage = 8.0, voteCount = 1, externalIds = mapOf("imdb" to "tt1234567"),
+        )
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+        viewModel.openMedia(MediaTarget("tt1234567", "movie", "Film"))
+        advanceUntilIdle()
+
+        viewModel.addDetailToQueue()
+        advanceUntilIdle()
+
+        assertEquals(2, gateway.queueAddInputs.size)
+        assertEquals(gateway.queueAddInputs[0].operationId, gateway.queueAddInputs[1].operationId)
+        assertEquals(listOf(4L, 4L), gateway.queueAddInputs.map { it.expectedRevision })
+        assertEquals(5, viewModel.state.value.viewer.features.queue?.revision)
+        assertFalse(viewModel.state.value.viewer.features.conflict)
+    }
+
+    @Test
+    fun partialV22LoadKeepsIndependentSuccessAndErrorStates() = runTest(dispatcher) {
+        val viewerProfile = profile(canManage = true)
+        val gateway = FakeGateway(restored = true, account = account(viewerProfile, active = true), collections = listOf(collection()))
+        gateway.readingQueueFailure = RivuneApiException.Server(503, "unavailable", "Queue unavailable")
+        gateway.v22Notifications = listOf(mediaNotification("17"))
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+
+        advanceUntilIdle()
+
+        val features = viewModel.state.value.viewer.features
+        assertEquals(UiFailure.CONTENT_LOAD, features.queueLoad.failure)
+        assertFalse(features.queueLoad.loaded)
+        assertTrue(features.inboxLoad.loaded)
+        assertNull(features.inboxLoad.failure)
+        assertEquals("17", features.notifications.single().id)
+        assertNull(features.queue)
+        gateway.readingQueueFailure = null
+        viewModel.retryV22Feature(V22FeatureKind.QUEUE)
+        advanceUntilIdle()
+        assertTrue(viewModel.state.value.viewer.features.queueLoad.loaded)
+        assertNull(viewModel.state.value.viewer.features.queueLoad.failure)
+    }
+
+    @Test
+    fun v22ProfileFeaturesLoadAndAccessibilityChangesWithProfile() = runTest(dispatcher) {
+        val first = profile(canManage = true)
+        val gateway = FakeGateway(restored = true, account = account(first, active = true), collections = listOf(collection()))
+        gateway.v22Accessibility = accessibility(revision = 7, textScale = 115)
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+
+        advanceUntilIdle()
+
+        assertEquals(7, viewModel.state.value.viewer.features.accessibility?.revision)
+        assertEquals(115, viewModel.state.value.viewer.features.accessibility?.textScale)
+        viewModel.updateAccessibility { it.copy(textScale = 130) }
+        advanceUntilIdle()
+        assertEquals(130, viewModel.state.value.viewer.features.accessibility?.textScale)
+        assertEquals(7, gateway.accessibilityUpdates.single().revision)
+    }
+
+    @Test
+    fun failoverBudgetAndClosedPlayerErrorsPreventLoops() {
+        val active = failover(attemptCount = 1, maximumAttempts = 2)
+        val exhausted = failover(attemptCount = 2, maximumAttempts = 2)
+        val player = playerPresentation(failover = active)
+        val eligible = PlayerEngineFailure(42_000, fallbackEligible = true, PlayerEngineFailureReason.STARTUP_TIMEOUT)
+
+        assertEquals(io.rivune.api.PlaybackFailoverError.SOURCE_TIMEOUT, eligible.playbackFailoverError())
+        assertTrue(player.canAdvancePlaybackFailover(eligible))
+        assertFalse(player.copy(failover = exhausted).canAdvancePlaybackFailover(eligible))
+        assertFalse(player.copy(failoverAdvancing = true).canAdvancePlaybackFailover(eligible))
+        assertNull(PlayerEngineFailure(0, fallbackEligible = false).playbackFailoverError())
+    }
+
+    @Test
+    fun notificationReadAndDismissTransitionsAreProfileState() = runTest(dispatcher) {
+        val first = profile(canManage = true)
+        val gateway = FakeGateway(restored = true, account = account(first, active = true), collections = listOf(collection()))
+        val notification = mediaNotification("1")
+        gateway.v22Notifications = listOf(notification)
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway, instantNow = { Instant.parse("2026-08-26T12:00:00Z") })
+        advanceUntilIdle()
+
+        viewModel.acknowledgeMediaNotification(notification, dismiss = false)
+        advanceUntilIdle()
+        assertEquals("2026-08-26T12:00:00Z", viewModel.state.value.viewer.features.notifications.single().readAt)
+        viewModel.acknowledgeMediaNotification(notification, dismiss = true)
+        advanceUntilIdle()
+        assertTrue(viewModel.state.value.viewer.features.notifications.isEmpty())
+        assertEquals(listOf(io.rivune.api.MediaNotificationAcknowledgementState.READ, io.rivune.api.MediaNotificationAcknowledgementState.DISMISSED), gateway.notificationAcknowledgements)
+    }
+
 
 
     private fun viewModel(
@@ -3353,10 +3843,12 @@ class RivuneViewModelTest {
         externalPlaybackSupport: ExternalPlaybackSupport = ExternalPlaybackSupport(),
         appPreferences: AppPreferencesReader = AppPreferencesReader { AppPreferencesState() },
         locale: java.util.Locale = java.util.Locale.ENGLISH,
-        playbackNetwork: PlaybackNetwork = PlaybackNetwork.WIFI_OR_ETHERNET,
+        playbackNetwork: NetworkClass = NetworkClass.REMOTE_WIFI,
         serverConnectionAllowed: (String) -> Boolean = { true },
         instantNow: () -> Instant = Instant::now,
         offlineMediaStore: OfflineMediaStore? = null,
+        awaitCoordinationTick: suspend (Long) -> Unit = { _ -> kotlinx.coroutines.awaitCancellation() },
+        monotonicNowMilliseconds: () -> Long = { 0L },
     ) = RivuneViewModel(
         store,
         RivuneGatewayFactory { gateway },
@@ -3369,8 +3861,9 @@ class RivuneViewModelTest {
         playbackNetworkProvider = { playbackNetwork },
         serverConnectionAllowed = serverConnectionAllowed,
         instantNow = instantNow,
-        awaitCoordinationTick = { kotlinx.coroutines.awaitCancellation() },
         offlineMediaStore = offlineMediaStore,
+        awaitCoordinationTick = awaitCoordinationTick,
+        monotonicNowMilliseconds = monotonicNowMilliseconds,
     ).also(viewModels::add)
 }
 private data class OfflineFixture(
@@ -3394,7 +3887,7 @@ private fun offlineFixture(
         val directory = java.io.File(root, scope)
         java.io.File(directory, "$mediaId.rvn").writeBytes(byteArrayOf(1))
         java.io.File(directory, "manifest.json").writeText(
-            """[{"id":"$mediaId","titleId":"$titleId","title":"Saved","fileName":"$mediaId.rvn","container":"mp4","sizeBytes":1,"createdAtEpochMs":1,"posterUrl":""}]""",
+            """[{"id":"$mediaId","titleId":"$titleId","title":"Saved","fileName":"$mediaId.rvn","container":"mp4","sizeBytes":1,"createdAtEpochMs":${System.currentTimeMillis()},"posterUrl":""}]""",
         )
     }
     store.lock()
@@ -3430,12 +3923,20 @@ private class FakeGateway(
     var exchangeCount = 0
     var clearSelectionCount = 0
     var authorizationPlatform: String? = null
+    var authorizationInstallationId: String = ""
     var loggedOut = false
     val resolvedPages = mutableListOf<Int>()
     val fullFolderRequests = mutableListOf<UUID>()
     val artworkFolderRequests = mutableListOf<UUID>()
     var catalogDescriptors = emptyList<io.rivune.api.AddonCatalogDescriptor>()
     var searchPages = emptyMap<Int, io.rivune.api.AddonResourceBatch>()
+    var semanticPages = emptyMap<Int, io.rivune.api.SemanticSearchPage>()
+    var semanticDelayMillis: Long = 0
+    var semanticFailure: Throwable? = null
+    val semanticRequests = mutableListOf<io.rivune.api.SemanticSearchRequest>()
+    val addonSearchRequests = mutableListOf<Triple<String, String, Int>>()
+    var semanticCancelled = false
+    var addonSearchCancellations = 0
     var libraryPages = emptyMap<Int, io.rivune.api.LibraryPage>()
     var resolvedTitle: io.rivune.api.TitleReference? = null
     val resolvedTitleInputs = mutableListOf<io.rivune.api.TitleResolveInput>()
@@ -3479,6 +3980,11 @@ private class FakeGateway(
     val watchedRequests = mutableListOf<Pair<UUID, Long>>()
     var seasonDelayMillis: Long = 0
     var searchDelayMillis: Long = 0
+    var searchIgnoresCancellation = false
+    var searchDelaysByType = emptyMap<String, Long>()
+    var activeAddonSearches = 0
+    var maxConcurrentAddonSearches = 0
+    var searchPagesByType = emptyMap<String, io.rivune.api.AddonResourceBatch>()
     var trailerResults = emptyMap<Int?, List<io.rivune.api.Trailer>>()
     var continueWatchingDelayMillis: Long = 0
     val continueWatchingLimits = mutableListOf<Int?>()
@@ -3495,6 +4001,15 @@ private class FakeGateway(
     var playbackHeartbeatRequests = 0
     var playbackDeviceListRequests = 0
     var localRecommendationRequests = 0
+    var localRecommendationArtworkShape: io.rivune.api.RecommendationArtworkShape? = null
+    var v22Accessibility = accessibility()
+    val accessibilityUpdates = mutableListOf<io.rivune.api.AccessibilityPreferencesDocument>()
+    var v22Notifications = emptyList<io.rivune.api.MediaNotification>()
+    val notificationAcknowledgements = mutableListOf<io.rivune.api.MediaNotificationAcknowledgementState>()
+    var v22Queue = io.rivune.api.ReadingQueue(1, emptyList())
+    var failFirstQueueAdd = false
+    val queueAddInputs = mutableListOf<io.rivune.api.ReadingQueueAddInput>()
+    var readingQueueFailure: Throwable? = null
 
     override suspend fun discover() = discovery
     override suspend fun restoreSession() = restored
@@ -3532,8 +4047,37 @@ private class FakeGateway(
     override suspend fun addonCatalogs() = catalogDescriptors
     override suspend fun searchAddonCatalogs(type: String, search: String, skip: Int?, limit: Int?, language: String?): io.rivune.api.AddonResourceBatch {
         metadataRequests += "search" to language
-        if (searchDelayMillis > 0) delay(searchDelayMillis)
-        return searchPages.getValue(skip ?: 0)
+        addonSearchRequests += Triple(type, search, skip ?: 0)
+        val response = searchPagesByType[type] ?: searchPages.getValue(skip ?: 0)
+        val searchDelay = searchDelaysByType[type] ?: searchDelayMillis
+        activeAddonSearches += 1
+        maxConcurrentAddonSearches = maxOf(maxConcurrentAddonSearches, activeAddonSearches)
+        try {
+            if (searchDelay > 0) {
+                if (searchIgnoresCancellation) {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { delay(searchDelay) }
+                } else {
+                    delay(searchDelay)
+                }
+            }
+            return response
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            addonSearchCancellations += 1
+            throw cause
+        } finally {
+            activeAddonSearches -= 1
+        }
+    }
+    override suspend fun semanticSearch(input: io.rivune.api.SemanticSearchRequest): io.rivune.api.SemanticSearchPage {
+        semanticRequests += input
+        if (semanticDelayMillis > 0) try {
+            delay(semanticDelayMillis)
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            semanticCancelled = true
+            throw cause
+        }
+        semanticFailure?.let { throw it }
+        return semanticPages.getValue(input.page)
     }
     override suspend fun resolveTitle(input: io.rivune.api.TitleResolveInput): io.rivune.api.TitleReference {
         resolvedTitleInputs += input
@@ -3697,29 +4241,39 @@ private class FakeGateway(
     }
     override suspend fun updatePlaybackDevice(input: io.rivune.api.PlaybackDeviceHeartbeatInput): io.rivune.api.PlaybackDevice {
         playbackHeartbeatRequests += 1
-        return io.rivune.api.PlaybackDevice(UUID.randomUUID(), UUID.randomUUID(), "Current", "android", input.capabilities, input.state, true, "2099-01-01T00:00:00Z")
+        return io.rivune.api.PlaybackDevice(UUID.randomUUID(), UUID.randomUUID(), "Current", "android", input.capabilities, input.state, 1, true, "2099-01-01T00:00:00Z")
     }
     override suspend fun playbackDevices(): io.rivune.api.PlaybackDeviceList {
         playbackDeviceListRequests += 1
         return io.rivune.api.PlaybackDeviceList(emptyList())
     }
-    override suspend fun sendPlaybackCommand(sessionId: UUID, input: io.rivune.api.PlaybackCommandInput) = Unit
-    override suspend fun playbackCommands(after: Long) = io.rivune.api.PlaybackCommandList(emptyList())
-    override suspend fun acknowledgePlaybackCommand(id: Long) = Unit
+    override suspend fun sendPlaybackCommand(sessionId: UUID, input: io.rivune.api.PlaybackCommandInput) = fakeCommand(input)
+    override suspend fun playbackCommands(after: UUID?) = io.rivune.api.PlaybackCommandList(emptyList())
+    override suspend fun reportPlaybackCommandResult(operationId: UUID, input: io.rivune.api.PlaybackCommandResultInput) =
+        fakeCommand(io.rivune.api.PlaybackCommandInput(operationId, io.rivune.api.PlaybackCommandType.PLAY), input.status, input.code)
+    override suspend fun outgoingPlaybackCommand(operationId: UUID) =
+        fakeCommand(io.rivune.api.PlaybackCommandInput(operationId, io.rivune.api.PlaybackCommandType.LOAD))
+    override suspend fun exportProfileArchive(profileId: UUID) = kotlinx.serialization.json.buildJsonObject {
+        put("version", kotlinx.serialization.json.JsonPrimitive(2)); put("identity", kotlinx.serialization.json.buildJsonObject {}); put("continueDismissals", kotlinx.serialization.json.buildJsonArray {})
+    }
+    override suspend fun importProfileArchive(profileId: UUID, archive: kotlinx.serialization.json.JsonObject) = error("unused")
+    override suspend fun createProfileFromArchive(categoryId: UUID, archive: kotlinx.serialization.json.JsonObject) = error("unused")
     override suspend fun createPlaybackRoom(input: io.rivune.api.PlaybackRoomCreateInput) = fakePlaybackRoom(input.item, input.state, input.positionMilliseconds, input.durationMilliseconds)
     override suspend fun joinPlaybackRoom(code: String) = fakePlaybackRoom(io.rivune.api.CoordinatedPlaybackItem(UUID.randomUUID()), "paused", 0, 0)
     override suspend fun playbackRoom(id: UUID) = fakePlaybackRoom(io.rivune.api.CoordinatedPlaybackItem(UUID.randomUUID()), "paused", 0, 0, id)
     override suspend fun updatePlaybackRoom(id: UUID, input: io.rivune.api.PlaybackRoomUpdateInput) = fakePlaybackRoom(io.rivune.api.CoordinatedPlaybackItem(UUID.randomUUID()), input.state, input.positionMilliseconds, input.durationMilliseconds, id)
     override suspend fun leavePlaybackRoom(id: UUID) = Unit
-    override suspend fun localRecommendations(limit: Int): io.rivune.api.LocalRecommendationPage {
+    override suspend fun localRecommendations(limit: Int, artworkShape: io.rivune.api.RecommendationArtworkShape?): io.rivune.api.LocalRecommendationPage {
         localRecommendationRequests += 1
+        localRecommendationArtworkShape = artworkShape
         return io.rivune.api.LocalRecommendationPage(emptyList())
     }
     override suspend fun calendar(from: String, to: String, language: String?): List<io.rivune.api.CalendarEvent> {
         metadataRequests += "calendar" to language
         return calendarEvents
     }
-    override suspend fun beginDeviceAuthorization(deviceName: String, platform: String): DeviceAuthorizationResponse {
+    override suspend fun beginDeviceAuthorization(installationId: String, deviceName: String, platform: String): DeviceAuthorizationResponse {
+        authorizationInstallationId = installationId
         authorizationFailure?.let { throw it }
         authorizationPlatform = platform
         return DeviceAuthorizationResponse(
@@ -3739,6 +4293,30 @@ private class FakeGateway(
     override suspend fun logout(): LogoutResult {
         loggedOut = true
         return logoutResult
+    }
+    override suspend fun readingQueue(profileId: UUID): io.rivune.api.ReadingQueue {
+        readingQueueFailure?.let { throw it }
+        return v22Queue
+    }
+    override suspend fun addReadingQueueItem(profileId: UUID, input: io.rivune.api.ReadingQueueAddInput): io.rivune.api.ReadingQueueMutation {
+        queueAddInputs += input
+        if (failFirstQueueAdd && queueAddInputs.size == 1) throw java.io.IOException("offline")
+        v22Queue = v22Queue.copy(revision = v22Queue.revision + 1)
+        return io.rivune.api.ReadingQueueMutation(v22Queue.revision)
+    }
+    override suspend fun savedSearches() = emptyList<io.rivune.api.SavedSearch>()
+    override suspend fun smartCollections() = emptyList<io.rivune.api.SmartCollection>()
+    override suspend fun extensionIncidents() = emptyList<io.rivune.api.AddonIncident>()
+    override suspend fun mediaNotificationSubscriptions() = emptyList<io.rivune.api.MediaNotificationSubscription>()
+    override suspend fun mediaNotifications(cursor: String?, limit: Int?) = io.rivune.api.MediaNotificationPage(v22Notifications)
+    override suspend fun acknowledgeMediaNotification(id: String, state: io.rivune.api.MediaNotificationAcknowledgementState) {
+        notificationAcknowledgements += state
+    }
+    override suspend fun profileAccessibilityPreferences(profileId: UUID) = v22Accessibility
+    override suspend fun updateProfileAccessibilityPreferences(profileId: UUID, input: io.rivune.api.AccessibilityPreferencesDocument): io.rivune.api.AccessibilityPreferencesDocument {
+        accessibilityUpdates += input
+        v22Accessibility = input.copy(revision = input.revision + 1)
+        return v22Accessibility
     }
     override fun resolveArtworkUrl(value: String) = if (value.startsWith("/")) "https://media.example.com$value" else null
     override fun resolveResourceUrl(value: String) = if (value.startsWith("https://")) value else "https://media.example.com$value"
@@ -3811,13 +4389,88 @@ private fun <T> io.rivune.api.PatchField<T>.applySourceTo(current: String?): Str
     is io.rivune.api.PatchField.Value -> "profile"
 }
 
+private fun semanticSearchGateway(types: List<String> = listOf("movie", "series")): FakeGateway {
+    val gateway = FakeGateway(
+        discovery = discovery(capabilities = listOf("semantic-search")),
+        restored = true,
+        account = account(profile(hasPin = false), active = true),
+        collections = listOf(collection()),
+    )
+    gateway.catalogDescriptors = types.mapIndexed { index, type ->
+        io.rivune.api.AddonCatalogDescriptor(
+            addonId = UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            addonName = "Catalog",
+            manifestId = "org.example",
+            position = index,
+            catalog = io.rivune.api.StremioManifestCatalog(type = type, id = "search-$type"),
+            addonCatalog = false,
+            searchable = true,
+        )
+    }
+    return gateway
+}
+
+private fun semanticPage(
+    items: List<CollectionItem>,
+    mediaTypes: List<String> = listOf("movie"),
+    hasMore: Boolean = false,
+    page: Int = 1,
+    partial: Boolean = false,
+) = io.rivune.api.SemanticSearchPage(
+    intents = listOf(io.rivune.api.SemanticSearchIntent("genre:war", "genre", "war", "War")),
+    titleQuery = "Dune",
+    mediaTypes = mediaTypes,
+    items = items,
+    page = page,
+    hasMore = hasMore,
+    partial = partial,
+)
+
+private fun addonSearchBatch(
+    type: String,
+    id: String,
+    title: String,
+) = io.rivune.api.AddonResourceBatch(
+    results = listOf(
+        io.rivune.api.AddonResourceResult(
+            addonId = UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            manifestId = "org.example",
+            resource = "catalog",
+            type = type,
+            id = "search-$type",
+            payload = kotlinx.serialization.json.Json.parseToJsonElement(
+                """{"metas":[{"id":"$id","type":"$type","name":"$title"}]}""",
+            ) as kotlinx.serialization.json.JsonObject,
+            cache = io.rivune.api.AddonCachePolicy(),
+        ),
+    ),
+
+    errors = emptyList(),
+)
+private fun fakeCommand(
+    input: io.rivune.api.PlaybackCommandInput,
+    status: io.rivune.api.PlaybackCommandStatus = io.rivune.api.PlaybackCommandStatus.PENDING,
+    code: io.rivune.api.PlaybackCommandResultCode? = null,
+) = io.rivune.api.PlaybackCommand(
+    operationId = input.operationId,
+    command = input.command,
+    item = input.item,
+    positionMilliseconds = input.positionMilliseconds,
+    mode = input.mode,
+    targetRevision = input.targetRevision,
+    status = status,
+    resultCode = code,
+    senderDeviceName = "Sender",
+    createdAt = "2099-01-01T00:00:00Z",
+    expiresAt = "2099-01-01T00:02:00Z",
+)
 private fun discovery(
     setupRequired: Boolean = false,
-    capabilities: List<String> = listOf("local-recommendations", "playback-coordination"),
+    capabilities: List<String> = listOf("local-recommendations", "playback-coordination", "playback-command-results"),
 ) = Discovery(
     name = "Family server",
     serverVersion = "20.0.0",
-    protocolVersion = 20,
+    protocolVersion = 22,
     apiBaseUrl = "/api/v1",
     setupRequired = setupRequired,
     setupCompleted = !setupRequired,
@@ -4020,3 +4673,39 @@ private val PROFILE_ID = UUID.fromString("44444444-4444-4444-8444-444444444444")
 private val CATEGORY_ID = UUID.fromString("55555555-5555-4555-8555-555555555555")
 private val COLLECTION_ID = UUID.fromString("66666666-6666-4666-8666-666666666666")
 private val FOLDER_ID = UUID.fromString("77777777-7777-4777-8777-777777777777")
+
+private fun accessibility(revision: Long = 1, textScale: Int = 100) = io.rivune.api.AccessibilityPreferencesDocument(
+    revision,
+    io.rivune.api.ReducedMotionPreference.SYSTEM,
+    io.rivune.api.HighContrastPreference.SYSTEM,
+    textScale,
+    io.rivune.api.CaptionsPreference.SYSTEM,
+    false,
+    io.rivune.api.FocusIndicatorsPreference.STANDARD,
+)
+
+private fun failover(attemptCount: Int, maximumAttempts: Int) = io.rivune.api.PlaybackFailoverState(
+    UUID.randomUUID(), "opaque-source-reference-01", 0, 0.0, attemptCount, maximumAttempts, 1,
+    io.rivune.api.PlaybackFailoverStatus.ACTIVE,
+    candidateHealth = listOf(
+        io.rivune.api.PlaybackFailoverCandidateHealth(0, io.rivune.api.PlaybackFailoverCandidateStatus.CURRENT),
+        io.rivune.api.PlaybackFailoverCandidateHealth(1, io.rivune.api.PlaybackFailoverCandidateStatus.AVAILABLE),
+    ),
+    expiresAt = "2099-01-01T00:00:00Z",
+)
+
+private fun playerPresentation(failover: io.rivune.api.PlaybackFailoverState) = PlayerPresentation(
+    UUID.randomUUID().toString(), UUID.randomUUID(), UUID.randomUUID(), "Title", "https://example.invalid/media",
+    "movie", "tmdb:42", protocol = "http", container = "mp4", mediaTimeline = null,
+    startPositionMs = 0, timelineStartPositionMs = 0, durationSeconds = 0, expectedProgressVersion = 0,
+    engine = EmbeddedPlayerEngine.MEDIA3, fallbackAllowed = false, failover = failover,
+)
+
+private fun mediaNotification(id: String) = io.rivune.api.MediaNotification(
+    id,
+    io.rivune.api.MediaNotificationKind.MOVIE_RELEASE,
+    UUID.randomUUID(),
+    title = "Release",
+    availableAt = "2026-08-26T10:00:00Z",
+    createdAt = "2026-08-26T09:00:00Z",
+)
