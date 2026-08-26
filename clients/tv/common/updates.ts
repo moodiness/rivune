@@ -25,6 +25,10 @@ export function checkForTvUpdate(): void {
   void window.RivuneUpdater?.checkManually();
 }
 
+export function dismissTvUpdateNotice(): void {
+  window.RivuneUpdater?.dismissNotice();
+}
+
 export function downloadTvUpdate(): void {
   void window.RivuneUpdater?.download();
 }

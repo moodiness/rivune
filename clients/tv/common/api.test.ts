@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { APIError, RivuneTvClient, normalizeServerUrl } from "./api";
-import { LocalStorageCredentialStore, MemoryCredentialStore, type CredentialStore, type StoredCredentials } from "./storage";
+import { MemoryCredentialStore, defaultCredentialStore, type CredentialStore, type StoredCredentials } from "./storage";
 import type { TokenPair } from "./types";
 
 type CapturedRequest = { url: string; init: RequestInit; headers: Headers };
@@ -8,7 +8,7 @@ type CapturedRequest = { url: string; init: RequestInit; headers: Headers };
 const DISCOVERY = {
   name: "Rivune",
   serverVersion: "1.12.0",
-  protocolVersion: 20,
+  protocolVersion: 22,
   apiBaseUrl: "/api/v1",
   setupRequired: false,
   timezone: "UTC",
@@ -117,7 +117,7 @@ describe("Rivune TV credentials", () => {
     expect(requests[0].headers.get("Authorization")).toBeNull();
   });
 
-  it("persists and applies profileContext only to profile-scoped APIs", async () => {
+  it("keeps and applies profileContext only to profile-scoped APIs", async () => {
     const store = new MemoryCredentialStore();
     await store.save({ issuer: "https://media.example.com", tokens: tokens("initial"), profileContext: null });
     const requests: CapturedRequest[] = [];
@@ -200,20 +200,23 @@ describe("Rivune TV credentials", () => {
     });
   });
 
-  it("drops persisted credentials with inconsistent authorization scope", async () => {
-    const storage = new Map<string, string>();
-    const store = new LocalStorageCredentialStore({
-      getItem(key) { return storage.get(key) ?? null; },
-      setItem(key, value) { storage.set(key, value); },
-      removeItem(key) { storage.delete(key); },
-    });
-    await store.save({
-      issuer: "https://media.example.com",
-      tokens: { ...tokens("bad"), authorizationScope: "category", category: null },
-      profileContext: null,
-    });
+  it("removes legacy persisted secrets and keeps credentials in memory only", async () => {
+    window.localStorage.setItem("rivune.tv.credentials.v1:https%3A%2F%2Fmedia.example.com", JSON.stringify({ accessToken: "rivune_at_secret", refreshToken: "rivune_rt_secret", profileContext: "rivune_pc_secret" }));
+    window.localStorage.setItem("rivune.tv.quality.v1", "maximum");
+    window.localStorage.setItem("rivune.tv.server.v1", "https://media.example.com");
+    window.localStorage.setItem("rivune.tv.installation.v1", "opaque-installation");
 
-    await expect(store.load("https://media.example.com")).resolves.toBeNull();
+    const store = defaultCredentialStore();
+    await store.save({ issuer: "https://media.example.com", tokens: tokens("memory"), profileContext: "rivune_pc_secret" });
+
+    expect(window.localStorage.getItem("rivune.tv.credentials.v1:https%3A%2F%2Fmedia.example.com")).toBeNull();
+    expect(window.localStorage.getItem("rivune.tv.quality.v1")).toBeNull();
+    expect(window.localStorage.getItem("rivune.tv.server.v1")).toBe("https://media.example.com");
+    expect(window.localStorage.getItem("rivune.tv.installation.v1")).toBe("opaque-installation");
+    const persisted = Object.values(window.localStorage).join("|");
+    expect(persisted).not.toMatch(/rivune_(?:at|rt|pc)_/);
+    expect(await store.load("https://media.example.com")).toMatchObject({ profileContext: "rivune_pc_secret" });
+    expect(defaultCredentialStore()).not.toBe(store);
   });
 });
 
@@ -264,7 +267,7 @@ describe("Rivune TV request security", () => {
   });
 
 
-  it("uses the v20 library mutation routes", async () => {
+  it("uses the current library mutation routes", async () => {
     const store = new MemoryCredentialStore();
     await store.save({ issuer: "https://media.example.com", tokens: tokens("library"), profileContext: "viewer" });
     const requests: CapturedRequest[] = [];
@@ -285,6 +288,84 @@ describe("Rivune TV request security", () => {
     expect(requests[1].init.method).toBe("PUT");
     expect(requests[2].url).toBe("https://media.example.com/api/v1/library/title-1");
     expect(requests[2].init.method).toBe("DELETE");
+  });
+
+  it("sends the stable installation identity when requesting a pairing code", async () => {
+    const requests: CapturedRequest[] = [];
+    const client = new RivuneTvClient("https://media.example.com", {
+      platform: "tizen",
+      credentialStore: new MemoryCredentialStore(),
+      fetch: fetchQueue([
+        json(DISCOVERY),
+        json({
+          deviceCode: "secret",
+          userCode: "ABCD-EFGH",
+          verificationUri: "https://media.example.com/pair",
+          verificationUriComplete: "https://media.example.com/pair?code=ABCD-EFGH",
+          expiresAt: "2099-01-01T00:00:00Z",
+          intervalSeconds: 5,
+        }, 201),
+      ], requests),
+    });
+
+    await client.beginDeviceAuthorization("installation-1", "Living room", "tizen");
+
+    expect(JSON.parse(String(requests[1].init.body))).toEqual({
+      installationId: "installation-1",
+      deviceName: "Living room",
+      platform: "tizen",
+    });
+  });
+
+  it("posts the semantic search contract with profile authentication and cancellation", async () => {
+    const store = new MemoryCredentialStore();
+    await store.save({ issuer: "https://media.example.com", tokens: tokens("search"), profileContext: "viewer" });
+    const requests: CapturedRequest[] = [];
+    const client = new RivuneTvClient("https://media.example.com", {
+      platform: "webos",
+      credentialStore: store,
+      fetch: fetchQueue([
+        json({ ...DISCOVERY, capabilities: ["semantic-search"] }),
+        json({
+          intents: [{ id: "genre:war", kind: "genre", value: "war", label: "War" }],
+          titleQuery: "Dune",
+          mediaTypes: ["movie"],
+          items: [],
+          page: 2,
+          hasMore: false,
+          partial: true,
+        }),
+      ], requests),
+    });
+    const controller = new AbortController();
+    const discovery = await client.discover();
+    expect(discovery.capabilities).toEqual(["semantic-search"]);
+
+    const page = await client.semanticSearch({
+      query: "war movie Dune",
+      mediaType: "movie",
+      language: "en",
+      region: "US",
+      page: 2,
+      limit: 40,
+      excludedIntentIds: ["theme:space"],
+    }, controller.signal);
+
+    expect(page).toMatchObject({ titleQuery: "Dune", page: 2, partial: true });
+    expect(requests[1].url).toBe("https://media.example.com/api/v1/search/semantic");
+    expect(requests[1].init.method).toBe("POST");
+    expect(requests[1].init.signal).toBe(controller.signal);
+    expect(requests[1].headers.get("Authorization")).toBe("Bearer search-access");
+    expect(requests[1].headers.get("X-Rivune-Profile-Context")).toBe("viewer");
+    expect(JSON.parse(String(requests[1].init.body))).toEqual({
+      query: "war movie Dune",
+      mediaType: "movie",
+      language: "en",
+      region: "US",
+      page: 2,
+      limit: 40,
+      excludedIntentIds: ["theme:space"],
+    });
   });
 
   it("rejects a declared response body above 16 MiB before parsing", async () => {
@@ -316,5 +397,51 @@ describe("Rivune TV request security", () => {
       message: "Try later",
       retryAfterSeconds: 42,
     });
+  });
+
+
+  it("requires closed playback reasons and strips internal pipeline details", async () => {
+    const store = new MemoryCredentialStore();
+    await store.save({ issuer: "https://media.example.com", tokens: tokens("playback"), profileContext: "viewer" });
+    const safeDecision = { reason: "direct_supported", reasons: [], videoAction: "copy", audioAction: "copy", subtitleAction: "none", toneMapping: false, pipeline: { command: "secret" } };
+    const client = new RivuneTvClient("https://media.example.com", {
+      platform: "tizen", credentialStore: store,
+      fetch: fetchQueue([json(DISCOVERY), json({ sourceRef: "ref", mode: "direct", protocol: "http", subtitleCount: 0, expiresAt: "later", decision: safeDecision })], []),
+    });
+    const preparation = await client.preparePlayback("ref");
+    expect(preparation.decision).toEqual({ reason: "direct_supported", reasons: [], videoAction: "copy", audioAction: "copy", subtitleAction: "none", toneMapping: false });
+    expect(preparation.decision).not.toHaveProperty("pipeline");
+
+    const invalid = new RivuneTvClient("https://media.example.com", {
+      platform: "webos", credentialStore: store,
+      fetch: fetchQueue([json(DISCOVERY), json({ sourceRef: "ref", mode: "direct", protocol: "http", subtitleCount: 0, expiresAt: "later", decision: { ...safeDecision, reasons: ["provider_url"] } })], []),
+    });
+    await expect(invalid.preparePlayback("ref")).rejects.toMatchObject({ code: "invalid_response" });
+  });
+  it("uses operation-scoped v22 command results without the removed ack route", async () => {
+    const store = new MemoryCredentialStore();
+    await store.save({ issuer: "https://media.example.com", tokens: tokens("coordination"), profileContext: "viewer" });
+    const requests: CapturedRequest[] = [];
+    const operationId = "44444444-4444-4444-8444-444444444444";
+    const command = { operationId, command: "play", targetRevision: 9, senderDeviceName: "Remote", status: "pending", createdAt: "now", expiresAt: "later" };
+    const client = new RivuneTvClient("https://media.example.com", {
+      platform: "webos", credentialStore: store,
+      fetch: fetchQueue([json(DISCOVERY), json(command, 201), json({ commands: [command] }), json({ ...command, status: "applied", resultCode: "applied" }), json({ ...command, status: "applied", resultCode: "applied" })], requests),
+    });
+
+    await client.sendPlaybackCommand("33333333-3333-4333-8333-333333333333", { operationId, command: "play", targetRevision: 9 });
+    await client.playbackCommands(operationId);
+    await client.reportPlaybackCommandResult(operationId, { status: "applied", code: "applied" });
+    await client.outgoingPlaybackCommand(operationId);
+
+    expect(requests.slice(1).map((request) => [request.init.method, request.url])).toEqual([
+      ["POST", "https://media.example.com/api/v1/playback/devices/33333333-3333-4333-8333-333333333333/commands"],
+      ["GET", `https://media.example.com/api/v1/playback/commands?after=${operationId}`],
+      ["PUT", `https://media.example.com/api/v1/playback/commands/incoming/${operationId}/result`],
+      ["GET", `https://media.example.com/api/v1/playback/commands/outgoing/${operationId}`],
+    ]);
+    expect(JSON.parse(String(requests[1].init.body))).toEqual({ operationId, command: "play", targetRevision: 9 });
+    expect(JSON.parse(String(requests[3].init.body))).toEqual({ status: "applied", code: "applied" });
+    expect(requests.some((request) => request.url.includes("/ack"))).toBe(false);
   });
 });
