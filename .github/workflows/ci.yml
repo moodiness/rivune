@@ -9,6 +9,8 @@ on:
 
 permissions:
   contents: read
+  actions: read
+  packages: read
 
 jobs:
   gate:
