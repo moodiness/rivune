@@ -1,0 +1,75 @@
+services:
+  rivune:
+    depends_on:
+      ollama:
+        condition: service_healthy
+      ollama-model:
+        condition: service_completed_successfully
+    environment:
+      RIVUNE_SEMANTIC_OLLAMA_URL: http://ollama:11434
+      RIVUNE_SEMANTIC_OLLAMA_MODEL: ${RIVUNE_SEMANTIC_OLLAMA_MODEL:?Set an operator-evaluated model explicitly; no benchmark candidate passed}
+
+  ollama:
+    image: ollama/ollama:0.32.15
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 512
+    deploy:
+      resources:
+        limits:
+          cpus: "8.0"
+          memory: 5G
+          pids: 512
+    environment:
+      OLLAMA_KEEP_ALIVE: "-1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_NO_CLOUD: "true"
+      OLLAMA_NUM_PARALLEL: "1"
+    volumes:
+      - ollama_models:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - edge
+
+  ollama-model:
+    image: ollama/ollama:0.32.15
+    restart: "no"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      MODEL: ${RIVUNE_SEMANTIC_OLLAMA_MODEL:?Set an operator-evaluated model explicitly; no benchmark candidate passed}
+    entrypoint: ["/bin/sh", "-c"]
+    command: ['ollama pull "$$MODEL"']
+    networks:
+      - edge
+
+  ollama-benchmark-models:
+    image: ollama/ollama:0.32.15
+    profiles: ["semantic-benchmark"]
+    restart: "no"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      MODELS: ${RIVUNE_SEMANTIC_BENCHMARK_MODELS:-qwen3:0.6b qwen3:1.7b qwen3:4b}
+    entrypoint: ["/bin/sh", "-c"]
+    command: ['for model in $$MODELS; do ollama pull "$$model" || exit 1; done']
+    networks:
+      - edge
+
+volumes:
+  ollama_models:
+    name: rivune_ollama

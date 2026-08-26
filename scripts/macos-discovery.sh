@@ -97,7 +97,7 @@ start_agent() {
     <string>local.</string>
     <string>${port}</string>
     <string>url=${escaped_origin}</string>
-    <string>protocol=20</string>
+    <string>protocol=22</string>
     <string>version=${escaped_version}</string>
   </array>
   <key>RunAtLoad</key>

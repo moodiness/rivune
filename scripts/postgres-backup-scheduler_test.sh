@@ -27,9 +27,9 @@ chmod +x "${TEST_DIR}/scripts/"*.sh
 
 create_set() {
   local stem="$1"
-  printf archive > "${TEST_DIR}/backups/${stem}.dump"
-  printf manifest > "${TEST_DIR}/backups/${stem}.dump.manifest"
-  printf signature > "${TEST_DIR}/backups/${stem}.dump.sig"
+  printf ciphertext > "${TEST_DIR}/backups/${stem}.age"
+  printf manifest > "${TEST_DIR}/backups/${stem}.age.manifest"
+  printf signature > "${TEST_DIR}/backups/${stem}.age.sig"
 }
 create_set rivune-scheduled-20260101T010101Z-1
 create_set rivune-scheduled-20260102T010101Z-2
@@ -38,19 +38,19 @@ export VERIFY_LOG="${TEST_DIR}/verify.log"
 RIVUNE_BACKUP_RETENTION=2 \
   "${TEST_DIR}/scripts/postgres-backup-scheduler.sh" --once "${TEST_DIR}/backups" >/dev/null
 
-[[ ! -e "${TEST_DIR}/backups/rivune-scheduled-20260101T010101Z-1.dump" ]]
-[[ -f "${TEST_DIR}/backups/rivune-scheduled-20260102T010101Z-2.dump" ]]
-[[ "$(find "${TEST_DIR}/backups" -maxdepth 1 -type f -name '*.dump' | wc -l | tr -d ' ')" == 2 ]]
+[[ ! -e "${TEST_DIR}/backups/rivune-scheduled-20260101T010101Z-1.age" ]]
+[[ -f "${TEST_DIR}/backups/rivune-scheduled-20260102T010101Z-2.age" ]]
+[[ "$(find "${TEST_DIR}/backups" -maxdepth 1 -type f -name '*.age' | wc -l | tr -d ' ')" == 2 ]]
 [[ "$(cat "${VERIFY_LOG}")" == *'<--expect-backup-id>'* ]]
 [[ "$(cat "${VERIFY_LOG}")" == *'<0123456789abcdef0123456789abcdef>'* ]]
 
-before_count="$(find "${TEST_DIR}/backups" -maxdepth 1 -type f -name '*.dump' | wc -l | tr -d ' ')"
+before_count="$(find "${TEST_DIR}/backups" -maxdepth 1 -type f -name '*.age' | wc -l | tr -d ' ')"
 if FAIL_VERIFY=true RIVUNE_BACKUP_RETENTION=1 \
     "${TEST_DIR}/scripts/postgres-backup-scheduler.sh" --once "${TEST_DIR}/backups" >/dev/null 2>&1; then
   echo 'scheduler accepted a failed verification' >&2
   exit 1
 fi
-after_count="$(find "${TEST_DIR}/backups" -maxdepth 1 -type f -name '*.dump' | wc -l | tr -d ' ')"
+after_count="$(find "${TEST_DIR}/backups" -maxdepth 1 -type f -name '*.age' | wc -l | tr -d ' ')"
 (( after_count == before_count + 1 ))
 
 if RIVUNE_BACKUP_INTERVAL_SECONDS=59 \
