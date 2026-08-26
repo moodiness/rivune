@@ -33,6 +33,8 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
+enum class OfflineMediaState { QUEUED, DOWNLOADING, READY, EXPIRED, FAILED }
+
 data class OfflineMediaItem(
     val id: UUID,
     val titleId: UUID,
@@ -45,6 +47,9 @@ data class OfflineMediaItem(
     val positionMs: Long = 0,
     val durationMs: Long = 0,
     val completed: Boolean = false,
+    val state: OfflineMediaState = OfflineMediaState.READY,
+    val downloadedBytes: Long = sizeBytes,
+    val expiresAtEpochMs: Long? = null,
 )
 
 data class OfflineProfileGate(
@@ -62,6 +67,10 @@ internal class OfflineMediaStore private constructor(private val root: File) {
     internal constructor(context: Context) : this(File(context.applicationContext.filesDir, "offline-media"))
     internal constructor(rootDirectory: File, testing: Boolean) : this(rootDirectory.also { check(testing) })
     private val gatesFile = File(root, "profiles.json")
+    private val reservations = mutableMapOf<UUID, Long>()
+    private var cachedArchiveBytes: Long? = null
+    internal var archiveScanCount: Int = 0
+        private set
 
     init { check(root.exists() || root.mkdirs()) { "Offline media directory is unavailable" } }
 
@@ -126,9 +135,32 @@ internal class OfflineMediaStore private constructor(private val root: File) {
 
     fun lock() { authorizedScope = null }
 
-    fun items(scope: String): List<OfflineMediaItem> = synchronized(this) {
+    fun items(
+        scope: String,
+        expirationDays: Int = 30,
+        nowEpochMs: Long = Instant.now().toEpochMilli(),
+    ): List<OfflineMediaItem> = synchronized(this) {
         requireOpen(scope)
-        readManifest(scope).sortedByDescending(OfflineMediaItem::createdAtEpochMs)
+        val manifest = readManifest(scope)
+        val active = mutableListOf<OfflineMediaItem>()
+        var changed = false
+        manifest.forEach { item ->
+            val expiry = if (expirationDays == 0) null else item.expiresAtEpochMs
+                ?: item.createdAtEpochMs + expirationDays.toLong() * 24L * 60L * 60L * 1_000L
+            if (expiry != null && nowEpochMs >= expiry) {
+                val archive = File(scopeDirectory(scope), item.fileName)
+                val beforeDelete = committedArchiveBytesLocked()
+                val released = archive.length().takeIf { archive.delete() } ?: 0L
+                cachedArchiveBytes = (beforeDelete - released).coerceAtLeast(0L)
+                changed = true
+            } else {
+                val normalized = item.copy(state = OfflineMediaState.READY, expiresAtEpochMs = expiry)
+                active += normalized
+                if (normalized != item) changed = true
+            }
+        }
+        if (changed) writeManifest(scope, active)
+        active.sortedByDescending(OfflineMediaItem::createdAtEpochMs)
     }
 
     suspend fun download(
@@ -138,12 +170,14 @@ internal class OfflineMediaStore private constructor(private val root: File) {
         title: String,
         container: String?,
         posterUrl: String?,
+        quotaBytes: Long = DEFAULT_MAXIMUM_STORED_BYTES,
+        expirationDays: Int = 30,
         progress: (Long) -> Unit,
     ): OfflineMediaItem = withContext(Dispatchers.IO) {
         requireOpen(scope)
+        require(quotaBytes > 0) { "Offline storage quota must be positive" }
+        require(expirationDays >= 0) { "Offline expiration must not be negative" }
         val directory = scopeDirectory(scope)
-        val currentBytes = items(scope).sumOf(OfflineMediaItem::sizeBytes)
-        require(currentBytes < MAXIMUM_STORED_BYTES) { "Offline storage quota reached" }
         val id = UUID.randomUUID()
         val partial = File(directory, ".${id}.partial")
         val destination = File(directory, "$id.rvn")
@@ -157,7 +191,7 @@ internal class OfflineMediaStore private constructor(private val root: File) {
             connection.connect()
             if (connection.responseCode !in 200..299) error("Offline source returned HTTP ${connection.responseCode}")
             val announcedLength = connection.contentLengthLong
-            if (announcedLength > 0 && announcedLength > MAXIMUM_STORED_BYTES - currentBytes) error("Offline storage quota reached")
+            if (!reserve(id, announcedLength.coerceAtLeast(0L), quotaBytes)) error("Offline storage quota reached")
             connection.inputStream.use { input ->
                 val buffer = ByteArray(256 * 1024)
                 var total = 0L
@@ -166,21 +200,42 @@ internal class OfflineMediaStore private constructor(private val root: File) {
                     if (count < 0) break
                     if (count == 0) continue
                     total += count
-                    if (total > MAXIMUM_STORED_BYTES - currentBytes) error("Offline storage quota reached")
                     writer.append(buffer, count)
+                    if (announcedLength <= 0 && !updateReservation(id, partial.length(), quotaBytes)) {
+                        error("Offline storage quota reached")
+                    }
                     progress(total)
                 }
             }
             connection.disconnect()
-            val size = writer.finish()
-            check(partial.renameTo(destination)) { "Could not commit offline media" }
-            val item = OfflineMediaItem(id, titleId, title, destination.name, container?.lowercase()?.ifBlank { "mp4" } ?: "mp4", size, Instant.now().toEpochMilli(), posterUrl)
-            synchronized(this@OfflineMediaStore) {
+            writer.finish()
+            val createdAt = Instant.now().toEpochMilli()
+            val expiresAt = expirationDays.takeIf { it > 0 }?.let { createdAt + it.toLong() * 24L * 60L * 60L * 1_000L }
+            val item = synchronized(this@OfflineMediaStore) {
                 requireOpen(scope)
-                writeManifest(scope, readManifest(scope).filterNot { it.id == item.id } + item)
+                check(reservations[id] != null) { "Offline download reservation is missing" }
+                val committedBytes = committedArchiveBytesLocked()
+                val otherReservations = reservations.filterKeys { it != id }.values.sum()
+                if (partial.length() > quotaBytes - committedBytes - otherReservations) {
+                    error("Offline storage quota reached")
+                }
+                check(partial.renameTo(destination)) { "Could not commit offline media" }
+                val committed = OfflineMediaItem(
+                    id, titleId, title, destination.name,
+                    container?.lowercase()?.ifBlank { "mp4" } ?: "mp4",
+                    destination.length(), createdAt, posterUrl,
+                    state = OfflineMediaState.READY,
+                    downloadedBytes = destination.length(),
+                    expiresAtEpochMs = expiresAt,
+                )
+                reservations.remove(id)
+                cachedArchiveBytes = committedBytes + destination.length()
+                writeManifest(scope, readManifest(scope).filterNot { it.id == committed.id } + committed)
+                committed
             }
             item
         } catch (failure: Throwable) {
+            releaseReservation(id)
             writer.closeQuietly()
             destination.delete()
             partial.delete()
@@ -191,7 +246,11 @@ internal class OfflineMediaStore private constructor(private val root: File) {
     fun remove(scope: String, item: OfflineMediaItem): Boolean = synchronized(this) {
         requireOpen(scope)
         check(item in readManifest(scope)) { "Offline media belongs to another scope" }
-        check(File(scopeDirectory(scope), item.fileName).delete()) { "Could not delete offline media" }
+        val archive = File(scopeDirectory(scope), item.fileName)
+        val beforeDelete = committedArchiveBytesLocked()
+        val released = archive.length()
+        check(archive.delete()) { "Could not delete offline media" }
+        cachedArchiveBytes = (beforeDelete - released).coerceAtLeast(0L)
         writeManifest(scope, readManifest(scope).filterNot { it.id == item.id })
         true
     }
@@ -207,16 +266,23 @@ internal class OfflineMediaStore private constructor(private val root: File) {
         }
     }
 
-    fun mediaUri(scope: String, item: OfflineMediaItem): String {
+    fun mediaUri(scope: String, item: OfflineMediaItem): String = synchronized(this) {
         requireOpen(scope)
-        check(item in readManifest(scope)) { "Offline media belongs to another scope" }
-        return "$OFFLINE_SCHEME://$scope/${item.id}"
+        val stored = readManifest(scope).firstOrNull { it.id == item.id }
+        check(stored != null) { "Offline media belongs to another scope" }
+        check(stored.state != OfflineMediaState.EXPIRED && stored.expiresAtEpochMs?.let { Instant.now().toEpochMilli() < it } != false) {
+            "Offline media has expired"
+        }
+        "$OFFLINE_SCHEME://$scope/${item.id}"
     }
 
     internal fun openReader(scope: String, id: UUID): EncryptedMediaReader {
         requireOpen(scope)
         val item = synchronized(this) { readManifest(scope).firstOrNull { it.id == id } }
             ?: error("Offline media does not exist in this scope")
+        check(item.state != OfflineMediaState.EXPIRED && item.expiresAtEpochMs?.let { Instant.now().toEpochMilli() < it } != false) {
+            "Offline media has expired"
+        }
         val archive = File(scopeDirectory(scope), item.fileName)
         check(archive.isFile) { "Offline media file is missing" }
         return EncryptedMediaReader(archive, offlineKey(scope))
@@ -257,6 +323,9 @@ internal class OfflineMediaStore private constructor(private val root: File) {
                     value.getString("fileName"), value.getString("container"), value.getLong("sizeBytes"), value.getLong("createdAtEpochMs"),
                     value.optString("posterUrl").takeIf(String::isNotBlank), value.optLong("positionMs", 0L).coerceAtLeast(0),
                     value.optLong("durationMs", 0L).coerceAtLeast(0), value.optBoolean("completed", false),
+                    state = runCatching { OfflineMediaState.valueOf(value.optString("state", "READY")) }.getOrDefault(OfflineMediaState.READY),
+                    downloadedBytes = value.optLong("downloadedBytes", value.getLong("sizeBytes")).coerceAtLeast(0),
+                    expiresAtEpochMs = value.optLong("expiresAtEpochMs", -1L).takeIf { it >= 0L },
                 ) }.getOrNull()?.let(::add)
             }
         }
@@ -267,7 +336,8 @@ internal class OfflineMediaStore private constructor(private val root: File) {
         items.forEach { item -> array.put(JSONObject().put("id", item.id.toString()).put("titleId", item.titleId.toString())
             .put("title", item.title).put("fileName", item.fileName).put("container", item.container).put("sizeBytes", item.sizeBytes)
             .put("createdAtEpochMs", item.createdAtEpochMs).put("posterUrl", item.posterUrl ?: "").put("positionMs", item.positionMs)
-            .put("durationMs", item.durationMs).put("completed", item.completed)) }
+            .put("durationMs", item.durationMs).put("completed", item.completed).put("state", item.state.name)
+            .put("downloadedBytes", item.downloadedBytes).put("expiresAtEpochMs", item.expiresAtEpochMs ?: -1L)) }
         atomicWrite(manifestFile(scope), array.toString())
     }
 
@@ -295,6 +365,52 @@ internal class OfflineMediaStore private constructor(private val root: File) {
         check(temporary.renameTo(file)) { "Could not persist offline data" }
     }
 
+    internal fun reserve(operationId: UUID, bytes: Long, quotaBytes: Long): Boolean = synchronized(this) {
+        if (bytes < 0 || quotaBytes <= 0) return false
+        val used = committedArchiveBytesLocked() + reservations.filterKeys { it != operationId }.values.sum()
+        if (bytes > quotaBytes - used) return false
+        reservations[operationId] = bytes
+        true
+    }
+
+    internal fun updateReservation(operationId: UUID, bytes: Long, quotaBytes: Long): Boolean = synchronized(this) {
+        if (operationId !in reservations || bytes < 0) return false
+        val used = committedArchiveBytesLocked() + reservations.filterKeys { it != operationId }.values.sum()
+        if (bytes > quotaBytes - used) return false
+        reservations[operationId] = bytes
+        true
+    }
+
+    internal fun releaseReservation(operationId: UUID) = synchronized(this) {
+        reservations.remove(operationId)
+        cachedArchiveBytes = null
+        Unit
+    }
+
+    private fun committedArchiveBytesLocked(): Long = cachedArchiveBytes ?: deviceArchiveBytes().also { cachedArchiveBytes = it }
+
+    internal fun deviceArchiveBytes(): Long {
+        archiveScanCount += 1
+        return root.walkTopDown()
+            .filter { it.isFile && it.extension == "rvn" }
+            .sumOf(File::length)
+    }
+
+    internal fun cleanupOrphans(scope: String): Unit = synchronized(this) {
+        requireOpen(scope)
+        val manifest = manifestFile(scope)
+        if (!manifest.isFile) return
+        val parsed = runCatching { JSONArray(manifest.readText(Charsets.UTF_8)) }.getOrNull() ?: return
+        val items = readManifest(scope)
+        if (items.size != parsed.length()) return
+        val referenced = items.mapTo(mutableSetOf(), OfflineMediaItem::fileName)
+        scopeDirectory(scope).listFiles().orEmpty().forEach { file ->
+            if (file.extension == "rvn" && file.name !in referenced) file.delete()
+            if (file.name.endsWith(".partial") && reservations.keys.none { file.name == ".$it.partial" }) file.delete()
+        }
+        cachedArchiveBytes = null
+    }
+
     private fun createPinVerifier(pin: String): String {
         val salt = ByteArray(16).also(SecureRandom()::nextBytes)
         return salt.toHex() + ":" + derivePin(pin, salt).toHex()
@@ -315,8 +431,8 @@ internal class OfflineMediaStore private constructor(private val root: File) {
 
     companion object {
         const val OFFLINE_SCHEME = "rivune-offline"
+        internal const val DEFAULT_MAXIMUM_STORED_BYTES = 20L * 1024L * 1024L * 1024L
         private const val KEY_ALIAS_PREFIX = "io.rivune.offline-media.v2."
-        private const val MAXIMUM_STORED_BYTES = 20L * 1024L * 1024L * 1024L
         private val SCOPE_PATTERN = Regex("^[0-9a-f]{64}$")
         private val PIN_PATTERN = Regex("^[0-9]{4,8}$")
         @Volatile private var authorizedScope: String? = null

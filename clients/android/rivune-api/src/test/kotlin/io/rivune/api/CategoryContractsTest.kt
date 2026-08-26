@@ -174,7 +174,7 @@ class CategoryContractsTest {
     fun updateCategoryClientUsesPatchRouteAndExactBody() = runBlocking {
         val server = MockWebServer()
         server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(
-            """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""",
+            """{"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""",
         ))
         server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(
             """{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","name":"Studio","description":null,"color":null,"icon":"briefcase","position":0,"isDefault":false,"profileCount":0,"deviceCount":0,"createdAt":"2026-08-03T10:00:00Z","updatedAt":"2026-08-03T11:00:00Z"}""",

@@ -48,6 +48,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import io.rivune.app.ui.theme.LocalRivuneEnhancedFocusIndicators
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -654,7 +655,7 @@ internal fun RivuneFocusSurface(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     readOnly: Boolean = false,
-    selected: Boolean = false,
+    selected: Boolean? = null,
     isTv: Boolean = false,
     idleColor: Color = RivuneSurface,
     selectedColor: Color = RivuneSurfaceSelected,
@@ -668,6 +669,7 @@ internal fun RivuneFocusSurface(
     content: @Composable () -> Unit,
 ) {
     val motionPolicy = LocalRivuneMotionPolicy.current
+    val enhancedFocus = LocalRivuneEnhancedFocusIndicators.current
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     val pressed by interaction.collectIsPressedAsState()
@@ -675,7 +677,7 @@ internal fun RivuneFocusSurface(
         targetValue = when {
             pressed -> pressedColor
             focused -> focusedColor
-            selected -> selectedColor
+            selected == true -> selectedColor
             else -> idleColor
         },
         animationSpec = motionPolicy.finiteAnimationSpec(RivuneMotion.fast),
@@ -703,13 +705,17 @@ internal fun RivuneFocusSurface(
             )
             .semantics(mergeDescendants = true) {
                 if (!readOnly) role = Role.Button
-                this.selected = selected
+                selected?.let { this.selected = it }
                 if (!enabled) disabled()
             }
             .then(
                 when {
-                    focused && showFocusBorder -> Modifier.border(RivuneDimensions.focusRing, MaterialTheme.colorScheme.primary, shape)
-                    selected && showSelectionBorder -> Modifier.border(RivuneDimensions.hairline, RivuneBorderStrong, shape)
+                    focused && showFocusBorder -> Modifier.border(
+                        if (enhancedFocus) RivuneDimensions.focusRing * 2 else RivuneDimensions.focusRing,
+                        if (enhancedFocus) MaterialTheme.colorScheme.onBackground else MaterialTheme.colorScheme.primary,
+                        shape,
+                    )
+                    selected == true && showSelectionBorder -> Modifier.border(RivuneDimensions.hairline, RivuneBorderStrong, shape)
                     restingBorderColor != null -> Modifier.border(RivuneDimensions.hairline, restingBorderColor, shape)
                     else -> Modifier
                 },

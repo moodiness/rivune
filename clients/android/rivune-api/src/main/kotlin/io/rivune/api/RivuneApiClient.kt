@@ -21,6 +21,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -119,7 +121,7 @@ sealed class RivuneApiException(message: String, cause: Throwable? = null) : Exc
     class IncompatibleProtocol(val expected: Int, val actual: Int) : RivuneApiException("Rivune protocol $actual is incompatible; this client requires $expected")
     class InvalidResponse(cause: Throwable? = null) : RivuneApiException("The Rivune server returned an invalid response", cause)
     class NotAuthenticated : RivuneApiException("Authentication is required")
-    class Server(val status: Int, val code: String, override val message: String) : RivuneApiException(message)
+    class Server(val status: Int, val code: String, override val message: String, val retryAfterSeconds: Long? = null) : RivuneApiException(message)
     class ResponseTooLarge(limit: String = "16 MiB") : RivuneApiException("The Rivune server response exceeds the $limit limit")
 }
 
@@ -191,6 +193,7 @@ class RivuneApiClient(
     private val json = Json {
         ignoreUnknownKeys = true
     }
+    private val strictV22Json = Json { ignoreUnknownKeys = false }
     private val requestJson = Json {
         explicitNulls = false
     }
@@ -209,6 +212,9 @@ class RivuneApiClient(
         .callTimeout(MEDIA_PREPARATION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .readTimeout(MEDIA_PREPARATION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .writeTimeout(MEDIA_PREPARATION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .build()
+    private val semanticSearchHttpClient = httpClient.secureBuilder()
+        .callTimeout(SEMANTIC_SEARCH_TIMEOUT_MILLISECONDS, TimeUnit.MILLISECONDS)
         .build()
     private var apiBaseUrl: HttpUrl? = null
     private var credentials: TokenPair? = null
@@ -378,10 +384,10 @@ class RivuneApiClient(
         authenticated = true,
     )
 
-    suspend fun beginDeviceAuthorization(deviceName: String, platform: String): DeviceAuthorizationResponse = request(
+    suspend fun beginDeviceAuthorization(installationId: String, deviceName: String, platform: String): DeviceAuthorizationResponse = request(
         path = "auth/device-code",
         method = "POST",
-        body = requestJson.encodeToString(DeviceAuthorizationRequest(deviceName, platform)),
+        body = requestJson.encodeToString(DeviceAuthorizationRequest(installationId, deviceName, platform)),
         authenticated = false,
     )
 
@@ -488,6 +494,31 @@ class RivuneApiClient(
         "profiles/$id/settings/effective",
         authenticated = true,
     )
+    suspend fun exportProfileArchive(profileId: UUID): kotlinx.serialization.json.JsonObject =
+        validateProfileArchive(request("profiles/$profileId/archive", authenticated = true))
+
+    suspend fun importProfileArchive(
+        profileId: UUID,
+        archive: kotlinx.serialization.json.JsonObject,
+    ): ProfileArchiveImportReport = request(
+        path = "profiles/$profileId/archive/import",
+        method = "POST",
+        body = boundedProfileArchiveBody(archive),
+        authenticated = true,
+    )
+
+    suspend fun createProfileFromArchive(
+        categoryId: UUID,
+        archive: kotlinx.serialization.json.JsonObject,
+    ): ProfileArchiveImportReport = request(
+        path = "profiles/archive",
+        method = "POST",
+        body = buildJsonObject {
+            put("categoryId", categoryId.toString())
+            put("archive", validateProfileArchive(archive))
+        }.toString().also(::requireProfileArchiveSize),
+        authenticated = true,
+    )
 
     suspend fun movie(id: UUID, language: String? = null): Movie = request(
         path = "metadata/titles/$id",
@@ -573,6 +604,14 @@ class RivuneApiClient(
         query = mapOf("page" to "1", "limit" to "1", "language" to language),
         authenticated = true,
         client = collectionArtworkHttpClient,
+    )
+
+    suspend fun semanticSearch(input: SemanticSearchRequest): SemanticSearchPage = request(
+        path = "search/semantic",
+        method = "POST",
+        body = requestJson.encodeToString(input),
+        authenticated = true,
+        client = semanticSearchHttpClient,
     )
 
 
@@ -767,12 +806,16 @@ class RivuneApiClient(
         path = "playback/devices/$sessionId/commands", method = "POST", body = requestJson.encodeToString(input), authenticated = true,
     )
 
-    suspend fun playbackCommands(after: Long = 0): PlaybackCommandList = request(
-        path = "playback/commands", query = mapOf("after" to after.toString()), authenticated = true,
+    suspend fun playbackCommands(after: UUID? = null): PlaybackCommandList = request(
+        path = "playback/commands", query = mapOf("after" to after?.toString()), authenticated = true,
     )
 
-    suspend fun acknowledgePlaybackCommand(id: Long) = requestUnit(
-        path = "playback/commands/$id/ack", method = "POST", authenticated = true,
+    suspend fun reportPlaybackCommandResult(operationId: UUID, input: PlaybackCommandResultInput): PlaybackCommand = request(
+        path = "playback/commands/incoming/$operationId/result", method = "PUT", body = requestJson.encodeToString(input), authenticated = true,
+    )
+
+    suspend fun outgoingPlaybackCommand(operationId: UUID): PlaybackCommand = request(
+        path = "playback/commands/outgoing/$operationId", authenticated = true,
     )
 
     suspend fun createPlaybackRoom(input: PlaybackRoomCreateInput): PlaybackRoom = request(
@@ -791,8 +834,16 @@ class RivuneApiClient(
 
     suspend fun leavePlaybackRoom(id: UUID) = requestUnit("playback/rooms/$id", "DELETE", authenticated = true)
 
-    suspend fun localRecommendations(limit: Int = 20): LocalRecommendationPage = request(
-        path = "recommendations", query = mapOf("limit" to limit.toString()), authenticated = true,
+    suspend fun localRecommendations(
+        limit: Int = 20,
+        artworkShape: RecommendationArtworkShape? = null,
+    ): LocalRecommendationPage = request(
+        path = "recommendations",
+        query = buildMap {
+            put("limit", limit.toString())
+            artworkShape?.let { put("artworkShape", it.name.lowercase()) }
+        },
+        authenticated = true,
     )
 
 
@@ -857,6 +908,79 @@ class RivuneApiClient(
         authenticated = true,
     )
 
+    suspend fun readingQueue(profileId: UUID): ReadingQueue = requestStrict(
+        path = "profiles/$profileId/queue", authenticated = true,
+    )
+
+    suspend fun addReadingQueueItem(profileId: UUID, input: ReadingQueueAddInput): ReadingQueueMutation = requestStrict(
+        path = "profiles/$profileId/queue/items", method = "POST", body = requestJson.encodeToString(input), authenticated = true,
+    )
+
+    suspend fun reorderReadingQueue(profileId: UUID, input: ReadingQueueReorderInput): ReadingQueueMutation = requestStrict(
+        path = "profiles/$profileId/queue/order", method = "PUT", body = requestJson.encodeToString(input), authenticated = true,
+    )
+
+    suspend fun updateReadingQueueItem(profileId: UUID, itemId: UUID, input: ReadingQueueUpdateInput): ReadingQueueMutation = requestStrict(
+        path = "profiles/$profileId/queue/items/$itemId", method = "PATCH", body = requestJson.encodeToString(input), authenticated = true,
+    )
+
+    suspend fun removeReadingQueueItem(profileId: UUID, itemId: UUID, input: ReadingQueueMutationInput): ReadingQueueMutation = requestStrict(
+        path = "profiles/$profileId/queue/items/$itemId", method = "DELETE", body = requestJson.encodeToString(input), authenticated = true,
+    )
+
+    suspend fun consumeReadingQueueItem(profileId: UUID, itemId: UUID, input: ReadingQueueMutationInput): ReadingQueueMutation = requestStrict(
+        path = "profiles/$profileId/queue/items/$itemId/consume", method = "POST", body = requestJson.encodeToString(input), authenticated = true,
+    )
+
+    suspend fun createPlaybackFailover(input: PlaybackFailoverCreateInput): PlaybackFailoverState = requestStrict(
+        path = "playback/failovers", method = "POST", body = requestJson.encodeToString(input), authenticated = true,
+    )
+
+    suspend fun playbackFailover(id: UUID): PlaybackFailoverState = requestStrict("playback/failovers/$id", authenticated = true)
+
+    suspend fun cancelPlaybackFailover(id: UUID) = requestUnit("playback/failovers/$id", "DELETE", authenticated = true)
+
+    suspend fun advancePlaybackFailover(id: UUID, input: PlaybackFailoverAdvanceInput): PlaybackFailoverState = requestStrict(
+        path = "playback/failovers/$id/advance", method = "POST", body = requestJson.encodeToString(input), authenticated = true,
+    )
+
+    suspend fun savedSearches(): List<SavedSearch> = requestStrict<SavedSearchList>("saved-searches", authenticated = true).savedSearches
+    suspend fun createSavedSearch(input: SavedSearchInput): SavedSearch = requestStrict("saved-searches", "POST", body = requestJson.encodeToString(input), authenticated = true)
+    suspend fun updateSavedSearch(id: UUID, input: SavedSearchUpdateInput): SavedSearch = requestStrict("saved-searches/$id", "PUT", body = requestJson.encodeToString(input), authenticated = true)
+    suspend fun deleteSavedSearch(id: UUID, expectedRevision: Long) = requestUnit("saved-searches/$id", "DELETE", query = mapOf("expectedRevision" to expectedRevision.toString()), authenticated = true)
+
+    suspend fun smartCollections(): List<SmartCollection> = requestStrict<SmartCollectionList>("smart-collections", authenticated = true).smartCollections
+    suspend fun createSmartCollection(input: SmartCollectionInput): SmartCollection = requestStrict("smart-collections", "POST", body = requestJson.encodeToString(input), authenticated = true)
+    suspend fun updateSmartCollection(id: UUID, input: SmartCollectionUpdateInput): SmartCollection = requestStrict("smart-collections/$id", "PUT", body = requestJson.encodeToString(input), authenticated = true)
+    suspend fun deleteSmartCollection(id: UUID, expectedRevision: Long) = requestUnit("smart-collections/$id", "DELETE", query = mapOf("expectedRevision" to expectedRevision.toString()), authenticated = true)
+    suspend fun evaluateSmartCollection(id: UUID, page: Int? = null, pageSize: Int? = null): SmartCollectionPage = request(
+        "smart-collections/$id/items", query = mapOf("page" to page?.toString(), "pageSize" to pageSize?.toString()), authenticated = true,
+    )
+
+    suspend fun extensionIncidents(): List<AddonIncident> = requestStrict<AddonIncidentList>("operations/extension-incidents", authenticated = true).incidents
+    suspend fun extensionIncident(id: UUID): AddonIncidentDetail = requestStrict("operations/extension-incidents/$id", authenticated = true)
+    suspend fun acknowledgeExtensionIncident(id: UUID): AddonIncident = requestStrict("operations/extension-incidents/$id/acknowledgement", "POST", authenticated = true)
+
+    suspend fun mediaNotificationSubscriptions(): List<MediaNotificationSubscription> = requestStrict<MediaNotificationSubscriptions>("media-notification-subscriptions", authenticated = true).subscriptions
+    suspend fun followMediaNotifications(titleId: UUID, input: MediaNotificationFollowInput): MediaNotificationSubscription = requestStrict(
+        "media-notification-subscriptions/$titleId", "PUT", body = requestJson.encodeToString(input), authenticated = true,
+    )
+    suspend fun unfollowMediaNotifications(titleId: UUID) = requestUnit("media-notification-subscriptions/$titleId", "DELETE", authenticated = true)
+    suspend fun mediaNotifications(cursor: String? = null, limit: Int? = null): MediaNotificationPage = requestStrict(
+        "media-notifications", query = mapOf("cursor" to cursor, "limit" to limit?.toString()), authenticated = true,
+    )
+    suspend fun acknowledgeMediaNotification(id: String, state: MediaNotificationAcknowledgementState) = requestUnit(
+        "media-notifications/${encodePathSegment(id)}/acknowledgement", "POST",
+        body = requestJson.encodeToString(MediaNotificationAcknowledgement(state)), authenticated = true,
+    )
+
+    suspend fun profileAccessibilityPreferences(profileId: UUID): AccessibilityPreferencesDocument = requestStrict(
+        "profiles/$profileId/accessibility-preferences", authenticated = true,
+    )
+    suspend fun updateProfileAccessibilityPreferences(profileId: UUID, input: AccessibilityPreferencesDocument): AccessibilityPreferencesDocument = requestStrict(
+        "profiles/$profileId/accessibility-preferences", "PUT", body = requestJson.encodeToString(input), authenticated = true,
+    )
+
     private suspend inline fun <reified Response> request(
         path: String,
         method: String = "GET",
@@ -868,6 +992,21 @@ class RivuneApiClient(
     ): Response {
         val url = endpoint(path, query)
         return execute(url, method, body, authenticated, retryAfterRefresh = authenticated, expectedProfileMutation = expectedProfileMutation, client = client)
+    }
+
+    private suspend inline fun <reified Response : StrictV22Response> requestStrict(
+        path: String,
+        method: String = "GET",
+        query: Map<String, String?> = emptyMap(),
+        body: String? = null,
+        authenticated: Boolean,
+    ): Response {
+        val data = executeData(endpoint(path, query), method, body, authenticated, retryAfterRefresh = authenticated)
+        return try {
+            strictV22Json.decodeFromString<Response>(data.body)
+        } catch (cause: Exception) {
+            throw RivuneApiException.InvalidResponse(cause)
+        }
     }
 
     private suspend inline fun <reified Response> requestWithQueryItems(
@@ -991,8 +1130,8 @@ class RivuneApiClient(
                 requestCancellationJob?.ensureActive()
                 client.newCall(request).execute().use { response ->
                     requireServerDestination(response.request.url)
-                    if (response.code in 300..399) throw decodeServerError(response.code, "")
-                    ResponseData(response.code, readResponseBody(response.body))
+                    if (response.code in 300..399) throw decodeServerError(response.code, "", response.header("Retry-After"))
+                    ResponseData(response.code, readResponseBody(response.body), response.header("Retry-After"))
                 }
             }
         } catch (cause: IOException) {
@@ -1018,8 +1157,8 @@ class RivuneApiClient(
                 client = client,
             )
         }
-        if (!responseSuccessful) throw decodeServerError(responseCode, responseBody)
-        return ResponseData(responseCode, responseBody)
+        if (!responseSuccessful) throw decodeServerError(responseCode, responseBody, responseData.retryAfter)
+        return responseData
     }
 
     private suspend fun executeBytes(
@@ -1089,7 +1228,7 @@ class RivuneApiClient(
         return bufferedBody.readByteArray()
     }
 
-    private data class ResponseData(val status: Int, val body: String)
+    private data class ResponseData(val status: Int, val body: String, val retryAfter: String?)
 
     private fun readResponseBody(body: ResponseBody): String {
         if (body.contentLength() > MAX_RESPONSE_BODY_BYTES) {
@@ -1361,12 +1500,13 @@ class RivuneApiClient(
         }
     }
 
-    private fun decodeServerError(status: Int, body: String): RivuneApiException.Server {
+    private fun decodeServerError(status: Int, body: String, retryAfter: String? = null): RivuneApiException.Server {
         val error = runCatching { json.decodeFromString<ErrorEnvelope>(body).error }.getOrNull()
         return RivuneApiException.Server(
             status = status,
             code = error?.code ?: "http_$status",
             message = error?.message ?: "Rivune server returned HTTP $status",
+            retryAfterSeconds = retryAfter?.trim()?.toLongOrNull()?.takeIf { it > 0 },
         )
     }
 
@@ -1379,6 +1519,19 @@ class RivuneApiClient(
         .last()
 
 
+    private fun boundedProfileArchiveBody(archive: kotlinx.serialization.json.JsonObject): String =
+        validateProfileArchive(archive).toString().also(::requireProfileArchiveSize)
+
+    private fun validateProfileArchive(archive: kotlinx.serialization.json.JsonObject): kotlinx.serialization.json.JsonObject {
+        require(archive["version"]?.jsonPrimitive?.intOrNull == 2) { "Unsupported profile archive version" }
+        require(archive["identity"] is kotlinx.serialization.json.JsonObject) { "Profile archive identity is missing" }
+        require(archive["continueDismissals"] is kotlinx.serialization.json.JsonArray) { "Profile archive continue dismissals are missing" }
+        return archive
+    }
+
+    private fun requireProfileArchiveSize(value: String) {
+        require(value.toByteArray(StandardCharsets.UTF_8).size <= MAX_RESPONSE_BODY_BYTES) { "Profile archive exceeds 16 MiB" }
+    }
     private fun profileSettingsUpdateBody(input: ProfileSettingsUpdate): String = buildJsonObject {
         putPatch("maximumResolution", input.maximumResolution) { name, value -> put(name, value) }
         putPatch("preferDirectPlay", input.preferDirectPlay) { name, value -> put(name, value) }
@@ -1428,5 +1581,6 @@ class RivuneApiClient(
         const val MAX_PROFILE_AVATAR_BYTES = 2L * 1024L * 1024L
         const val COLLECTION_ARTWORK_TIMEOUT_SECONDS = 10L
         const val MEDIA_PREPARATION_TIMEOUT_SECONDS = 180L
+        const val SEMANTIC_SEARCH_TIMEOUT_MILLISECONDS = 12_000L
     }
 }

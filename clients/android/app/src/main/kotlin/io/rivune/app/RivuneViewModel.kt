@@ -17,6 +17,7 @@ import io.rivune.api.CollectionItem
 import io.rivune.api.ContinueWatchingPage
 import io.rivune.api.CredentialStoreException
 import io.rivune.api.Discovery
+import io.rivune.api.DiscoveryCapability
 import io.rivune.api.EffectiveSettings
 import io.rivune.api.DeviceAuthorizationResponse
 import io.rivune.api.LibraryItem
@@ -30,7 +31,13 @@ import io.rivune.api.PlaybackMarkerList
 import io.rivune.api.PlaybackProgressBatch
 import io.rivune.api.CoordinatedPlaybackItem
 import io.rivune.api.LocalRecommendationPage
+import io.rivune.api.RecommendationArtworkShape
 import io.rivune.api.PlaybackCommandInput
+import io.rivune.api.PlaybackCommandMode
+import io.rivune.api.PlaybackCommandResultCode
+import io.rivune.api.PlaybackCommandResultInput
+import io.rivune.api.PlaybackCommandStatus
+import io.rivune.api.PlaybackCommandType
 import io.rivune.api.PlaybackCommandList
 import io.rivune.api.PlaybackDevice
 import io.rivune.api.PlaybackDeviceHeartbeatInput
@@ -40,6 +47,8 @@ import io.rivune.api.PlaybackRoom
 import io.rivune.api.PlaybackRoomCreateInput
 import io.rivune.api.PlaybackRoomUpdateInput
 import io.rivune.api.PlaybackSession
+import io.rivune.api.ProfileArchiveImportReport
+import kotlinx.serialization.json.JsonObject
 import io.rivune.api.PlaybackSourceList
 import io.rivune.api.Profile
 import io.rivune.api.ProfileSettingsUpdate
@@ -48,6 +57,7 @@ import io.rivune.api.ResolvedCollectionFolder
 import io.rivune.api.RivuneApiClient
 import io.rivune.api.RivuneApiException
 import io.rivune.api.normalizeServerUrl
+import io.rivune.api.isKnownLocalNetworkServerUrl
 import io.rivune.api.Season
 import io.rivune.api.Series
 import io.rivune.api.SeriesMappingProvider
@@ -57,6 +67,8 @@ import io.rivune.api.SetWatchedBatchResult
 import io.rivune.api.SettingsLayer
 import io.rivune.api.SettingsValues
 import io.rivune.api.TitleReference
+import io.rivune.api.SemanticSearchPage
+import io.rivune.api.SemanticSearchRequest
 import io.rivune.api.TitleResolveInput
 import io.rivune.api.UpdatePlaybackProgressRequest
 import java.io.IOException
@@ -74,6 +86,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -86,6 +99,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.withLock
 
 sealed interface AppDestination {
@@ -103,9 +117,33 @@ private data class PlayerProgressSnapshot(
     val durationSeconds: Int,
     val completed: Boolean,
 )
+internal fun boundedStableSearchTypes(types: List<String>, limit: Int = 16): Pair<List<String>, Boolean> {
+    val stable = types.asSequence().map { it.trim().lowercase() }.filter(String::isNotEmpty).distinct().toList()
+    return stable.take(limit) to (stable.size > limit)
+}
+
+private class SearchFanoutBudget(private val limit: Int) {
+    private var used = 0
+    @Volatile var truncated: Boolean = false
+        private set
+
+    @Synchronized fun tryAcquire(): Boolean {
+        if (used >= limit) {
+            truncated = true
+            return false
+        }
+        used += 1
+        return true
+    }
+}
+
 private data class HomeResolution(
     val collections: List<Collection>,
     val heroSlides: List<HomeHeroSlide>,
+)
+private data class SemanticSearchOutcome(
+    val page: SemanticSearchPage?,
+    val failed: Boolean,
 )
 
 
@@ -125,6 +163,29 @@ internal fun offlineStartPositionMs(item: OfflineMediaItem): Long =
 internal fun coordinatedHostRoomState(ending: Boolean, playing: Boolean): String =
     if (ending) "ended" else if (playing) "playing" else "paused"
 internal fun shouldPublishHostRoomProgress(ending: Boolean, ended: Boolean): Boolean = !ending && !ended
+private val NAMESPACED_ID = Regex("^([a-z0-9._-]+):(.+)$", RegexOption.IGNORE_CASE)
+private val CANONICAL_SEARCH_PROVIDERS = setOf("tmdb", "imdb", "tvdb", "trakt")
+
+internal fun searchMediaTargetKey(target: MediaTarget): String =
+    "${target.mediaType.lowercase()}:${searchMediaTargetIdentities(target).minOrNull()}"
+
+private fun searchMediaTargetIdentities(target: MediaTarget): Set<String> {
+    val identities = target.externalIds.mapNotNullTo(mutableSetOf()) { (provider, value) ->
+        value.trim().takeIf(String::isNotEmpty)?.let { "${provider.lowercase()}:${it.lowercase()}" }
+    }
+    val namespaced = NAMESPACED_ID.matchEntire(target.id.trim())
+    val namespace = namespaced?.groupValues?.get(1)?.lowercase()
+    if (namespace in CANONICAL_SEARCH_PROVIDERS) {
+        identities += "$namespace:${namespaced!!.groupValues[2].lowercase()}"
+    } else if (target.id.lowercase().startsWith("tt")) {
+        identities += "imdb:${target.id.lowercase()}"
+    }
+    if (identities.isEmpty()) {
+        identities += "${target.sourceAddonId?.toString()?.lowercase() ?: "native"}:" +
+            "${target.sourceCatalogId?.lowercase() ?: "none"}:${target.mediaType.lowercase()}:${target.id.lowercase()}"
+    }
+    return identities
+}
 
 enum class UiFailure {
     SERVER_INVALID,
@@ -175,8 +236,9 @@ data class RivuneUiState(
     val calendarEvents: List<CalendarEvent> = emptyList(),
     val calendarMonth: java.time.YearMonth = java.time.YearMonth.now(),
     val externalPlayers: List<ExternalPlayerApp> = emptyList(),
+    val archiveReport: ProfileArchiveImportReport? = null,
+    val archiveBusy: Boolean = false,
 )
-
 internal data class LogoutResult(
     val localCredentialsCleared: Boolean,
     val serverSessionClosed: Boolean,
@@ -194,6 +256,7 @@ internal interface RivuneGateway {
     suspend fun addonCatalogs(): List<AddonCatalogDescriptor>
     suspend fun resolveCollectionFolderArtwork(collectionId: UUID, folderId: UUID, language: String? = null): ResolvedCollectionFolder
     suspend fun searchAddonCatalogs(type: String, search: String, skip: Int? = null, limit: Int? = null, language: String? = null): AddonResourceBatch
+    suspend fun semanticSearch(input: SemanticSearchRequest): SemanticSearchPage
     suspend fun resolveTitle(input: TitleResolveInput): TitleReference
     suspend fun movie(id: UUID, language: String? = null): Movie
     suspend fun series(id: UUID, mappingProvider: SeriesMappingProvider = SeriesMappingProvider.TMDB, language: String? = null): Series
@@ -210,30 +273,66 @@ internal interface RivuneGateway {
     suspend fun markTitleUnwatched(titleId: UUID, expectedVersion: Long): PlaybackProgress
     suspend fun effectiveProfileSettings(id: UUID): EffectiveSettings
     suspend fun updateProfileSettings(id: UUID, input: ProfileSettingsUpdate): SettingsLayer
+    suspend fun exportProfileArchive(profileId: UUID): JsonObject
+    suspend fun importProfileArchive(profileId: UUID, archive: JsonObject): ProfileArchiveImportReport
+    suspend fun createProfileFromArchive(categoryId: UUID, archive: JsonObject): ProfileArchiveImportReport
     suspend fun playbackSources(mediaType: String, resourceId: String, capabilities: PlaybackCapabilities, addonId: UUID? = null): PlaybackSourceList
     suspend fun preparePlayback(sourceRef: String, startSeconds: Int? = null, externalPlayer: Boolean = false): PlaybackPreparation
     suspend fun playbackMarkers(imdbId: String, season: Int, episode: Int): PlaybackMarkerList
     suspend fun resolvePlayback(sourceRef: String, titleId: String? = null, startSeconds: Int? = null, externalPlayer: Boolean = false): PlaybackSession
+    suspend fun resolvePlaybackAccessible(
+        sourceRef: String,
+        titleId: String?,
+        startSeconds: Int?,
+        externalPlayer: Boolean,
+        preferredAudioTrack: Int?,
+    ): PlaybackSession = resolvePlayback(sourceRef, titleId, startSeconds, externalPlayer)
     suspend fun stopPlayback(sessionId: UUID)
     suspend fun updatePlaybackProgress(titleId: UUID, input: UpdatePlaybackProgressRequest): PlaybackProgress
     suspend fun updatePlaybackDevice(input: PlaybackDeviceHeartbeatInput): PlaybackDevice
     suspend fun playbackDevices(): PlaybackDeviceList
-    suspend fun sendPlaybackCommand(sessionId: UUID, input: PlaybackCommandInput)
-    suspend fun playbackCommands(after: Long = 0): PlaybackCommandList
-    suspend fun acknowledgePlaybackCommand(id: Long)
+    suspend fun sendPlaybackCommand(sessionId: UUID, input: PlaybackCommandInput): io.rivune.api.PlaybackCommand
+    suspend fun playbackCommands(after: UUID? = null): PlaybackCommandList
+    suspend fun reportPlaybackCommandResult(operationId: UUID, input: PlaybackCommandResultInput): io.rivune.api.PlaybackCommand
+    suspend fun outgoingPlaybackCommand(operationId: UUID): io.rivune.api.PlaybackCommand
     suspend fun createPlaybackRoom(input: PlaybackRoomCreateInput): PlaybackRoom
     suspend fun joinPlaybackRoom(code: String): PlaybackRoom
     suspend fun playbackRoom(id: UUID): PlaybackRoom
     suspend fun updatePlaybackRoom(id: UUID, input: PlaybackRoomUpdateInput): PlaybackRoom
     suspend fun leavePlaybackRoom(id: UUID)
-    suspend fun localRecommendations(limit: Int = 20): LocalRecommendationPage
+    suspend fun localRecommendations(limit: Int = 20, artworkShape: RecommendationArtworkShape? = null): LocalRecommendationPage
     suspend fun calendar(from: String, to: String, language: String? = null): List<CalendarEvent>
-    suspend fun beginDeviceAuthorization(deviceName: String, platform: String): DeviceAuthorizationResponse
+    suspend fun beginDeviceAuthorization(installationId: String, deviceName: String, platform: String): DeviceAuthorizationResponse
     suspend fun exchangeDeviceAuthorization(deviceCode: String)
     suspend fun logout(): LogoutResult
+    suspend fun readingQueue(profileId: UUID): io.rivune.api.ReadingQueue = unsupportedV22()
+    suspend fun addReadingQueueItem(profileId: UUID, input: io.rivune.api.ReadingQueueAddInput): io.rivune.api.ReadingQueueMutation = unsupportedV22()
+    suspend fun removeReadingQueueItem(profileId: UUID, itemId: UUID, input: io.rivune.api.ReadingQueueMutationInput): io.rivune.api.ReadingQueueMutation = unsupportedV22()
+    suspend fun consumeReadingQueueItem(profileId: UUID, itemId: UUID, input: io.rivune.api.ReadingQueueMutationInput): io.rivune.api.ReadingQueueMutation = unsupportedV22()
+    suspend fun createPlaybackFailover(input: io.rivune.api.PlaybackFailoverCreateInput): io.rivune.api.PlaybackFailoverState = unsupportedV22()
+    suspend fun playbackFailover(id: UUID): io.rivune.api.PlaybackFailoverState = unsupportedV22()
+    suspend fun advancePlaybackFailover(id: UUID, input: io.rivune.api.PlaybackFailoverAdvanceInput): io.rivune.api.PlaybackFailoverState = unsupportedV22()
+    suspend fun cancelPlaybackFailover(id: UUID): Unit = unsupportedV22()
+    suspend fun savedSearches(): List<io.rivune.api.SavedSearch> = unsupportedV22()
+    suspend fun createSavedSearch(input: io.rivune.api.SavedSearchInput): io.rivune.api.SavedSearch = unsupportedV22()
+    suspend fun deleteSavedSearch(id: UUID, expectedRevision: Long): Unit = unsupportedV22()
+    suspend fun smartCollections(): List<io.rivune.api.SmartCollection> = unsupportedV22()
+    suspend fun createSmartCollection(input: io.rivune.api.SmartCollectionInput): io.rivune.api.SmartCollection = unsupportedV22()
+    suspend fun deleteSmartCollection(id: UUID, expectedRevision: Long): Unit = unsupportedV22()
+    suspend fun evaluateSmartCollection(id: UUID, page: Int? = null, pageSize: Int? = null): io.rivune.api.SmartCollectionPage = unsupportedV22()
+    suspend fun extensionIncidents(): List<io.rivune.api.AddonIncident> = unsupportedV22()
+    suspend fun acknowledgeExtensionIncident(id: UUID): io.rivune.api.AddonIncident = unsupportedV22()
+    suspend fun mediaNotificationSubscriptions(): List<io.rivune.api.MediaNotificationSubscription> = unsupportedV22()
+    suspend fun followMediaNotifications(titleId: UUID, input: io.rivune.api.MediaNotificationFollowInput): io.rivune.api.MediaNotificationSubscription = unsupportedV22()
+    suspend fun unfollowMediaNotifications(titleId: UUID): Unit = unsupportedV22()
+    suspend fun mediaNotifications(cursor: String? = null, limit: Int? = null): io.rivune.api.MediaNotificationPage = unsupportedV22()
+    suspend fun acknowledgeMediaNotification(id: String, state: io.rivune.api.MediaNotificationAcknowledgementState): Unit = unsupportedV22()
+    suspend fun profileAccessibilityPreferences(profileId: UUID): io.rivune.api.AccessibilityPreferencesDocument = unsupportedV22()
+    suspend fun updateProfileAccessibilityPreferences(profileId: UUID, input: io.rivune.api.AccessibilityPreferencesDocument): io.rivune.api.AccessibilityPreferencesDocument = unsupportedV22()
     fun resolveResourceUrl(value: String): String?
     fun resolveArtworkUrl(value: String): String?
 }
+private fun unsupportedV22(): Nothing = throw UnsupportedOperationException("v22 feature unavailable")
 
 internal fun interface RivuneGatewayFactory {
     fun create(serverUrl: String): RivuneGateway
@@ -262,6 +361,7 @@ private class DefaultRivuneGateway(
         client.resolveCollectionFolderArtwork(collectionId, folderId, language)
     override suspend fun searchAddonCatalogs(type: String, search: String, skip: Int?, limit: Int?, language: String?) =
         client.searchAddonCatalogs(type, search, skip, limit, language = language)
+    override suspend fun semanticSearch(input: SemanticSearchRequest) = client.semanticSearch(input)
     override suspend fun resolveTitle(input: TitleResolveInput) = client.resolveTitle(input)
     override suspend fun movie(id: UUID, language: String?) = client.movie(id, language)
     override suspend fun series(id: UUID, mappingProvider: SeriesMappingProvider, language: String?) =
@@ -292,23 +392,30 @@ private class DefaultRivuneGateway(
         client.playbackMarkers(imdbId, season, episode)
     override suspend fun resolvePlayback(sourceRef: String, titleId: String?, startSeconds: Int?, externalPlayer: Boolean) =
         client.resolvePlayback(sourceRef, titleId = titleId, startSeconds = startSeconds, externalPlayer = externalPlayer)
+    override suspend fun resolvePlaybackAccessible(sourceRef: String, titleId: String?, startSeconds: Int?, externalPlayer: Boolean, preferredAudioTrack: Int?) =
+        client.resolvePlayback(sourceRef, titleId = titleId, startSeconds = startSeconds, externalPlayer = externalPlayer, preferredAudioTrack = preferredAudioTrack)
     override suspend fun stopPlayback(sessionId: UUID) = client.stopPlayback(sessionId)
     override suspend fun updatePlaybackProgress(titleId: UUID, input: UpdatePlaybackProgressRequest) =
         client.updatePlaybackProgress(titleId, input)
+    override suspend fun exportProfileArchive(profileId: UUID) = client.exportProfileArchive(profileId)
+    override suspend fun importProfileArchive(profileId: UUID, archive: JsonObject) = client.importProfileArchive(profileId, archive)
+    override suspend fun createProfileFromArchive(categoryId: UUID, archive: JsonObject) = client.createProfileFromArchive(categoryId, archive)
     override suspend fun updatePlaybackDevice(input: PlaybackDeviceHeartbeatInput) = client.updatePlaybackDevice(input)
     override suspend fun playbackDevices() = client.playbackDevices()
-    override suspend fun sendPlaybackCommand(sessionId: UUID, input: PlaybackCommandInput) { client.sendPlaybackCommand(sessionId, input) }
-    override suspend fun playbackCommands(after: Long) = client.playbackCommands(after)
-    override suspend fun acknowledgePlaybackCommand(id: Long) = client.acknowledgePlaybackCommand(id)
+    override suspend fun sendPlaybackCommand(sessionId: UUID, input: PlaybackCommandInput) = client.sendPlaybackCommand(sessionId, input)
+    override suspend fun playbackCommands(after: UUID?) = client.playbackCommands(after)
+    override suspend fun reportPlaybackCommandResult(operationId: UUID, input: PlaybackCommandResultInput) =
+        client.reportPlaybackCommandResult(operationId, input)
+    override suspend fun outgoingPlaybackCommand(operationId: UUID) = client.outgoingPlaybackCommand(operationId)
     override suspend fun createPlaybackRoom(input: PlaybackRoomCreateInput) = client.createPlaybackRoom(input)
     override suspend fun joinPlaybackRoom(code: String) = client.joinPlaybackRoom(code)
     override suspend fun playbackRoom(id: UUID) = client.playbackRoom(id)
     override suspend fun updatePlaybackRoom(id: UUID, input: PlaybackRoomUpdateInput) = client.updatePlaybackRoom(id, input)
     override suspend fun leavePlaybackRoom(id: UUID) = client.leavePlaybackRoom(id)
-    override suspend fun localRecommendations(limit: Int) = client.localRecommendations(limit)
+    override suspend fun localRecommendations(limit: Int, artworkShape: RecommendationArtworkShape?) = client.localRecommendations(limit, artworkShape)
     override suspend fun calendar(from: String, to: String, language: String?) = client.calendar(from, to, language)
-    override suspend fun beginDeviceAuthorization(deviceName: String, platform: String) =
-        client.beginDeviceAuthorization(deviceName, platform)
+    override suspend fun beginDeviceAuthorization(installationId: String, deviceName: String, platform: String) =
+        client.beginDeviceAuthorization(installationId, deviceName, platform)
     override suspend fun exchangeDeviceAuthorization(deviceCode: String) {
         client.exchangeDeviceAuthorization(deviceCode)
     }
@@ -327,6 +434,30 @@ private class DefaultRivuneGateway(
         LogoutResult(localCredentialsCleared = true, serverSessionClosed = false)
     }
     override fun resolveResourceUrl(value: String) = client.resolveResponseResourceUrl(value)?.toString()
+    override suspend fun readingQueue(profileId: UUID) = client.readingQueue(profileId)
+    override suspend fun addReadingQueueItem(profileId: UUID, input: io.rivune.api.ReadingQueueAddInput) = client.addReadingQueueItem(profileId, input)
+    override suspend fun removeReadingQueueItem(profileId: UUID, itemId: UUID, input: io.rivune.api.ReadingQueueMutationInput) = client.removeReadingQueueItem(profileId, itemId, input)
+    override suspend fun consumeReadingQueueItem(profileId: UUID, itemId: UUID, input: io.rivune.api.ReadingQueueMutationInput) = client.consumeReadingQueueItem(profileId, itemId, input)
+    override suspend fun createPlaybackFailover(input: io.rivune.api.PlaybackFailoverCreateInput) = client.createPlaybackFailover(input)
+    override suspend fun playbackFailover(id: UUID) = client.playbackFailover(id)
+    override suspend fun advancePlaybackFailover(id: UUID, input: io.rivune.api.PlaybackFailoverAdvanceInput) = client.advancePlaybackFailover(id, input)
+    override suspend fun cancelPlaybackFailover(id: UUID) = client.cancelPlaybackFailover(id)
+    override suspend fun savedSearches() = client.savedSearches()
+    override suspend fun createSavedSearch(input: io.rivune.api.SavedSearchInput) = client.createSavedSearch(input)
+    override suspend fun deleteSavedSearch(id: UUID, expectedRevision: Long) = client.deleteSavedSearch(id, expectedRevision)
+    override suspend fun smartCollections() = client.smartCollections()
+    override suspend fun createSmartCollection(input: io.rivune.api.SmartCollectionInput) = client.createSmartCollection(input)
+    override suspend fun deleteSmartCollection(id: UUID, expectedRevision: Long) = client.deleteSmartCollection(id, expectedRevision)
+    override suspend fun evaluateSmartCollection(id: UUID, page: Int?, pageSize: Int?) = client.evaluateSmartCollection(id, page, pageSize)
+    override suspend fun extensionIncidents() = client.extensionIncidents()
+    override suspend fun acknowledgeExtensionIncident(id: UUID) = client.acknowledgeExtensionIncident(id)
+    override suspend fun mediaNotificationSubscriptions() = client.mediaNotificationSubscriptions()
+    override suspend fun followMediaNotifications(titleId: UUID, input: io.rivune.api.MediaNotificationFollowInput) = client.followMediaNotifications(titleId, input)
+    override suspend fun unfollowMediaNotifications(titleId: UUID) = client.unfollowMediaNotifications(titleId)
+    override suspend fun mediaNotifications(cursor: String?, limit: Int?) = client.mediaNotifications(cursor, limit)
+    override suspend fun acknowledgeMediaNotification(id: String, state: io.rivune.api.MediaNotificationAcknowledgementState) = client.acknowledgeMediaNotification(id, state)
+    override suspend fun profileAccessibilityPreferences(profileId: UUID) = client.profileAccessibilityPreferences(profileId)
+    override suspend fun updateProfileAccessibilityPreferences(profileId: UUID, input: io.rivune.api.AccessibilityPreferencesDocument) = client.updateProfileAccessibilityPreferences(profileId, input)
 }
 
 private class PreferencesServerAddressStore(context: Context) : ServerAddressStore {
@@ -342,6 +473,72 @@ private class PreferencesServerAddressStore(context: Context) : ServerAddressSto
     }
 }
 
+private class PreferencesInstallationIdStore(context: Context) {
+    private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+
+    fun loadOrCreate(): String = synchronized(lock) {
+        preferences.getString(INSTALLATION_ID_KEY, null)?.let { stored ->
+            runCatching { UUID.fromString(stored).toString() }.getOrNull()
+        } ?: UUID.randomUUID().toString().also {
+            preferences.edit().putString(INSTALLATION_ID_KEY, it).commit()
+        }
+    }
+
+
+    private companion object {
+        val lock = Any()
+        const val PREFERENCES_NAME = "rivune_app"
+        const val INSTALLATION_ID_KEY = "installation_id"
+    }
+}
+internal data class StoredPlaybackOperation(
+    val status: PlaybackCommandStatus?,
+    val code: PlaybackCommandResultCode?,
+)
+internal interface PlaybackOperationStore {
+    fun get(operationId: UUID): StoredPlaybackOperation?
+    fun put(operationId: UUID, operation: StoredPlaybackOperation)
+}
+internal class MemoryPlaybackOperationStore : PlaybackOperationStore {
+    private val values = LinkedHashMap<UUID, StoredPlaybackOperation>()
+    override fun get(operationId: UUID): StoredPlaybackOperation? = synchronized(values) { values[operationId] }
+    override fun put(operationId: UUID, operation: StoredPlaybackOperation) = synchronized(values) {
+        values.remove(operationId)
+        values[operationId] = operation
+        while (values.size > MAX_PLAYBACK_OPERATION_RECORDS) values.remove(values.keys.first())
+    }
+}
+
+internal class PreferencesPlaybackOperationStore(context: Context) : PlaybackOperationStore {
+    private val preferences = context.getSharedPreferences("playback_operations_v22", Context.MODE_PRIVATE)
+
+    override fun get(operationId: UUID): StoredPlaybackOperation? = synchronized(this) {
+        read().firstOrNull { it.first == operationId }?.second
+    }
+
+    override fun put(operationId: UUID, operation: StoredPlaybackOperation) = synchronized(this) {
+        val records = read().filterNot { it.first == operationId }.toMutableList()
+        records += operationId to operation
+        while (records.size > MAX_PLAYBACK_OPERATION_RECORDS) records.removeAt(0)
+        check(preferences.edit().putStringSet("records", records.mapTo(linkedSetOf()) { (id, value) ->
+            listOf(id, value.status?.name.orEmpty(), value.code?.name.orEmpty()).joinToString("|")
+        }).commit()) { "Could not persist playback operation result" }
+    }
+
+    private fun read(): List<Pair<UUID, StoredPlaybackOperation>> = preferences.getStringSet("records", emptySet()).orEmpty()
+        .mapNotNull { encoded ->
+            val parts = encoded.split('|')
+            if (parts.size != 3) return@mapNotNull null
+            val id = runCatching { UUID.fromString(parts[0]) }.getOrNull() ?: return@mapNotNull null
+            val status = parts[1].takeIf(String::isNotEmpty)?.let { runCatching { PlaybackCommandStatus.valueOf(it) }.getOrNull() }
+            val code = parts[2].takeIf(String::isNotEmpty)?.let { runCatching { PlaybackCommandResultCode.valueOf(it) }.getOrNull() }
+            id to StoredPlaybackOperation(status, code)
+        }
+        .sortedBy { it.first.toString() }
+}
+
+private const val MAX_PLAYBACK_OPERATION_RECORDS = 256
+
 class RivuneViewModel internal constructor(
     private val serverStore: ServerAddressStore,
     private val gatewayFactory: RivuneGatewayFactory,
@@ -350,13 +547,16 @@ class RivuneViewModel internal constructor(
     private val terminalCleanupScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val externalPlaybackSupportProvider: () -> ExternalPlaybackSupport = { ExternalPlaybackSupport() },
     private val appPreferences: AppPreferencesReader = AppPreferencesReader { AppPreferencesState() },
-    private val playbackNetworkProvider: () -> PlaybackNetwork = { PlaybackNetwork.WIFI_OR_ETHERNET },
+    private val playbackNetworkProvider: () -> NetworkClass = { NetworkClass.REMOTE_WIFI },
     private val serverConnectionAllowed: (String) -> Boolean = { true },
     private val localeProvider: () -> Locale = Locale::getDefault,
     private val diagnostics: DiagnosticsBuffer = DiagnosticsBuffer(),
     private val instantNow: () -> Instant = Instant::now,
     private val offlineMediaStore: OfflineMediaStore? = null,
-    private val awaitCoordinationTick: suspend () -> Unit = { delay(2_000) },
+    private val awaitCoordinationTick: suspend (Long) -> Unit = { delay(it) },
+    private val monotonicNowMilliseconds: () -> Long = { System.nanoTime() / 1_000_000L },
+    private val installationId: String = UUID.randomUUID().toString(),
+    private val playbackOperationStore: PlaybackOperationStore = MemoryPlaybackOperationStore(),
 ) : ViewModel() {
     private var externalPlaybackSupport = runCatching(externalPlaybackSupportProvider).getOrDefault(ExternalPlaybackSupport())
     private val mutableState = MutableStateFlow(
@@ -375,15 +575,19 @@ class RivuneViewModel internal constructor(
     private var folderRequestGeneration = 0L
     private var viewerRequestGeneration = 0L
     private var sourceRequestGeneration = 0L
+    private var searchJob: Job? = null
     private var searchDescriptors: List<AddonCatalogDescriptor> = emptyList()
     private var metadataRefreshPending = false
     private val roomEndMutex = Mutex()
     private val progressUpdateMutex = Mutex()
     private var playbackCoordinationAvailable = false
     private var localRecommendationsAvailable = false
+    private var semanticSearchAvailable = false
     private var coordinationJob: Job? = null
-    private var lastPlaybackCommandId = 0L
-    private val appliedPlaybackCommandIds = mutableSetOf<Long>()
+    private var coordinationForeground = true
+    private var coordinationRecentUntilMilliseconds = 0L
+    private var lastPlaybackOperationId: UUID? = null
+    private val pendingOutgoingHandoffs = mutableMapOf<UUID, UUID>()
     private var coordinationPositionMs = 0L
     private var coordinationDurationMs = 0L
     private var coordinationPlaying = false
@@ -392,6 +596,7 @@ class RivuneViewModel internal constructor(
     private var coordinatedPlaybackLoading = false
     private var activeOfflineScope: String? = null
 
+    private var offlineDownloadJob: Job? = null
     init {
         offlineMediaStore?.lock()
         val offlineProfiles = offlineMediaStore?.profiles().orEmpty()
@@ -439,11 +644,14 @@ class RivuneViewModel internal constructor(
 
         generation += 1
         val operationGeneration = generation
+        searchJob?.cancel()
+        searchJob = null
         pairingJob?.cancel()
         pairingJob = null
         stopCoordination()
         playbackCoordinationAvailable = false
         localRecommendationsAvailable = false
+        semanticSearchAvailable = false
         val connectingDestination = if (mutableState.value.destination == AppDestination.Server) {
             AppDestination.Server
         } else {
@@ -492,8 +700,10 @@ class RivuneViewModel internal constructor(
                 }
                 if (!isCurrent(operationGeneration)) return@launch
                 gateway = candidate
-                playbackCoordinationAvailable = "playback-coordination" in discovery.capabilities
+                playbackCoordinationAvailable = discovery.supportsCapability(DiscoveryCapability.PLAYBACK_COORDINATION) &&
+                    discovery.supportsCapability(DiscoveryCapability.PLAYBACK_COMMAND_RESULTS)
                 localRecommendationsAvailable = "local-recommendations" in discovery.capabilities
+                semanticSearchAvailable = discovery.supportsCapability(DiscoveryCapability.SEMANTIC_SEARCH)
                 serverStore.save(normalized)
                 mutableState.value = mutableState.value.copy(
                     serverName = discovery.name,
@@ -547,6 +757,8 @@ class RivuneViewModel internal constructor(
             return
         }
         generation += 1
+        searchJob?.cancel()
+        searchJob = null
         val operationGeneration = generation
         folderRequestGeneration += 1
         viewerRequestGeneration += 1
@@ -567,6 +779,7 @@ class RivuneViewModel internal constructor(
             }
             gateway = null
             searchDescriptors = emptyList()
+            semanticSearchAvailable = false
             serverStore.clear()
             mutableState.value = RivuneUiState(
                 destination = AppDestination.Server,
@@ -1228,6 +1441,8 @@ class RivuneViewModel internal constructor(
 
     fun search(query: String) {
         val normalized = query.trim()
+        searchJob?.cancel()
+        searchJob = null
         viewerRequestGeneration += 1
         mutableState.value = mutableState.value.copy(
             viewer = mutableState.value.viewer.copy(
@@ -1413,12 +1628,19 @@ class RivuneViewModel internal constructor(
         val scope = requireOfflineDownloadScope() ?: return
         val picker = mutableState.value.viewer.sourcePicker ?: return
         val selected = picker.options.firstOrNull { it.id == source.id && it.sourceRef == source.sourceRef } ?: return
-        if (selected.protocol.lowercase() in setOf("hls", "dash") || mutableState.value.viewer.offlineDownloadActive) return
+        if (selected.protocol.lowercase() in setOf("hls", "dash") || offlineDownloadJob?.isActive == true) return
+        val preferences = appPreferences.snapshot()
+        if (!preferences.downloadOnMobile && runCatching(playbackNetworkProvider).getOrDefault(NetworkClass.MOBILE) == NetworkClass.MOBILE) return
         val currentGateway = gateway ?: return
         mutableState.value = mutableState.value.copy(
-            viewer = mutableState.value.viewer.copy(offlineDownloadActive = true, offlineDownloadBytes = 0, inlineFailure = null),
+            viewer = mutableState.value.viewer.copy(
+                offlineDownloadState = OfflineMediaState.QUEUED,
+                offlineDownloadActive = true,
+                offlineDownloadBytes = 0,
+                inlineFailure = null,
+            ),
         )
-        viewModelScope.launch {
+        offlineDownloadJob = viewModelScope.launch {
             var session: PlaybackSession? = null
             try {
                 currentGateway.preparePlayback(selected.sourceRef, externalPlayer = true)
@@ -1428,9 +1650,20 @@ class RivuneViewModel internal constructor(
                     ?: resolvedSession.sources.firstOrNull()
                     ?: error("No downloadable source")
                 val url = resolved.url?.let(currentGateway::resolveResourceUrl) ?: error("No downloadable source URL")
-                val item = store.download(scope, url, picker.titleId, picker.target.title, resolved.container ?: selected.container, picker.target.posterUrl) { bytes ->
+                val item = store.download(
+                    scope, url, picker.titleId, picker.target.title,
+                    resolved.container ?: selected.container, picker.target.posterUrl,
+                    quotaBytes = preferences.offlineQuotaBytes,
+                    expirationDays = preferences.offlineExpirationDays,
+                ) { bytes ->
+                    if (!preferences.downloadOnMobile && runCatching(playbackNetworkProvider).getOrDefault(NetworkClass.MOBILE) == NetworkClass.MOBILE) {
+                        throw CancellationException("Mobile downloads disabled")
+                    }
                     if (activeOfflineScope == scope) {
-                        mutableState.update { state -> state.copy(viewer = state.viewer.copy(offlineDownloadBytes = bytes)) }
+                        mutableState.update { state -> state.copy(viewer = state.viewer.copy(
+                            offlineDownloadState = OfflineMediaState.DOWNLOADING,
+                            offlineDownloadBytes = bytes,
+                        )) }
                     }
                 }
                 if (activeOfflineScope == scope) {
@@ -1439,25 +1672,41 @@ class RivuneViewModel internal constructor(
                             offlineProfiles = store.profiles(),
                             viewer = state.viewer.copy(
                                 offlineItems = listOf(item) + state.viewer.offlineItems.filterNot { it.id == item.id },
+                                offlineDownloadState = OfflineMediaState.READY,
                                 offlineDownloadActive = false,
                             ),
                         )
                     }
                 }
             } catch (cause: CancellationException) {
-                throw cause
+                if (activeOfflineScope == scope) {
+                    mutableState.update { state -> state.copy(viewer = state.viewer.copy(
+                        offlineDownloadState = OfflineMediaState.FAILED,
+                        offlineDownloadActive = false,
+                    )) }
+                }
+                return@launch
             } catch (_: Throwable) {
                 if (activeOfflineScope == scope) {
-                    mutableState.update { state -> state.copy(viewer = state.viewer.copy(offlineDownloadActive = false, inlineFailure = UiFailure.ACTION)) }
+                    mutableState.update { state -> state.copy(viewer = state.viewer.copy(
+                        offlineDownloadState = OfflineMediaState.FAILED,
+                        offlineDownloadActive = false,
+                        inlineFailure = UiFailure.ACTION,
+                    )) }
                 }
             } finally {
                 session?.let { activeSession ->
                     kotlinx.coroutines.withContext(NonCancellable) { runCatching { currentGateway.stopPlayback(activeSession.id) } }
                 }
+                offlineDownloadJob = null
             }
         }
     }
 
+
+    fun cancelOfflineDownload() {
+        offlineDownloadJob?.cancel()
+    }
     fun playOffline(item: OfflineMediaItem) {
         val store = offlineMediaStore ?: return
         val scope = activeOfflineScope ?: return
@@ -1491,20 +1740,48 @@ class RivuneViewModel internal constructor(
         }
     }
 
-    fun handoffPlayback(device: PlaybackDevice) {
+    fun handoffPlayback(device: PlaybackDevice) = sendLoadOperation(device, PlaybackCommandMode.HANDOFF)
+
+    fun playCopyPlayback(device: PlaybackDevice) = sendLoadOperation(device, PlaybackCommandMode.PLAY_COPY)
+
+    private fun sendLoadOperation(device: PlaybackDevice, mode: PlaybackCommandMode) {
         val currentGateway = gateway ?: return
         val detail = mutableState.value.viewer.detail ?: return
-        val item = detail.coordinatedItem()
-        viewModelScope.launch { runCatching { currentGateway.sendPlaybackCommand(device.sessionId, PlaybackCommandInput("load", item, (detail.progress?.positionSeconds ?: 0) * 1_000L)) } }
+        val operationId = UUID.randomUUID()
+        val sourceSessionId = mutableState.value.viewer.player?.sessionId
+        val input = PlaybackCommandInput(
+            operationId = operationId,
+            command = PlaybackCommandType.LOAD,
+            item = detail.coordinatedItem(),
+            positionMilliseconds = coordinationPositionMs.takeIf { it > 0 }
+                ?: (detail.progress?.positionSeconds ?: 0) * 1_000L,
+            mode = mode,
+            targetRevision = device.revision,
+        )
+        viewModelScope.launch {
+            val sent = runCatching { currentGateway.sendPlaybackCommand(device.sessionId, input) }.getOrNull()
+                ?: return@launch
+            if (mode == PlaybackCommandMode.HANDOFF && sourceSessionId != null) {
+                pendingOutgoingHandoffs[sent.operationId] = sourceSessionId
+            }
+        }
     }
-
     fun controlPlayback(device: PlaybackDevice, command: String) {
         val currentGateway = gateway ?: return
-        if (command !in setOf("play", "pause", "seek", "stop")) return
-        val position = coordinationPositionMs.takeIf { command == "seek" }
-        viewModelScope.launch {
-            runCatching { currentGateway.sendPlaybackCommand(device.sessionId, PlaybackCommandInput(command, positionMilliseconds = position)) }
+        val type = when (command) {
+            "play" -> PlaybackCommandType.PLAY
+            "pause" -> PlaybackCommandType.PAUSE
+            "seek" -> PlaybackCommandType.SEEK
+            "stop" -> PlaybackCommandType.STOP
+            else -> return
         }
+        val input = PlaybackCommandInput(
+            operationId = UUID.randomUUID(),
+            command = type,
+            positionMilliseconds = coordinationPositionMs.takeIf { type == PlaybackCommandType.SEEK },
+            targetRevision = device.revision,
+        )
+        viewModelScope.launch { runCatching { currentGateway.sendPlaybackCommand(device.sessionId, input) } }
     }
 
     fun createPlaybackRoom() {
@@ -1537,6 +1814,40 @@ class RivuneViewModel internal constructor(
             }
         }
     }
+    fun exportActiveProfileArchive(deliver: (JsonObject?) -> Unit) {
+        val profile = mutableState.value.activeProfile ?: return
+        val currentGateway = gateway ?: return
+        if (mutableState.value.archiveBusy) return
+        mutableState.update { it.copy(archiveBusy = true, failure = null) }
+        viewModelScope.launch {
+            val archive = runCatching { currentGateway.exportProfileArchive(profile.id) }.getOrNull()
+            mutableState.update { it.copy(archiveBusy = false, failure = if (archive == null) UiFailure.ACTION else null) }
+            deliver(archive)
+        }
+    }
+
+    fun importProfileArchive(archive: JsonObject, create: Boolean) {
+        val profile = mutableState.value.activeProfile ?: return
+        val currentGateway = gateway ?: return
+        if (mutableState.value.archiveBusy) return
+        mutableState.update { it.copy(archiveBusy = true, archiveReport = null, failure = null) }
+        viewModelScope.launch {
+            val result = runCatching {
+                if (create) currentGateway.createProfileFromArchive(profile.categoryId, archive)
+                else currentGateway.importProfileArchive(profile.id, archive)
+            }.getOrNull()
+            mutableState.update { it.copy(
+                archiveBusy = false,
+                archiveReport = result,
+                failure = if (result == null) UiFailure.ACTION else null,
+            ) }
+            if (result != null && create) refresh()
+        }
+    }
+
+    fun clearArchiveReport() {
+        mutableState.update { it.copy(archiveReport = null) }
+    }
 
     fun leavePlaybackRoom() {
         val currentGateway = gateway ?: return
@@ -1547,9 +1858,15 @@ class RivuneViewModel internal constructor(
 
     fun consumePlaybackCommand() {
         val viewer = mutableState.value.viewer
+        val command = viewer.pendingPlaybackCommands.firstOrNull() ?: return
         mutableState.value = mutableState.value.copy(
             viewer = viewer.copy(pendingPlaybackCommands = viewer.pendingPlaybackCommands.drop(1)),
         )
+        val result = StoredPlaybackOperation(PlaybackCommandStatus.APPLIED, PlaybackCommandResultCode.APPLIED)
+        playbackOperationStore.put(command.operationId, result)
+        gateway?.let { currentGateway ->
+            viewModelScope.launch { reportStoredPlaybackResult(currentGateway, command.operationId, result) }
+        }
     }
 
     fun choosePlaybackTarget(target: PlaybackTargetSelection) {
@@ -1598,6 +1915,7 @@ class RivuneViewModel internal constructor(
         target: PlaybackTargetSelection,
         startOverrideMs: Long? = null,
         onResult: ((Boolean) -> Unit)? = null,
+        resumeFailover: io.rivune.api.PlaybackFailoverState? = null,
     ) {
         if (mutableState.value.viewer.loading == ViewerLoading.PLAYER) {
             onResult?.invoke(false)
@@ -1680,8 +1998,48 @@ class RivuneViewModel internal constructor(
                 }
             }
             try {
-                currentGateway.preparePlayback(source.sourceRef, start, preserveOriginalSource)
-                val session = currentGateway.resolvePlayback(source.sourceRef, picker.titleId.toString(), start, preserveOriginalSource)
+                val candidateRefs = buildList {
+                    add(source.sourceRef)
+                    picker.options.asSequence()
+                        .map { it.sourceRef }
+                        .filter { it != source.sourceRef && it.length in 16..128 }
+                        .distinct()
+                        .take(7)
+                        .forEach(::add)
+                }
+                val failover = resumeFailover ?: if (!external && candidateRefs.size >= 2) {
+                    try {
+                        currentGateway.createPlaybackFailover(
+                            io.rivune.api.PlaybackFailoverCreateInput(
+                                candidateSourceRefs = candidateRefs,
+                                selectedSourceRef = source.sourceRef,
+                                maximumAttempts = minOf(3, candidateRefs.size - 1),
+                            ),
+                        )
+                    } catch (cause: CancellationException) {
+                        throw cause
+                    } catch (_: Throwable) {
+                        null
+                    }
+                } else {
+                    null
+                }
+                val preparation = currentGateway.preparePlayback(source.sourceRef, start, preserveOriginalSource)
+                val accessibility = mutableState.value.viewer.features.accessibility
+                val preferredAudioTrack = accessibility?.takeIf { it.audioDescription }
+                    ?.let {
+                        preparation.media?.audioTracks?.firstOrNull { track ->
+                            val title = track.title.orEmpty().lowercase(Locale.ROOT)
+                            "description" in title || "descriptive" in title || title == "ad"
+                        }?.index
+                    }
+                val session = currentGateway.resolvePlaybackAccessible(
+                    source.sourceRef,
+                    picker.titleId.toString(),
+                    start,
+                    preserveOriginalSource,
+                    preferredAudioTrack,
+                )
                 createdSession = session
                 val selected = session.sources.firstOrNull { it.id == session.selectedSourceId } ?: session.sources.firstOrNull()
                     ?: throw IllegalStateException("Playback session has no selected source")
@@ -1690,12 +2048,17 @@ class RivuneViewModel internal constructor(
                     ?: throw IllegalStateException("Playback session has no playable URL")
                 val subtitles = session.subtitles.mapNotNull { subtitle ->
                     val url = subtitle.url?.let(currentGateway::resolveResourceUrl) ?: return@mapNotNull null
+                    val serverSelected = subtitle.id == session.selectedSubtitleId
                     PlayerSubtitlePresentation(
                         id = subtitle.id,
                         label = subtitle.language ?: subtitle.id,
                         language = subtitle.language,
                         url = url,
-                        selected = subtitle.id == session.selectedSubtitleId,
+                        selected = when (accessibility?.captions) {
+                            io.rivune.api.CaptionsPreference.ON -> serverSelected || session.selectedSubtitleId == null && subtitle == session.subtitles.firstOrNull { it.url != null }
+                            io.rivune.api.CaptionsPreference.OFF -> false
+                            else -> serverSelected
+                        },
                     )
                 }
                 val durationSeconds = selected.media?.durationSeconds
@@ -1737,6 +2100,12 @@ class RivuneViewModel internal constructor(
                             subtitles = subtitles,
                             externalPlayer = selectedExternalPlayer,
                             nextEpisode = picker.nextEpisode,
+                            decisionReasons = selected.decision?.reasons.orEmpty(),
+                            queueItemId = picker.target.queueItemId
+                                ?: mutableState.value.viewer.features.queue?.items?.firstOrNull {
+                                    it.resourceId == picker.target.resourceId && it.sourceAddonId == picker.target.sourceAddonId
+                                }?.id,
+                            failover = failover,
                         ),
                         loading = null,
                         playerFailure = null,
@@ -1746,6 +2115,7 @@ class RivuneViewModel internal constructor(
                 diagnostics.record(DiagnosticEventCode.PLAYBACK_STARTED)
                 createdSession = null
                 deliverPlaybackResult(true)
+                consumeQueueAfterPlaybackStarted(currentGateway, picker, failover)
 
                 val markers = markerDeferred?.await().orEmpty()
                 val currentViewer = mutableState.value.viewer
@@ -1774,6 +2144,34 @@ class RivuneViewModel internal constructor(
                         runCatching { currentGateway.stopPlayback(session.id) }
                     }
                 }
+            }
+        }
+
+    }
+    private fun consumeQueueAfterPlaybackStarted(
+        currentGateway: RivuneGateway,
+        picker: SourcePickerState,
+        failover: io.rivune.api.PlaybackFailoverState?,
+    ) {
+        val profile = mutableState.value.activeProfile ?: return
+        val queue = mutableState.value.viewer.features.queue ?: return
+        val item = picker.target.queueItemId?.let { id -> queue.items.firstOrNull { it.id == id } }
+            ?: queue.items.firstOrNull { it.resourceId == picker.target.resourceId && it.sourceAddonId == picker.target.sourceAddonId }
+            ?: return
+        val input = io.rivune.api.ReadingQueueMutationInput(UUID.randomUUID(), queue.revision)
+        viewModelScope.launch {
+            try {
+                val mutation = retryIdempotentMutation { currentGateway.consumeReadingQueueItem(profile.id, item.id, input) }
+                if (mutableState.value.activeProfile?.id == profile.id) mutableState.update { state ->
+                    val currentQueue = state.viewer.features.queue
+                    if (currentQueue?.revision != queue.revision) state else state.copy(viewer = state.viewer.copy(features = state.viewer.features.copy(
+                        queue = currentQueue.copy(revision = mutation.revision, items = currentQueue.items.filterNot { it.id == item.id }),
+                    )))
+                }
+            } catch (cause: CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                featureMutationFailure(cause)
             }
         }
     }
@@ -2153,6 +2551,7 @@ class RivuneViewModel internal constructor(
         viewModelScope.launch {
             kotlinx.coroutines.withContext(NonCancellable) {
                 runCatching { currentGateway?.stopPlayback(player.sessionId) }
+                player.failover?.id?.let { runCatching { currentGateway?.cancelPlaybackFailover(it) } }
             }
             if (mutableState.value.viewer.player == null && mutableState.value.viewer.sourcePicker?.titleId == picker.titleId) {
                 mutableState.value = mutableState.value.copy(
@@ -2182,6 +2581,7 @@ class RivuneViewModel internal constructor(
             terminalCleanupScope.launch {
                 kotlinx.coroutines.withContext(NonCancellable) {
                     runCatching { currentGateway?.stopPlayback(player.sessionId) }
+                    player.failover?.id?.let { runCatching { currentGateway?.cancelPlaybackFailover(it) } }
                 }
             }
         }
@@ -2195,6 +2595,12 @@ class RivuneViewModel internal constructor(
             val player = state.viewer.player ?: return
             if (player.key != playerKey || player.sessionId != sessionId) return
             if (state.viewer.playerFailure?.matches(player) == true) return
+            if (player.canAdvancePlaybackFailover(failure)) {
+                val advancing = state.copy(viewer = state.viewer.copy(player = player.copy(failoverAdvancing = true)))
+                if (!mutableState.compareAndSet(state, advancing)) continue
+                advanceFailedPlaybackSource(player, failure)
+                return
+            }
             val fallback = player.fallbackToMpv(failure, "${player.sessionId}:mpv:${UUID.randomUUID()}")
             if (fallback != null) {
                 val updated = state.copy(
@@ -2218,6 +2624,71 @@ class RivuneViewModel internal constructor(
             if (!mutableState.compareAndSet(state, failed)) continue
             diagnostics.record(DiagnosticEventCode.PLAYBACK_FAILED)
             return
+        }
+    }
+
+    private fun advanceFailedPlaybackSource(player: PlayerPresentation, failure: PlayerEngineFailure) {
+        val currentGateway = gateway ?: return
+        val failover = player.failover ?: return
+        val error = failure.playbackFailoverError() ?: return
+        val picker = mutableState.value.viewer.sourcePicker ?: return
+        viewModelScope.launch {
+            val inputFor: (Long) -> io.rivune.api.PlaybackFailoverAdvanceInput = { revision ->
+                io.rivune.api.PlaybackFailoverAdvanceInput(
+                    error = error,
+                    positionSeconds = (failure.positionMs.coerceAtLeast(0L) / 1_000.0).coerceAtMost(86_400.0),
+                    expectedRevision = revision,
+                )
+            }
+            val advanced = try {
+                currentGateway.advancePlaybackFailover(failover.id, inputFor(failover.revision))
+            } catch (cause: RivuneApiException.Server) {
+                if (cause.status != 409) null else {
+                    val latest = try { currentGateway.playbackFailover(failover.id) } catch (_: Throwable) { null }
+                    if (latest?.status == io.rivune.api.PlaybackFailoverStatus.ACTIVE &&
+                        latest.attemptCount < latest.maximumAttempts
+                    ) try {
+                        currentGateway.advancePlaybackFailover(latest.id, inputFor(latest.revision))
+                    } catch (_: Throwable) {
+                        null
+                    } else latest
+                }
+            } catch (cause: CancellationException) {
+                throw cause
+            } catch (_: Throwable) {
+                null
+            }
+            val currentPlayer = mutableState.value.viewer.player
+                ?.takeIf { it.sessionId == player.sessionId && it.failoverAdvancing }
+                ?: return@launch
+            val nextSource = advanced?.currentSourceRef?.let { sourceRef ->
+                picker.options.firstOrNull { it.sourceRef == sourceRef && it.sourceRef != picker.playerSource?.sourceRef }
+            }
+            if (advanced?.status != io.rivune.api.PlaybackFailoverStatus.ACTIVE || nextSource == null) {
+                mutableState.update { state -> state.copy(viewer = state.viewer.copy(
+                    player = currentPlayer.copy(failover = advanced ?: failover, failoverAdvancing = false),
+                    playerFailure = PlayerFailureState(currentPlayer.key, currentPlayer.sessionId, failure),
+                    loading = null,
+                )) }
+                diagnostics.record(DiagnosticEventCode.PLAYBACK_FAILED)
+                return@launch
+            }
+            mutableState.update { state -> state.copy(viewer = state.viewer.copy(
+                player = null,
+                playerFailure = null,
+                sourcePicker = picker.copy(playerSource = null),
+                sourcePickerVisible = true,
+                loading = null,
+                inlineFailure = null,
+            )) }
+            kotlinx.coroutines.withContext(NonCancellable) { runCatching { currentGateway.stopPlayback(player.sessionId) } }
+            startPlayback(
+                picker,
+                nextSource,
+                PlaybackTargetSelection.Embedded(player.recoveryEmbeddedPreference()),
+                startOverrideMs = (advanced.positionSeconds * 1_000.0).toLong(),
+                resumeFailover = advanced,
+            )
         }
     }
     fun externalPlaybackFinished(result: ExternalPlaybackResult?) {
@@ -2410,10 +2881,11 @@ class RivuneViewModel internal constructor(
     }
 
     private fun startCoordination(currentGateway: RivuneGateway) {
-        if (!playbackCoordinationAvailable) return
+        if (!playbackCoordinationAvailable || !coordinationForeground) return
         coordinationJob?.cancel()
         coordinationJob = viewModelScope.launch {
-            while (true) {
+            var lastPresenceAtMilliseconds: Long? = null
+            while (coordinationForeground) {
                 val viewer = mutableState.value.viewer
                 val player = viewer.player
                 val coordinatedItem = player?.takeUnless { it.mediaType == "offline" }?.coordinatedItem()
@@ -2426,43 +2898,71 @@ class RivuneViewModel internal constructor(
                         durationMilliseconds = if (coordinatedItem == null) 0 else coordinationDurationMs,
                     ),
                 )
-                runCatching { currentGateway.updatePlaybackDevice(heartbeat) }
-                val devices = runCatching {
-                    controllablePlaybackDevices(currentGateway.playbackDevices().devices)
-                }.getOrDefault(controllablePlaybackDevices(viewer.playbackDevices))
-                val commands = runCatching { currentGateway.playbackCommands(lastPlaybackCommandId).commands }
+                val nowMilliseconds = monotonicNowMilliseconds()
+                val presenceDue = lastPresenceAtMilliseconds == null ||
+                    nowMilliseconds - lastPresenceAtMilliseconds >= COORDINATION_PRESENCE_INTERVAL_MILLISECONDS
+                val devices = if (presenceDue) {
+                    runCatching { currentGateway.updatePlaybackDevice(heartbeat) }
+                    lastPresenceAtMilliseconds = nowMilliseconds
+                    runCatching { controllablePlaybackDevices(currentGateway.playbackDevices().devices) }
+                        .getOrDefault(controllablePlaybackDevices(viewer.playbackDevices))
+                } else {
+                    controllablePlaybackDevices(viewer.playbackDevices)
+                }
+                val commands = runCatching { currentGateway.playbackCommands(lastPlaybackOperationId).commands }
                     .getOrDefault(emptyList())
+                if (commands.isNotEmpty()) {
+                    coordinationRecentUntilMilliseconds = nowMilliseconds + COORDINATION_RECENT_ACTIVITY_MILLISECONDS
+                }
                 val queuedCommands = mutableListOf<io.rivune.api.PlaybackCommand>()
                 var hasPlayback = viewer.player != null
                 for (command in commands) {
-                    if (command.id !in appliedPlaybackCommandIds) {
-                        if (command.command == "load") {
-                            val item = command.item ?: break
-                            val loaded = awaitCoordinatedMedia(
-                                MediaTarget(
-                                    id = item.resourceId,
-                                    resourceId = item.resourceId,
-                                    mediaType = item.mediaType,
-                                    title = item.title,
-                                    titleId = item.titleId,
-                                    sourceAddonId = item.sourceAddonId,
-                                    posterUrl = item.posterUrl,
-                                ),
-                                command.positionMilliseconds,
-                            )
-                            if (!loaded) break
-                            hasPlayback = true
-                        } else if (hasPlayback || coordinatedPlaybackLoading) {
-                            queuedCommands += command
-                        } else {
-                            break
-                        }
-                        appliedPlaybackCommandIds += command.id
+                    val stored = playbackOperationStore.get(command.operationId)
+                    if (stored != null) {
+                        if (!reportStoredPlaybackResult(currentGateway, command.operationId, stored)) break
+                        lastPlaybackOperationId = command.operationId
+                        continue
                     }
-                    if (runCatching { currentGateway.acknowledgePlaybackCommand(command.id) }.isFailure) break
-                    appliedPlaybackCommandIds -= command.id
-                    lastPlaybackCommandId = maxOf(lastPlaybackCommandId, command.id)
-                    if (command.command == "stop") break
+                    if (playbackCommandExpired(command.expiresAt, instantNow())) {
+                        val expired = StoredPlaybackOperation(PlaybackCommandStatus.EXPIRED, PlaybackCommandResultCode.EXPIRED)
+                        playbackOperationStore.put(command.operationId, expired)
+                        if (!reportStoredPlaybackResult(currentGateway, command.operationId, expired)) break
+                        lastPlaybackOperationId = command.operationId
+                        continue
+                    }
+                    if (command.command == PlaybackCommandType.LOAD) {
+                        val item = command.item
+                        val validMode = command.mode == PlaybackCommandMode.HANDOFF || command.mode == PlaybackCommandMode.PLAY_COPY
+                        val loaded = if (item != null && validMode) awaitCoordinatedMedia(
+                            MediaTarget(
+                                id = item.resourceId,
+                                resourceId = item.resourceId,
+                                mediaType = item.mediaType,
+                                title = item.title,
+                                titleId = item.titleId,
+                                sourceAddonId = item.sourceAddonId,
+                                posterUrl = item.posterUrl,
+                            ),
+                            command.positionMilliseconds,
+                        ) else false
+                        val result = if (loaded) {
+                            hasPlayback = true
+                            StoredPlaybackOperation(PlaybackCommandStatus.APPLIED, PlaybackCommandResultCode.APPLIED)
+                        } else {
+                            StoredPlaybackOperation(PlaybackCommandStatus.FAILED, if (item == null || !validMode) PlaybackCommandResultCode.INVALID_STATE else PlaybackCommandResultCode.EXECUTION_FAILED)
+                        }
+                        playbackOperationStore.put(command.operationId, result)
+                        if (!reportStoredPlaybackResult(currentGateway, command.operationId, result)) break
+                        lastPlaybackOperationId = command.operationId
+                    } else if (command.command != PlaybackCommandType.LOAD && (hasPlayback || coordinatedPlaybackLoading)) {
+                        if (viewer.pendingPlaybackCommands.none { it.operationId == command.operationId }) queuedCommands += command
+                        break
+                    } else {
+                        val failed = StoredPlaybackOperation(PlaybackCommandStatus.FAILED, PlaybackCommandResultCode.UNSUPPORTED)
+                        playbackOperationStore.put(command.operationId, failed)
+                        if (!reportStoredPlaybackResult(currentGateway, command.operationId, failed)) break
+                        lastPlaybackOperationId = command.operationId
+                    }
                 }
                 var room = viewer.activePlaybackRoom
                 if (room != null) {
@@ -2514,10 +3014,41 @@ class RivuneViewModel internal constructor(
                         ),
                     )
                 }
-                awaitCoordinationTick()
+                refreshOutgoingHandoffs(currentGateway)
+                val latestViewer = mutableState.value.viewer
+                val active = latestViewer.player != null || latestViewer.activePlaybackRoom != null ||
+                    latestViewer.pendingPlaybackCommands.isNotEmpty() || coordinatedPlaybackLoading ||
+                    pendingOutgoingHandoffs.isNotEmpty() || monotonicNowMilliseconds() < coordinationRecentUntilMilliseconds
+                awaitCoordinationTick(coordinationDelayMilliseconds(active))
             }
         }
     }
+
+    private suspend fun reportStoredPlaybackResult(
+        currentGateway: RivuneGateway,
+        operationId: UUID,
+        result: StoredPlaybackOperation,
+    ): Boolean {
+        val status = result.status ?: return false
+        val code = result.code ?: return false
+        return runCatching {
+            currentGateway.reportPlaybackCommandResult(operationId, PlaybackCommandResultInput(status, code))
+        }.isSuccess
+    }
+
+    private suspend fun refreshOutgoingHandoffs(currentGateway: RivuneGateway) {
+        for ((operationId, sourceSessionId) in pendingOutgoingHandoffs.toMap()) {
+            val outgoing = runCatching { currentGateway.outgoingPlaybackCommand(operationId) }.getOrNull() ?: continue
+            if (outgoing.status == PlaybackCommandStatus.PENDING) continue
+            pendingOutgoingHandoffs.remove(operationId)
+            if (outgoing.status == PlaybackCommandStatus.APPLIED && mutableState.value.viewer.player?.sessionId == sourceSessionId) {
+                closePlayer()
+            }
+        }
+    }
+
+    internal fun playbackCommandExpired(expiresAt: String, now: Instant): Boolean =
+        runCatching { !now.isBefore(Instant.parse(expiresAt)) }.getOrDefault(true)
 
     private suspend fun refreshPlaybackRoom(currentGateway: RivuneGateway, room: PlaybackRoom): PlaybackRoom? = try {
         currentGateway.playbackRoom(room.id).preservingJoinCode(room)
@@ -2529,16 +3060,31 @@ class RivuneViewModel internal constructor(
         room
     }
 
+    internal fun coordinationForegroundChanged(foreground: Boolean) {
+        if (coordinationForeground == foreground) return
+        coordinationForeground = foreground
+        if (!foreground) {
+            coordinationJob?.cancel()
+            coordinationJob = null
+        } else {
+            gateway?.let(::startCoordination)
+        }
+    }
+
+    internal fun coordinationDelayMilliseconds(active: Boolean): Long =
+        if (active) COORDINATION_ACTIVE_INTERVAL_MILLISECONDS else COORDINATION_IDLE_INTERVAL_MILLISECONDS
+
     private fun stopCoordination() {
         coordinationJob?.cancel()
         coordinationJob = null
         coordinationEndedSessionId = null
-        lastPlaybackCommandId = 0
+        lastPlaybackOperationId = null
         coordinationEndingSessionId = null
-        appliedPlaybackCommandIds.clear()
+        pendingOutgoingHandoffs.clear()
         coordinationPositionMs = 0
         coordinationDurationMs = 0
         coordinationPlaying = false
+        coordinationRecentUntilMilliseconds = 0L
     }
 
     private fun applyPlayerProgress(player: PlayerPresentation, updated: PlaybackProgress) {
@@ -2583,6 +3129,7 @@ class RivuneViewModel internal constructor(
         val profile = mutableState.value.activeProfile ?: return
         val operationGeneration = generation
         val requestGeneration = viewerRequestGeneration
+        loadV22Features(currentGateway, profile, operationGeneration)
         viewModelScope.launch {
             val effective = try {
                 currentGateway.effectiveProfileSettings(profile.id)
@@ -2635,13 +3182,14 @@ class RivuneViewModel internal constructor(
                         } catch (cause: CancellationException) {
                             throw cause
                         } catch (_: Throwable) {
+
                             null
                         }
                     }
                     val recommendationsTask = async {
                         if (!localRecommendationsAvailable) return@async emptyList()
                         try {
-                            currentGateway.localRecommendations(30).items
+                            currentGateway.localRecommendations(30, RecommendationArtworkShape.LANDSCAPE).items
                         } catch (cause: CancellationException) {
                             throw cause
                         } catch (_: Throwable) {
@@ -2684,6 +3232,333 @@ class RivuneViewModel internal constructor(
             } catch (cause: Throwable) {
                 diagnostics.record(DiagnosticEventCode.CATALOG_REFRESH_FAILED)
                 viewerFailure(cause, operationGeneration, requestGeneration, UiFailure.CONTENT_LOAD)
+            }
+        }
+    }
+    private fun loadV22Features(currentGateway: RivuneGateway, profile: Profile, operationGeneration: Long) {
+        V22FeatureKind.entries.forEach { kind ->
+            loadV22Feature(kind, currentGateway, profile, operationGeneration)
+        }
+    }
+
+    fun retryV22Feature(kind: V22FeatureKind) {
+        val currentGateway = gateway ?: return
+        val profile = mutableState.value.activeProfile ?: return
+        loadV22Feature(kind, currentGateway, profile, generation)
+    }
+
+    private fun loadV22Feature(
+        kind: V22FeatureKind,
+        currentGateway: RivuneGateway,
+        profile: Profile,
+        operationGeneration: Long,
+    ) {
+        mutableState.update { state ->
+            val features = state.viewer.features
+            val pending = V22LoadState(loading = true)
+            state.copy(viewer = state.viewer.copy(features = when (kind) {
+                V22FeatureKind.QUEUE -> features.copy(queueLoad = pending)
+                V22FeatureKind.SAVED_SEARCHES -> features.copy(savedSearchLoad = pending)
+                V22FeatureKind.SMART_COLLECTIONS -> features.copy(smartCollectionLoad = pending)
+                V22FeatureKind.INCIDENTS -> features.copy(incidentLoad = pending)
+                V22FeatureKind.INBOX -> features.copy(inboxLoad = pending)
+                V22FeatureKind.ACCESSIBILITY -> features.copy(accessibilityLoad = pending)
+            }))
+        }
+        viewModelScope.launch {
+            try {
+                val result: Any = when (kind) {
+                    V22FeatureKind.QUEUE -> currentGateway.readingQueue(profile.id)
+                    V22FeatureKind.SAVED_SEARCHES -> currentGateway.savedSearches()
+                    V22FeatureKind.SMART_COLLECTIONS -> currentGateway.smartCollections()
+                    V22FeatureKind.INCIDENTS -> currentGateway.extensionIncidents()
+                    V22FeatureKind.INBOX -> currentGateway.mediaNotificationSubscriptions() to currentGateway.mediaNotifications(limit = 30)
+                    V22FeatureKind.ACCESSIBILITY -> currentGateway.profileAccessibilityPreferences(profile.id)
+                }
+                if (!isCurrent(operationGeneration) || mutableState.value.activeProfile?.id != profile.id) return@launch
+                mutableState.update { state ->
+                    val features = state.viewer.features
+                    val loaded = V22LoadState(loaded = true)
+                    @Suppress("UNCHECKED_CAST")
+                    state.copy(viewer = state.viewer.copy(features = when (kind) {
+                        V22FeatureKind.QUEUE -> features.copy(queue = result as io.rivune.api.ReadingQueue, queueLoad = loaded)
+                        V22FeatureKind.SAVED_SEARCHES -> features.copy(savedSearches = result as List<io.rivune.api.SavedSearch>, savedSearchLoad = loaded)
+                        V22FeatureKind.SMART_COLLECTIONS -> features.copy(smartCollections = result as List<io.rivune.api.SmartCollection>, smartCollectionLoad = loaded)
+                        V22FeatureKind.INCIDENTS -> features.copy(incidents = result as List<io.rivune.api.AddonIncident>, incidentLoad = loaded)
+                        V22FeatureKind.INBOX -> {
+                            val inbox = result as Pair<List<io.rivune.api.MediaNotificationSubscription>, io.rivune.api.MediaNotificationPage>
+                            features.copy(notificationSubscriptions = inbox.first, notifications = inbox.second.notifications, inboxLoad = loaded)
+                        }
+                        V22FeatureKind.ACCESSIBILITY -> features.copy(accessibility = result as io.rivune.api.AccessibilityPreferencesDocument, accessibilityLoad = loaded)
+                    }))
+                }
+            } catch (cause: CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                if (!isCurrent(operationGeneration) || mutableState.value.activeProfile?.id != profile.id) return@launch
+                val failed = V22LoadState(failure = failureFor(cause, UiFailure.CONTENT_LOAD))
+                mutableState.update { state ->
+                    val features = state.viewer.features
+                    state.copy(viewer = state.viewer.copy(features = when (kind) {
+                        V22FeatureKind.QUEUE -> features.copy(queueLoad = failed)
+                        V22FeatureKind.SAVED_SEARCHES -> features.copy(savedSearchLoad = failed)
+                        V22FeatureKind.SMART_COLLECTIONS -> features.copy(smartCollectionLoad = failed)
+                        V22FeatureKind.INCIDENTS -> features.copy(incidentLoad = failed)
+                        V22FeatureKind.INBOX -> features.copy(inboxLoad = failed)
+                        V22FeatureKind.ACCESSIBILITY -> features.copy(accessibilityLoad = failed)
+                    }))
+                }
+            }
+        }
+    }
+
+    private fun setFeatureMutationState(busy: Boolean, failure: UiFailure? = null, conflict: Boolean = false) {
+        mutableState.update { state ->
+            state.copy(viewer = state.viewer.copy(features = state.viewer.features.copy(
+                mutationInFlight = busy,
+                failure = failure,
+                conflict = conflict,
+            )))
+        }
+    }
+
+    private suspend fun <T> retryIdempotentMutation(block: suspend () -> T): T = try {
+        block()
+    } catch (cause: IOException) {
+        block()
+    }
+
+    private fun featureMutationFailure(cause: Throwable) {
+        val conflict = cause is RivuneApiException.Server && cause.status == 409
+        setFeatureMutationState(false, if (conflict) UiFailure.ACTION else failureFor(cause, UiFailure.ACTION), conflict)
+    }
+
+    fun addDetailToQueue() {
+        val currentGateway = gateway ?: return
+        val profile = mutableState.value.activeProfile ?: return
+        val detail = mutableState.value.viewer.detail ?: return
+        val queue = mutableState.value.viewer.features.queue ?: return
+        val mediaType = when (detail.target.mediaType.lowercase(Locale.ROOT)) {
+            "movie" -> io.rivune.api.ReadingQueueMediaType.MOVIE
+            "series" -> io.rivune.api.ReadingQueueMediaType.SERIES
+            "episode" -> io.rivune.api.ReadingQueueMediaType.EPISODE
+            "tv" -> io.rivune.api.ReadingQueueMediaType.TV
+            else -> return
+        }
+        val operationId = UUID.randomUUID()
+        val input = io.rivune.api.ReadingQueueAddInput(
+            operationId = operationId,
+            expectedRevision = queue.revision,
+            mediaType = mediaType,
+            resourceId = detail.target.resourceId,
+            sourceAddonId = detail.target.sourceAddonId,
+            titleId = detail.titleId,
+            title = detail.target.title,
+            posterUrl = detail.target.posterUrl,
+        )
+        setFeatureMutationState(true)
+        viewModelScope.launch {
+            try {
+                retryIdempotentMutation { currentGateway.addReadingQueueItem(profile.id, input) }
+                val updated = currentGateway.readingQueue(profile.id)
+                if (mutableState.value.activeProfile?.id == profile.id) mutableState.update { state ->
+                    state.copy(viewer = state.viewer.copy(features = state.viewer.features.copy(
+                        queue = updated, mutationInFlight = false, failure = null, conflict = false,
+                    )))
+                }
+            } catch (cause: CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                featureMutationFailure(cause)
+            }
+        }
+    }
+
+    fun removeQueueItem(item: io.rivune.api.ReadingQueueItem) {
+        val currentGateway = gateway ?: return
+        val profile = mutableState.value.activeProfile ?: return
+        val queue = mutableState.value.viewer.features.queue ?: return
+        val input = io.rivune.api.ReadingQueueMutationInput(UUID.randomUUID(), queue.revision)
+        setFeatureMutationState(true)
+        viewModelScope.launch {
+            try {
+                retryIdempotentMutation { currentGateway.removeReadingQueueItem(profile.id, item.id, input) }
+                val updated = currentGateway.readingQueue(profile.id)
+                if (mutableState.value.activeProfile?.id == profile.id) mutableState.update { state ->
+                    state.copy(viewer = state.viewer.copy(features = state.viewer.features.copy(
+                        queue = updated, mutationInFlight = false, failure = null, conflict = false,
+                    )))
+                }
+            } catch (cause: CancellationException) { throw cause } catch (cause: Throwable) { featureMutationFailure(cause) }
+        }
+    }
+
+    fun saveCurrentSearch() {
+        val currentGateway = gateway ?: return
+        val query = mutableState.value.viewer.search.query.trim().takeIf { it.length >= 2 } ?: return
+        val input = io.rivune.api.SavedSearchInput(query.take(120), query.take(256), sort = io.rivune.api.SavedSearchSort.RELEVANCE)
+        setFeatureMutationState(true)
+        viewModelScope.launch {
+            try {
+                val created = currentGateway.createSavedSearch(input)
+                mutableState.update { state -> state.copy(viewer = state.viewer.copy(features = state.viewer.features.copy(
+                    savedSearches = (state.viewer.features.savedSearches.filterNot { it.id == created.id } + created).sortedBy { it.name },
+                    mutationInFlight = false, failure = null, conflict = false,
+                ))) }
+            } catch (cause: CancellationException) { throw cause } catch (cause: Throwable) { featureMutationFailure(cause) }
+        }
+    }
+
+    fun runSavedSearch(saved: io.rivune.api.SavedSearch) = search(saved.query)
+
+    fun deleteSavedSearch(saved: io.rivune.api.SavedSearch) {
+        val currentGateway = gateway ?: return
+        setFeatureMutationState(true)
+        viewModelScope.launch {
+            try {
+                currentGateway.deleteSavedSearch(saved.id, saved.revision)
+                mutableState.update { state -> state.copy(viewer = state.viewer.copy(features = state.viewer.features.copy(
+                    savedSearches = state.viewer.features.savedSearches.filterNot { it.id == saved.id },
+                    mutationInFlight = false, failure = null, conflict = false,
+                ))) }
+            } catch (cause: CancellationException) { throw cause } catch (cause: Throwable) { featureMutationFailure(cause) }
+        }
+    }
+
+    fun createSmartCollectionForLibrary() {
+        val currentGateway = gateway ?: return
+        val mediaType = when (mutableState.value.viewer.library.mediaType) {
+            "movie" -> io.rivune.api.CatalogMediaType.MOVIE
+            "series" -> io.rivune.api.CatalogMediaType.SERIES
+            "tv" -> io.rivune.api.CatalogMediaType.TV
+            else -> return
+        }
+        val name = mediaType.name.lowercase().replaceFirstChar(Char::uppercase)
+        val input = io.rivune.api.SmartCollectionInput(
+            name = name,
+            rules = io.rivune.api.SmartRule.MediaType(values = listOf(mediaType)),
+            sort = io.rivune.api.SmartCollectionSort.TITLE,
+        )
+        setFeatureMutationState(true)
+        viewModelScope.launch {
+            try {
+                val created = currentGateway.createSmartCollection(input)
+                mutableState.update { state -> state.copy(viewer = state.viewer.copy(features = state.viewer.features.copy(
+                    smartCollections = (state.viewer.features.smartCollections.filterNot { it.id == created.id } + created).sortedBy { it.name },
+                    mutationInFlight = false, failure = null, conflict = false,
+                ))) }
+            } catch (cause: CancellationException) { throw cause } catch (cause: Throwable) { featureMutationFailure(cause) }
+        }
+    }
+
+    fun openSmartCollection(collection: io.rivune.api.SmartCollection) {
+        val currentGateway = gateway ?: return
+        setFeatureMutationState(true)
+        viewModelScope.launch {
+            try {
+                val page = currentGateway.evaluateSmartCollection(collection.id)
+                mutableState.update { state -> state.copy(viewer = state.viewer.copy(features = state.viewer.features.copy(
+                    smartCollectionPage = page, mutationInFlight = false, failure = null,
+                ))) }
+            } catch (cause: CancellationException) { throw cause } catch (cause: Throwable) { featureMutationFailure(cause) }
+        }
+    }
+
+    fun deleteSmartCollection(collection: io.rivune.api.SmartCollection) {
+        val currentGateway = gateway ?: return
+        setFeatureMutationState(true)
+        viewModelScope.launch {
+            try {
+                currentGateway.deleteSmartCollection(collection.id, collection.revision)
+                mutableState.update { state -> state.copy(viewer = state.viewer.copy(features = state.viewer.features.copy(
+                    smartCollections = state.viewer.features.smartCollections.filterNot { it.id == collection.id },
+                    smartCollectionPage = null,
+                    mutationInFlight = false,
+                    failure = null,
+                    conflict = false,
+                ))) }
+            } catch (cause: CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                featureMutationFailure(cause)
+            }
+        }
+    }
+    fun acknowledgeIncident(incident: io.rivune.api.AddonIncident) {
+        val currentGateway = gateway ?: return
+        setFeatureMutationState(true)
+        viewModelScope.launch {
+            try {
+                val updated = currentGateway.acknowledgeExtensionIncident(incident.id)
+                mutableState.update { state -> state.copy(viewer = state.viewer.copy(features = state.viewer.features.copy(
+                    incidents = state.viewer.features.incidents.map { if (it.id == updated.id) updated else it },
+                    mutationInFlight = false, failure = null,
+                ))) }
+            } catch (cause: CancellationException) { throw cause } catch (cause: Throwable) { featureMutationFailure(cause) }
+        }
+    }
+
+    fun acknowledgeMediaNotification(notification: io.rivune.api.MediaNotification, dismiss: Boolean) {
+        val currentGateway = gateway ?: return
+        val acknowledgement = if (dismiss) io.rivune.api.MediaNotificationAcknowledgementState.DISMISSED else io.rivune.api.MediaNotificationAcknowledgementState.READ
+        setFeatureMutationState(true)
+        viewModelScope.launch {
+            try {
+                currentGateway.acknowledgeMediaNotification(notification.id, acknowledgement)
+                mutableState.update { state -> state.copy(viewer = state.viewer.copy(features = state.viewer.features.copy(
+                    notifications = if (dismiss) state.viewer.features.notifications.filterNot { it.id == notification.id }
+                    else state.viewer.features.notifications.map { if (it.id == notification.id) it.copy(readAt = instantNow().toString()) else it },
+                    mutationInFlight = false, failure = null,
+                ))) }
+            } catch (cause: CancellationException) { throw cause } catch (cause: Throwable) { featureMutationFailure(cause) }
+        }
+    }
+
+    fun toggleMediaNotifications() {
+        val currentGateway = gateway ?: return
+        val detail = mutableState.value.viewer.detail ?: return
+        val existing = mutableState.value.viewer.features.notificationSubscriptions.firstOrNull { it.titleId == detail.titleId }
+        setFeatureMutationState(true)
+        viewModelScope.launch {
+            try {
+                if (existing == null) {
+                    val followed = currentGateway.followMediaNotifications(
+                        detail.titleId,
+                        io.rivune.api.MediaNotificationFollowInput(java.time.ZoneId.systemDefault().id, horizonDays = 90, leadDays = 1),
+                    )
+                    mutableState.update { state -> state.copy(viewer = state.viewer.copy(features = state.viewer.features.copy(
+                        notificationSubscriptions = state.viewer.features.notificationSubscriptions + followed,
+                        mutationInFlight = false, failure = null,
+                    ))) }
+                } else {
+                    currentGateway.unfollowMediaNotifications(detail.titleId)
+                    mutableState.update { state -> state.copy(viewer = state.viewer.copy(features = state.viewer.features.copy(
+                        notificationSubscriptions = state.viewer.features.notificationSubscriptions.filterNot { it.titleId == detail.titleId },
+                        mutationInFlight = false, failure = null,
+                    ))) }
+                }
+            } catch (cause: CancellationException) { throw cause } catch (cause: Throwable) { featureMutationFailure(cause) }
+        }
+    }
+
+    fun updateAccessibility(transform: (io.rivune.api.AccessibilityPreferencesDocument) -> io.rivune.api.AccessibilityPreferencesDocument) {
+        val currentGateway = gateway ?: return
+        val profile = mutableState.value.activeProfile ?: return
+        val current = mutableState.value.viewer.features.accessibility ?: return
+        val input = transform(current).copy(revision = current.revision)
+        setFeatureMutationState(true)
+        viewModelScope.launch {
+            try {
+                val updated = currentGateway.updateProfileAccessibilityPreferences(profile.id, input)
+                if (mutableState.value.activeProfile?.id == profile.id) mutableState.update { state -> state.copy(viewer = state.viewer.copy(features = state.viewer.features.copy(
+                    accessibility = updated, mutationInFlight = false, failure = null, conflict = false,
+                ))) }
+            } catch (cause: CancellationException) { throw cause } catch (cause: Throwable) {
+                if (cause is RivuneApiException.Server && cause.status == 409) {
+                    val latest = try { currentGateway.profileAccessibilityPreferences(profile.id) } catch (_: Throwable) { null }
+                    if (latest != null && mutableState.value.activeProfile?.id == profile.id) mutableState.update { state -> state.copy(viewer = state.viewer.copy(features = state.viewer.features.copy(accessibility = latest))) }
+                }
+                featureMutationFailure(cause)
             }
         }
     }
@@ -2827,11 +3702,11 @@ class RivuneViewModel internal constructor(
             }
         }
     }
-
     private fun runSearch(query: String, skip: Int, append: Boolean) {
         val currentGateway = gateway ?: return
         val operationGeneration = generation
         val language = metadataLanguage()
+        val region = runCatching(localeProvider).getOrNull()?.country?.trim()?.uppercase().takeUnless { it.isNullOrEmpty() }
         val requestGeneration = ++viewerRequestGeneration
         mutableState.value = mutableState.value.copy(
             viewer = mutableState.value.viewer.copy(
@@ -2839,39 +3714,186 @@ class RivuneViewModel internal constructor(
                 inlineFailure = null,
             ),
         )
-        viewModelScope.launch {
+        val diagnosticOperation = SearchDiagnosticOperation(diagnostics)
+        searchJob = viewModelScope.launch {
+            var hasPublishedResults = false
+            val pendingItems = mutableListOf<MediaTarget>()
+            var coalescedPublication: Job? = null
+
+            fun publishItems(incoming: List<MediaTarget>): Boolean {
+                if (incoming.isEmpty() || !viewerRequestCurrent(operationGeneration, requestGeneration)) return false
+                val viewer = mutableState.value.viewer
+                val merged = mergeSearchMediaTargets(viewer.search.items, incoming)
+                if (merged == viewer.search.items) return false
+                mutableState.value = mutableState.value.copy(
+                    viewer = viewer.copy(search = viewer.search.copy(items = merged)),
+                )
+                return true
+            }
+
+            fun publishPendingItems() {
+                coalescedPublication = null
+                if (pendingItems.isEmpty()) return
+                val incoming = pendingItems.toList()
+                pendingItems.clear()
+                publishItems(incoming)
+            }
+
+            fun enqueueItems(incoming: List<MediaTarget>) {
+                if (incoming.isEmpty() || !viewerRequestCurrent(operationGeneration, requestGeneration)) return
+                if (!hasPublishedResults) {
+                    hasPublishedResults = publishItems(incoming)
+                    if (hasPublishedResults) return
+                }
+                pendingItems += incoming
+                if (coalescedPublication == null) {
+                    coalescedPublication = launch {
+                        delay(SEARCH_PUBLICATION_WINDOW_MILLISECONDS)
+                        publishPendingItems()
+                    }
+                }
+            }
+
             try {
+                val semanticDeferred = async {
+                    semanticSearchOutcome(
+                        currentGateway,
+                        SemanticSearchRequest(
+                            query = query,
+                            language = language,
+                            region = region,
+                            page = if (append) mutableState.value.viewer.search.page + 1 else 1,
+                            limit = minOf(SEARCH_PAGE_SIZE, 40),
+                        ),
+                    )
+                }
                 val descriptors = if (searchDescriptors.isEmpty()) currentGateway.addonCatalogs() else searchDescriptors
                 searchDescriptors = descriptors
-                val types = descriptors.asSequence().filter { it.searchable }.map { it.catalog.type }.distinct().toList()
-                val results = coroutineScope {
-                    types.map { type -> async {
-                        runCatching { currentGateway.searchAddonCatalogs(type, query, skip, SEARCH_PAGE_SIZE, language) }
-                    } }.awaitAll()
+                val configured = descriptors.asSequence()
+                    .filter { it.searchable }
+                    .map { it.catalog.type }
+                    .toList()
+                val (configuredTypes, configuredTypesTruncated) = boundedStableSearchTypes(configured, MAX_SEARCH_ADDON_TYPES)
+                val fanoutBudget = SearchFanoutBudget(MAX_SEARCH_ADDON_REQUESTS)
+                val publishAddonOutcome: (Result<AddonResourceBatch>) -> Unit = { outcome ->
+                    enqueueItems(outcome.getOrNull()?.toMediaTargets(descriptors).orEmpty())
+                }
+                val speculativeAddonSearch = async {
+                    searchAddonCatalogOutcomes(currentGateway, configuredTypes, query, skip, language, fanoutBudget, publishAddonOutcome)
+                }
+                val semanticOutcome = semanticDeferred.await()
+                val semantic = semanticOutcome.page
+                if (semantic != null && viewerRequestCurrent(operationGeneration, requestGeneration)) {
+                    enqueueItems(semantic.items.map(CollectionItem::toSemanticMediaTarget))
+                    val viewer = mutableState.value.viewer
+                    if (viewerRequestCurrent(operationGeneration, requestGeneration) && viewer.search.intents != semantic.intents) {
+                        mutableState.value = mutableState.value.copy(
+                            viewer = viewer.copy(search = viewer.search.copy(intents = semantic.intents)),
+                        )
+                    }
+                }
+                val inferredTypes = semantic?.mediaTypes.orEmpty().map(String::lowercase).toSet()
+                val inferredConfiguredTypes = configuredTypes.filter(inferredTypes::contains)
+                val types = inferredConfiguredTypes.ifEmpty { configuredTypes }
+                val residualQuery = semantic?.titleQuery?.trim()
+                val addonQuery = residualQuery?.takeIf { it.length >= 2 } ?: query
+                val results = if (types == configuredTypes && addonQuery == query) {
+                    speculativeAddonSearch.await()
+                } else {
+                    speculativeAddonSearch.cancelAndJoin()
+                    searchAddonCatalogOutcomes(currentGateway, types, addonQuery, skip, language, fanoutBudget, publishAddonOutcome)
                 }
                 if (!viewerRequestCurrent(operationGeneration, requestGeneration)) return@launch
+                coalescedPublication?.cancelAndJoin()
+                coalescedPublication = null
                 val batches = results.mapNotNull { it.getOrNull() }
-                val incoming = batches.flatMap { it.toMediaTargets(descriptors) }
-                val current = if (append) mutableState.value.viewer.search.items else emptyList()
-                val merged = mergeMediaTargets(current, incoming)
+                if (batches.isEmpty() && results.any { it.isFailure } && semantic?.items.isNullOrEmpty() &&
+                    mutableState.value.viewer.search.items.isEmpty()
+                ) {
+                    throw RivuneApiException.InvalidResponse()
+                }
+                val directItems = batches.flatMap { it.toMediaTargets(descriptors) }
+                    .filter { inferredConfiguredTypes.isEmpty() || it.mediaType.lowercase() in inferredConfiguredTypes }
+                val semanticItems = semantic?.items.orEmpty().map(CollectionItem::toSemanticMediaTarget)
+                val viewer = mutableState.value.viewer
+                val merged = mergeSearchMediaTargets(viewer.search.items, pendingItems + directItems + semanticItems)
+                pendingItems.clear()
+                val completedSearch = SearchState(
+                    query = query,
+                    items = merged,
+                    intents = semantic?.intents ?: if (append) viewer.search.intents else emptyList(),
+                    page = semantic?.page ?: if (append) viewer.search.page + 1 else 1,
+                    hasMore = semantic?.hasMore == true || batches.any { it.hasFullPage(SEARCH_PAGE_SIZE) },
+                    partial = (append && viewer.search.partial) || configuredTypesTruncated || fanoutBudget.truncated ||
+                        semanticOutcome.failed || semantic?.partial == true || results.any { it.isFailure } || batches.any { it.errors.isNotEmpty() },
+                )
                 mutableState.value = mutableState.value.copy(
-                    viewer = mutableState.value.viewer.copy(
-                        search = SearchState(
-                            query = query,
-                            items = merged,
-                            page = if (append) mutableState.value.viewer.search.page + 1 else 1,
-                            hasMore = batches.any { it.hasFullPage(SEARCH_PAGE_SIZE) },
-                            partial = results.any { it.isFailure } || batches.any { it.errors.isNotEmpty() },
-                        ),
+                    viewer = viewer.copy(
+                        search = completedSearch,
                         loading = null,
                         inlineFailure = null,
                     ),
                 )
+                diagnosticOperation.finish(
+                    if (completedSearch.partial) DiagnosticEventCode.SEARCH_PARTIAL
+                    else DiagnosticEventCode.SEARCH_SUCCEEDED,
+                )
             } catch (cause: CancellationException) {
+                diagnosticOperation.finish(DiagnosticEventCode.SEARCH_CANCELED)
                 throw cause
             } catch (cause: Throwable) {
+                diagnosticOperation.finish(DiagnosticEventCode.SEARCH_FAILED)
                 viewerFailure(cause, operationGeneration, requestGeneration, UiFailure.CONTENT_LOAD)
             }
+        }
+        searchJob?.invokeOnCompletion { cause ->
+            if (cause is CancellationException) diagnosticOperation.finish(DiagnosticEventCode.SEARCH_CANCELED)
+            else if (cause != null) diagnosticOperation.finish(DiagnosticEventCode.SEARCH_FAILED)
+        }
+    }
+    private suspend fun searchAddonCatalogOutcomes(
+        currentGateway: RivuneGateway,
+        types: List<String>,
+        query: String,
+        skip: Int,
+        language: String?,
+        budget: SearchFanoutBudget,
+        onOutcome: (Result<AddonResourceBatch>) -> Unit,
+    ): List<Result<AddonResourceBatch>> = coroutineScope {
+        val semaphore = Semaphore(MAX_SEARCH_ADDON_CONCURRENCY)
+        types.map { type ->
+            async {
+                semaphore.withPermit {
+                    if (!budget.tryAcquire()) return@withPermit null
+                    val outcome = try {
+                        Result.success(currentGateway.searchAddonCatalogs(type, query, skip, SEARCH_PAGE_SIZE, language))
+                    } catch (cause: CancellationException) {
+                        throw cause
+                    } catch (cause: Throwable) {
+                        Result.failure(cause)
+                    }
+                    onOutcome(outcome)
+                    outcome
+                }
+            }
+        }.awaitAll().filterNotNull()
+    }
+
+
+    private suspend fun semanticSearchOutcome(
+        currentGateway: RivuneGateway,
+        request: SemanticSearchRequest,
+    ): SemanticSearchOutcome {
+        if (!semanticSearchAvailable) return SemanticSearchOutcome(page = null, failed = false)
+        return try {
+            val page = withTimeoutOrNull(SEMANTIC_SEARCH_TIMEOUT_MILLISECONDS) {
+                currentGateway.semanticSearch(request)
+            }
+            SemanticSearchOutcome(page = page, failed = page == null)
+        } catch (cause: CancellationException) {
+            throw cause
+        } catch (_: Throwable) {
+            SemanticSearchOutcome(page = null, failed = true)
         }
     }
 
@@ -3010,12 +4032,16 @@ class RivuneViewModel internal constructor(
                     EpisodePlaybackContext()
                 }
                 val preferences = appPreferences.snapshot()
-                val network = runCatching(playbackNetworkProvider)
-                    .getOrDefault(PlaybackNetwork.MOBILE_OR_METERED)
-                val quality = if (network == PlaybackNetwork.WIFI_OR_ETHERNET) {
-                    preferences.wifiQuality
-                } else {
-                    preferences.mobileQuality
+                val detectedNetwork = runCatching(playbackNetworkProvider)
+                    .getOrDefault(NetworkClass.MOBILE)
+                val network = if (
+                    detectedNetwork == NetworkClass.REMOTE_WIFI &&
+                    isKnownLocalNetworkServerUrl(mutableState.value.serverInput)
+                ) NetworkClass.LOCAL else detectedNetwork
+                val quality = when (network) {
+                    NetworkClass.LOCAL -> preferences.localQuality
+                    NetworkClass.REMOTE_WIFI -> preferences.remoteWifiQuality
+                    NetworkClass.MOBILE -> preferences.mobileQuality
                 }
                 val capabilities = playbackCapabilitiesFor(
                     if (forceEmbedded) PreferredPlayer.Rivune else preferences.preferredPlayer,
@@ -3247,17 +4273,17 @@ class RivuneViewModel internal constructor(
         ).titleId
     }
 
-    private fun mergeMediaTargets(current: List<MediaTarget>, incoming: List<MediaTarget>): List<MediaTarget> {
+    private fun mergeSearchMediaTargets(current: List<MediaTarget>, incoming: List<MediaTarget>): List<MediaTarget> {
         val output = current.toMutableList()
-        val seen = current.mapTo(mutableSetOf(), ::mediaTargetIdentity)
-        for (target in incoming) if (seen.add(mediaTargetIdentity(target))) output += target
+        val seen = current.flatMapTo(mutableSetOf(), ::searchMediaTargetIdentities)
+        for (target in incoming) {
+            val identities = searchMediaTargetIdentities(target)
+            if (seen.none(identities::contains)) {
+                output += target
+            }
+            seen += identities
+        }
         return output
-    }
-
-    private fun mediaTargetIdentity(target: MediaTarget): String = if (target.mediaType in setOf("movie", "series", "episode")) {
-        "${target.mediaType}:${target.titleId ?: target.id}"
-    } else {
-        "${target.mediaType}:${target.sourceAddonId}:${target.resourceId}"
     }
 
     private fun viewerRequestCurrent(operationGeneration: Long, requestGeneration: Long): Boolean =
@@ -3616,7 +4642,7 @@ class RivuneViewModel internal constructor(
                 failure = mutableState.value.failure.takeIf { preserveFailure },
             )
             try {
-                val authorization = currentGateway.beginDeviceAuthorization(deviceName, platformName())
+                val authorization = currentGateway.beginDeviceAuthorization(installationId, deviceName, platformName())
                 if (!isCurrent(operationGeneration)) return@launch
                 mutableState.value = mutableState.value.copy(
                     destination = AppDestination.Pairing,
@@ -3667,7 +4693,7 @@ class RivuneViewModel internal constructor(
             } catch (cause: RivuneApiException.Server) {
                 when (cause.code) {
                     "authorization_pending" -> Unit
-                    "slow_down" -> intervalSeconds += 5
+                    "slow_down" -> intervalSeconds = cause.retryAfterSeconds?.coerceAtLeast(1)?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: intervalSeconds + 5
                     "expired_device_code" -> {
                         ifCurrent(operationGeneration) {
                             mutableState.value = mutableState.value.copy(
@@ -3769,8 +4795,16 @@ class RivuneViewModel internal constructor(
         private const val PROFILE_AVATAR_CONCURRENCY = 4
         private const val LIBRARY_PAGE_SIZE = 100
         private const val MAX_WATCHED_BATCH_SIZE = 100
+        private const val SEMANTIC_SEARCH_TIMEOUT_MILLISECONDS = 12_000L
+        private const val SEARCH_PUBLICATION_WINDOW_MILLISECONDS = 32L
+        private const val MAX_SEARCH_ADDON_TYPES = 16
+        private const val MAX_SEARCH_ADDON_REQUESTS = 16
+        private const val MAX_SEARCH_ADDON_CONCURRENCY = 4
+        private const val COORDINATION_ACTIVE_INTERVAL_MILLISECONDS = 2_000L
+        private const val COORDINATION_IDLE_INTERVAL_MILLISECONDS = 15_000L
+        private const val COORDINATION_PRESENCE_INTERVAL_MILLISECONDS = 15_000L
+        private const val COORDINATION_RECENT_ACTIVITY_MILLISECONDS = 30_000L
         private const val PAIRING_SUCCESS_HOLD_MS = 550L
-        private val NAMESPACED_ID = Regex("^([a-z0-9._-]+):(.+)$", RegexOption.IGNORE_CASE)
         private val IMDB_ID = Regex("^tt\\d+$", RegexOption.IGNORE_CASE)
         private val SERIES_IMDB_ID = Regex("^tt[0-9]{7,8}$")
         private val DATE_ONLY = Regex("^\\d{4}-\\d{2}-\\d{2}$")
@@ -3787,6 +4821,7 @@ class RivuneViewModel internal constructor(
                     val gatewayFactory = RivuneGatewayFactory { serverUrl ->
                         DefaultRivuneGateway(RivuneApiClient(serverUrl, applicationContext))
                     }
+                    val installationId = PreferencesInstallationIdStore(applicationContext).loadOrCreate()
                     val model = Build.MODEL.trim().ifBlank { "Android device" }.take(120)
                     val application = applicationContext as? RivuneApplication
                     return RivuneViewModel(
@@ -3794,6 +4829,7 @@ class RivuneViewModel internal constructor(
                         gatewayFactory,
                         isTv,
                         model,
+                        installationId = installationId,
                         externalPlaybackSupportProvider = { detectExternalPlaybackSupport(applicationContext) },
                         appPreferences = application?.appPreferences ?: AppPreferencesStore(applicationContext),
                         playbackNetworkProvider = { detectPlaybackNetwork(applicationContext) },
@@ -3802,6 +4838,7 @@ class RivuneViewModel internal constructor(
                         },
                         diagnostics = application?.diagnostics ?: DiagnosticsBuffer(),
                         offlineMediaStore = OfflineMediaStore(applicationContext),
+                        playbackOperationStore = PreferencesPlaybackOperationStore(applicationContext),
                     ) as T
                 }
             }

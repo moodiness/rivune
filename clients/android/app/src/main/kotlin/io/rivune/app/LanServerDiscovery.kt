@@ -5,6 +5,7 @@ import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Handler
 import android.os.Looper
+import io.rivune.api.RivuneProtocol
 import io.rivune.api.isKnownLocalNetworkServerUrl
 import java.net.URI
 import java.nio.ByteBuffer
@@ -27,7 +28,7 @@ internal fun discoveredRivuneServer(
     serviceName: String,
     attributes: Map<String, ByteArray>,
 ): DiscoveredRivuneServer? {
-    if (attributes["protocol"]?.decodeStrictUTF8()?.trim() != "20") return null
+    if (attributes["protocol"]?.decodeStrictUTF8()?.trim() != RivuneProtocol.VERSION.toString()) return null
     val rawAddress = attributes["url"]?.decodeStrictUTF8()?.trim()?.takeIf { it.length <= 255 } ?: return null
     val parsed = runCatching { URI(rawAddress) }.getOrNull() ?: return null
     val scheme = parsed.scheme?.lowercase() ?: return null

@@ -80,7 +80,17 @@ class MainActivity : ComponentActivity() {
                 RivuneRoot(viewModel, updates, this, systemAnimationsEnabled)
             }
         }
-        if (!showPlayerRecoveryPreview) updates.checkAutomatically()
+        if (!showPlayerRecoveryPreview) {
+            if (intent.action == SHOW_APP_UPDATE_ACTION) updates.checkFromNotification() else updates.checkAutomatically()
+        }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (!showPlayerRecoveryPreview && intent.action == SHOW_APP_UPDATE_ACTION) {
+            (application as RivuneApplication).appUpdates.checkFromNotification()
+        }
     }
 
     internal fun copyDiagnosticReport(report: String): Boolean = try {
@@ -108,6 +118,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         systemAnimationsEnabled = ValueAnimator.areAnimatorsEnabled()
+        if (!showPlayerRecoveryPreview) viewModel.coordinationForegroundChanged(true)
         if (!showPlayerRecoveryPreview) {
             viewModel.refreshExternalPlaybackSupport()
             val updates = (application as RivuneApplication).appUpdates
@@ -125,7 +136,10 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
-        if (!showPlayerRecoveryPreview) viewModel.lockOfflineAccessOnBackground()
+        if (!showPlayerRecoveryPreview) {
+            viewModel.coordinationForegroundChanged(false)
+            viewModel.lockOfflineAccessOnBackground()
+        }
         super.onStop()
     }
 

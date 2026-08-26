@@ -43,9 +43,10 @@ private data class VideoSupport(
     val maximumBitrateKbps: Int,
 )
 
-internal enum class PlaybackNetwork {
-    WIFI_OR_ETHERNET,
-    MOBILE_OR_METERED,
+internal enum class NetworkClass {
+    LOCAL,
+    REMOTE_WIFI,
+    MOBILE,
 }
 
 internal data class PlaybackQualityLimit(
@@ -169,38 +170,40 @@ internal fun playbackCapabilitiesFor(
     else -> MpvPlaybackCapabilities
 }
 
-internal fun detectPlaybackNetwork(context: Context): PlaybackNetwork = runCatching {
+internal fun detectPlaybackNetwork(context: Context): NetworkClass = runCatching {
     val connectivity = context.getSystemService(ConnectivityManager::class.java)
-        ?: return@runCatching PlaybackNetwork.MOBILE_OR_METERED
+        ?: return@runCatching NetworkClass.MOBILE
     val network = connectivity.activeNetwork
-        ?: return@runCatching PlaybackNetwork.MOBILE_OR_METERED
+        ?: return@runCatching NetworkClass.MOBILE
     val capabilities = connectivity.getNetworkCapabilities(network)
-        ?: return@runCatching PlaybackNetwork.MOBILE_OR_METERED
+        ?: return@runCatching NetworkClass.MOBILE
     classifyPlaybackNetwork(
         hasWifi = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI),
         hasEthernet = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET),
         hasCellular = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR),
         isMetered = !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED),
+        serverIsLocal = false,
     )
-}.getOrDefault(PlaybackNetwork.MOBILE_OR_METERED)
+}.getOrDefault(NetworkClass.MOBILE)
 
 internal fun classifyPlaybackNetwork(
     hasWifi: Boolean,
     hasEthernet: Boolean,
     hasCellular: Boolean,
     isMetered: Boolean,
-): PlaybackNetwork = when {
-    hasWifi || hasEthernet -> PlaybackNetwork.WIFI_OR_ETHERNET
-    hasCellular -> PlaybackNetwork.MOBILE_OR_METERED
-    !isMetered -> PlaybackNetwork.WIFI_OR_ETHERNET
-    else -> PlaybackNetwork.MOBILE_OR_METERED
+    serverIsLocal: Boolean = false,
+): NetworkClass = when {
+    hasCellular -> NetworkClass.MOBILE
+    serverIsLocal && (hasWifi || hasEthernet) -> NetworkClass.LOCAL
+    hasWifi || hasEthernet -> NetworkClass.REMOTE_WIFI
+    else -> NetworkClass.MOBILE
 }
 
 internal fun playbackQualityLimit(
     quality: NetworkQualityPreference,
-    network: PlaybackNetwork,
+    network: NetworkClass,
 ): PlaybackQualityLimit = when (quality) {
-    NetworkQualityPreference.AUTOMATIC -> if (network == PlaybackNetwork.MOBILE_OR_METERED) {
+    NetworkQualityPreference.AUTOMATIC -> if (network == NetworkClass.MOBILE) {
         PlaybackQualityLimit(AUTOMATIC_METERED_MAXIMUM_HEIGHT, AUTOMATIC_METERED_MAXIMUM_BITRATE_KBPS)
     } else {
         PlaybackQualityLimit(null, null)

@@ -216,8 +216,6 @@
     <string name="preferences_aspect_fit">Adatta</string>
     <string name="preferences_aspect_fill">Riempi</string>
     <string name="preferences_aspect_zoom">Zoom</string>
-    <string name="preferences_wifi_quality">Qualità su Wi-Fi</string>
-    <string name="preferences_wifi_quality_body">Limita gli stream su Wi-Fi ed Ethernet. Senza una sorgente diretta idonea o l’accesso alla transcodifica, la riproduzione potrebbe non essere disponibile.</string>
     <string name="preferences_mobile_quality">Qualità su rete mobile</string>
     <string name="preferences_mobile_quality_body">Limita gli stream su rete cellulare e altre reti non locali. Senza una sorgente diretta idonea o l’accesso alla transcodifica, la riproduzione potrebbe non essere disponibile.</string>
     <string name="preferences_quality_automatic">Automatico</string>
@@ -402,4 +400,19 @@
     <string name="error_session_expired">La sessione è scaduta. Associa di nuovo questo dispositivo.</string>
     <string name="error_no_profiles">Nessun profilo disponibile per questo dispositivo.</string>
     <string name="error_logout_failed">Rivune non ha potuto disconnettere completamente la sessione di questo dispositivo.</string>
+    <string name="viewer_coordination_devices_title">Riproduci su un altro dispositivo</string>
+    <string name="viewer_coordination_play">Riproduci</string>
+    <string name="viewer_coordination_pause">Pausa</string>
+    <string name="viewer_coordination_match_position">Sincronizza posizione</string>
+    <string name="viewer_coordination_stop">Interrompi</string>
+    <string name="viewer_coordination_room_start">Avvia stanza di visione</string>
+    <string name="viewer_coordination_room_join">Unisciti a una stanza</string>
+    <string name="viewer_coordination_room_label">Stanza %1$s</string>
+    <string name="viewer_coordination_room_default">Stanza di visione</string>
+    <plurals name="viewer_coordination_watching_count"><item quantity="one">%1$d persona sta guardando</item><item quantity="other">%1$d persone stanno guardando</item></plurals>
+    <string name="viewer_coordination_room_leave">Esci</string>
+    <string name="viewer_coordination_join_title">Unisciti alla stanza di visione</string>
+    <string name="viewer_coordination_room_code">Codice stanza</string>
+    <string name="viewer_coordination_join_confirm">Unisciti</string>
+    <string name="viewer_coordination_cancel">Annulla</string>
 </resources>

@@ -20,15 +20,18 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.decodeFromJsonElement
 
 object RivuneProtocol {
-    const val VERSION: Int = 20
+    const val VERSION: Int = 22
 }
 
 enum class DiscoveryCapability(val identifier: String) {
     BOUNDED_AGGREGATE_RESOURCES("bounded-aggregate-resources"),
-    PROFILE_ARCHIVES_V1("profile-archives-v1"),
+    PROFILE_ARCHIVES_V2("profile-archives-v2"),
     REQUEST_CORRELATION("request-correlation"),
     LOCAL_RECOMMENDATIONS("local-recommendations"),
+    SEMANTIC_SEARCH("semantic-search"),
     PLAYBACK_COORDINATION("playback-coordination"),
+    PLAYBACK_COMMAND_RESULTS("playback-command-results"),
+    ADDON_VERIFICATIONS("addon-verifications"),
 }
 
 private const val MAX_DISCOVERY_CAPABILITIES = 64
@@ -96,7 +99,7 @@ data class Discovery(
     fun supportsCapability(capability: DiscoveryCapability): Boolean = capability.identifier in capabilities
 
     val supportsProfileArchives: Boolean
-        get() = supportsCapability(DiscoveryCapability.PROFILE_ARCHIVES_V1)
+        get() = supportsCapability(DiscoveryCapability.PROFILE_ARCHIVES_V2)
 }
 
 @Serializable
@@ -351,7 +354,7 @@ data class DeviceCategoryMoveRequest(
 )
 
 @Serializable
-data class DeviceAuthorizationRequest(val deviceName: String, val platform: String)
+data class DeviceAuthorizationRequest(val installationId: String, val deviceName: String, val platform: String)
 
 @Serializable
 data class DeviceAuthorizationResponse(
@@ -681,11 +684,22 @@ enum class PlaybackMode {
 }
 
 @Serializable
-enum class PlaybackDecisionReason {
+enum class PlaybackDecisionOutcome {
     @SerialName("direct_supported") DIRECT_SUPPORTED,
     @SerialName("remux_required") REMUX_REQUIRED,
     @SerialName("audio_transcode_required") AUDIO_TRANSCODE_REQUIRED,
     @SerialName("video_transcode_required") VIDEO_TRANSCODE_REQUIRED,
+    @SerialName("subtitle_burn_required") SUBTITLE_BURN_REQUIRED,
+}
+
+@Serializable
+enum class PlaybackDecisionReason {
+    @SerialName("container_not_supported") CONTAINER_NOT_SUPPORTED,
+    @SerialName("video_codec_not_supported") VIDEO_CODEC_NOT_SUPPORTED,
+    @SerialName("audio_codec_not_supported") AUDIO_CODEC_NOT_SUPPORTED,
+    @SerialName("resolution_limit") RESOLUTION_LIMIT,
+    @SerialName("bitrate_limit") BITRATE_LIMIT,
+    @SerialName("hdr_not_supported") HDR_NOT_SUPPORTED,
     @SerialName("subtitle_burn_required") SUBTITLE_BURN_REQUIRED,
 }
 
@@ -778,26 +792,67 @@ data class PlaybackDevice(
     val platform: String,
     val capabilities: List<String>,
     val state: PlaybackDeviceState,
+
+    val revision: Long,
     val current: Boolean,
     val lastSeenAt: String,
 )
+@Serializable
+enum class PlaybackCommandType {
+    @SerialName("load") LOAD,
+    @SerialName("play") PLAY,
+    @SerialName("pause") PAUSE,
+    @SerialName("seek") SEEK,
+    @SerialName("stop") STOP,
+}
 
 @Serializable
 data class PlaybackDeviceList(val devices: List<PlaybackDevice>)
 
 @Serializable
+enum class PlaybackCommandMode {
+    @SerialName("handoff") HANDOFF,
+    @SerialName("play-copy") PLAY_COPY,
+}
+
+@Serializable
+enum class PlaybackCommandStatus {
+    @SerialName("pending") PENDING,
+    @SerialName("applied") APPLIED,
+    @SerialName("failed") FAILED,
+    @SerialName("expired") EXPIRED,
+}
+
+@Serializable
+enum class PlaybackCommandResultCode {
+    @SerialName("applied") APPLIED,
+    @SerialName("unsupported") UNSUPPORTED,
+    @SerialName("invalid_state") INVALID_STATE,
+    @SerialName("stale_target") STALE_TARGET,
+    @SerialName("expired") EXPIRED,
+    @SerialName("execution_failed") EXECUTION_FAILED,
+}
+
+@Serializable
 data class PlaybackCommandInput(
-    val command: String,
+    @Serializable(with = UUIDSerializer::class) val operationId: UUID,
+    val command: PlaybackCommandType,
     val item: CoordinatedPlaybackItem? = null,
     val positionMilliseconds: Long? = null,
+    val mode: PlaybackCommandMode? = null,
+    val targetRevision: Long? = null,
 )
 
 @Serializable
 data class PlaybackCommand(
-    val id: Long,
-    val command: String,
+    @Serializable(with = UUIDSerializer::class) val operationId: UUID,
+    val command: PlaybackCommandType,
     val item: CoordinatedPlaybackItem? = null,
     val positionMilliseconds: Long? = null,
+    val mode: PlaybackCommandMode? = null,
+    val targetRevision: Long? = null,
+    val status: PlaybackCommandStatus,
+    val resultCode: PlaybackCommandResultCode? = null,
     val senderDeviceName: String,
     val createdAt: String,
     val expiresAt: String,
@@ -805,6 +860,12 @@ data class PlaybackCommand(
 
 @Serializable
 data class PlaybackCommandList(val commands: List<PlaybackCommand>)
+
+@Serializable
+data class PlaybackCommandResultInput(
+    val status: PlaybackCommandStatus,
+    val code: PlaybackCommandResultCode,
+)
 
 @Serializable
 data class PlaybackRoomCreateInput(
@@ -852,6 +913,12 @@ data class PlaybackRoom(
 ) {
     val currentMember: PlaybackRoomMember? get() = members.firstOrNull(PlaybackRoomMember::current)
     val currentMemberIsHost: Boolean get() = currentMember?.role == "host"
+}
+
+@Serializable
+enum class RecommendationArtworkShape {
+    @SerialName("poster") POSTER,
+    @SerialName("landscape") LANDSCAPE,
 }
 
 @Serializable
@@ -910,13 +977,14 @@ data class PlaybackMediaInspection(
 
 @Serializable
 data class PlaybackDecision(
-    val reason: PlaybackDecisionReason,
+    val reasons: List<PlaybackDecisionReason>,
     val videoAction: PlaybackTrackAction,
     val audioAction: PlaybackTrackAction,
     val subtitleAction: PlaybackSubtitleAction,
     val toneMapping: Boolean,
     val source: PlaybackDecisionSource? = null,
     val target: PlaybackDecisionTarget? = null,
+    val reason: PlaybackDecisionOutcome,
 )
 
 @Serializable
@@ -1510,6 +1578,42 @@ data class CollectionMDBListSource(
 )
 
 @Serializable
+data class SemanticSearchRequest(
+    val query: String,
+    val mediaType: String? = null,
+    val language: String? = null,
+    val region: String? = null,
+    val page: Int = 1,
+    val limit: Int = 24,
+    val excludedIntentIds: List<String> = emptyList(),
+) {
+    init {
+        require(page in 1..1000) { "page must be between 1 and 1000" }
+        require(limit in 1..40) { "limit must be between 1 and 40" }
+        require(excludedIntentIds.size <= 16) { "excludedIntentIds must contain at most 16 values" }
+    }
+}
+
+@Serializable
+data class SemanticSearchIntent(
+    val id: String,
+    val kind: String,
+    val value: String,
+    val label: String,
+)
+
+@Serializable
+data class SemanticSearchPage(
+    val intents: List<SemanticSearchIntent>,
+    val titleQuery: String,
+    val mediaTypes: List<String>,
+    val items: List<CollectionItem>,
+    val page: Int,
+    val hasMore: Boolean,
+    val partial: Boolean,
+)
+
+@Serializable
 data class ResolvedCollectionFolder(
     @Serializable(with = UUIDSerializer::class) val collectionId: UUID,
     val folder: CollectionFolder,
@@ -1791,6 +1895,27 @@ data class TVLibraryMembership(
 data class TVLibraryMembershipResult(val items: List<TVLibraryMembership>)
 
 @Serializable
+enum class ProfileArchiveImportMode {
+    @SerialName("merge") MERGE,
+    @SerialName("create") CREATE,
+}
+
+@Serializable
+data class ProfileArchiveSectionReport(
+    val section: String,
+    val created: Int,
+    val updated: Int,
+    val unchanged: Int,
+)
+
+@Serializable
+data class ProfileArchiveImportReport(
+    val mode: ProfileArchiveImportMode,
+    @Serializable(with = UUIDSerializer::class) val profileId: UUID,
+    val sections: List<ProfileArchiveSectionReport>,
+    val trackingAccountsUpdated: Int,
+)
+@Serializable
 data class SessionNotificationList(val notifications: List<SessionNotification>)
 
 @Serializable
@@ -1800,3 +1925,341 @@ data class SessionNotification(
     val senderUsername: String,
     val createdAt: String,
 )
+
+/** Marker for v22 response documents whose closed schemas reject unknown fields. */
+interface StrictV22Response
+
+@Serializable
+data class ReadingQueue(
+    val revision: Long,
+    val items: List<ReadingQueueItem>,
+) : StrictV22Response
+
+@Serializable
+data class ReadingQueueItem(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val mediaType: ReadingQueueMediaType,
+    val resourceId: String,
+    @Serializable(with = UUIDSerializer::class) val sourceAddonId: UUID? = null,
+    @Serializable(with = UUIDSerializer::class) val titleId: UUID? = null,
+    val title: String,
+    val posterUrl: String? = null,
+    val position: Int,
+    val createdAt: String,
+    val updatedAt: String,
+)
+
+@Serializable
+enum class ReadingQueueMediaType {
+    @SerialName("movie") MOVIE,
+    @SerialName("series") SERIES,
+    @SerialName("episode") EPISODE,
+    @SerialName("tv") TV,
+}
+
+@Serializable
+data class ReadingQueueMutationInput(
+    @Serializable(with = UUIDSerializer::class) val operationId: UUID,
+    val expectedRevision: Long,
+)
+
+@Serializable
+data class ReadingQueueAddInput(
+    @Serializable(with = UUIDSerializer::class) val operationId: UUID,
+    val expectedRevision: Long,
+    val mediaType: ReadingQueueMediaType,
+    val resourceId: String,
+    @Serializable(with = UUIDSerializer::class) val sourceAddonId: UUID? = null,
+    @Serializable(with = UUIDSerializer::class) val titleId: UUID? = null,
+    val title: String,
+    val posterUrl: String? = null,
+)
+
+@Serializable
+data class ReadingQueueUpdateInput(
+    @Serializable(with = UUIDSerializer::class) val operationId: UUID,
+    val expectedRevision: Long,
+    val title: String,
+    val posterUrl: String? = null,
+)
+
+@Serializable
+data class ReadingQueueReorderInput(
+    @Serializable(with = UUIDSerializer::class) val operationId: UUID,
+    val expectedRevision: Long,
+    val itemIds: List<@Serializable(with = UUIDSerializer::class) UUID>,
+)
+
+@Serializable
+data class ReadingQueueMutation(
+    val revision: Long,
+    @Serializable(with = UUIDSerializer::class) val affectedItemId: UUID? = null,
+    val duplicate: Boolean? = null,
+) : StrictV22Response
+
+@Serializable
+enum class PlaybackFailoverError {
+    @SerialName("source_failed") SOURCE_FAILED,
+    @SerialName("source_timeout") SOURCE_TIMEOUT,
+    @SerialName("ended_early") ENDED_EARLY,
+    @SerialName("decode_failed") DECODE_FAILED,
+    @SerialName("access_denied") ACCESS_DENIED,
+    @SerialName("user_cancelled") USER_CANCELLED,
+}
+
+@Serializable
+data class PlaybackFailoverCreateInput(
+    val candidateSourceRefs: List<String>,
+    val selectedSourceRef: String,
+    val maximumAttempts: Int? = null,
+)
+
+@Serializable
+data class PlaybackFailoverAdvanceInput(
+    val error: PlaybackFailoverError,
+    val positionSeconds: Double,
+    val expectedRevision: Long,
+)
+
+@Serializable
+enum class PlaybackFailoverCandidateStatus {
+    @SerialName("current") CURRENT,
+    @SerialName("available") AVAILABLE,
+    @SerialName("cooling_down") COOLING_DOWN,
+}
+
+@Serializable
+data class PlaybackFailoverCandidateHealth(
+    val position: Int,
+    val status: PlaybackFailoverCandidateStatus,
+    val cooldownUntil: String? = null,
+)
+
+@Serializable
+enum class PlaybackFailoverStatus {
+    @SerialName("active") ACTIVE,
+    @SerialName("exhausted") EXHAUSTED,
+    @SerialName("cancelled") CANCELLED,
+}
+
+@Serializable
+data class PlaybackFailoverState(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val currentSourceRef: String? = null,
+    val currentPosition: Int,
+    val positionSeconds: Double,
+    val attemptCount: Int,
+    val maximumAttempts: Int,
+    val revision: Long,
+    val status: PlaybackFailoverStatus,
+    val lastError: PlaybackFailoverError? = null,
+    val explanation: String? = null,
+    val candidateHealth: List<PlaybackFailoverCandidateHealth>,
+    val expiresAt: String,
+) : StrictV22Response
+
+@Serializable
+enum class SavedSearchSort {
+    @SerialName("relevance") RELEVANCE,
+    @SerialName("title") TITLE,
+    @SerialName("year") YEAR,
+    @SerialName("rating") RATING,
+    @SerialName("added") ADDED,
+}
+
+@Serializable
+enum class CatalogMediaType {
+    @SerialName("movie") MOVIE,
+    @SerialName("series") SERIES,
+    @SerialName("season") SEASON,
+    @SerialName("episode") EPISODE,
+    @SerialName("video") VIDEO,
+    @SerialName("tv") TV,
+}
+
+@Serializable
+data class SavedSearch(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val name: String,
+    val query: String,
+    val mediaType: CatalogMediaType? = null,
+    val sort: SavedSearchSort,
+    val revision: Long,
+    val createdAt: String,
+    val updatedAt: String,
+) : StrictV22Response
+
+@Serializable
+data class SavedSearchInput(
+    val name: String,
+    val query: String,
+    val mediaType: CatalogMediaType? = null,
+    val sort: SavedSearchSort,
+)
+
+@Serializable
+data class SavedSearchUpdateInput(
+    val name: String,
+    val query: String,
+    val mediaType: CatalogMediaType? = null,
+    val sort: SavedSearchSort,
+    val expectedRevision: Long,
+)
+
+@Serializable
+data class SavedSearchList(val savedSearches: List<SavedSearch>) : StrictV22Response
+
+@Serializable
+sealed interface SmartRule {
+    @Serializable
+    @SerialName("all")
+    data class All(val rules: List<SmartRule>) : SmartRule
+
+    @Serializable
+    @SerialName("any")
+    data class Any(val rules: List<SmartRule>) : SmartRule
+
+    @Serializable
+    @SerialName("media_type")
+    data class MediaType(
+        val operator: SmartMediaTypeOperator = SmartMediaTypeOperator.ONE_OF,
+        val values: List<CatalogMediaType>,
+    ) : SmartRule
+
+    @Serializable
+    @SerialName("year")
+    data class Year(val operator: SmartNumericOperator, val number: Double) : SmartRule
+
+    @Serializable
+    @SerialName("rating")
+    data class Rating(val operator: SmartNumericOperator, val number: Double) : SmartRule
+
+    @Serializable
+    @SerialName("genre")
+    data class Genre(val operator: SmartTextOperator, val value: String) : SmartRule
+
+    @Serializable
+    @SerialName("status")
+    data class Status(val operator: SmartTextOperator, val value: String) : SmartRule
+
+    @Serializable
+    @SerialName("source")
+    data class Source(val operator: SmartTextOperator, val value: String) : SmartRule
+}
+
+@Serializable enum class SmartMediaTypeOperator { @SerialName("one_of") ONE_OF }
+// Smart rule field names are represented by the sealed subtype discriminator, never free-form text.
+@Serializable enum class SmartNumericOperator { @SerialName("equals") EQUALS, @SerialName("gte") GTE, @SerialName("lte") LTE }
+// Smart text fields are represented by the sealed subtype discriminator, never free-form text.
+@Serializable enum class SmartTextOperator { @SerialName("equals") EQUALS, @SerialName("not_equals") NOT_EQUALS }
+@Serializable enum class SmartCollectionSort { @SerialName("title") TITLE, @SerialName("year") YEAR, @SerialName("rating") RATING, @SerialName("added") ADDED }
+
+@Serializable
+data class SmartCollection(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val name: String,
+    val rules: SmartRule,
+    val sort: SmartCollectionSort,
+    val revision: Long,
+    val createdAt: String,
+    val updatedAt: String,
+) : StrictV22Response
+
+@Serializable data class SmartCollectionInput(val name: String, val rules: SmartRule, val sort: SmartCollectionSort)
+@Serializable data class SmartCollectionUpdateInput(val name: String, val rules: SmartRule, val sort: SmartCollectionSort, val expectedRevision: Long)
+@Serializable data class SmartCollectionList(val smartCollections: List<SmartCollection>) : StrictV22Response
+
+@Serializable
+data class SmartCollectionCatalogItem(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    val mediaType: CatalogMediaType,
+    val title: String,
+    val genres: List<String>,
+    val posterUrl: String? = null,
+    val backgroundUrl: String? = null,
+    val releaseInfo: String? = null,
+    val released: String? = null,
+    val communityRating: Double? = null,
+    val status: String? = null,
+    val resourceId: String? = null,
+    val resourceProvider: String? = null,
+    @Serializable(with = UUIDSerializer::class) val sourceAddonId: UUID? = null,
+    val sourceCatalogId: String? = null,
+    val sourceName: String? = null,
+)
+
+@Serializable
+data class SmartCollectionPage(
+    val items: List<SmartCollectionCatalogItem>,
+    val page: Int,
+    val pageSize: Int,
+    val total: Int,
+    val totalPages: Int,
+) : StrictV22Response
+
+@Serializable enum class AddonIncidentCode { @SerialName("timeout") TIMEOUT, @SerialName("unavailable") UNAVAILABLE, @SerialName("invalid_response") INVALID_RESPONSE, @SerialName("unhealthy") UNHEALTHY }
+@Serializable enum class AddonIncidentState { @SerialName("open") OPEN, @SerialName("recovering") RECOVERING, @SerialName("resolved") RESOLVED }
+@Serializable enum class AddonIncidentImpact { @SerialName("availability") AVAILABILITY, @SerialName("response_integrity") RESPONSE_INTEGRITY }
+@Serializable enum class AddonIncidentEventType { @SerialName("opened") OPENED, @SerialName("occurred") OCCURRED, @SerialName("recovering") RECOVERING, @SerialName("resolved") RESOLVED, @SerialName("acknowledged") ACKNOWLEDGED }
+
+@Serializable
+data class AddonIncident(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    @Serializable(with = UUIDSerializer::class) val profileId: UUID,
+    @Serializable(with = UUIDSerializer::class) val addonId: UUID,
+    val addonName: String,
+    val code: AddonIncidentCode,
+    val state: AddonIncidentState,
+    val impact: AddonIncidentImpact,
+    val occurrenceCount: Int,
+    val firstOccurredAt: String,
+    val lastOccurredAt: String,
+    val lastSuccessAt: String?,
+    val recoveryStartedAt: String?,
+    val resolvedAt: String?,
+    val acknowledgedAt: String?,
+    @Serializable(with = UUIDSerializer::class) val acknowledgedByUserId: UUID?,
+    val updatedAt: String,
+) : StrictV22Response
+
+@Serializable data class AddonIncidentList(val incidents: List<AddonIncident>) : StrictV22Response
+@Serializable data class AddonIncidentEvent(val id: Long, val type: AddonIncidentEventType, val code: AddonIncidentCode, val occurredAt: String)
+@Serializable data class AddonIncidentDetail(val incident: AddonIncident, val events: List<AddonIncidentEvent>) : StrictV22Response
+
+@Serializable data class MediaNotificationFollowInput(val timezone: String, val horizonDays: Int, val leadDays: Int)
+@Serializable data class MediaNotificationSubscription(@Serializable(with = UUIDSerializer::class) val titleId: UUID, val timezone: String, val horizonDays: Int, val leadDays: Int, val createdAt: String, val updatedAt: String) : StrictV22Response
+@Serializable data class MediaNotificationSubscriptions(val subscriptions: List<MediaNotificationSubscription>) : StrictV22Response
+@Serializable enum class MediaNotificationKind { @SerialName("calendar-event-upcoming") CALENDAR_EVENT_UPCOMING, @SerialName("season-available") SEASON_AVAILABLE, @SerialName("episode-available") EPISODE_AVAILABLE, @SerialName("movie-release") MOVIE_RELEASE }
+@Serializable data class MediaNotification(
+    val id: String,
+    val kind: MediaNotificationKind,
+    @Serializable(with = UUIDSerializer::class) val titleId: UUID,
+    @Serializable(with = UUIDSerializer::class) val subjectTitleId: UUID? = null,
+    val title: String,
+    val seriesTitle: String? = null,
+    val releaseDate: String? = null,
+    val seasonNumber: Int? = null,
+    val episodeNumber: Int? = null,
+    val availableAt: String,
+    val readAt: String? = null,
+    val createdAt: String,
+)
+@Serializable data class MediaNotificationPage(val notifications: List<MediaNotification>, val nextCursor: String? = null) : StrictV22Response
+@Serializable enum class MediaNotificationAcknowledgementState { @SerialName("read") READ, @SerialName("dismissed") DISMISSED }
+@Serializable data class MediaNotificationAcknowledgement(val state: MediaNotificationAcknowledgementState)
+
+@Serializable enum class ReducedMotionPreference { @SerialName("system") SYSTEM, @SerialName("reduce") REDUCE, @SerialName("no-preference") NO_PREFERENCE }
+@Serializable enum class HighContrastPreference { @SerialName("system") SYSTEM, @SerialName("more") MORE, @SerialName("standard") STANDARD }
+@Serializable enum class CaptionsPreference { @SerialName("system") SYSTEM, @SerialName("on") ON, @SerialName("off") OFF }
+@Serializable enum class FocusIndicatorsPreference { @SerialName("standard") STANDARD, @SerialName("enhanced") ENHANCED }
+
+@Serializable
+data class AccessibilityPreferencesDocument(
+    val revision: Long,
+    val reducedMotion: ReducedMotionPreference,
+    val highContrast: HighContrastPreference,
+    val textScale: Int,
+    val captions: CaptionsPreference,
+    val audioDescription: Boolean,
+    val focusIndicators: FocusIndicatorsPreference,
+) : StrictV22Response

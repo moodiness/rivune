@@ -8,6 +8,9 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+import kotlinx.coroutines.Job
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -54,6 +57,11 @@ class AppUpdateTest {
         var requests = 0
         var ifNoneMatch: String? = null
         val transport = Interceptor { chain ->
+            if (chain.request().url.encodedPath.endsWith(".sig")) {
+                return@Interceptor Response.Builder()
+                    .request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                    .body(validSignature().toResponseBody("application/json".toMediaType())).build()
+            }
             requests += 1
             ifNoneMatch = chain.request().header("If-None-Match")
             Response.Builder()
@@ -93,8 +101,9 @@ class AppUpdateTest {
             "https://github.com/moodiness/rivune/releases/latest/download/rivune-update.json",
             cache,
             responseClient { request ->
-                Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(status)
-                    .message("response").body(body.toResponseBody("application/json".toMediaType())).build()
+                val responseBody = if (request.url.encodedPath.endsWith(".sig")) validSignature() else body
+                Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(if (request.url.encodedPath.endsWith(".sig")) 200 else status)
+                    .message("response").body(responseBody.toResponseBody("application/json".toMediaType())).build()
             },
         ) { 2_000_000L }
 
@@ -106,6 +115,34 @@ class AppUpdateTest {
         assertEquals(0L, cache.lastSuccessfulCheckAt)
         assertEquals(validManifest(), cache.manifest)
         assertNull(cache.etag)
+    }
+
+    @Test
+    fun missingOversizedAndRedirectedSidecarsFailClosed() = runBlocking {
+        var signatureStatus = 404
+        var signatureBody = ""
+        var redirectSignature = false
+        val client = AppUpdateManifestClient(
+            "https://github.com/moodiness/rivune/releases/latest/download/rivune-update.json",
+            MemoryCache(),
+            responseClient { request ->
+                val isSignature = request.url.encodedPath.endsWith(".sig")
+                val responseRequest = if (isSignature && redirectSignature) {
+                    request.newBuilder().url("https://evil.example/rivune-update.json.sig").build()
+                } else request
+                Response.Builder().request(responseRequest).protocol(Protocol.HTTP_1_1)
+                    .code(if (isSignature) signatureStatus else 200).message("response")
+                    .body((if (isSignature) signatureBody else validManifest()).toResponseBody("application/json".toMediaType())).build()
+            },
+        )
+        assertFailsWith<InvalidUpdateManifest> { client.fetch(manual = true) }
+        signatureStatus = 200
+        signatureBody = " ".repeat((MAX_UPDATE_SIGNATURE_BYTES + 1).toInt())
+        assertFailsWith<InvalidUpdateManifest> { client.fetch(manual = true) }
+        signatureBody = validSignature()
+        redirectSignature = true
+        assertFailsWith<InvalidUpdateManifest> { client.fetch(manual = true) }
+        Unit
     }
 
     @Test
@@ -121,6 +158,24 @@ class AppUpdateTest {
         }
         assertFailsWith<InvalidUpdateManifest> {
             copyAndVerifyUpdate(ByteArrayInputStream(bytes), ByteArrayOutputStream(), bytes.size.toLong(), "0".repeat(64))
+        }
+    }
+
+    @Test
+    fun signatureVerifierRejectsAlteredManifestKeyAndEncoding() {
+        val manifest = validManifest().encodeToByteArray()
+        AppUpdateSignatureVerifier.verify(manifest, validSignature().encodeToByteArray())
+        assertFailsWith<InvalidUpdateManifest> {
+            AppUpdateSignatureVerifier.verify(manifest + '!'.code.toByte(), validSignature().encodeToByteArray())
+        }
+        assertFailsWith<InvalidUpdateManifest> {
+            AppUpdateSignatureVerifier.verify(manifest, validSignature().replace(UPDATE_SIGNING_KEY_ID_FOR_TEST, "0".repeat(64)).encodeToByteArray())
+        }
+        assertFailsWith<InvalidUpdateManifest> {
+            AppUpdateSignatureVerifier.verify(manifest, validSignature().replace("MEUCIA", "%%%CIA").encodeToByteArray())
+        }
+        assertFailsWith<InvalidUpdateManifest> {
+            AppUpdateSignatureVerifier.verify(manifest, ByteArray((MAX_UPDATE_SIGNATURE_BYTES + 1).toInt()))
         }
     }
 
@@ -146,12 +201,111 @@ class AppUpdateTest {
     }
 
     @Test
+    fun updateNoticeDedupOnlyAllowsStrictlyNewerVersions() {
+        assertEquals(true, shouldPresentUpdateNotice(null, "1.2.3"))
+        assertEquals(false, shouldPresentUpdateNotice("1.2.3", "1.2.3"))
+        assertEquals(true, shouldPresentUpdateNotice("1.2.3", "1.2.4"))
+        assertEquals(false, shouldPresentUpdateNotice("1.2.4", "1.2.3"))
+        assertEquals(false, shouldPresentUpdateNotice("invalid", "1.2.4"))
+    }
+
+    @Test
     fun installerConfirmationRequiresMatchingRecordedLiveSessionAndIntent() {
         assertEquals(true, canLaunchInstallationConfirmation(42, 42, sessionExists = true, confirmationPresent = true))
         assertEquals(false, canLaunchInstallationConfirmation(42, 41, sessionExists = true, confirmationPresent = true))
         assertEquals(false, canLaunchInstallationConfirmation(42, 42, sessionExists = false, confirmationPresent = true))
         assertEquals(false, canLaunchInstallationConfirmation(42, 42, sessionExists = true, confirmationPresent = false))
         assertEquals(false, canLaunchInstallationConfirmation(-1, -1, sessionExists = true, confirmationPresent = true))
+    }
+
+    @Test
+    fun cancellingActiveDownloadCancelsTransportJobAndPartialFiles() {
+        val directory = kotlin.io.path.createTempDirectory("rivune-update-cancel").toFile()
+        try {
+            val partial = directory.resolve("update.apk.part").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+            val complete = directory.resolve("update.apk").apply { writeBytes(byteArrayOf(4)) }
+            var transportCancelled = false
+            val job = Job()
+
+            ActiveUpdateDownload(job, { transportCancelled = true }, listOf(partial, complete)).cancel()
+
+            assertTrue(transportCancelled)
+            assertTrue(job.isCancelled)
+            assertFalse(partial.exists())
+            assertFalse(complete.exists())
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun cancellingInstallPreparationCancelsCopySessionAndPackage() {
+        val directory = kotlin.io.path.createTempDirectory("rivune-install-cancel").toFile()
+        try {
+            val apk = directory.resolve("update.apk").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+            val job = Job()
+            var sessionAbandoned = false
+
+            ActiveInstallPreparation(job, { sessionAbandoned = true }, apk).cancel()
+
+            assertTrue(sessionAbandoned)
+            assertTrue(job.isCancelled)
+            assertFalse(apk.exists())
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun updateDialogKeepsCancelFocusUntilSystemHandoff() {
+        val manifest = AppUpdateManifestParser.parse(validManifest())
+        val apk = kotlin.io.path.createTempFile("rivune-focus", ".apk").toFile()
+        try {
+            assertTrue(shouldFocusUpdateCancel(AppUpdateState.Downloading(manifest, manifest.androidPackage)))
+            assertTrue(shouldFocusUpdateCancel(AppUpdateState.PreparingInstallation(apk)))
+            assertFalse(shouldFocusUpdateCancel(AppUpdateState.Installing))
+            assertFalse(canDismissUpdateDialog(AppUpdateState.PreparingInstallation(apk)))
+            assertFalse(canDismissUpdateDialog(AppUpdateState.Installing))
+            assertTrue(shouldShowUpdateDialog(AppUpdateState.PreparingInstallation(apk)))
+            assertFalse(shouldShowUpdateDialog(AppUpdateState.Installing))
+            assertTrue(canDismissUpdateDialog(AppUpdateState.ReadyToInstall(manifest, manifest.androidPackage, apk)))
+        } finally {
+            apk.delete()
+        }
+    }
+    @Test
+    fun transportIOExceptionAfterCancelCannotEmitSecondTerminal() {
+        val manifest = AppUpdateManifestParser.parse(validManifest())
+        val downloading = AppUpdateState.Downloading(manifest, manifest.androidPackage)
+        val transportCancellationError = java.io.IOException("Canceled")
+
+        assertEquals(DiagnosticEventCode.UPDATE_DOWNLOAD_FAILED, updateDownloadFailureCode(transportCancellationError))
+        assertFalse(shouldRecordUpdateDownloadFailure(AppUpdateState.Idle, coroutineActive = true))
+        assertFalse(shouldRecordUpdateDownloadFailure(downloading, coroutineActive = false))
+        assertTrue(shouldRecordUpdateDownloadFailure(downloading, coroutineActive = true))
+        assertFalse(shouldRecordUpdateInstallFailure(AppUpdateState.Idle, coroutineActive = true))
+    }
+
+
+    @Test
+    fun updateTerminalDiagnosticsUseClosedPhaseCodes() {
+        assertEquals(DiagnosticEventCode.UPDATE_DOWNLOAD_FAILED, updateDownloadFailureCode(java.io.IOException("network")))
+        assertEquals(DiagnosticEventCode.UPDATE_PACKAGE_REJECTED, updateDownloadFailureCode(InvalidUpdateManifest("invalid package")))
+        assertEquals(DiagnosticEventCode.UPDATE_INSTALL_FAILED, installationFailureCode(android.content.pm.PackageInstaller.STATUS_FAILURE))
+        assertNull(installationFailureCode(android.content.pm.PackageInstaller.STATUS_SUCCESS))
+        assertTrue(DiagnosticEventCode.UPDATE_DOWNLOAD_CANCELED.name.matches(Regex("^UPDATE_[A-Z_]+$")))
+        val manifest = AppUpdateManifestParser.parse(validManifest())
+        var state: AppUpdateState = AppUpdateState.Downloading(manifest, manifest.androidPackage)
+        val recorded = buildList {
+            repeat(2) {
+                updateCancellationCode(state)?.let(::add)
+                state = AppUpdateState.Idle
+            }
+        }
+        assertEquals(listOf(DiagnosticEventCode.UPDATE_DOWNLOAD_CANCELED), recorded)
+        assertTrue(recorded.none { it == DiagnosticEventCode.UPDATE_DOWNLOAD_FAILED || it == DiagnosticEventCode.UPDATE_PACKAGE_REJECTED })
+        assertTrue(DiagnosticEventCode.UPDATE_INSTALL_CANCELED.name.matches(Regex("^UPDATE_[A-Z_]+$")))
+        assertTrue(DiagnosticEventCode.UPDATE_INSTALL_CANCELED != DiagnosticEventCode.UPDATE_INSTALL_FAILED)
     }
 
     private fun responseClient(response: (okhttp3.Request) -> Response): OkHttpClient =
@@ -162,6 +316,11 @@ class AppUpdateTest {
         override var manifest: String? = null,
         override var lastSuccessfulCheckAt: Long = 0L,
     ) : UpdateCheckCache
+
+    private companion object {
+        const val UPDATE_SIGNING_KEY_ID_FOR_TEST = "4e9b15a0b6aed77908f3686fbf05a0a9c322ad846662eb758f56d4e65c22796f"
+    }
+    private fun validSignature() = """{"schemaVersion":1,"algorithm":"ecdsa-p256-sha256","keyId":"4e9b15a0b6aed77908f3686fbf05a0a9c322ad846662eb758f56d4e65c22796f","manifestSha256":"e0404a37ee9fb66fec045f80460a920b83c679c5867f1492c18f65dcfc85799f","signature":"MEUCIAIplcAe0LpTG5S/BpsnKiDu+Ud1BPLFlFcJHYdoTycBAiEAlbjrGRLCGQ/18R26MmHLzTKseWWqzLNJc0zcL7Guy+o="}"""
 
     private fun validManifest(extra: String = "") = """
         {

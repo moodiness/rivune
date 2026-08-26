@@ -78,8 +78,12 @@ internal data class AppPreferencesState(
     val accentColor: Int = DEFAULT_ACCENT_COLOR,
     val frameRateMatching: FrameRateMatchingPreference = FrameRateMatchingPreference.SYSTEM,
     val videoAspect: VideoAspectPreference = VideoAspectPreference.FIT,
-    val wifiQuality: NetworkQualityPreference = NetworkQualityPreference.AUTOMATIC,
+    val localQuality: NetworkQualityPreference = NetworkQualityPreference.AUTOMATIC,
+    val remoteWifiQuality: NetworkQualityPreference = NetworkQualityPreference.AUTOMATIC,
     val mobileQuality: NetworkQualityPreference = NetworkQualityPreference.AUTOMATIC,
+    val offlineQuotaBytes: Long = 20L * 1024L * 1024L * 1024L,
+    val offlineExpirationDays: Int = 30,
+    val downloadOnMobile: Boolean = false,
     val automaticallyShowStreams: Boolean = true,
     val autoSkipIntro: Boolean = false,
     val autoSkipRecap: Boolean = false,
@@ -98,8 +102,12 @@ internal fun appPreferencesState(
     accentColor: Int,
     frameRateMatching: String? = null,
     videoAspect: String? = null,
-    wifiQuality: String? = null,
+    localQuality: String? = null,
+    remoteWifiQuality: String? = null,
     mobileQuality: String? = null,
+    offlineQuotaBytes: Long = 20L * 1024L * 1024L * 1024L,
+    offlineExpirationDays: Int = 30,
+    downloadOnMobile: Boolean = false,
     automaticallyShowStreams: Boolean = true,
     autoSkipIntro: Boolean = false,
     autoSkipRecap: Boolean = false,
@@ -123,8 +131,12 @@ internal fun appPreferencesState(
     accentColor = opaque(accentColor),
     frameRateMatching = FrameRateMatchingPreference.fromPreference(frameRateMatching),
     videoAspect = VideoAspectPreference.fromPreference(videoAspect),
-    wifiQuality = NetworkQualityPreference.fromPreference(wifiQuality),
+    localQuality = NetworkQualityPreference.fromPreference(localQuality),
+    remoteWifiQuality = NetworkQualityPreference.fromPreference(remoteWifiQuality),
     mobileQuality = NetworkQualityPreference.fromPreference(mobileQuality),
+    offlineQuotaBytes = offlineQuotaBytes.coerceAtLeast(1L),
+    offlineExpirationDays = offlineExpirationDays.coerceAtLeast(0),
+    downloadOnMobile = downloadOnMobile,
     automaticallyShowStreams = automaticallyShowStreams,
     autoSkipIntro = autoSkipIntro,
     autoSkipRecap = autoSkipRecap,
@@ -133,7 +145,7 @@ internal fun appPreferencesState(
 
 internal class AppPreferencesStore(context: Context) : AppPreferencesReader, SharedPreferences.OnSharedPreferenceChangeListener {
     private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
-    private val mutableState = MutableStateFlow(readState())
+    private val mutableState = MutableStateFlow(migrateAndReadState())
     val state: StateFlow<AppPreferencesState> = mutableState.asStateFlow()
 
     init {
@@ -189,12 +201,28 @@ internal class AppPreferencesStore(context: Context) : AppPreferencesReader, Sha
         preferences.edit { putString(VIDEO_ASPECT_KEY, value.preferenceValue) }
     }
 
-    fun setWifiQuality(value: NetworkQualityPreference) {
-        preferences.edit { putString(WIFI_QUALITY_KEY, value.preferenceValue) }
+    fun setLocalQuality(value: NetworkQualityPreference) {
+        preferences.edit { putString(LOCAL_QUALITY_KEY, value.preferenceValue) }
+    }
+
+    fun setRemoteWifiQuality(value: NetworkQualityPreference) {
+        preferences.edit { putString(REMOTE_WIFI_QUALITY_KEY, value.preferenceValue) }
     }
 
     fun setMobileQuality(value: NetworkQualityPreference) {
         preferences.edit { putString(MOBILE_QUALITY_KEY, value.preferenceValue) }
+    }
+
+    fun setOfflineQuotaBytes(value: Long) {
+        preferences.edit { putLong(OFFLINE_QUOTA_BYTES_KEY, value.coerceAtLeast(1L)) }
+    }
+
+    fun setOfflineExpirationDays(value: Int) {
+        preferences.edit { putInt(OFFLINE_EXPIRATION_DAYS_KEY, value.coerceAtLeast(0)) }
+    }
+
+    fun setDownloadOnMobile(value: Boolean) {
+        preferences.edit { putBoolean(DOWNLOAD_ON_MOBILE_KEY, value) }
     }
     fun setAutomaticallyShowStreams(value: Boolean) {
         preferences.edit { putBoolean(AUTO_SHOW_STREAMS_KEY, value) }
@@ -217,6 +245,20 @@ internal class AppPreferencesStore(context: Context) : AppPreferencesReader, Sha
         if (key in OBSERVED_KEYS) mutableState.value = readState()
     }
 
+    private fun migrateAndReadState(): AppPreferencesState {
+        if (preferences.contains(LEGACY_WIFI_QUALITY_KEY)) {
+            val legacy = preferences.getString(LEGACY_WIFI_QUALITY_KEY, null)
+            check(preferences.edit()
+                .apply {
+                    if (!preferences.contains(LOCAL_QUALITY_KEY)) putString(LOCAL_QUALITY_KEY, legacy)
+                    if (!preferences.contains(REMOTE_WIFI_QUALITY_KEY)) putString(REMOTE_WIFI_QUALITY_KEY, legacy)
+                    remove(LEGACY_WIFI_QUALITY_KEY)
+                }
+                .commit()) { "Could not migrate network quality preferences" }
+        }
+        return readState()
+    }
+
     private fun readState(): AppPreferencesState = appPreferencesState(
         startupTab = preferences.getString(STARTUP_TAB_KEY, null),
         preferredPlayer = preferences.getString(PREFERRED_PLAYER_KEY, null),
@@ -226,8 +268,12 @@ internal class AppPreferencesStore(context: Context) : AppPreferencesReader, Sha
         accentColor = preferences.getInt(ACCENT_COLOR_KEY, DEFAULT_ACCENT_COLOR),
         frameRateMatching = preferences.getString(FRAME_RATE_MATCHING_KEY, null),
         videoAspect = preferences.getString(VIDEO_ASPECT_KEY, null),
-        wifiQuality = preferences.getString(WIFI_QUALITY_KEY, null),
+        localQuality = preferences.getString(LOCAL_QUALITY_KEY, null),
+        remoteWifiQuality = preferences.getString(REMOTE_WIFI_QUALITY_KEY, null),
         mobileQuality = preferences.getString(MOBILE_QUALITY_KEY, null),
+        offlineQuotaBytes = preferences.getLong(OFFLINE_QUOTA_BYTES_KEY, 20L * 1024L * 1024L * 1024L),
+        offlineExpirationDays = preferences.getInt(OFFLINE_EXPIRATION_DAYS_KEY, 30),
+        downloadOnMobile = preferences.getBoolean(DOWNLOAD_ON_MOBILE_KEY, false),
         automaticallyShowStreams = preferences.getBoolean(AUTO_SHOW_STREAMS_KEY, true),
         autoSkipIntro = preferences.getBoolean(AUTO_SKIP_INTRO_KEY, false),
         autoSkipRecap = preferences.getBoolean(AUTO_SKIP_RECAP_KEY, false),
@@ -244,8 +290,13 @@ internal class AppPreferencesStore(context: Context) : AppPreferencesReader, Sha
         const val ACCENT_COLOR_KEY = "accent_color"
         const val FRAME_RATE_MATCHING_KEY = "frame_rate_matching"
         const val VIDEO_ASPECT_KEY = "video_aspect"
-        const val WIFI_QUALITY_KEY = "wifi_quality"
+        const val LEGACY_WIFI_QUALITY_KEY = "wifi_quality"
+        const val LOCAL_QUALITY_KEY = "local_quality"
+        const val REMOTE_WIFI_QUALITY_KEY = "remote_wifi_quality"
         const val MOBILE_QUALITY_KEY = "mobile_quality"
+        const val OFFLINE_QUOTA_BYTES_KEY = "offline_quota_bytes"
+        const val OFFLINE_EXPIRATION_DAYS_KEY = "offline_expiration_days"
+        const val DOWNLOAD_ON_MOBILE_KEY = "download_on_mobile"
         const val AUTO_SHOW_STREAMS_KEY = "auto_show_streams"
         const val AUTO_SKIP_INTRO_KEY = "auto_skip_intro"
         const val AUTO_SKIP_RECAP_KEY = "auto_skip_recap"
@@ -262,8 +313,12 @@ internal class AppPreferencesStore(context: Context) : AppPreferencesReader, Sha
             ACCENT_COLOR_KEY,
             FRAME_RATE_MATCHING_KEY,
             VIDEO_ASPECT_KEY,
-            WIFI_QUALITY_KEY,
+            LOCAL_QUALITY_KEY,
+            REMOTE_WIFI_QUALITY_KEY,
             MOBILE_QUALITY_KEY,
+            OFFLINE_QUOTA_BYTES_KEY,
+            OFFLINE_EXPIRATION_DAYS_KEY,
+            DOWNLOAD_ON_MOBILE_KEY,
             AUTO_SHOW_STREAMS_KEY,
             AUTO_SKIP_INTRO_KEY,
             AUTO_SKIP_RECAP_KEY,

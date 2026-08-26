@@ -28,6 +28,7 @@ private const val MAX_DIAGNOSTIC_SCALAR_BYTES = 512
 private const val MAX_DIAGNOSTIC_DISPLAY_CODE_POINTS = 120
 private const val MAX_SERVER_URL_LENGTH = 4_096
 private const val UNAVAILABLE = "unavailable"
+private val DIAGNOSTIC_OPERATION_ID = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
 internal enum class DiagnosticEventCode {
     APP_STARTED,
@@ -37,6 +38,11 @@ internal enum class DiagnosticEventCode {
     CATALOG_REFRESH_STARTED,
     CATALOG_REFRESH_SUCCEEDED,
     CATALOG_REFRESH_FAILED,
+    SEARCH_STARTED,
+    SEARCH_SUCCEEDED,
+    SEARCH_PARTIAL,
+    SEARCH_FAILED,
+    SEARCH_CANCELED,
     PLAYBACK_STARTED,
     PLAYBACK_STOPPED,
     PLAYBACK_FAILED,
@@ -44,6 +50,11 @@ internal enum class DiagnosticEventCode {
     UPDATE_AVAILABLE,
     UPDATE_UP_TO_DATE,
     UPDATE_CHECK_FAILED,
+    UPDATE_DOWNLOAD_FAILED,
+    UPDATE_DOWNLOAD_CANCELED,
+    UPDATE_INSTALL_FAILED,
+    UPDATE_INSTALL_CANCELED,
+    UPDATE_PACKAGE_REJECTED,
     DIAGNOSTIC_EXPORT_SUCCEEDED,
     DIAGNOSTIC_EXPORT_FAILED,
 }
@@ -51,6 +62,7 @@ internal enum class DiagnosticEventCode {
 internal data class DiagnosticEvent(
     val timestampEpochMillis: Long,
     val code: DiagnosticEventCode,
+    val operationId: String? = null,
 )
 
 internal class DiagnosticsBuffer(
@@ -71,8 +83,16 @@ internal class DiagnosticsBuffer(
         record(code, now())
     }
 
+    fun record(code: DiagnosticEventCode, operationId: String) {
+        require(DIAGNOSTIC_OPERATION_ID.matches(operationId)) { "Invalid diagnostic operation ID" }
+        record(DiagnosticEvent(now(), code, operationId))
+    }
+
     fun record(code: DiagnosticEventCode, timestampEpochMillis: Long) {
-        val event = DiagnosticEvent(timestampEpochMillis, code)
+        record(DiagnosticEvent(timestampEpochMillis, code))
+    }
+
+    private fun record(event: DiagnosticEvent) {
         val buffered = BufferedEvent(event, serializedEventLine(event).utf8Size())
         synchronized(lock) {
             if (buffered.bytes > maxBytes) return
@@ -97,6 +117,33 @@ internal class DiagnosticsBuffer(
 
     private data class BufferedEvent(val event: DiagnosticEvent, val bytes: Int)
 }
+
+internal class SearchDiagnosticOperation(
+    private val diagnostics: DiagnosticsBuffer,
+    val id: String = java.util.UUID.randomUUID().toString(),
+) {
+    private val lock = Any()
+    private var terminalRecorded = false
+
+    init {
+        diagnostics.record(DiagnosticEventCode.SEARCH_STARTED, id)
+    }
+
+    fun finish(code: DiagnosticEventCode) {
+        require(code in SEARCH_TERMINAL_CODES) { "Search diagnostic must use a terminal code" }
+        val shouldRecord = synchronized(lock) {
+            if (terminalRecorded) false else true.also { terminalRecorded = true }
+        }
+        if (shouldRecord) diagnostics.record(code, id)
+    }
+}
+
+private val SEARCH_TERMINAL_CODES = setOf(
+    DiagnosticEventCode.SEARCH_SUCCEEDED,
+    DiagnosticEventCode.SEARCH_PARTIAL,
+    DiagnosticEventCode.SEARCH_FAILED,
+    DiagnosticEventCode.SEARCH_CANCELED,
+)
 
 internal enum class DiagnosticStartupTab {
     HOME,
@@ -135,7 +182,8 @@ internal data class DiagnosticReportInput(
     val accentColor: Int?,
     val frameRateMatching: String?,
     val videoAspect: String?,
-    val wifiQuality: String?,
+    val localQuality: String?,
+    val remoteWifiQuality: String?,
     val mobileQuality: String?,
     val events: List<DiagnosticEvent> = emptyList(),
 )
@@ -212,7 +260,8 @@ internal fun buildDiagnosticReport(input: DiagnosticReportInput): String {
     report.appendField("Accent color", input.accentColor?.let { String.format(Locale.ROOT, "#%08X", it) })
     report.appendField("Frame-rate matching", safeScalar(input.frameRateMatching))
     report.appendField("Video aspect", safeScalar(input.videoAspect))
-    report.appendField("Wi-Fi quality", safeScalar(input.wifiQuality))
+    report.appendField("Local quality", safeScalar(input.localQuality))
+    report.appendField("Remote Wi-Fi quality", safeScalar(input.remoteWifiQuality))
     report.appendField("Mobile quality", safeScalar(input.mobileQuality))
     report.append("Events:\n")
 
@@ -320,8 +369,11 @@ private fun CharSequence.utf8Size(): Int {
     return size
 }
 
-private fun serializedEventLine(event: DiagnosticEvent): String =
-    "${formatTimestamp(event.timestampEpochMillis)} ${event.code.name}\n"
+private fun serializedEventLine(event: DiagnosticEvent): String = buildString {
+    append(formatTimestamp(event.timestampEpochMillis)).append(' ').append(event.code.name)
+    event.operationId?.let { append(" operation=").append(it) }
+    append('\n')
+}
 
 private fun formatTimestamp(timestampEpochMillis: Long): String =
     DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochMilli(timestampEpochMillis))

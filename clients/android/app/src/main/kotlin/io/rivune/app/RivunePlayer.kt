@@ -24,6 +24,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -202,6 +203,16 @@ private data class PlayerMenuChoice(
     val onClick: () -> Unit,
 )
 
+internal enum class PlaybackFailoverUiState { ADVANCING, SUCCEEDED, EXHAUSTED }
+
+internal fun playbackFailoverUiState(presentation: PlayerPresentation): PlaybackFailoverUiState? = when {
+    presentation.failoverAdvancing -> PlaybackFailoverUiState.ADVANCING
+    presentation.failover?.status == io.rivune.api.PlaybackFailoverStatus.EXHAUSTED -> PlaybackFailoverUiState.EXHAUSTED
+    presentation.failover?.status == io.rivune.api.PlaybackFailoverStatus.ACTIVE && presentation.failover.attemptCount > 0 ->
+        PlaybackFailoverUiState.SUCCEEDED
+    else -> null
+}
+
 @Composable
 internal fun RivunePlayerScreen(
     presentation: PlayerPresentation,
@@ -264,6 +275,24 @@ internal fun RivunePlayerScreen(
                     onPlaybackError = onPlaybackError,
                 )
             }
+            if (presentation.decisionReasons.isNotEmpty()) {
+                val reasonLabels = presentation.decisionReasons.map { stringResource(decisionReasonResource(it)) }
+                androidx.compose.material3.Surface(
+                    color = Color.Black.copy(alpha = 0.72f),
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.safeDrawing).padding(RivuneSpacing.md),
+                ) {
+                    Text(
+                        text = stringResource(
+                            R.string.player_decision_reasons,
+                            reasonLabels.joinToString(", "),
+                        ),
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(horizontal = RivuneSpacing.md, vertical = RivuneSpacing.sm),
+                    )
+                }
+            }
         } else {
             PlayerRecoveryOverlay(
                 isTv = isTv,
@@ -273,7 +302,51 @@ internal fun RivunePlayerScreen(
                 onChooseSource = onChooseSource,
             )
         }
+        PlayerFailoverStatusOverlay(presentation)
     }
+}
+
+@Composable
+private fun BoxScope.PlayerFailoverStatusOverlay(presentation: PlayerPresentation) {
+    val status = playbackFailoverUiState(presentation) ?: return
+    var showSuccess by remember(presentation.failover?.id, presentation.failover?.attemptCount) { mutableStateOf(true) }
+    LaunchedEffect(status) {
+        if (status == PlaybackFailoverUiState.SUCCEEDED) {
+            delay(4_000)
+            showSuccess = false
+        }
+    }
+    if (status == PlaybackFailoverUiState.SUCCEEDED && !showSuccess) return
+    val message = stringResource(
+        when (status) {
+            PlaybackFailoverUiState.ADVANCING -> R.string.player_failover_advancing
+            PlaybackFailoverUiState.SUCCEEDED -> R.string.player_failover_succeeded
+            PlaybackFailoverUiState.EXHAUSTED -> R.string.player_failover_exhausted
+        },
+    )
+    androidx.compose.material3.Surface(
+        color = if (status == PlaybackFailoverUiState.EXHAUSTED) MaterialTheme.colorScheme.errorContainer else Color.Black.copy(alpha = 0.86f),
+        contentColor = if (status == PlaybackFailoverUiState.EXHAUSTED) MaterialTheme.colorScheme.onErrorContainer else Color.White,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier
+            .align(Alignment.TopCenter)
+            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .padding(RivuneSpacing.md)
+            .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Assertive },
+    ) {
+        Text(message, modifier = Modifier.padding(horizontal = RivuneSpacing.lg, vertical = RivuneSpacing.sm))
+    }
+}
+
+@StringRes
+internal fun decisionReasonResource(reason: io.rivune.api.PlaybackDecisionReason): Int = when (reason) {
+    io.rivune.api.PlaybackDecisionReason.CONTAINER_NOT_SUPPORTED -> R.string.player_reason_container
+    io.rivune.api.PlaybackDecisionReason.VIDEO_CODEC_NOT_SUPPORTED -> R.string.player_reason_video_codec
+    io.rivune.api.PlaybackDecisionReason.AUDIO_CODEC_NOT_SUPPORTED -> R.string.player_reason_audio_codec
+    io.rivune.api.PlaybackDecisionReason.RESOLUTION_LIMIT -> R.string.player_reason_resolution
+    io.rivune.api.PlaybackDecisionReason.BITRATE_LIMIT -> R.string.player_reason_bitrate
+    io.rivune.api.PlaybackDecisionReason.HDR_NOT_SUPPORTED -> R.string.player_reason_hdr
+    io.rivune.api.PlaybackDecisionReason.SUBTITLE_BURN_REQUIRED -> R.string.player_reason_subtitle
 }
 
 @Composable
@@ -885,17 +958,18 @@ private fun Media3PlayerScreen(
             delay(PLAYER_POSITION_INTERVAL_MS)
         }
     }
-    LaunchedEffect(remoteCommand?.id) {
+    LaunchedEffect(remoteCommand?.operationId) {
         val command = remoteCommand ?: return@LaunchedEffect
         command.positionMilliseconds?.let { target ->
             player.seekTo(mediaPlaybackPositionMs(target, presentation.timelineStartPositionMs, presentation.mediaTimeline))
         }
-        resumeAfterLifecyclePause = coordinatedLifecycleResumeIntent(resumeAfterLifecyclePause, command.command)
+        resumeAfterLifecyclePause = coordinatedLifecycleResumeIntent(resumeAfterLifecyclePause, command.command.name.lowercase())
         when (command.command) {
-            "play" -> player.play()
-            "pause" -> player.pause()
-            "seek" -> Unit
-            "stop" -> onClose()
+            io.rivune.api.PlaybackCommandType.PLAY -> player.play()
+            io.rivune.api.PlaybackCommandType.PAUSE -> player.pause()
+            io.rivune.api.PlaybackCommandType.SEEK -> Unit
+            io.rivune.api.PlaybackCommandType.STOP -> currentOnClose()
+            io.rivune.api.PlaybackCommandType.LOAD -> Unit
         }
         onCommandConsumed()
     }
@@ -1493,15 +1567,16 @@ private fun MpvPlayerScreen(
             if (!finished) { finished = true; reportProgress(); controller.release() }
         }
     }
-    LaunchedEffect(remoteCommand?.id) {
+    LaunchedEffect(remoteCommand?.operationId) {
         val command = remoteCommand ?: return@LaunchedEffect
         command.positionMilliseconds?.let(::seekTo)
-        resumeAfterPause = coordinatedLifecycleResumeIntent(resumeAfterPause, command.command)
+        resumeAfterPause = coordinatedLifecycleResumeIntent(resumeAfterPause, command.command.name.lowercase())
         when (command.command) {
-            "play" -> { playbackRequested = true; controller.play() }
-            "pause" -> { playbackRequested = false; controller.pause() }
-            "seek" -> Unit
-            "stop" -> onClose()
+            io.rivune.api.PlaybackCommandType.PLAY -> { playbackRequested = true; controller.play() }
+            io.rivune.api.PlaybackCommandType.PAUSE -> { playbackRequested = false; controller.pause() }
+            io.rivune.api.PlaybackCommandType.SEEK -> Unit
+            io.rivune.api.PlaybackCommandType.STOP -> currentOnClose()
+            io.rivune.api.PlaybackCommandType.LOAD -> Unit
         }
         onCommandConsumed()
     }
@@ -2175,7 +2250,6 @@ private fun PlaybackTimeline(
                         icon = aspectIcon,
                         label = aspectDescription,
                         isTv = isTv,
-                        selected = false,
                         focus = aspectFocus,
                         upFocus = seekFocus,
                         leftFocus = subtitleFocus,
@@ -2198,7 +2272,6 @@ private fun PlaybackTimeline(
                         icon = Icons.Rounded.Lock,
                         label = stringResource(R.string.player_lock_controls),
                         isTv = isTv,
-                        selected = false,
                         focus = lockFocus,
                         upFocus = seekFocus,
                         leftFocus = speedFocus,
@@ -2217,7 +2290,7 @@ private fun PlayerOptionAction(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
     isTv: Boolean,
-    selected: Boolean,
+    selected: Boolean? = null,
     focus: FocusRequester,
     upFocus: FocusRequester,
     leftFocus: FocusRequester,
