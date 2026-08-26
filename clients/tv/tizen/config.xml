@@ -23,7 +23,6 @@
   <tizen:setting screen-orientation="landscape"
                  context-menu="disable"
                  background-support="disable"
-                 encryption="disable"
                  install-location="auto"
                  hwkey-event="enable" />
 </widget>

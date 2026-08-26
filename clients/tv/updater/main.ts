@@ -9,10 +9,12 @@ import {
   parseStoredRuntimeState,
   prepareRuntime,
   releaseEndpoint,
+  shouldPresentTvUpdateNotice,
   rollbackRuntime,
   type RuntimeBundle,
   type RuntimeRelease,
 } from "./contracts";
+import { maximumUpdateSignatureBytes, verifyUpdateManifestSignature } from "./signature";
 import { openRuntimeStore, type RuntimeStore } from "./storage";
 
 const automaticCheckInterval = 24 * 60 * 60 * 1000;
@@ -184,13 +186,36 @@ async function bootstrap(): Promise<void> {
         if (manifestBytes.length !== result.release.manifest.size || sha256Hex(manifestBytes) !== result.release.manifest.sha256) {
           throw new Error("The TV update manifest does not match the GitHub release digest.");
         }
+        const signatureResponse = await fetch(result.release.signature.mirrorUrl, {
+          method: "GET",
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+          credentials: "omit",
+          redirect: "error",
+        });
+        if (!signatureResponse.ok || signatureResponse.url !== result.release.signature.mirrorUrl) {
+          throw new Error("The TV update signature mirror returned an invalid response.");
+        }
+        const signatureBytes = await responseBytes(signatureResponse, maximumUpdateSignatureBytes);
+        if (signatureBytes.length !== result.release.signature.size || sha256Hex(signatureBytes) !== result.release.signature.sha256) {
+          throw new Error("The TV update signature does not match the GitHub release digest.");
+        }
+        await verifyUpdateManifestSignature(manifestBytes, signatureBytes);
         const runtimeRelease = parseUpdateManifest(JSON.parse(decodeUtf8(manifestBytes)), result.release, selectedPlatform);
         availableRelease = runtimeRelease;
-        if (manual) {
-          publish({ status: "available", currentVersion: prepared.runtime.version, latestVersion: runtimeRelease.version });
-        } else {
-          await download(runtimeRelease, true);
-        }
+        const isNewNotice = shouldPresentTvUpdateNotice(persisted.lastPresentedVersion, runtimeRelease.version);
+        persisted = {
+          ...persisted,
+          lastSuccessfulCheckAt: now,
+          lastPresentedVersion: isNewNotice ? runtimeRelease.version : persisted.lastPresentedVersion,
+        };
+        await save();
+        publish({
+          status: "available",
+          currentVersion: prepared.runtime.version,
+          latestVersion: runtimeRelease.version,
+          notice: isNewNotice,
+        });
       }
     } catch {
       publish({ status: manual ? "error" : "idle", currentVersion: prepared.runtime.version });
@@ -218,6 +243,9 @@ async function bootstrap(): Promise<void> {
     },
     checkAutomatically: () => check(false),
     checkManually: () => check(true),
+    dismissNotice() {
+      if (publicState.status === "available" && publicState.notice) publish({ ...publicState, notice: false });
+    },
     async download() {
       if (!availableRelease || operationRunning) return;
       operationRunning = true;

@@ -1,6 +1,8 @@
 import type { TvPlaybackCapabilities } from "./platform";
 
-export const RIVUNE_PROTOCOL_VERSION = 20 as const;
+export const RIVUNE_PROTOCOL_VERSION = 22 as const;
+export const SEMANTIC_SEARCH_CAPABILITY = "semantic-search" as const;
+export const PLAYBACK_COORDINATION_CAPABILITY = "playback-command-results" as const;
 
 export type UUID = string;
 export type JsonPrimitive = string | number | boolean | null;
@@ -128,6 +130,26 @@ export interface CollectionSourceFailure { sourceId: UUID; kind: CollectionSourc
 export interface ResolvedCollectionFolder {
   collectionId: UUID; folder: CollectionFolder; sourcePosterUrls?: Record<string, string> | null;
   items: CollectionItem[]; page: number; hasMore: boolean; errors: CollectionSourceFailure[];
+}
+
+export interface SemanticSearchRequest {
+  query: string;
+  mediaType?: string;
+  language?: string;
+  region?: string;
+  page: number;
+  limit: number;
+  excludedIntentIds: string[];
+}
+export interface SemanticSearchIntent { id: string; kind: string; value: string; label: string }
+export interface SemanticSearchPage {
+  intents: SemanticSearchIntent[];
+  titleQuery: string;
+  mediaTypes: string[];
+  items: CollectionItem[];
+  page: number;
+  hasMore: boolean;
+  partial: boolean;
 }
 
 export interface ContinueWatchingItem {
@@ -288,8 +310,10 @@ export interface PlaybackMediaInspection {
   container?: string | null; durationSeconds?: number | null; hdrFormat?: string | null;
   videoTracks: PlaybackMediaTrack[]; audioTracks: PlaybackMediaTrack[]; subtitleTracks: PlaybackMediaTrack[];
 }
+export type PlaybackDecisionOutcome = "direct_supported" | "remux_required" | "audio_transcode_required" | "video_transcode_required" | "subtitle_burn_required";
+export type PlaybackDecisionReason = "container_not_supported" | "video_codec_not_supported" | "audio_codec_not_supported" | "resolution_limit" | "bitrate_limit" | "hdr_not_supported" | "subtitle_burn_required";
 export interface PlaybackDecision {
-  reason: string; videoAction: string; audioAction: string; subtitleAction: string; toneMapping: boolean;
+  reason: PlaybackDecisionOutcome; reasons: PlaybackDecisionReason[]; videoAction: string; audioAction: string; subtitleAction: string; toneMapping: boolean;
   source?: Record<string, JsonValue | undefined> | null; target?: Record<string, JsonValue | undefined> | null;
 }
 export interface PlaybackPreparation {
@@ -309,6 +333,108 @@ export interface PlaybackSubtitle {
 export interface PlaybackSession {
   id: UUID; selectedSourceId: string; selectedAudioTrack?: number | null; selectedSubtitleId?: string | null;
   sources: PlaybackSource[]; subtitles: PlaybackSubtitle[]; providerErrors: PlaybackProviderError[]; expiresAt: string;
+}
+
+export type PlaybackDeviceStatus = "idle" | "playing" | "paused" | "ended";
+export type PlaybackCommandName = "load" | "play" | "pause" | "seek" | "stop";
+export type PlaybackLoadMode = "handoff" | "play-copy";
+export type PlaybackCommandStatus = "pending" | "applied" | "failed" | "expired";
+export type PlaybackCommandResultCode = "applied" | "unsupported" | "invalid_state" | "stale_target" | "expired" | "execution_failed";
+export interface CoordinatedPlaybackItem {
+  titleId: UUID; mediaType: TitleMediaType | "episode"; resourceId: string; sourceAddonId?: UUID; title: string; posterUrl?: string;
+}
+export interface PlaybackDeviceState {
+  status: PlaybackDeviceStatus; item?: CoordinatedPlaybackItem; positionMilliseconds: number; durationMilliseconds: number; updatedAt?: string;
+}
+export interface PlaybackDeviceHeartbeatInput { capabilities: string[]; state: PlaybackDeviceState }
+export interface PlaybackDevice {
+  sessionId: UUID; deviceId: UUID; name: string; platform: string; capabilities: string[]; state: PlaybackDeviceState;
+  current: boolean; lastSeenAt: string; revision: number;
+}
+export interface PlaybackDeviceList { devices: PlaybackDevice[] }
+export interface PlaybackCommandInput {
+  operationId: UUID; command: PlaybackCommandName; item?: CoordinatedPlaybackItem; positionMilliseconds?: number;
+  mode?: PlaybackLoadMode; targetRevision?: number;
+}
+export interface PlaybackCommand extends PlaybackCommandInput {
+  senderDeviceName: string; status: PlaybackCommandStatus; resultCode?: PlaybackCommandResultCode; createdAt: string; expiresAt: string;
+}
+export interface PlaybackCommandList { commands: PlaybackCommand[] }
+export interface PlaybackCommandResultInput { status: Exclude<PlaybackCommandStatus, "pending">; code: PlaybackCommandResultCode }
+
+export type QueueMediaType = "movie" | "series" | "episode" | "tv";
+export interface ReadingQueueItem {
+  id: UUID; mediaType: QueueMediaType; resourceId: string; sourceAddonId?: UUID; titleId?: UUID; title: string;
+  posterUrl?: string; position: number; createdAt: string; updatedAt: string;
+}
+export interface ReadingQueue { revision: number; items: ReadingQueueItem[] }
+export interface ReadingQueueMutationHeader { operationId: UUID; expectedRevision: number }
+export interface ReadingQueueAddInput extends ReadingQueueMutationHeader {
+  mediaType: QueueMediaType; resourceId: string; sourceAddonId?: UUID; titleId?: UUID; title: string; posterUrl?: string;
+}
+export type ReadingQueueMutationInput = ReadingQueueMutationHeader;
+export interface ReadingQueueUpdateInput extends ReadingQueueMutationHeader { title: string; posterUrl?: string }
+export interface ReadingQueueReorderInput extends ReadingQueueMutationHeader { itemIds: UUID[] }
+export interface ReadingQueueMutation { revision: number; affectedItemId?: UUID; duplicate?: boolean }
+
+export type SavedSearchSort = "relevance" | "title" | "year" | "rating" | "added";
+export type SavedSearchMediaType = QueueMediaType | "season" | "video";
+export interface SavedSearchInput { name: string; query: string; mediaType?: SavedSearchMediaType; sort: SavedSearchSort }
+export interface SavedSearch extends SavedSearchInput { id: UUID; revision: number; createdAt: string; updatedAt: string }
+export interface SavedSearchUpdateInput extends SavedSearchInput { expectedRevision: number }
+export interface SavedSearchList { savedSearches: SavedSearch[] }
+
+export type SmartRule =
+  | { type: "all" | "any"; rules: SmartRule[] }
+  | { type: "media_type"; operator: "one_of"; values: SavedSearchMediaType[] }
+  | { type: "year" | "rating"; operator: "equals" | "gte" | "lte"; number: number }
+  | { type: "genre" | "status" | "source"; operator: "equals" | "not_equals"; value: string };
+export type SmartCollectionSort = "title" | "year" | "rating" | "added";
+export interface SmartCollectionInput { name: string; rules: SmartRule; sort: SmartCollectionSort }
+export interface SmartCollection extends SmartCollectionInput { id: UUID; revision: number; createdAt: string; updatedAt: string }
+export interface SmartCollectionUpdateInput extends SmartCollectionInput { expectedRevision: number }
+export interface SmartCollectionList { smartCollections: SmartCollection[] }
+export interface SmartCollectionCatalogItem {
+  id: UUID; mediaType: SavedSearchMediaType; title: string; genres: string[]; posterUrl?: string; backgroundUrl?: string;
+  releaseInfo?: string; released?: string; communityRating?: number; status?: string; resourceId?: string;
+  resourceProvider?: string; sourceAddonId?: UUID; sourceCatalogId?: string; sourceName?: string;
+}
+export interface SmartCollectionPage { items: SmartCollectionCatalogItem[]; page: number; pageSize: number; total: number; totalPages: number }
+
+export type AddonIncidentCode = "timeout" | "unavailable" | "invalid_response" | "unhealthy";
+export interface AddonIncident {
+  id: UUID; profileId: UUID; addonId: UUID; addonName: string; code: AddonIncidentCode;
+  state: "open" | "recovering" | "resolved"; impact: "availability" | "response_integrity"; occurrenceCount: number;
+  firstOccurredAt: string; lastOccurredAt: string; lastSuccessAt: string | null; recoveryStartedAt: string | null;
+  resolvedAt: string | null; acknowledgedAt: string | null; acknowledgedByUserId: UUID | null; updatedAt: string;
+}
+export interface AddonIncidentEvent { id: number; type: "opened" | "occurred" | "recovering" | "resolved" | "acknowledged"; code: AddonIncidentCode; occurredAt: string }
+export interface AddonIncidentList { incidents: AddonIncident[] }
+export interface AddonIncidentDetail { incident: AddonIncident; events: AddonIncidentEvent[] }
+
+export type MediaNotificationKind = "calendar-event-upcoming" | "season-available" | "episode-available" | "movie-release";
+export interface MediaNotification {
+  id: string; kind: MediaNotificationKind; titleId: UUID; subjectTitleId?: UUID; title: string; seriesTitle?: string;
+  releaseDate?: string; seasonNumber?: number; episodeNumber?: number; availableAt: string; readAt?: string; createdAt: string;
+}
+export interface MediaNotificationPage { notifications: MediaNotification[]; nextCursor?: string }
+export interface MediaNotificationFollowInput { timezone: string; horizonDays: number; leadDays: number }
+export interface MediaNotificationSubscription extends MediaNotificationFollowInput { titleId: UUID; createdAt: string; updatedAt: string }
+export interface MediaNotificationSubscriptions { subscriptions: MediaNotificationSubscription[] }
+
+export type PlaybackFailoverError = "source_failed" | "source_timeout" | "ended_early" | "decode_failed" | "access_denied" | "user_cancelled";
+export interface PlaybackFailoverCreateInput { candidateSourceRefs: string[]; selectedSourceRef: string; maximumAttempts?: number }
+export interface PlaybackFailoverAdvanceInput { error: PlaybackFailoverError; positionSeconds: number; expectedRevision: number }
+export interface PlaybackFailoverCandidateHealth { position: number; status: "current" | "available" | "cooling_down"; cooldownUntil?: string }
+export interface PlaybackFailoverState {
+  id: UUID; currentSourceRef?: string; currentPosition: number; positionSeconds: number; attemptCount: number; maximumAttempts: number;
+  revision: number; status: "active" | "exhausted" | "cancelled"; lastError?: PlaybackFailoverError; explanation?: string;
+  candidateHealth: PlaybackFailoverCandidateHealth[]; expiresAt: string;
+}
+
+export interface AccessibilityPreferencesDocument {
+  revision: number; reducedMotion: "system" | "reduce" | "no-preference"; highContrast: "system" | "more" | "standard";
+  textScale: 100 | 115 | 130; captions: "system" | "on" | "off"; audioDescription: boolean; focusIndicators: "standard" | "enhanced";
 }
 
 export interface FolderQuery { page?: number; limit?: number; language?: string; region?: string }
