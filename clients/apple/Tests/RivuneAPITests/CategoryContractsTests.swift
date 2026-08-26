@@ -151,7 +151,7 @@ private final class RecordingCategoryTransport: HTTPTransport, @unchecked Sendab
         let body: Data
         if request.url?.path == "/.well-known/rivune" {
             body = Data("""
-            {"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
+            {"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}
             """.utf8)
         } else {
             body = Data("""
