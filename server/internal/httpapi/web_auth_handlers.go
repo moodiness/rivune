@@ -15,7 +15,7 @@ import (
 const (
 	webRefreshCookieName = "rivune_web_refresh"
 	webRefreshCookiePath = "/api/v1/auth/web/refresh"
-	webCSRFHeader         = "X-Rivune-CSRF"
+	webCSRFHeader        = "X-Rivune-CSRF"
 )
 
 type webTokenResponse struct {
@@ -165,8 +165,13 @@ func (a *API) requireWebAuthRequest(w http.ResponseWriter, r *http.Request) (boo
 		writeError(w, http.StatusForbidden, "invalid_csrf", "The browser authentication request is not same-origin")
 		return false, false
 	}
-	scheme, host, ok := effectiveWebOrigin(r, a.config.TrustedProxies)
-	if !ok || r.Header.Get("Origin") != scheme+"://"+host {
+	expectedOrigin := a.config.PublicURL
+	scheme, host, ok := strings.Cut(expectedOrigin, "://")
+	if expectedOrigin == "" {
+		scheme, host, ok = effectiveWebOrigin(r, a.config.TrustedProxies)
+		expectedOrigin = scheme + "://" + host
+	}
+	if !ok || r.Header.Get("Origin") != expectedOrigin {
 		writeError(w, http.StatusForbidden, "invalid_origin", "The browser authentication origin is invalid")
 		return false, false
 	}
