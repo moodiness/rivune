@@ -1,17 +1,18 @@
-# Rivune v1.12.4
+# Rivune v1.13.0
 
 ## Highlights
 
-- Apple clients preserve the complete series progress snapshot when opening and closing an episode, hydrate series longer than 100 episodes in bounded batches, and retain successful watched updates when a later batch conflicts.
-- Apple search now paginates every compatible catalog, the personal library supports pagination and movie, series, and live-TV filters, and the calendar can move between months without leaving its tab.
-- Native Apple playback exposes the next episode for manual or automatic continuation and applies intro, recap, and outro markers consistently across AVPlayer and MPV playback.
-- macOS external playback preserves encoded paths and signed query parameters, handles installed applications whose paths contain spaces, and prevents horizontal rail drags from opening a card accidentally.
-- Browser tabs now coordinate rotated access and refresh tokens without logging out a peer or replaying a failed request under a different session.
-- Container migration checks wait for the real PostgreSQL process and an authenticated SQL query before exercising clean installation, one-version upgrade, and idempotency.
+- Rivune protocol 22 adds a durable profile reading queue, playback source failover, saved searches, smart collections, extension incident recovery, media notifications, and synchronized accessibility preferences.
+- Web, Android, Apple, Windows, webOS, and Tizen publish bounded search batches progressively, deduplicate bridged provider identities, reject stale results, and expose partial-source failures without blocking fast results.
+- Connected devices can transfer playback and control TV clients through idempotent operation IDs, adaptive polling, bounded result retries, and revision-aware commands.
+- Add-on installation now consumes expiring one-shot verification snapshots, encrypts successful private transport URLs at rest, and records sanitized incident classifications without leaking upstream requests or credentials.
+- Browser authentication keeps rotating refresh credentials in an HttpOnly same-origin cookie; TV clients no longer persist bearer tokens in JavaScript storage.
+- Android and Windows support verified application updates; Apple clients publish verified update notices; webOS and Tizen can atomically replace the signed shared runtime when persistent storage is available.
+- The release pipeline promotes one tested multi-architecture OCI digest, signs the update manifest, and publishes SBOM, build provenance, and release-identity attestations for every artifact.
 
 ## Installation
 
-- Download `Rivune-Windows.exe` on x64 or ARM64 Windows 10 build 19041 or newer. The unsigned setup may trigger SmartScreen; verify its exact GitHub Release URL and SHA-256 before running it.
+- Download `Rivune-Windows.exe` on x64 or ARM64 Windows 10 build 19041 or newer. The unsigned setup may trigger SmartScreen; verify its exact GitHub Release URL, digest, and attestations before running it.
 - Download `Rivune-TV-Installer-Windows.exe` or `Rivune-TV-Installer-macOS.dmg` to install the packaged LG webOS or Samsung Tizen client from the same local-only companion interface.
 - `Rivune-Tizen.wgt` remains unsigned and must be signed locally with an appropriate Samsung/Tizen certificate profile. LG installation continues through Developer Mode tooling.
 - `Rivune-iOS-unsigned.ipa`, `Rivune-tvOS-unsigned.ipa`, and `Rivune-visionOS-unsigned.ipa` must be re-signed with an identity and provisioning profile authorized for the destination device.
@@ -20,18 +21,19 @@
 
 ## Upgrade notes
 
-- Existing operators can set `RIVUNE_VERSION=1.12.4`, pull, and recreate Rivune. Fresh Compose deployments default to the immutable `1.12.4` image tag.
-- This patch has no protocol or storage-schema cutover; existing v1.12.3 installations can update directly.
-- The release contains exactly twelve assets: eight application packages, `rivune-update.json`, the shared TV runtime, and the two universal TV installer companions.
-- Clients upgrading from v1.12.0 still require one manual installation from the exact GitHub Release before automatic updates can consume the schema 3 universal package contract.
+- Before upgrading, create and verify an authenticated backup, record its backup ID separately, and preserve the complete encryption keyring.
+- Set `RIVUNE_VERSION=1.13.0`, pull, and recreate only Rivune. Startup applies embedded migrations `000082` through `000094` transactionally before readiness.
+- Protocol 21 clients are incompatible with protocol 22. Upgrade the server and every first-party client together, wait for `/ready`, and then rediscover `/.well-known/rivune` instead of retrying cached v21 requests.
+- Migration `000092` deliberately removes pending short-lived add-on verification snapshots while replacing plaintext transport storage with encrypted envelopes; verify affected add-ons again after upgrade.
+- The release contains exactly thirteen assets: eight application packages, `rivune-update.json`, its detached `rivune-update.json.sig` signature, the shared TV runtime, and two universal TV-installer companions.
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.12.4`
-- `ghcr.io/moodiness/rivune:1.12`
+- `ghcr.io/moodiness/rivune:1.13.0`
+- `ghcr.io/moodiness/rivune:1.13`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 - Provenance and SBOM attestations are published for both runnable platforms.
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.12.3...v1.12.4
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.12.4...v1.13.0
