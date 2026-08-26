@@ -1,4 +1,4 @@
-import { Bookmark, CalendarDays, Home, LogOut, PanelLeftClose, PanelLeftOpen, RotateCcw, Search, Settings, Sparkles, Users } from "lucide-react";
+import { Bell, Bookmark, CalendarDays, Home, LogOut, PanelLeftClose, PanelLeftOpen, RotateCcw, Search, Settings, Sparkles, Users } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { useAuth } from "./auth";
 import { APIError } from "./api";
@@ -7,13 +7,14 @@ import { allowsMotion, focusFirstElement, handleDirectionalFocus, RivuneMark } f
 import { translate as t } from "./i18n";
 import { notifyError } from "./notifications";
 
-export type View = "home" | "search" | "library" | "calendar" | "admin";
+export type View = "home" | "search" | "library" | "calendar" | "notifications" | "admin";
 
-const navItems: Array<{ id: View; labelKey: "nav.home" | "nav.search" | "nav.library" | "nav.calendar"; icon: typeof Home }> = [
+const navItems: Array<{ id: View; labelKey: "nav.home" | "nav.search" | "nav.library" | "nav.calendar" | "nav.notifications"; icon: typeof Home }> = [
   { id: "home", labelKey: "nav.home", icon: Home },
   { id: "search", labelKey: "nav.search", icon: Search },
   { id: "library", labelKey: "nav.library", icon: Bookmark },
   { id: "calendar", labelKey: "nav.calendar", icon: CalendarDays },
+  { id: "notifications", labelKey: "nav.notifications", icon: Bell },
 ];
 
 function formatServerVersion(version: string | null): string | null {

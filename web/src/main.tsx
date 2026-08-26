@@ -3,7 +3,8 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
-import { AuthProvider } from "./auth";
+import { AccessibilityProvider } from "./accessibility";
+import { AuthProvider, useAuth } from "./auth";
 import { ApplicationsPage } from "./pages/Applications";
 import { setLocale, translate as t } from "./i18n";
 import { NotificationViewport } from "./notifications";
@@ -22,10 +23,15 @@ if (applicationsRoute) {
   document.querySelector('meta[name="description"]')?.setAttribute("content", t("applications.meta.description"));
 }
 
+function ProfileExperience() {
+  const { activeProfile } = useAuth();
+  return <AccessibilityProvider profileId={activeProfile?.id}><App /><NotificationViewport /></AccessibilityProvider>;
+}
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     {applicationsRoute
       ? <ApplicationsPage />
-      : <AuthProvider><App /><NotificationViewport /></AuthProvider>}
+      : <AuthProvider><ProfileExperience /></AuthProvider>}
   </StrictMode>,
 );

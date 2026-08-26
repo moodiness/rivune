@@ -218,16 +218,16 @@ test("global administrators see joined safe addon diagnostics and declared capab
   expect(diagnosticsRequests).toEqual(["/api/v1/addons/diagnostics"]);
 });
 
-test("delegated administration never requests addon diagnostics or preview", async ({ page, rivune }) => {
+test("delegated administration never requests addon diagnostics or verification", async ({ page, rivune }) => {
   const diagnosticsRequests: string[] = [];
-  const previewRequests: string[] = [];
+  const verificationRequests: string[] = [];
   await rivune.configureCategoryScope(page);
   await page.route("**/api/v1/addons/diagnostics", async (route) => {
     diagnosticsRequests.push(new URL(route.request().url()).pathname);
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ observedSince: "2026-01-01T00:00:00Z", diagnostics: [] }) });
   });
-  await page.route("**/api/v1/addons/preview", async (route) => {
-    previewRequests.push(new URL(route.request().url()).pathname);
+  await page.route("**/api/v1/addons/verifications", async (route) => {
+    verificationRequests.push(new URL(route.request().url()).pathname);
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({}) });
   });
 
@@ -235,8 +235,8 @@ test("delegated administration never requests addon diagnostics or preview", asy
   await expect(page.getByRole("heading", { name: "Profiles", exact: true })).toBeVisible();
   await page.waitForLoadState("networkidle");
   expect(diagnosticsRequests).toEqual([]);
-  expect(previewRequests).toEqual([]);
-  await expect(page.getByRole("button", { name: "Review add-on", exact: true })).toHaveCount(0);
+  expect(verificationRequests).toEqual([]);
+  await expect(page.getByRole("button", { name: "Verify", exact: true })).toHaveCount(0);
   await expect(page.getByText(/^Health observations since /)).toHaveCount(0);
 });
 
@@ -267,6 +267,12 @@ test("diagnostics failure leaves addon content intact without invented unknown s
 test("addon installation previews declarations before sending the exact confirmed input", async ({ page, rivune: _rivune }) => {
   const changedTransportUrl = `${transportUrl}&variant=next`;
   const previewResponse = {
+    id: "verification-install",
+    status: "passed",
+    summary: "ready",
+    checks: [{ code: "manifest_fetch", status: "passed" }, { code: "manifest_valid", status: "passed" }, { code: "catalog_probe", status: "passed" }],
+    createdAt: "2026-01-01T00:00:00Z",
+    expiresAt: "2099-01-01T00:00:00Z",
     manifest: {
       id: "preview-fixture",
       name: "Preview fixture",
@@ -293,7 +299,7 @@ test("addon installation previews declarations before sending the exact confirme
       await route.fulfill({ contentType: "application/json", body: JSON.stringify({ observedSince: "2026-01-01T00:00:00Z", diagnostics: [] }) });
       return;
     }
-    if (request.method() === "POST" && pathname === "/api/v1/addons/preview") {
+    if (request.method() === "POST" && pathname === "/api/v1/addons/verifications") {
       requestOrder.push("preview");
       previewInputs.push(request.postDataJSON());
       const input = request.postDataJSON() as { profileIds: string[]; categoryIds: string[] };
@@ -319,10 +325,10 @@ test("addon installation previews declarations before sending the exact confirme
   await manifestUrl.fill(transportUrl);
   await expect(tool.getByRole("button", { name: "Install addon", exact: true })).toHaveCount(0);
 
-  await tool.getByRole("button", { name: "Review add-on", exact: true }).click();
+  await tool.getByRole("button", { name: "Verify", exact: true }).click();
   await expect.poll(() => requestOrder).toEqual(["preview"]);
   const preview = tool.locator(".addon-preview");
-  await expect(preview.getByRole("heading", { name: "Review before installing", exact: true })).toBeVisible();
+  await expect(preview.getByRole("heading", { name: "Verification", exact: true })).toBeVisible();
   await expect(preview.getByText("Preview fixture", { exact: true })).toBeVisible();
   await expect(preview.getByText("v2.4.0", { exact: true })).toBeVisible();
   await expect(preview.getByText("Declared preview description", { exact: true })).toBeVisible();
@@ -334,15 +340,17 @@ test("addon installation previews declarations before sending the exact confirme
   await expect(preview).toHaveCount(0);
   await bobAssignment.getByText("Bob", { exact: true }).click();
   await expect(bobCheckbox).toBeChecked();
-  await tool.getByRole("button", { name: "Review add-on", exact: true }).click();
+  await tool.getByRole("button", { name: "Verify", exact: true }).click();
   await expect.poll(() => requestOrder).toEqual(["preview", "preview"]);
   await expect(preview).toBeVisible();
 
   await bobAssignment.getByText("Bob", { exact: true }).click();
   await expect(bobCheckbox).not.toBeChecked();
   await expect(preview).toHaveCount(0);
-  await tool.getByRole("button", { name: "Review add-on", exact: true }).click();
+  await tool.getByRole("button", { name: "Verify", exact: true }).click();
   await expect.poll(() => requestOrder).toEqual(["preview", "preview", "preview"]);
+  await preview.getByRole("button", { name: "Review warnings", exact: true }).click();
+  await expect(preview.getByText("Review the warnings, then confirm installation again.", { exact: true })).toBeVisible();
   await preview.getByRole("button", { name: "Install addon", exact: true }).click();
   await expect.poll(() => requestOrder).toEqual(["preview", "preview", "preview", "install"]);
 
@@ -351,7 +359,7 @@ test("addon installation previews declarations before sending the exact confirme
     { transportUrl: changedTransportUrl, profileIds: ["alice", "bob"], categoryIds: [] },
     { transportUrl: changedTransportUrl, profileIds: ["alice"], categoryIds: [] },
   ]);
-  expect(installInput).toEqual({ transportUrl: changedTransportUrl, profileIds: ["alice"], categoryIds: [] });
+  expect(installInput).toEqual({ verificationId: "verification-install" });
 });
 
 test("category-first addon assignment keeps durable categories independent through preview confirmation", async ({ page, rivune }) => {
@@ -382,10 +390,10 @@ test("category-first addon assignment keeps durable categories independent throu
       await route.fulfill({ contentType: "application/json", body: JSON.stringify(assignedAddon) });
       return;
     }
-    if (request.method() === "POST" && pathname === "/api/v1/addons/preview") {
+    if (request.method() === "POST" && pathname === "/api/v1/addons/verifications") {
       const input = request.postDataJSON() as { profileIds: string[]; categoryIds: string[] };
       previewInputs.push(input);
-      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ manifest: addon.manifest, capabilities: { resources: ["catalog"], search: false, pagination: false, searchPagination: false }, profileIds: input.profileIds, categoryIds: input.categoryIds }) });
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ id: "verification-category", status: "passed", summary: "ready", checks: [{ code: "manifest_fetch", status: "passed" }, { code: "manifest_valid", status: "passed" }, { code: "catalog_probe", status: "passed" }], createdAt: "2026-01-01T00:00:00Z", expiresAt: "2099-01-01T00:00:00Z", manifest: addon.manifest, capabilities: { resources: ["catalog"], search: false, pagination: false, searchPagination: false }, profileIds: input.profileIds, categoryIds: input.categoryIds }) });
       return;
     }
     if (request.method() === "POST" && pathname === "/api/v1/addons") {
@@ -442,17 +450,17 @@ test("category-first addon assignment keeps durable categories independent throu
   await page.keyboard.press("Space");
   await tool.locator(".assignment-picker__profiles").getByText("Choose individual profiles (1 selected)", { exact: true }).click();
   await tool.locator(".assignment-picker__profiles label").filter({ hasText: "Bob" }).getByRole("checkbox").check();
-  await tool.getByRole("button", { name: "Review add-on", exact: true }).click();
+  await tool.getByRole("button", { name: "Verify", exact: true }).click();
   await expect(tool.locator(".addon-preview")).toBeVisible();
   await kidsCheckbox.uncheck();
   await expect(tool.locator(".addon-preview")).toHaveCount(0);
   await kidsCheckbox.check();
-  await tool.getByRole("button", { name: "Review add-on", exact: true }).click();
+  await tool.getByRole("button", { name: "Verify", exact: true }).click();
   await tool.locator(".addon-preview").getByRole("button", { name: "Install addon", exact: true }).click();
 
   const snapshot = { transportUrl, profileIds: ["alice", "bob"], categoryIds: [CATEGORY_IDS.kids] };
   expect(previewInputs).toEqual([snapshot, snapshot]);
-  expect(installInput).toEqual(snapshot);
+  expect(installInput).toEqual({ verificationId: "verification-category" });
 });
 
 test("preview failure is isolated and never renders provider details", async ({ page, rivune: _rivune }) => {
@@ -469,7 +477,7 @@ test("preview failure is isolated and never renders provider details", async ({ 
       await route.fulfill({ contentType: "application/json", body: JSON.stringify({ observedSince: "2026-01-01T00:00:00Z", diagnostics: [] }) });
       return;
     }
-    if (request.method() === "POST" && pathname === "/api/v1/addons/preview") {
+    if (request.method() === "POST" && pathname === "/api/v1/addons/verifications") {
       requests.push("preview");
       await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: { code: "unavailable", message: privateFailure } }) });
       return;
@@ -481,7 +489,7 @@ test("preview failure is isolated and never renders provider details", async ({ 
   await page.goto("/#admin?tab=addons");
   const tool = page.locator(".admin-tool-card").filter({ has: page.getByRole("heading", { name: "Install from a manifest", exact: true }) });
   await tool.getByLabel("Manifest URL", { exact: true }).fill(transportUrl);
-  await tool.getByRole("button", { name: "Review add-on", exact: true }).click();
+  await tool.getByRole("button", { name: "Verify", exact: true }).click();
 
   await expect(tool.getByText("The add-on could not be reviewed.", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: addon.manifest.name, exact: true })).toBeVisible();

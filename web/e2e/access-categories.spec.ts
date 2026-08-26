@@ -492,13 +492,12 @@ test("global pairing requires a category and submits normalized optional metadat
   await expect(page.getByRole("heading", { name: "They can choose a profile now." })).toBeFocused();
 });
 
-test("category-scoped pairing is fixed to its server category on mobile RTL", async ({ page, rivune }) => {
+test("category-scoped pairing is fixed to its server category on mobile", async ({ page, rivune }) => {
   await rivune.configureCategoryScope(page, CATEGORY_IDS.household);
-  rivune.setInterfaceLanguage("ar");
   await page.setViewportSize({ width: 360, height: 800 });
   await page.goto("/pair?code=bcdfghjk");
 
-  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
   const category = page.locator(".pairing-card__category");
   await expect(category.getByText("Household", { exact: true })).toBeVisible();
   expect(rivune.matching("/api/v1/categories", "GET")).toHaveLength(0);

@@ -1,5 +1,8 @@
+import { readFileSync } from "node:fs";
 import { expect, test as base } from "@playwright/test";
 import type { Page, Route } from "@playwright/test";
+
+const seekableSegment = Buffer.from(readFileSync(new URL("./seekable-segment.b64", import.meta.url), "utf8"), "base64");
 
 export type CapturedRequest = {
   method: string;
@@ -123,6 +126,15 @@ type ConfigurationAuditFixture = {
   createdAt: string;
 };
 
+type ReadingQueueFixtureItem = {
+  id: string;
+  mediaType: "movie" | "series" | "episode" | "tv";
+  resourceId: string;
+  title: string;
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+};
 const expiresAt = "2099-01-01T00:00:00Z";
 const createdAt = "2024-01-01T00:00:00Z";
 const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="100%" height="100%" fill="#241f35"/></svg>`;
@@ -349,6 +361,8 @@ export class RivuneHarness {
   private demoSessionActive = false;
   private authorizationScope: "global_admin" | "category" = "global_admin";
   private sessionCategoryId: string | null = null;
+  private webRefreshSessionActive = true;
+
   private deviceCategoryId = CATEGORY_IDS.household as string;
   private categories = categoryFixtures.map((category) => ({ ...category }));
   private profiles = profileFixtures.map((profile) => ({ ...profile, category: { ...profile.category }, avatar: { ...profile.avatar } }));
@@ -442,12 +456,22 @@ export class RivuneHarness {
   private readonly seasonOverrides = new Map<string, unknown>();
   private libraryItems: Array<Record<string, unknown>> = [];
   private libraryMembershipDelay = 0;
+  private readingQueueRevision = 1;
+  private readingQueueItems: ReadingQueueFixtureItem[] = [];
+  private rejectNextReadingQueueReorder = false;
+  private savedSearches: Array<Record<string, unknown>> = [];
+  private smartCollections: Array<Record<string, unknown>> = [];
+  private playbackFailoverSequence = 0;
+  private readonly playbackFailovers = new Map<string, { id: string; currentSourceRef: string; currentPosition: number; positionSeconds: number; attemptCount: number; maximumAttempts: number; revision: number; status: "active" | "cancelled" | "exhausted"; candidateSourceRefs: string[]; expiresAt: string }>();
+
   private readonly demoProgress = new Map<string, { positionSeconds: number; durationSeconds: number; completed: boolean; version: number }>();
   private readonly playbackProgress = new Map<string, { positionSeconds: number; durationSeconds: number; completed: boolean; version: number }>();
   private readonly customTitleIDs = new Map<string, string>();
   private nextCustomTitleSequence = 1;
   private readonly searchResponses = new Map<string, { body: unknown; status: number; delay: number }>();
   private readonly catalogResponses = new Map<string, { body: unknown; status: number; delay: number }>();
+  private semanticSearchEnabled = false;
+  private readonly semanticSearchResponses = new Map<number, { body: unknown; status: number; delay: number }>();
   private readonly deviceResponses = new Map<string, { status: number; delay: number }>();
   private readonly deviceDeletionFailures = new Map<string, number>();
   private readonly accountRefreshResponses: Array<{ status: number; delay: number }> = [];
@@ -456,6 +480,24 @@ export class RivuneHarness {
   private calendarSubscriptionSequence = 0;
   private readonly calendarSubscriptions = new Map<string, { token: string; createdAt: string; rotatedAt: string }>();
   private readonly resolvedTitles = new Map<string, Record<string, unknown>>();
+  private addonIncidents = [{
+    id: "88000000-0000-4000-8000-000000000010",
+    profileId: "alice",
+    addonId: "88000000-0000-4000-8000-000000000011",
+    addonName: "Cinema Index",
+    code: "timeout" as const,
+    state: "recovering" as "open" | "recovering" | "resolved",
+    impact: "availability" as const,
+    occurrenceCount: 3,
+    firstOccurredAt: "2026-08-26T10:00:00Z",
+    lastOccurredAt: "2026-08-26T10:05:00Z",
+    lastSuccessAt: "2026-08-26T10:06:00Z",
+    recoveryStartedAt: "2026-08-26T10:06:00Z",
+    resolvedAt: null as string | null,
+    acknowledgedAt: null as string | null,
+    acknowledgedByUserId: null as string | null,
+    updatedAt: "2026-08-26T10:06:00Z",
+  }];
   private operations = {
     metadataCache: {
       entries: 48,
@@ -499,6 +541,26 @@ export class RivuneHarness {
       active: 4,
       transcoding: 2,
     },
+    semanticExtension: {
+      enabled: true,
+      warmupStatus: "ready" as const,
+      persistentStatus: "ready" as const,
+      memoryEntries: 148,
+      persistentEntries: 1_205,
+      hits: 845,
+      misses: 37,
+      coalescedWaiters: 19,
+      executions: 901,
+      successes: 867,
+      timeouts: 9,
+      failures: 5,
+      cancellations: 20,
+      busyFallbacks: 20,
+      active: 2,
+      queued: 4,
+      latencyP50Milliseconds: 18,
+      latencyP95Milliseconds: 74,
+    },
     housekeepingIntervalMinutes: 15,
   };
   private readonly metadataOperationResponses: MetadataOperationResponse[] = [];
@@ -525,6 +587,7 @@ export class RivuneHarness {
     this.authorizationScope = "category";
     this.sessionCategoryId = demoCategory.id;
     this.activeProfileId = demoProfiles[0].id;
+    this.webRefreshSessionActive = false;
     this.libraryItems = [];
     this.demoProgress.clear();
     this.demoProgress.set("episode-1", { positionSeconds: 321, durationSeconds: 1800, completed: false, version: 4 });
@@ -539,6 +602,7 @@ export class RivuneHarness {
   async configureUnpaired(page: Page) {
     this.setupRequired = false;
     this.demoAvailable = false;
+    this.webRefreshSessionActive = false;
     await page.evaluate(() => {
       localStorage.removeItem("rivune.access");
       localStorage.removeItem("rivune.refresh");
@@ -639,6 +703,10 @@ export class RivuneHarness {
   setInterfaceLanguage(language: string) {
     this.instanceSettings = { ...this.instanceSettings, interfaceLanguage: language };
   }
+  setNotificationDuration(seconds: number) {
+    this.instanceSettings = { ...this.instanceSettings, notificationDurationSeconds: seconds };
+  }
+
   setJellyfinEnabled(enabled: boolean) {
     this.instanceSettings = { ...this.instanceSettings, jellyfinEnabled: enabled };
     this.runtimeActive = { ...this.runtimeActive, jellyfinEnabled: enabled };
@@ -808,12 +876,25 @@ export class RivuneHarness {
   setSearchResponse(type: string, skip: number, body: unknown, options: { status?: number; delay?: number } = {}) {
     this.searchResponses.set(`${type}:${skip}`, { body, status: options.status ?? 200, delay: options.delay ?? 0 });
   }
+  setSemanticSearchResponse(page: number, body: unknown, options: { status?: number; delay?: number } = {}) {
+    this.semanticSearchEnabled = true;
+    this.semanticSearchResponses.set(page, { body, status: options.status ?? 200, delay: options.delay ?? 0 });
+  }
   setCatalogResponse(addonId: string, type: string, catalogId: string, skip: number, body: unknown, options: { status?: number; delay?: number } = {}) {
     this.catalogResponses.set(`${addonId}\u0000${type}\u0000${catalogId}\u0000${skip}`, { body, status: options.status ?? 200, delay: options.delay ?? 0 });
   }
 
   queueMetadataOperationResponses(...responses: MetadataOperationResponse[]) {
     this.metadataOperationResponses.push(...responses);
+  }
+
+  setReadingQueue(items: ReadingQueueFixtureItem[], revision = 1) {
+    this.readingQueueItems = items.map((item, position) => ({ ...item, position }));
+    this.readingQueueRevision = revision;
+  }
+
+  rejectNextQueueReorder() {
+    this.rejectNextReadingQueueReorder = true;
   }
 
   matching(pathname: string, method?: string) {
@@ -831,7 +912,6 @@ export class RivuneHarness {
     const profileID = this.activeProfileId;
     const profileContext = this.activeProfileContext;
     await page.evaluate(({ profileID, profileContext }) => {
-      localStorage.setItem("rivune.refresh", "fixture-refresh");
       localStorage.setItem("rivune.device", "fixture-device");
       if (profileID) sessionStorage.setItem("rivune.profile", profileID);
       if (profileID && profileContext) sessionStorage.setItem("rivune.profile.context", profileContext);
@@ -986,7 +1066,7 @@ export class RivuneHarness {
     this.requests.push({ method: request.method(), pathname: url.pathname, search: new URLSearchParams(url.search), body, profileId: profileAtRequest, authorization: request.headers().authorization ?? null, profileContext: request.headers()["x-rivune-profile-context"] ?? null });
 
     if (url.pathname === "/.well-known/rivune") {
-      await json(route, { name: "Rivune E2E", serverVersion: "1.2.3", protocolVersion: 20, apiBaseUrl: "/api/v1", setupRequired: this.setupRequired, setupCompleted: !this.setupRequired, demoAvailable: this.setupRequired && this.demoAvailable, timezone: "UTC", interfaceLanguage: typeof this.instanceSettings.interfaceLanguage === "string" ? this.instanceSettings.interfaceLanguage : "en" });
+      await json(route, { name: "Rivune E2E", serverVersion: "1.2.3", protocolVersion: 22, apiBaseUrl: "/api/v1", setupRequired: this.setupRequired, setupCompleted: !this.setupRequired, demoAvailable: this.setupRequired && this.demoAvailable, capabilities: [...(this.semanticSearchEnabled ? ["semantic-search"] : []), "addon-verifications", "playback-command-results", "profile-archives-v2", "playback-explanations"], timezone: "UTC", interfaceLanguage: typeof this.instanceSettings.interfaceLanguage === "string" ? this.instanceSettings.interfaceLanguage : "en" });
       return;
     }
     const profileContextExempt =
@@ -1089,41 +1169,61 @@ export class RivuneHarness {
       await json(route, { instance: { id: "instance-1" }, admin: { id: "user-1" }, profile: { id: "alice" } }, 201);
       return;
     }
-    if (path === "/auth/login" && request.method() === "POST") {
+    if (path === "/auth/web/login" && request.method() === "POST") {
       this.authorizationScope = "global_admin";
       this.sessionCategoryId = null;
-      await json(route, { tokenType: "Bearer", accessToken: "fixture-access", accessTokenExpiresAt: expiresAt, refreshToken: "fixture-refresh", refreshTokenExpiresAt: expiresAt, sessionId: "session-1", deviceId: "fixture-device", authorizationScope: "global_admin", category: null });
+      this.webRefreshSessionActive = true;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: { "set-cookie": "rivune_web_refresh=fixture-refresh-cookie; HttpOnly; SameSite=Strict; Path=/api/v1/auth/web/refresh" },
+        body: JSON.stringify({ tokenType: "Bearer", accessToken: "fixture-access", accessTokenExpiresAt: expiresAt, sessionId: "session-1", deviceId: "fixture-device", authorizationScope: "global_admin", category: null }),
+      });
       return;
     }
     const maintenanceSelection = path.match(/^\/profiles\/([^/]+)\/select$/);
-    const maintenanceExempt = path === "/auth/refresh" || path === "/auth/me" || path === "/auth/logout" ||
+    const maintenanceExempt = path === "/auth/web/refresh" || path === "/auth/me" || path === "/auth/logout" ||
       path === "/profiles" || path === "/profiles/selection" || maintenanceSelection !== null;
     const activeProfile = this.currentProfiles().find((profile) => profile.id === this.activeProfileId);
     if (this.maintenance.enabled && !activeProfile?.canManage && !maintenanceExempt) {
       await json(route, { error: { code: "maintenance_mode", message: "Rivune is temporarily unavailable for maintenance.", ...(this.maintenance.message ? { publicMessage: this.maintenance.message } : {}) } }, 503);
       return;
     }
-    if (path === "/auth/refresh" && request.method() === "POST") {
+    if (path === "/auth/web/refresh" && request.method() === "POST") {
+      if (!this.webRefreshSessionActive) {
+        await json(route, { error: { code: "refresh_session_not_found", message: "Refresh session not found" } }, 401);
+        return;
+      }
       const sessionCategory = this.authorizationScope === "category" && this.sessionCategoryId ? this.categoryReference(this.sessionCategoryId) : null;
-      await json(route, { tokenType: "Bearer", accessToken: "fixture-access", accessTokenExpiresAt: expiresAt, refreshToken: "fixture-refresh", refreshTokenExpiresAt: expiresAt, sessionId: "session-1", deviceId: "fixture-device", authorizationScope: this.authorizationScope, category: sessionCategory });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: { "set-cookie": "rivune_web_refresh=fixture-refresh-cookie; HttpOnly; SameSite=Strict; Path=/api/v1/auth/web/refresh" },
+        body: JSON.stringify({ tokenType: "Bearer", accessToken: "fixture-access", accessTokenExpiresAt: expiresAt, sessionId: "session-1", deviceId: "fixture-device", authorizationScope: this.authorizationScope, category: sessionCategory }),
+      });
+      return;
+    }
+    if (path === "/auth/web/refresh" && request.method() === "DELETE") {
+      this.webRefreshSessionActive = false;
+      await route.fulfill({ status: 204, headers: { "set-cookie": "rivune_web_refresh=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/api/v1/auth/web/refresh" } });
       return;
     }
     if (path === "/auth/device-code" && request.method() === "POST") {
       await json(route, this.deviceAuthorization);
       return;
     }
-    if (path === "/auth/device-code/token" && request.method() === "POST") {
+    if (path === "/auth/web/device-code/token" && request.method() === "POST") {
       if (this.deviceAuthorizationFailure) {
         await json(route, { error: { code: this.deviceAuthorizationFailure.code, message: "Device authorization failed" } }, this.deviceAuthorizationFailure.status);
         return;
       }
       const approval = this.approvedDeviceCodes.get(this.deviceAuthorization.userCode);
       if (!approval) {
-        await json(route, { error: { code: "authorization_pending", message: "Authorization is pending" } }, 428);
+        await json(route, { error: { code: "authorization_pending", message: "Device authorization is pending" } }, 428);
         return;
       }
       const approvedCategory = this.categoryReference(approval.categoryId);
-      await json(route, { tokenType: "Bearer", accessToken: "fixture-device-access", accessTokenExpiresAt: expiresAt, refreshToken: "fixture-device-refresh", refreshTokenExpiresAt: expiresAt, sessionId: "session-device-code", deviceId: this.devices.at(-1)?.id ?? DEVICE_IDS.livingRoom, authorizationScope: "category", category: approvedCategory });
+      await json(route, { tokenType: "Bearer", accessToken: "fixture-device-access", accessTokenExpiresAt: expiresAt, sessionId: "session-device-code", deviceId: this.devices.at(-1)?.id ?? DEVICE_IDS.livingRoom, authorizationScope: "category", category: approvedCategory });
       return;
     }
     if (path === "/auth/device-code/approve" && request.method() === "POST") {
@@ -1164,6 +1264,19 @@ export class RivuneHarness {
     if (path === "/settings/maintenance" && request.method() === "PUT") {
       this.maintenance = body as { enabled: boolean; message: string | null };
       await json(route, this.maintenance);
+      return;
+    }
+    if (path === "/operations/extension-incidents" && request.method() === "GET") {
+      await json(route, { incidents: this.addonIncidents });
+      return;
+    }
+    const incidentAcknowledgement = path.match(/^\/operations\/extension-incidents\/([^/]+)\/acknowledgement$/);
+    if (incidentAcknowledgement && request.method() === "POST") {
+      const incident = this.addonIncidents.find((item) => item.id === incidentAcknowledgement[1]);
+      if (!incident) { await json(route, { error: { code: "addon_incident_not_found", message: "Incident not found" } }, 404); return; }
+      incident.acknowledgedAt = "2026-08-26T10:07:00Z";
+      incident.acknowledgedByUserId = "user-1";
+      await json(route, incident);
       return;
     }
     if (path === "/operations" && request.method() === "GET") {
@@ -1507,8 +1620,9 @@ export class RivuneHarness {
         await json(route, { error: { code: "maintenance_mode", message: "Rivune is temporarily unavailable for maintenance.", ...(this.maintenance.message ? { publicMessage: this.maintenance.message } : {}) } }, 503);
         return;
       }
+      const alreadyActive = this.activeProfileId === selected.id && Boolean(this.activeProfileContext);
       this.activeProfileId = selected.id;
-      this.activeProfileContext = `fixture-profile-context-${selected.id}-${++this.profileContextSequence}`;
+      if (!alreadyActive) this.activeProfileContext = `fixture-profile-context-${selected.id}-${++this.profileContextSequence}`;
       const refreshedName = this.profileRefreshAfterSelection.get(selected.id);
       if (refreshedName) {
         this.profiles = this.profiles.map((profile) => profile.id === selected.id ? { ...profile, name: refreshedName } : profile);
@@ -1538,13 +1652,34 @@ export class RivuneHarness {
         : typeof instanceLanguage === "string" ? instanceLanguage : "en";
       const responseDelay = this.effectiveSettingsDelays.shift() ?? 0;
       if (responseDelay > 0) await wait(responseDelay);
-      await json(route, { schemaVersion: 1, settings: { interfaceLanguage, allowTranscoding, transcoding, maximumCastMembers, maximumDirectTitles, autoplayNextEpisode: true, animationsEnabled: false, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds, metadataLanguage: "en-US", metadataRegion: "US", audioLanguage: "en", subtitleLanguage: "en" }, sources: { interfaceLanguage: typeof profileLanguage === "string" ? "profile" : typeof instanceLanguage === "string" ? "instance" : "default", allowTranscoding: instanceAllowsTranscoding ? transcoding === "disabled" ? "profile" : "instance" : "instance", transcoding: "profile", maximumCastMembers: typeof profileValues.maximumCastMembers === "number" ? "profile" : "instance", maximumDirectTitles: typeof profileValues.maximumDirectTitles === "number" ? "profile" : "instance", notificationsEnabled: notificationSource("notificationsEnabled"), notificationDurationSeconds: notificationSource("notificationDurationSeconds"), notificationPollIntervalSeconds: notificationSource("notificationPollIntervalSeconds") } });
+      await json(route, { schemaVersion: 1, settings: { interfaceLanguage, allowTranscoding, transcoding, maximumCastMembers, maximumDirectTitles, autoplayNextEpisode: true, animationsEnabled: false, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds, metadataLanguage: "en-US", metadataRegion: "US", audioLanguage: "en", subtitleLanguage: "en" }, sources: { interfaceLanguage: typeof profileLanguage === "string" ? "profile" : typeof instanceLanguage === "string" ? "instance" : "default", allowTranscoding: instanceAllowsTranscoding ? transcoding === "disabled" ? "profile" : "instance" : "instance", transcoding: "profile", maximumCastMembers: typeof profileValues.maximumCastMembers === "number" ? "profile" : "instance", maximumDirectTitles: typeof profileValues.maximumDirectTitles === "number" ? "profile" : "instance", autoplayNextEpisode: "default", animationsEnabled: "default", notificationsEnabled: notificationSource("notificationsEnabled"), notificationDurationSeconds: notificationSource("notificationDurationSeconds"), notificationPollIntervalSeconds: notificationSource("notificationPollIntervalSeconds"), metadataLanguage: "default", metadataRegion: "default", audioLanguage: "default", subtitleLanguage: "default" } });
       return;
     }
     if (path === "/auth/notifications") { await json(route, { notifications: [] }); return; }
     if (path === "/auth/notifications/broadcast" && request.method() === "POST") {
       const input = body as { idempotencyKey: string; message: string };
       await json(route, { id: input.idempotencyKey, message: input.message, senderUsername: "fixture-owner", recipientCount: 3, createdAt }, 201);
+      return;
+    }
+    const accessibilityPreferences = path.match(/^\/profiles\/([^/]+)\/accessibility-preferences$/);
+    if (accessibilityPreferences && request.method() === "GET") {
+      await json(route, { revision: 0, reducedMotion: "system", highContrast: "system", textScale: 100, captions: "system", audioDescription: false, focusIndicators: "standard" });
+      return;
+    }
+    if (path === "/saved-searches" && request.method() === "GET") {
+      await json(route, { savedSearches: this.savedSearches });
+      return;
+    }
+    if (path === "/smart-collections" && request.method() === "GET") {
+      await json(route, { smartCollections: this.smartCollections });
+      return;
+    }
+    if (path === "/media-notification-subscriptions" && request.method() === "GET") {
+      await json(route, { subscriptions: [] });
+      return;
+    }
+    if (path === "/media-notifications" && request.method() === "GET") {
+      await json(route, { notifications: [], nextCursor: null });
       return;
     }
     const collectionManagement = path.match(/^\/collections\/([^/]+)\/management$/);
@@ -1648,6 +1783,13 @@ export class RivuneHarness {
       await route.fulfill({ status: 200, contentType: "image/svg+xml", body: svg });
       return;
     }
+    if (path === "/search/semantic" && request.method() === "POST") {
+      const page = body && typeof body === "object" && "page" in body && typeof body.page === "number" ? body.page : 1;
+      const configured = this.semanticSearchResponses.get(page);
+      if (configured?.delay) await wait(configured.delay);
+      await json(route, configured?.body ?? { error: { code: "not_found", message: "Semantic search is unavailable" } }, configured?.status ?? 404);
+      return;
+    }
     const catalogSearch = path.match(/^\/addons\/catalogs\/search\/([^/]+)$/);
     if (catalogSearch && request.method() === "GET") {
       const type = decodeURIComponent(catalogSearch[1]);
@@ -1694,6 +1836,52 @@ export class RivuneHarness {
       await json(route, { items });
       return;
     }
+    const readingQueue = path.match(/^\/profiles\/([^/]+)\/queue$/);
+    if (readingQueue && request.method() === "GET") {
+      await json(route, { revision: this.readingQueueRevision, items: this.readingQueueItems });
+      return;
+    }
+    if (path.match(/^\/profiles\/[^/]+\/queue\/items$/) && request.method() === "POST") {
+      const input = body as Omit<ReadingQueueFixtureItem, "id" | "position" | "createdAt" | "updatedAt">;
+      const id = `fixture-queue-${this.readingQueueItems.length + 1}`;
+      this.readingQueueItems.push({ ...input, id, position: this.readingQueueItems.length, createdAt, updatedAt: createdAt });
+      this.readingQueueRevision++;
+      await json(route, { revision: this.readingQueueRevision, affectedItemId: id }, 201);
+      return;
+    }
+
+    if (path.match(/^\/profiles\/[^/]+\/queue\/order$/) && request.method() === "PUT") {
+      if (this.rejectNextReadingQueueReorder) {
+        this.rejectNextReadingQueueReorder = false;
+        this.readingQueueRevision++;
+        this.readingQueueItems = [...this.readingQueueItems].reverse().map((item, position) => ({ ...item, position }));
+        await json(route, { error: { code: "reading_queue_conflict", message: "stale" } }, 409);
+        return;
+      }
+      const itemIds = body && typeof body === "object" && "itemIds" in body && Array.isArray(body.itemIds) ? body.itemIds : [];
+      this.readingQueueItems = itemIds.flatMap((id, position) => {
+        const item = this.readingQueueItems.find((candidate) => candidate.id === id);
+        return item ? [{ ...item, position }] : [];
+      });
+      this.readingQueueRevision++;
+      await json(route, { revision: this.readingQueueRevision });
+      return;
+    }
+    const readingQueueItem = path.match(/^\/profiles\/[^/]+\/queue\/items\/([^/]+)$/);
+    if (readingQueueItem && request.method() === "DELETE") {
+      this.readingQueueItems = this.readingQueueItems.filter((item) => item.id !== readingQueueItem[1]).map((item, position) => ({ ...item, position }));
+      this.readingQueueRevision++;
+      await json(route, { revision: this.readingQueueRevision, affectedItemId: readingQueueItem[1] });
+      return;
+    }
+    const readingQueueConsume = path.match(/^\/profiles\/[^/]+\/queue\/items\/([^/]+)\/consume$/);
+    if (readingQueueConsume && request.method() === "POST") {
+      this.readingQueueItems = this.readingQueueItems.filter((item) => item.id !== readingQueueConsume[1]).map((item, position) => ({ ...item, position }));
+      this.readingQueueRevision++;
+      await json(route, { revision: this.readingQueueRevision, affectedItemId: readingQueueConsume[1] });
+      return;
+    }
+
     if (path === "/library") {
       const mediaType = url.searchParams.get("mediaType");
       const items = mediaType ? this.libraryItems.filter((item) => item.mediaType === mediaType) : this.libraryItems;
@@ -1849,8 +2037,12 @@ export class RivuneHarness {
     if (/^\/playback\/sessions\/[^/]+\/assets\/master\.m3u8$/.test(path) && request.method() === "GET") {
       await route.fulfill({
         contentType: "application/vnd.apple.mpegurl",
-        body: "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-ENDLIST\n",
+        body: "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1,\nsegment.ts\n#EXT-X-ENDLIST\n",
       });
+      return;
+    }
+    if (/^\/playback\/sessions\/[^/]+\/assets\/segment\.ts$/.test(path) && request.method() === "GET") {
+      await route.fulfill({ contentType: "video/mp2t", body: seekableSegment });
       return;
     }
     if (/^\/playback\/sessions\//.test(path) && request.method() === "DELETE") {
@@ -1964,6 +2156,49 @@ export class RivuneHarness {
       await json(route, resolved);
       return;
     }
+    if (path === "/playback/device" && request.method() === "PUT") {
+      const heartbeatState = body && typeof body === "object" && "state" in body ? body.state : { status: "idle", positionMilliseconds: 0, durationMilliseconds: 0, updatedAt: createdAt };
+      const status = heartbeatState && typeof heartbeatState === "object" && "status" in heartbeatState ? heartbeatState.status : undefined;
+      if (status !== "idle" && status !== "playing" && status !== "paused" && status !== "ended") {
+        await json(route, { error: { code: "validation_failed", message: "Invalid playback device state" } }, 422);
+        return;
+      }
+      await json(route, { sessionId: "fixture-current-session", deviceId: "fixture-device", name: "Fixture browser", platform: "web", capabilities: ["playback", "remote-control", "load"], state: heartbeatState, revision: 1, current: true, lastSeenAt: createdAt });
+      return;
+    }
+    if (path === "/playback/devices" && request.method() === "GET") {
+      await json(route, { devices: [{ sessionId: "fixture-current-session", deviceId: "fixture-device", name: "Fixture browser", platform: "web", capabilities: ["playback", "remote-control", "load"], state: { status: "idle", positionMilliseconds: 0, durationMilliseconds: 0, updatedAt: createdAt }, revision: 1, current: true, lastSeenAt: createdAt }] });
+      return;
+    }
+    if (path === "/playback/commands" && request.method() === "GET") {
+      await json(route, { commands: [] });
+      return;
+    }
+    if (path === "/playback/failovers" && request.method() === "POST") {
+      const input = body as { candidateSourceRefs?: string[]; selectedSourceRef?: string; maximumAttempts?: number };
+      const candidates = input.candidateSourceRefs ?? [];
+      const currentPosition = Math.max(0, candidates.indexOf(input.selectedSourceRef ?? ""));
+      const id = `fixture-failover-${++this.playbackFailoverSequence}`;
+      const state = { id, currentSourceRef: candidates[currentPosition] ?? input.selectedSourceRef ?? "", currentPosition, positionSeconds: 0, attemptCount: 0, maximumAttempts: input.maximumAttempts ?? Math.max(0, candidates.length - 1), revision: 1, status: "active" as const, candidateSourceRefs: candidates, expiresAt };
+      this.playbackFailovers.set(id, state);
+      await json(route, { ...state, candidateHealth: candidates.map((_, position) => ({ position, status: position === currentPosition ? "current" : "available" })) }, 201);
+      return;
+    }
+    const playbackFailover = path.match(/^\/playback\/failovers\/([^/]+)$/);
+    if (playbackFailover && request.method() === "GET") {
+      const state = this.playbackFailovers.get(playbackFailover[1]);
+      if (!state) { await json(route, { error: { code: "playback_failover_not_found", message: "Failover not found" } }, 404); return; }
+      await json(route, { ...state, candidateHealth: state.candidateSourceRefs.map((_, position) => ({ position, status: position === state.currentPosition ? "current" : "available" })) });
+      return;
+    }
+    if (playbackFailover && request.method() === "DELETE") {
+      const state = this.playbackFailovers.get(playbackFailover[1]);
+      if (state) this.playbackFailovers.set(state.id, { ...state, status: "cancelled", revision: state.revision + 1 });
+      await route.fulfill({ status: 204 });
+      return;
+    }
+
+
     await json(route, { error: { code: "fixture_route_missing", message: `No E2E fixture for ${request.method()} ${path}` } }, 501);
   }
 }

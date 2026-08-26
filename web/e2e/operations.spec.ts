@@ -1,6 +1,67 @@
 import { expect, test } from "./fixtures/rivune";
 import { selectOption } from "./helpers/select";
 
+const semanticOperationLocales = [
+  {
+    language: "de",
+    operations: "Betrieb",
+    serviceHealth: "Dienstzustand",
+    classifierTitle: "Semantischer Klassifikator",
+    cacheTitle: "Semantischer Zwischenspeicher und Leistung",
+    enabled: "Erweiterung aktiviert",
+    enabledStatus: "Aktiviert",
+    warmup: "Vorwärmung",
+    persistence: "Persistenz",
+    executions: "Ausführungen",
+    hits: "Treffer",
+    ready: "Bereit",
+  },
+  {
+    language: "es",
+    operations: "Operaciones",
+    serviceHealth: "Estado de los servicios",
+    classifierTitle: "Clasificador semántico",
+    cacheTitle: "Caché y rendimiento semánticos",
+    enabled: "Extensión activada",
+    enabledStatus: "Activado",
+    warmup: "Precalentamiento",
+    persistence: "Persistencia",
+    executions: "Ejecuciones",
+    hits: "Aciertos",
+    ready: "Listo",
+  },
+  {
+    language: "it",
+    operations: "Operazioni",
+    serviceHealth: "Stato dei servizi",
+    classifierTitle: "Classificatore semantico",
+    cacheTitle: "Cache e prestazioni semantiche",
+    enabled: "Estensione attivata",
+    enabledStatus: "Attivato",
+    warmup: "Preriscaldamento",
+    persistence: "Persistenza",
+    executions: "Esecuzioni",
+    hits: "Elementi trovati in cache",
+    ready: "Pronto",
+  },
+  {
+    language: "pt-BR",
+    operations: "Operações",
+    serviceHealth: "Integridade dos serviços",
+    classifierTitle: "Classificador semântico",
+    cacheTitle: "Cache e desempenho semânticos",
+    enabled: "Extensão ativada",
+    enabledStatus: "Ativado",
+    warmup: "Pré-aquecimento",
+    persistence: "Persistência",
+    executions: "Execuções",
+    hits: "Acertos",
+    ready: "Pronto",
+  },
+] as const;
+
+const englishSemanticFallback = /\b(?:Semantic classifier|Semantic cache and performance|Extension enabled|Warmup|Persistence|Active|Queued|Executions|Successes|Timeouts|Failures|Cancellations|Busy fallbacks|Memory entries|Persistent entries|Hits|Misses|Coalesced waiters|p50 latency|p95 latency|Enabled|Disabled|Pending|Ready|Failed)\b/i;
+
 test("Operations resource health follows the selected locale", async ({ page, rivune }) => {
   rivune.setInterfaceLanguage("fr");
   await page.goto("/#admin");
@@ -14,12 +75,65 @@ test("Operations resource health follows the selected locale", async ({ page, ri
   await expect(serviceHealth).toContainText("Transcodage");
   await expect(serviceHealth).not.toContainText("Service health");
   await expect(serviceHealth).not.toContainText("Tracking outbox");
+  const semanticClassifier = serviceHealth.locator(".operation-aggregate").filter({ has: page.getByRole("heading", { name: "Classifieur sémantique" }) });
+  await expect(semanticClassifier.locator("dt")).toHaveText(["Extension activée", "Préchauffage", "Persistance", "Actives", "En file d’attente", "Exécutions", "Réussites", "Délais dépassés", "Échecs", "Annulations", "Replis pour saturation"]);
+  await expect(semanticClassifier.locator("dd").nth(0)).toHaveText("Activé");
+  await expect(semanticClassifier.locator("dd").nth(1)).toHaveText("Prêt");
+  await expect(semanticClassifier.locator("dd").nth(2)).toHaveText("Prêt");
+  const semanticCache = serviceHealth.locator(".operation-aggregate").filter({ has: page.getByRole("heading", { name: "Cache et performances sémantiques" }) });
+  await expect(semanticCache.locator("dt")).toHaveText(["Entrées en mémoire", "Entrées persistantes", "Résultats en cache", "Absences du cache", "Attentes regroupées", "Latence p50", "Latence p95"]);
+  await expect(semanticClassifier).not.toContainText(/\b(request|model|key|digest|error|requête|modèle|clé|empreinte|erreur)\b/i);
+  await expect(semanticCache).not.toContainText(/\b(request|model|key|digest|error|requête|modèle|clé|empreinte|erreur)\b/i);
 });
+
+for (const locale of semanticOperationLocales) {
+  test(`Semantic Operations metrics are localized in ${locale.language}`, async ({ page, rivune }) => {
+    rivune.setInterfaceLanguage(locale.language);
+    await page.goto("/#admin");
+    await expect(page.locator("html")).toHaveAttribute("lang", locale.language);
+    await page.getByRole("button", { name: locale.operations }).click();
+
+    const serviceHealth = page.getByRole("region", { name: locale.serviceHealth });
+    const semanticClassifier = serviceHealth.locator(".operation-aggregate").filter({ has: page.getByRole("heading", { name: locale.classifierTitle }) });
+    const semanticCache = serviceHealth.locator(".operation-aggregate").filter({ has: page.getByRole("heading", { name: locale.cacheTitle }) });
+    await expect(semanticClassifier.getByRole("heading")).toHaveText(locale.classifierTitle);
+    await expect(semanticCache.getByRole("heading")).toHaveText(locale.cacheTitle);
+    await expect(semanticClassifier.locator("dl > div").filter({ hasText: locale.enabled })).toHaveText(`${locale.enabled}${locale.enabledStatus}`);
+    await expect(semanticClassifier.locator("dl > div").filter({ hasText: locale.warmup })).toHaveText(`${locale.warmup}${locale.ready}`);
+    await expect(semanticClassifier.locator("dl > div").filter({ hasText: locale.persistence })).toHaveText(`${locale.persistence}${locale.ready}`);
+    await expect(semanticClassifier.locator("dl > div").filter({ hasText: locale.executions })).toHaveText(`${locale.executions}901`);
+    await expect(semanticCache.locator("dl > div").filter({ hasText: locale.hits })).toHaveText(`${locale.hits}845`);
+    await expect(semanticClassifier).not.toContainText(englishSemanticFallback);
+    await expect(semanticCache).not.toContainText(englishSemanticFallback);
+  });
+}
 
 test("administrator monitors operations and runs fixed maintenance controls", async ({ page, rivune }) => {
   await page.setViewportSize({ width: 1568, height: 1000 });
+  const operationsResponse = page.waitForResponse((response) => response.request().method() === "GET" && new URL(response.url()).pathname === "/api/v1/operations");
   await page.goto("/#admin");
   await page.getByRole("button", { name: /Operations/ }).click();
+  const operationsPayload = await (await operationsResponse).json() as { semanticExtension: Record<string, unknown> };
+  expect(Object.keys(operationsPayload.semanticExtension).sort()).toEqual([
+    "active",
+    "busyFallbacks",
+    "coalescedWaiters",
+    "enabled",
+    "executions",
+    "failures",
+    "cancellations",
+    "hits",
+    "latencyP50Milliseconds",
+    "latencyP95Milliseconds",
+    "memoryEntries",
+    "misses",
+    "persistentEntries",
+    "persistentStatus",
+    "queued",
+    "successes",
+    "timeouts",
+    "warmupStatus",
+  ].sort());
 
   await expect(page.getByRole("heading", { name: "Metadata health" })).toBeVisible();
   const metadataMetrics = page.getByLabel("Metadata cache metrics");
@@ -39,6 +153,12 @@ test("administrator monitors operations and runs fixed maintenance controls", as
   await expect(addonAggregate.locator("dl > div").nth(2)).toHaveText(/Latest update age.*\d/);
   const playbackAggregate = serviceHealth.locator(".operation-aggregate").filter({ has: page.getByRole("heading", { name: "Playback", exact: true }) });
   await expect(playbackAggregate.locator("dl > div")).toHaveText(["Active4", "Transcoding2"]);
+  const semanticClassifierAggregate = serviceHealth.locator(".operation-aggregate").filter({ has: page.getByRole("heading", { name: "Semantic classifier" }) });
+  await expect(semanticClassifierAggregate.locator("dl > div")).toHaveText(["Extension enabledEnabled", "WarmupReady", "PersistenceReady", "Active2", "Queued4", "Executions901", "Successes867", "Timeouts9", "Failures5", "Cancellations20", "Busy fallbacks20"]);
+  const semanticCacheAggregate = serviceHealth.locator(".operation-aggregate").filter({ has: page.getByRole("heading", { name: "Semantic cache and performance" }) });
+  await expect(semanticCacheAggregate.locator("dl > div")).toHaveText(["Memory entries148", "Persistent entries1,205", "Hits845", "Misses37", "Coalesced waiters19", "p50 latency18 ms", "p95 latency74 ms"]);
+  await expect(semanticClassifierAggregate).not.toContainText(/\b(request|model|key|digest|error)\b/i);
+  await expect(semanticCacheAggregate).not.toContainText(/\b(request|model|key|digest|error)\b/i);
 
   const notifications = page.getByRole("region", { name: "Device notifications" });
   await expect(notifications).toBeVisible();
@@ -65,7 +185,7 @@ test("administrator monitors operations and runs fixed maintenance controls", as
   await expect(page.getByText("The metadata refresh schedule was updated.")).toBeVisible();
 
   const overviewRequests = rivune.matching("/api/v1/operations", "GET").length;
-  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await page.getByRole("button", { name: "Refresh Operations", exact: true }).click();
   await expect.poll(() => rivune.matching("/api/v1/operations", "GET").length).toBeGreaterThan(overviewRequests);
   await expect(page.getByLabel("Run scheduled refreshes")).toBeChecked();
   await expect(page.getByLabel("Refresh interval")).toHaveAttribute("data-value", "12");

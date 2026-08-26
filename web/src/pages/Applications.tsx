@@ -496,7 +496,7 @@ function TVInstallerGuide({ release }: { release: Release }) {
 }
 
 export function ApplicationsPage() {
-  const [activeLocale, setActiveLocale] = useState<Locale>(locale === "fr" || locale === "fr-CA" ? "fr" : "en");
+  const [activeLocale, setActiveLocale] = useState<Locale>(locale === "fr" ? "fr" : "en");
   const [release, setRelease] = useState<Release | null>(null);
   const [recommendation, setRecommendation] = useState<DeviceRecommendation>({ labelKey: "applications.device.detecting", assets: [] });
   const [failure, setFailure] = useState(false);
@@ -538,7 +538,7 @@ export function ApplicationsPage() {
 
   async function changeLocale(nextLocale: Locale) {
     const loadedLocale = await setLocale(nextLocale);
-    const publicLocale = loadedLocale === "fr" || loadedLocale === "fr-CA" ? "fr" : "en";
+    const publicLocale = loadedLocale === "fr" ? "fr" : "en";
     const url = new URL(window.location.href);
     url.searchParams.set("lang", publicLocale);
     window.history.replaceState(null, "", url);
