@@ -85,6 +85,7 @@ func (s *Service) Heartbeat(ctx context.Context, principal auth.Principal, input
 		SET profile_id = EXCLUDED.profile_id,
 		    capabilities = EXCLUDED.capabilities,
 		    playback_state = EXCLUDED.playback_state,
+		    revision = playback_device_presence.revision + 1,
 		    last_seen_at = EXCLUDED.last_seen_at,
 		    updated_at = EXCLUDED.updated_at
 	`, principal.SessionID, profileID, input.Capabilities, stateJSON, now); err != nil {
@@ -92,7 +93,7 @@ func (s *Service) Heartbeat(ctx context.Context, principal auth.Principal, input
 	}
 	device, err := scanDevice(tx.QueryRow(ctx, `
 		SELECT session.id::text, device.id::text, device.name, device.platform,
-		       presence.capabilities, presence.playback_state, true, presence.last_seen_at
+		       presence.capabilities, presence.playback_state, presence.revision, true, presence.last_seen_at
 		FROM playback_device_presence presence
 		JOIN auth_sessions session ON session.id = presence.auth_session_id
 		JOIN devices device ON device.id = session.device_id
@@ -115,7 +116,7 @@ func (s *Service) Devices(ctx context.Context, principal auth.Principal) (Device
 	defer func() { _ = tx.Rollback(ctx) }()
 	rows, err := tx.Query(ctx, `
 		SELECT session.id::text, device.id::text, device.name, device.platform,
-		       presence.capabilities, presence.playback_state,
+		       presence.capabilities, presence.playback_state, presence.revision,
 		       session.id = $1::uuid, presence.last_seen_at
 		FROM playback_device_presence presence
 		JOIN auth_sessions session ON session.id = presence.auth_session_id
@@ -167,12 +168,9 @@ func (s *Service) Devices(ctx context.Context, principal auth.Principal) (Device
 }
 
 func (s *Service) SendCommand(ctx context.Context, principal auth.Principal, targetSessionID string, input CommandInput) (Command, error) {
-	targetSessionID = strings.TrimSpace(targetSessionID)
+	targetSessionID = strings.ToLower(strings.TrimSpace(targetSessionID))
 	input, err := s.normalizeCommand(input)
 	if err != nil || !uuidPattern.MatchString(targetSessionID) {
-		if err != nil {
-			return Command{}, err
-		}
 		return Command{}, ErrInvalidInput
 	}
 	tx, profileID, err := s.beginAuthorizedProfileTx(ctx, principal)
@@ -191,62 +189,81 @@ func (s *Service) SendCommand(ctx context.Context, principal auth.Principal, tar
 	if err != nil {
 		return Command{}, fmt.Errorf("encode playback command: %w", err)
 	}
+	existing, found, err := queryCommandByOperation(ctx, tx, principal.SessionID, input.OperationID, true)
+	if err != nil {
+		return Command{}, err
+	}
+	if found {
+		if existing.targetSessionID != targetSessionID || !sameCommandInput(existing.input, input) {
+			return Command{}, ErrConflict
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return Command{}, fmt.Errorf("commit playback command replay: %w", err)
+		}
+		return existing.command, nil
+	}
 	var senderName string
+	var targetRevision int64
 	if err := tx.QueryRow(ctx, `
-        SELECT sender_device.name
-        FROM auth_sessions session
-		JOIN devices device ON device.id = session.device_id
+		SELECT sender_device.name, presence.revision
+		FROM auth_sessions session
 		JOIN playback_device_presence presence ON presence.auth_session_id = session.id
-        JOIN auth_sessions sender ON sender.id = $2::uuid
-        JOIN devices sender_device ON sender_device.id = sender.device_id
-		WHERE session.id = $1::uuid
-		  AND session.id <> $2::uuid
-		  AND session.user_id = $3::uuid
-		  AND session.active_profile_id = $4::uuid
-		  AND session.revoked_at IS NULL
-		  AND session.refresh_expires_at > now()
-		  AND session.profile_grant_expires_at > now()
-		  AND presence.profile_id = $4::uuid
+		JOIN auth_sessions sender ON sender.id = $2::uuid
+		JOIN devices sender_device ON sender_device.id = sender.device_id
+		WHERE session.id = $1::uuid AND session.id <> $2::uuid
+		  AND session.user_id = $3::uuid AND session.active_profile_id = $4::uuid
+		  AND session.revoked_at IS NULL AND session.refresh_expires_at > now()
+		  AND session.profile_grant_expires_at > now() AND presence.profile_id = $4::uuid
 		  AND presence.last_seen_at > now() - $5::interval
 		  AND 'remote-control' = ANY(presence.capabilities)
 		FOR UPDATE OF presence
-    `, targetSessionID, principal.SessionID, principal.UserID, profileID, intervalLiteral(presenceTTL)).Scan(&senderName); errors.Is(err, pgx.ErrNoRows) {
+	`, targetSessionID, principal.SessionID, principal.UserID, profileID, intervalLiteral(presenceTTL)).Scan(&senderName, &targetRevision); errors.Is(err, pgx.ErrNoRows) {
 		return Command{}, ErrNotFound
 	} else if err != nil {
 		return Command{}, fmt.Errorf("authorize playback command target: %w", err)
 	}
+	if input.TargetRevision != nil && *input.TargetRevision != targetRevision {
+		return Command{}, ErrConflict
+	}
 	var pending int
-	if err := tx.QueryRow(ctx, `
-		SELECT count(*) FROM playback_commands
-		WHERE target_session_id = $1::uuid AND acknowledged_at IS NULL AND expires_at > now()
-	`, targetSessionID).Scan(&pending); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM playback_commands WHERE target_session_id=$1::uuid AND result_status IS NULL AND expires_at>now()`, targetSessionID).Scan(&pending); err != nil {
 		return Command{}, fmt.Errorf("count pending playback commands: %w", err)
 	}
 	if pending >= maximumPendingCommands {
 		return Command{}, ErrCapacity
 	}
 	now := s.now()
-	var command Command
+	command := Command{
+		OperationID: input.OperationID, Command: input.Command, Mode: input.Mode, TargetRevision: input.TargetRevision,
+		Item: input.Item, PositionMilliseconds: input.PositionMilliseconds, SenderDeviceName: senderName,
+		Status: "pending", CreatedAt: now, ExpiresAt: now.Add(commandTTL),
+	}
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO playback_commands (target_session_id, sender_session_id, profile_id, command, payload, created_at, expires_at)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5::jsonb, $6, $7)
-		RETURNING id, command, created_at, expires_at
-	`, targetSessionID, principal.SessionID, profileID, input.Command, payload, now, now.Add(commandTTL)).Scan(
-		&command.ID, &command.Command, &command.CreatedAt, &command.ExpiresAt,
-	); err != nil {
+		INSERT INTO playback_commands (operation_id,target_session_id,sender_session_id,profile_id,command,payload,target_revision,created_at,expires_at)
+		VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6::jsonb,$7,$8,$9)
+		ON CONFLICT (sender_session_id,operation_id) DO NOTHING
+		RETURNING created_at,expires_at
+	`, input.OperationID, targetSessionID, principal.SessionID, profileID, input.Command, payload, input.TargetRevision, command.CreatedAt, command.ExpiresAt).Scan(&command.CreatedAt, &command.ExpiresAt); errors.Is(err, pgx.ErrNoRows) {
+		replayed, replayFound, replayErr := queryCommandByOperation(ctx, tx, principal.SessionID, input.OperationID, true)
+		if replayErr != nil {
+			return Command{}, replayErr
+		}
+		if !replayFound || replayed.targetSessionID != targetSessionID || !sameCommandInput(replayed.input, input) {
+			return Command{}, ErrConflict
+		}
+		command = replayed.command
+	} else if err != nil {
 		return Command{}, fmt.Errorf("store playback command: %w", err)
 	}
-	command.Item = input.Item
-	command.PositionMilliseconds = input.PositionMilliseconds
-	command.SenderDeviceName = senderName
 	if err := tx.Commit(ctx); err != nil {
 		return Command{}, fmt.Errorf("commit playback command: %w", err)
 	}
 	return command, nil
 }
 
-func (s *Service) Commands(ctx context.Context, principal auth.Principal, afterID int64) (CommandList, error) {
-	if afterID < 0 {
+func (s *Service) Commands(ctx context.Context, principal auth.Principal, afterOperationID string) (CommandList, error) {
+	afterOperationID = strings.ToLower(strings.TrimSpace(afterOperationID))
+	if afterOperationID != "" && !uuidPattern.MatchString(afterOperationID) {
 		return CommandList{}, ErrInvalidInput
 	}
 	tx, profileID, err := s.beginAuthorizedProfileTx(ctx, principal)
@@ -255,86 +272,200 @@ func (s *Service) Commands(ctx context.Context, principal auth.Principal, afterI
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	rows, err := tx.Query(ctx, `
-		SELECT command.id, command.command, command.payload, sender_device.name,
-		       command.created_at, command.expires_at
+		SELECT command.operation_id::text,command.command,command.payload,sender_device.name,
+		       command.result_status,command.result_code,command.created_at,command.expires_at,command.target_session_id::text
 		FROM playback_commands command
-		JOIN auth_sessions sender ON sender.id = command.sender_session_id
-		JOIN devices sender_device ON sender_device.id = sender.device_id
-		WHERE command.target_session_id = $1::uuid
-		  AND command.profile_id = $2::uuid
-		  AND command.id > $3
-		  AND command.acknowledged_at IS NULL
-		  AND command.expires_at > now()
-		ORDER BY command.id
-		LIMIT 100
-	`, principal.SessionID, profileID, afterID)
+		JOIN auth_sessions sender ON sender.id=command.sender_session_id
+		JOIN devices sender_device ON sender_device.id=sender.device_id
+		WHERE command.target_session_id=$1::uuid AND command.profile_id=$2::uuid
+		  AND command.result_status IS NULL AND command.expires_at>now()
+		  AND ($3='' OR EXISTS (
+		      SELECT 1 FROM playback_commands cursor
+		      WHERE cursor.target_session_id=$1::uuid AND cursor.operation_id=$3::uuid
+		        AND (command.created_at,command.operation_id)>(cursor.created_at,cursor.operation_id)))
+		ORDER BY command.created_at,command.operation_id LIMIT 100
+	`, principal.SessionID, profileID, afterOperationID)
 	if err != nil {
 		return CommandList{}, fmt.Errorf("query playback commands: %w", err)
 	}
 	defer rows.Close()
-	commands := make([]Command, 0)
+	storedCommands := make([]storedCommand, 0)
 	for rows.Next() {
-		var command Command
-		var payload []byte
-		if err := rows.Scan(&command.ID, &command.Command, &payload, &command.SenderDeviceName, &command.CreatedAt, &command.ExpiresAt); err != nil {
-			return CommandList{}, fmt.Errorf("scan playback command: %w", err)
+		stored, scanErr := scanStoredCommand(rows)
+		if scanErr != nil {
+			return CommandList{}, scanErr
 		}
-		var input CommandInput
-		if err := json.Unmarshal(payload, &input); err != nil || input.Command != command.Command {
-			return CommandList{}, fmt.Errorf("decode playback command %d", command.ID)
-		}
-		command.Item = input.Item
-		command.PositionMilliseconds = input.PositionMilliseconds
-		commands = append(commands, command)
+		storedCommands = append(storedCommands, stored)
 	}
 	if err := rows.Err(); err != nil {
 		return CommandList{}, fmt.Errorf("iterate playback commands: %w", err)
 	}
 	rows.Close()
-	visibleCommands := commands[:0]
-	for index := range commands {
-		if commands[index].Item != nil {
-			item, itemErr := s.canonicalItemTx(ctx, tx, profileID, *commands[index].Item)
+	commands := make([]Command, 0, len(storedCommands))
+	for _, stored := range storedCommands {
+		if stored.command.Item != nil {
+			item, itemErr := s.canonicalItemTx(ctx, tx, profileID, *stored.command.Item)
 			if errors.Is(itemErr, ErrNotFound) {
 				continue
 			}
 			if itemErr != nil {
 				return CommandList{}, itemErr
 			}
-			commands[index].Item = &item
+			stored.command.Item = &item
 		}
-		visibleCommands = append(visibleCommands, commands[index])
+		commands = append(commands, stored.command)
 	}
-	commands = visibleCommands
 	if err := tx.Commit(ctx); err != nil {
 		return CommandList{}, fmt.Errorf("commit playback commands read: %w", err)
 	}
 	return CommandList{Commands: commands}, nil
 }
 
-func (s *Service) AcknowledgeCommand(ctx context.Context, principal auth.Principal, commandID int64) error {
-	if commandID <= 0 {
-		return ErrInvalidInput
+func (s *Service) CompleteCommand(ctx context.Context, principal auth.Principal, operationID string, input CommandResultInput) (Command, error) {
+	operationID = strings.ToLower(strings.TrimSpace(operationID))
+	input.Status = strings.ToLower(strings.TrimSpace(input.Status))
+	input.Code = strings.ToLower(strings.TrimSpace(input.Code))
+	if !uuidPattern.MatchString(operationID) || !validCommandResult(input) {
+		return Command{}, ErrInvalidInput
 	}
 	tx, profileID, err := s.beginAuthorizedProfileTx(ctx, principal)
 	if err != nil {
-		return err
+		return Command{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	result, err := tx.Exec(ctx, `
-		UPDATE playback_commands SET acknowledged_at = COALESCE(acknowledged_at, now())
-		WHERE id = $1 AND target_session_id = $2::uuid AND profile_id = $3::uuid AND expires_at > now()
-	`, commandID, principal.SessionID, profileID)
-	if err != nil {
-		return fmt.Errorf("acknowledge playback command: %w", err)
+	var currentStatus, currentCode *string
+	var expiresAt time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT result_status,result_code,expires_at FROM playback_commands
+		WHERE operation_id=$1::uuid AND target_session_id=$2::uuid AND profile_id=$3::uuid FOR UPDATE
+	`, operationID, principal.SessionID, profileID).Scan(&currentStatus, &currentCode, &expiresAt); errors.Is(err, pgx.ErrNoRows) {
+		return Command{}, ErrNotFound
+	} else if err != nil {
+		return Command{}, fmt.Errorf("lock playback command result: %w", err)
 	}
-	if result.RowsAffected() == 0 {
-		return ErrNotFound
+	status, code := input.Status, input.Code
+	if !expiresAt.After(s.now()) {
+		status, code = "expired", "expired"
+	}
+	if currentStatus != nil {
+		if *currentStatus != status || currentCode == nil || *currentCode != code {
+			return Command{}, ErrConflict
+		}
+	} else if _, err := tx.Exec(ctx, `UPDATE playback_commands SET result_status=$4,result_code=$5,completed_at=$6 WHERE operation_id=$1::uuid AND target_session_id=$2::uuid AND profile_id=$3::uuid`, operationID, principal.SessionID, profileID, status, code, s.now()); err != nil {
+		return Command{}, fmt.Errorf("store playback command result: %w", err)
+	}
+	stored, found, err := queryCommandByOperation(ctx, tx, principal.SessionID, operationID, false)
+	if err != nil {
+		return Command{}, err
+	}
+	if !found {
+		return Command{}, ErrNotFound
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit playback command acknowledgement: %w", err)
+		return Command{}, fmt.Errorf("commit playback command result: %w", err)
 	}
-	return nil
+	return stored.command, nil
+}
+
+func (s *Service) OutgoingCommand(ctx context.Context, principal auth.Principal, operationID string) (Command, error) {
+	operationID = strings.ToLower(strings.TrimSpace(operationID))
+	if !uuidPattern.MatchString(operationID) {
+		return Command{}, ErrInvalidInput
+	}
+	tx, _, err := s.beginAuthorizedProfileTx(ctx, principal)
+	if err != nil {
+		return Command{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	stored, found, err := queryCommandByOperation(ctx, tx, principal.SessionID, operationID, true)
+	if err != nil {
+		return Command{}, err
+	}
+	if !found {
+		return Command{}, ErrNotFound
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Command{}, fmt.Errorf("commit outgoing playback command read: %w", err)
+	}
+	return stored.command, nil
+}
+
+type storedCommand struct {
+	command         Command
+	input           CommandInput
+	targetSessionID string
+}
+
+func scanStoredCommand(row pgx.Row) (storedCommand, error) {
+	var stored storedCommand
+	var payload []byte
+	var status, code *string
+	if err := row.Scan(&stored.command.OperationID, &stored.command.Command, &payload, &stored.command.SenderDeviceName,
+		&status, &code, &stored.command.CreatedAt, &stored.command.ExpiresAt, &stored.targetSessionID); err != nil {
+		return storedCommand{}, fmt.Errorf("scan playback command: %w", err)
+	}
+	if err := json.Unmarshal(payload, &stored.input); err != nil || stored.input.Command != stored.command.Command || stored.input.OperationID != stored.command.OperationID {
+		return storedCommand{}, fmt.Errorf("decode playback command")
+	}
+	stored.command.Mode = stored.input.Mode
+	stored.command.TargetRevision = stored.input.TargetRevision
+	stored.command.Item = stored.input.Item
+	stored.command.PositionMilliseconds = stored.input.PositionMilliseconds
+	stored.command.Status = "pending"
+	if status != nil {
+		stored.command.Status = *status
+	}
+	if code != nil {
+		stored.command.ResultCode = *code
+	}
+	if stored.command.Status == "pending" && !stored.command.ExpiresAt.After(time.Now().UTC()) {
+		stored.command.Status, stored.command.ResultCode = "expired", "expired"
+	}
+	return stored, nil
+}
+
+func queryCommandByOperation(ctx context.Context, tx pgx.Tx, sessionID, operationID string, sender bool) (storedCommand, bool, error) {
+	column := "target_session_id"
+	if sender {
+		column = "sender_session_id"
+	}
+	stored, err := scanStoredCommand(tx.QueryRow(ctx, `
+		SELECT command.operation_id::text,command.command,command.payload,sender_device.name,
+		       command.result_status,command.result_code,command.created_at,command.expires_at,command.target_session_id::text
+		FROM playback_commands command
+		JOIN auth_sessions sender ON sender.id=command.sender_session_id
+		JOIN devices sender_device ON sender_device.id=sender.device_id
+		WHERE command.`+column+`=$1::uuid AND command.operation_id=$2::uuid
+		FOR UPDATE OF command
+	`, sessionID, operationID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return storedCommand{}, false, nil
+	}
+	if err != nil {
+		return storedCommand{}, false, err
+	}
+	return stored, true, nil
+}
+
+func sameCommandInput(left, right CommandInput) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && string(leftJSON) == string(rightJSON)
+}
+
+func validCommandResult(input CommandResultInput) bool {
+	switch input.Status {
+	case "applied":
+		return input.Code == "applied"
+	case "failed":
+		switch input.Code {
+		case "unsupported", "invalid_state", "stale_target", "execution_failed":
+			return true
+		}
+	case "expired":
+		return input.Code == "expired"
+	}
+	return false
 }
 
 func (s *Service) CreateRoom(ctx context.Context, principal auth.Principal, input CreateRoomInput) (Room, error) {
@@ -620,8 +751,8 @@ func (s *Service) Cleanup(ctx context.Context) error {
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM playback_commands
-		WHERE expires_at <= clock_timestamp()
-		   OR acknowledged_at < clock_timestamp() - interval '10 minutes'
+		WHERE expires_at <= clock_timestamp() - interval '10 minutes'
+		   OR completed_at < clock_timestamp() - interval '10 minutes'
 	`); err != nil {
 		return fmt.Errorf("clean playback coordination commands: %w", err)
 	}
@@ -669,18 +800,23 @@ func (s *Service) normalizeHeartbeat(input DeviceHeartbeatInput) (DeviceHeartbea
 }
 
 func (s *Service) normalizeCommand(input CommandInput) (CommandInput, error) {
+	input.OperationID = strings.ToLower(strings.TrimSpace(input.OperationID))
 	input.Command = strings.ToLower(strings.TrimSpace(input.Command))
+	input.Mode = strings.ToLower(strings.TrimSpace(input.Mode))
+	if !uuidPattern.MatchString(input.OperationID) || input.TargetRevision != nil && *input.TargetRevision <= 0 {
+		return CommandInput{}, ErrInvalidInput
+	}
 	switch input.Command {
 	case "play", "pause", "stop":
-		if input.Item != nil || input.PositionMilliseconds != nil {
+		if input.Mode != "" || input.Item != nil || input.PositionMilliseconds != nil {
 			return CommandInput{}, ErrInvalidInput
 		}
 	case "seek":
-		if input.Item != nil || input.PositionMilliseconds == nil || *input.PositionMilliseconds < 0 || *input.PositionMilliseconds > maximumPositionMillis {
+		if input.Mode != "" || input.Item != nil || input.PositionMilliseconds == nil || *input.PositionMilliseconds < 0 || *input.PositionMilliseconds > maximumPositionMillis {
 			return CommandInput{}, ErrInvalidInput
 		}
 	case "load":
-		if input.Item == nil || input.PositionMilliseconds == nil || *input.PositionMilliseconds < 0 || *input.PositionMilliseconds > maximumPositionMillis {
+		if input.Mode != "handoff" && input.Mode != "play-copy" || input.Item == nil || input.PositionMilliseconds == nil || *input.PositionMilliseconds < 0 || *input.PositionMilliseconds > maximumPositionMillis {
 			return CommandInput{}, ErrInvalidInput
 		}
 	default:
@@ -875,7 +1011,7 @@ func scanDevice(row pgx.Row) (Device, error) {
 	var device Device
 	var stateJSON []byte
 	if err := row.Scan(&device.SessionID, &device.DeviceID, &device.Name, &device.Platform,
-		&device.Capabilities, &stateJSON, &device.Current, &device.LastSeenAt); err != nil {
+		&device.Capabilities, &stateJSON, &device.Revision, &device.Current, &device.LastSeenAt); err != nil {
 		return Device{}, err
 	}
 	if err := json.Unmarshal(stateJSON, &device.State); err != nil {

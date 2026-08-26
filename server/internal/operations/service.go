@@ -41,11 +41,16 @@ type PlaybackMaintenance interface {
 	ResetCache(context.Context) (playback.PurgeResult, error)
 }
 
+type SemanticExtensionStatusProvider interface {
+	SemanticExtensionOperationsStatus() SemanticExtensionOperationsStatus
+}
+
 type Service struct {
 	pool                 *pgxpool.Pool
 	metadata             MetadataRefresher
 	auth                 MaintenanceCleaner
 	playback             PlaybackMaintenance
+	semanticExtension    SemanticExtensionStatusProvider
 	housekeepingInterval time.Duration
 	logger               *slog.Logger
 	now                  func() time.Time
@@ -57,6 +62,7 @@ func NewService(
 	metadataService MetadataRefresher,
 	authService MaintenanceCleaner,
 	playbackService PlaybackMaintenance,
+	semanticExtension SemanticExtensionStatusProvider,
 	housekeepingInterval time.Duration,
 	logger *slog.Logger,
 ) *Service {
@@ -65,7 +71,7 @@ func NewService(
 	}
 	return &Service{
 		pool: pool, metadata: metadataService, auth: authService, playback: playbackService,
-		housekeepingInterval: housekeepingInterval, logger: logger,
+		semanticExtension: semanticExtension, housekeepingInterval: housekeepingInterval, logger: logger,
 		now: func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -86,10 +92,14 @@ func (service *Service) Overview(ctx context.Context, principal auth.Principal) 
 	if err != nil {
 		return OperationsOverview{}, err
 	}
+	semanticExtension := SemanticExtensionOperationsStatus{WarmupStatus: "disabled", PersistentStatus: "disabled"}
+	if service.semanticExtension != nil {
+		semanticExtension = service.semanticExtension.SemanticExtensionOperationsStatus()
+	}
 	return OperationsOverview{
 		MetadataCache: cache, MetadataRefresh: schedule,
 		PostgreSQLPool: service.postgreSQLPoolStatus(), TrackingOutbox: status.tracking,
-		Addons: status.addons, Playback: status.playback,
+		Addons: status.addons, Playback: status.playback, SemanticExtension: semanticExtension,
 		HousekeepingIntervalMinutes: int(service.housekeepingInterval / time.Minute),
 	}, nil
 }

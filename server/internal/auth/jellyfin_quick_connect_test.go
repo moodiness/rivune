@@ -157,7 +157,7 @@ func TestJellyfinQuickConnectApprovalExchangeBoundaries(t *testing.T) {
 	if ownerDeviceCount != 3 || ownerDeviceCount > maximumDevicesPerUser {
 		t.Fatalf("concurrent Quick Connect owner device count=%d, want 3 within quota %d", ownerDeviceCount, maximumDevicesPerUser)
 	}
-	nativeAuthorization, err := service.BeginDeviceAuthorization(requestContext, "Native device", "test")
+	nativeAuthorization, err := service.BeginDeviceAuthorization(requestContext, "native-test-installation", "Native device", "test")
 	if err != nil {
 		t.Fatalf("begin native-purpose authorization: %v", err)
 	}

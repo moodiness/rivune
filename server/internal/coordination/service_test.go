@@ -21,23 +21,24 @@ import (
 
 func TestCommandShapesRejectAmbiguousPayloads(t *testing.T) {
 	service := &Service{}
+	const operationID = "11111111-1111-4111-8111-111111111111"
 	position := int64(42_000)
 	for _, input := range []CommandInput{
-		{Command: "play", PositionMilliseconds: &position},
-		{Command: "pause", Item: &PlaybackItem{}},
-		{Command: "seek"},
-		{Command: "stop", PositionMilliseconds: &position},
-		{Command: "load", PositionMilliseconds: &position},
-		{Command: "unknown"},
+		{OperationID: operationID, Command: "play", PositionMilliseconds: &position},
+		{OperationID: operationID, Command: "pause", Item: &PlaybackItem{}},
+		{OperationID: operationID, Command: "seek"},
+		{OperationID: operationID, Command: "stop", PositionMilliseconds: &position},
+		{OperationID: operationID, Command: "load", PositionMilliseconds: &position},
+		{OperationID: operationID, Command: "unknown"},
 	} {
 		if _, err := service.normalizeCommand(input); !errors.Is(err, ErrInvalidInput) {
 			t.Fatalf("expected invalid command payload %+v, got %v", input, err)
 		}
 	}
-	if command, err := service.normalizeCommand(CommandInput{Command: " PLAY "}); err != nil || command.Command != "play" {
+	if command, err := service.normalizeCommand(CommandInput{OperationID: operationID, Command: " PLAY "}); err != nil || command.Command != "play" {
 		t.Fatalf("play command was not normalized: command=%+v err=%v", command, err)
 	}
-	if command, err := service.normalizeCommand(CommandInput{Command: "seek", PositionMilliseconds: &position}); err != nil || command.PositionMilliseconds == nil || *command.PositionMilliseconds != position {
+	if command, err := service.normalizeCommand(CommandInput{OperationID: operationID, Command: "seek", PositionMilliseconds: &position}); err != nil || command.PositionMilliseconds == nil || *command.PositionMilliseconds != position {
 		t.Fatalf("seek command was not accepted: command=%+v err=%v", command, err)
 	}
 }
@@ -89,16 +90,17 @@ func TestRevokedTitleCannotBeReadExtendedOrRepublished(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("publish initial heartbeat: %v", err)
 	}
+	operationID := "11111111-2222-4333-8444-555555555555"
 	commandPayload, err := json.Marshal(CommandInput{
-		Command: "load", Item: &PlaybackItem{TitleID: fixture.titleID}, PositionMilliseconds: new(int64),
+		OperationID: operationID, Command: "load", Mode: "play-copy", Item: &PlaybackItem{TitleID: fixture.titleID}, PositionMilliseconds: new(int64),
 	})
 	if err != nil {
 		t.Fatalf("encode cached load command: %v", err)
 	}
 	if _, err := fixture.pool.Exec(context.Background(), `
-		INSERT INTO playback_commands (target_session_id, sender_session_id, profile_id, command, payload, expires_at)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, 'load', $4::jsonb, now() + interval '2 minutes')
-	`, fixture.participant.SessionID, fixture.host.SessionID, fixture.profileID, commandPayload); err != nil {
+		INSERT INTO playback_commands (target_session_id, sender_session_id, profile_id, operation_id, command, payload, expires_at)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'load', $5::jsonb, now() + interval '2 minutes')
+	`, fixture.participant.SessionID, fixture.host.SessionID, fixture.profileID, operationID, commandPayload); err != nil {
 		t.Fatalf("seed cached load command: %v", err)
 	}
 	if _, err := fixture.pool.Exec(context.Background(), `DELETE FROM addon_profile_access WHERE addon_id = $1::uuid`, fixture.addonID); err != nil {
@@ -121,7 +123,7 @@ func TestRevokedTitleCannotBeReadExtendedOrRepublished(t *testing.T) {
 	if err != nil || len(devices.Devices) != 0 {
 		t.Fatalf("revoked cached device projection = %+v, error %v", devices, err)
 	}
-	commands, err := fixture.service.Commands(context.Background(), fixture.participant, 0)
+	commands, err := fixture.service.Commands(context.Background(), fixture.participant, "")
 	if err != nil || len(commands.Commands) != 0 {
 		t.Fatalf("revoked cached command projection = %+v, error %v", commands, err)
 	}
@@ -130,7 +132,7 @@ func TestRevokedTitleCannotBeReadExtendedOrRepublished(t *testing.T) {
 	})
 	assertNotFound("heartbeat revoked title", err)
 	_, err = fixture.service.SendCommand(context.Background(), fixture.host, fixture.participant.SessionID, CommandInput{
-		Command: "load", Item: &PlaybackItem{TitleID: fixture.titleID}, PositionMilliseconds: &position,
+		OperationID: "66666666-7777-4888-8999-000000000000", Command: "load", Mode: "play-copy", Item: &PlaybackItem{TitleID: fixture.titleID}, PositionMilliseconds: &position,
 	})
 	assertNotFound("load revoked title", err)
 	var version int64

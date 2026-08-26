@@ -724,27 +724,30 @@ func (encoder videoEncoder) codecArguments(codec, quality string, threads int, m
 	case videoEncoderVAAPI:
 		encoderName = codec + "_vaapi"
 		qualityLevel := "4"
-		if quality == "speed" {
+		switch quality {
+		case "speed":
 			qualityLevel = "7"
-		} else if quality == "quality" {
+		case "quality":
 			qualityLevel = "1"
 		}
 		return []string{"-c:v", encoderName, "-profile:v", profile, "-quality", qualityLevel}, nil
 	case videoEncoderQSV:
 		encoderName = codec + "_qsv"
 		preset := "medium"
-		if quality == "speed" {
+		switch quality {
+		case "speed":
 			preset = "veryfast"
-		} else if quality == "quality" {
+		case "quality":
 			preset = "slow"
 		}
 		return []string{"-c:v", encoderName, "-profile:v", profile, "-preset", preset, "-look_ahead", "0"}, nil
 	case videoEncoderNVENC:
 		encoderName = codec + "_nvenc"
 		preset := "p4"
-		if quality == "speed" {
+		switch quality {
+		case "speed":
 			preset = "p2"
-		} else if quality == "quality" {
+		case "quality":
 			preset = "p6"
 		}
 		arguments := make([]string, 0, 14)
@@ -763,9 +766,10 @@ func (encoder videoEncoder) codecArguments(codec, quality string, threads int, m
 			return nil, fmt.Errorf("positive software transcode thread count is required")
 		}
 		preset, crf := "superfast", "18"
-		if quality == "speed" {
+		switch quality {
+		case "speed":
 			preset, crf = "ultrafast", "23"
-		} else if quality == "quality" {
+		case "quality":
 			preset, crf = "medium", "16"
 		}
 		switch codec {
@@ -773,20 +777,22 @@ func (encoder videoEncoder) codecArguments(codec, quality string, threads int, m
 			encoderName = "libx264"
 		case "hevc":
 			encoderName = "libx265"
-			if quality == "speed" {
+			switch quality {
+			case "speed":
 				crf = "28"
-			} else if quality == "balanced" {
+			case "balanced":
 				crf = "23"
-			} else {
+			case "quality":
 				crf = "19"
 			}
 		case "av1":
 			encoderName = "libsvtav1"
-			if quality == "speed" {
+			switch quality {
+			case "speed":
 				preset, crf = "10", "35"
-			} else if quality == "balanced" {
+			case "balanced":
 				preset, crf = "8", "30"
-			} else {
+			case "quality":
 				preset, crf = "6", "25"
 			}
 		}

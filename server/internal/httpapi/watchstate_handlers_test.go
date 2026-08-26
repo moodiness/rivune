@@ -17,53 +17,54 @@ import (
 )
 
 type fakeWatchstateService struct {
-	resolveInput          watchstate.ResolveTitleInput
-	resolveValue          watchstate.TitleReference
-	resolveErr            error
-	customInput           watchstate.ResolveCustomSeriesInput
-	customValue           watchstate.ResolveCustomSeriesResult
-	customErr             error
-	libraryMediaType      string
-	libraryPage           int
-	libraryPageSize       int
-	libraryValue          watchstate.LibraryPage
-	libraryErr            error
-	membershipInput       []watchstate.TVLibraryIdentity
-	membershipValue       watchstate.TVLibraryMembershipResult
-	membershipErr         error
-	addTitleID            string
-	addValue              watchstate.LibraryItem
-	addErr                error
-	removeTitleID         string
-	removeErr             error
-	progressTitleID       string
-	progressInput         watchstate.UpdateProgressInput
-	progressValue         watchstate.Progress
-	progressErr           error
-	progressBatchInput    []string
-	progressBatchValue    watchstate.ProgressBatch
-	progressBatchErr      error
-	completionID          string
-	completionValue       bool
-	completionInput       watchstate.CompletionInput
-	completionResult      watchstate.Progress
-	completionErr         error
-	completionBatchInput  []watchstate.SetWatchedBatchItem
-	completionBatchResult watchstate.ProgressBatch
-	completionBatchErr    error
-	clearTitleID          string
-	clearVersion          int64
-	clearErr              error
-	continueCalls         int
-	continueLimit         int
-	continueLanguage      string
-	continueValue         watchstate.ContinuePage
-	continueErr           error
-	dismissTitleID        string
-	dismissErr            error
-	recommendationLimit   int
-	recommendationValue   watchstate.RecommendationPage
-	recommendationErr     error
+	resolveInput               watchstate.ResolveTitleInput
+	resolveValue               watchstate.TitleReference
+	resolveErr                 error
+	customInput                watchstate.ResolveCustomSeriesInput
+	customValue                watchstate.ResolveCustomSeriesResult
+	customErr                  error
+	libraryMediaType           string
+	libraryPage                int
+	libraryPageSize            int
+	libraryValue               watchstate.LibraryPage
+	libraryErr                 error
+	membershipInput            []watchstate.TVLibraryIdentity
+	membershipValue            watchstate.TVLibraryMembershipResult
+	membershipErr              error
+	addTitleID                 string
+	addValue                   watchstate.LibraryItem
+	addErr                     error
+	removeTitleID              string
+	removeErr                  error
+	progressTitleID            string
+	progressInput              watchstate.UpdateProgressInput
+	progressValue              watchstate.Progress
+	progressErr                error
+	progressBatchInput         []string
+	progressBatchValue         watchstate.ProgressBatch
+	progressBatchErr           error
+	completionID               string
+	completionValue            bool
+	completionInput            watchstate.CompletionInput
+	completionResult           watchstate.Progress
+	completionErr              error
+	completionBatchInput       []watchstate.SetWatchedBatchItem
+	completionBatchResult      watchstate.ProgressBatch
+	completionBatchErr         error
+	clearTitleID               string
+	clearVersion               int64
+	clearErr                   error
+	continueCalls              int
+	continueLimit              int
+	continueLanguage           string
+	continueValue              watchstate.ContinuePage
+	continueErr                error
+	dismissTitleID             string
+	dismissErr                 error
+	recommendationLimit        int
+	recommendationArtworkShape watchstate.RecommendationArtworkShape
+	recommendationValue        watchstate.RecommendationPage
+	recommendationErr          error
 }
 
 func (f *fakeWatchstateService) ResolveTitle(_ context.Context, _ auth.Principal, input watchstate.ResolveTitleInput) (watchstate.TitleReference, error) {
@@ -136,8 +137,9 @@ func (f *fakeWatchstateService) DismissContinue(_ context.Context, _ auth.Princi
 	f.dismissTitleID = titleID
 	return f.dismissErr
 }
-func (f *fakeWatchstateService) Recommendations(_ context.Context, _ auth.Principal, limit int) (watchstate.RecommendationPage, error) {
+func (f *fakeWatchstateService) Recommendations(_ context.Context, _ auth.Principal, limit int, artworkShape watchstate.RecommendationArtworkShape) (watchstate.RecommendationPage, error) {
 	f.recommendationLimit = limit
+	f.recommendationArtworkShape = artworkShape
 	return f.recommendationValue, f.recommendationErr
 }
 
@@ -579,13 +581,13 @@ func TestRecommendationsPassLimitAndReturnLocalRanks(t *testing.T) {
 		Reason: "Because you like Drama", Score: 11.5,
 	}}}}
 	api := watchstateAPI(service)
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/recommendations?limit=7", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/recommendations?limit=7&artworkShape=landscape", nil)
 	response := httptest.NewRecorder()
 
 	api.recommendations(response, request, auth.Principal{})
 
-	if response.Code != http.StatusOK || service.recommendationLimit != 7 || !strings.Contains(response.Body.String(), `"reason":"Because you like Drama"`) {
-		t.Fatalf("unexpected recommendations response status=%d limit=%d body=%s", response.Code, service.recommendationLimit, response.Body.String())
+	if response.Code != http.StatusOK || service.recommendationLimit != 7 || service.recommendationArtworkShape != watchstate.RecommendationArtworkLandscape || !strings.Contains(response.Body.String(), `"reason":"Because you like Drama"`) {
+		t.Fatalf("unexpected recommendations response status=%d limit=%d artwork=%q body=%s", response.Code, service.recommendationLimit, service.recommendationArtworkShape, response.Body.String())
 	}
 }
 
@@ -599,6 +601,19 @@ func TestRecommendationsRejectMalformedLimitBeforeService(t *testing.T) {
 
 	if response.Code != http.StatusUnprocessableEntity || service.recommendationLimit != 0 {
 		t.Fatalf("unexpected malformed recommendation response status=%d calls=%d", response.Code, service.recommendationLimit)
+	}
+}
+
+func TestRecommendationsRejectUnknownArtworkShapeBeforeService(t *testing.T) {
+	service := &fakeWatchstateService{}
+	api := watchstateAPI(service)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/recommendations?artworkShape=square", nil)
+	response := httptest.NewRecorder()
+
+	api.recommendations(response, request, auth.Principal{})
+
+	if response.Code != http.StatusUnprocessableEntity || service.recommendationLimit != 0 {
+		t.Fatalf("unexpected artwork response status=%d calls=%d", response.Code, service.recommendationLimit)
 	}
 }
 

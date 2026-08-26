@@ -311,7 +311,7 @@ func applySubtitleDecision(sources []Source, streamAssets []storedAsset, subtitl
 				}
 			}
 		}
-		appendDecisionReason(decision, decisionSubtitleBurnRequired)
+		appendDecisionReason(decision, reasonSubtitleBurnRequired)
 		decision.SubtitleAction = "burn"
 		decision.Pipeline = plannedPlaybackPipeline(decisionInspection, capabilities, decision.Target, toneMap, true)
 		if audioAction == "copy" && audio != nil {
@@ -355,6 +355,13 @@ func subtitleBurnAudioCopySupported(audio *MediaTrack, capabilities Capabilities
 		return false
 	}
 	return len(capabilities.MediaProfiles) > 0 || supportsCodec(capabilities.AudioCodecs, audio.Codec)
+}
+
+func hlsSegmentVideoCopySupported(codec, segmentContainer string) bool {
+	if normalizedHLSSegmentContainer(segmentContainer) == "mp4" {
+		return mp4RemuxableVideo(codec)
+	}
+	return normalizedCodec(codec) == "h264"
 }
 
 func hlsSegmentAudioCopySupported(codec, segmentContainer string) bool {

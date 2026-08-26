@@ -122,6 +122,21 @@ func TestCopyModesNeverInvokeVideoEncoder(t *testing.T) {
 	}
 }
 
+func TestCopiedHEVCUsesHVC1InFragmentedMP4(t *testing.T) {
+	for _, kind := range []string{processingRemux, processingTranscodeAudio} {
+		arguments, err := (&FFmpegProcessor{threads: 4}).processingArguments(storedAsset{
+			Kind: kind, URL: "https://media.example/movie.mkv", HLSSegmentContainer: "mp4",
+			Decision: &PlaybackDecision{Source: &PlaybackDecisionSource{VideoCodec: "hevc"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if joined := strings.Join(arguments, " "); !strings.Contains(joined, "-tag:v hvc1") {
+			t.Fatalf("%s copied HEVC arguments missing hvc1: %v", kind, arguments)
+		}
+	}
+}
+
 func TestHEVCMain10TranscodeHonorsAudioCopyAndHVC1SampleEntry(t *testing.T) {
 	encoder := videoEncoder{
 		kind:         videoEncoderNVENC,

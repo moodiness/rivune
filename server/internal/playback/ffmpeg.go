@@ -927,6 +927,10 @@ func (processor *FFmpegProcessor) processingArgumentsWithEncoder(asset storedAss
 	default:
 		return nil, fmt.Errorf("%w: unsupported mode %q", ErrMediaProcessingFailed, asset.Kind)
 	}
+	if asset.Kind != processingTranscode && normalizedHLSSegmentContainer(asset.HLSSegmentContainer) == "mp4" &&
+		asset.Decision != nil && asset.Decision.Source != nil && normalizedCodec(asset.Decision.Source.VideoCodec) == "h265" {
+		arguments = append(arguments, "-tag:v", "hvc1")
+	}
 	return arguments, nil
 }
 

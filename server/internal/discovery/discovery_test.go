@@ -86,7 +86,7 @@ func TestRunPublishesContractUntilCancellation(t *testing.T) {
 	if gotInstance != "Living room" || gotService != "_rivune._tcp" || gotDomain != "local." || gotPort != 443 {
 		t.Fatalf("unexpected registration: %q %q %q %d", gotInstance, gotService, gotDomain, gotPort)
 	}
-	if want := []string{"url=https://media.example.com", "protocol=20", "version=1.10.0"}; !reflect.DeepEqual(gotText, want) {
+	if want := []string{"url=https://media.example.com", "protocol=22", "version=1.10.0"}; !reflect.DeepEqual(gotText, want) {
 		t.Fatalf("TXT records = %#v, want %#v", gotText, want)
 	}
 	cancel()

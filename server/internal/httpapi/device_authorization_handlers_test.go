@@ -20,7 +20,7 @@ func TestBeginDeviceAuthorizationReturnsPairingURLs(t *testing.T) {
 	api := testAPI(&fakeInstanceService{})
 	api.config.PublicURL = "https://media.example"
 	api.auth = service
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/device-code", bytes.NewBufferString(`{"deviceName":"Living Room","platform":"tvos"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/device-code", bytes.NewBufferString(`{"installationId":"apple-installation","deviceName":"Living Room","platform":"tvos"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 
@@ -28,6 +28,9 @@ func TestBeginDeviceAuthorizationReturnsPairingURLs(t *testing.T) {
 
 	if response.Code != http.StatusCreated {
 		t.Fatalf("expected status 201, got %d: %s", response.Code, response.Body.String())
+	}
+	if service.deviceAuthorizationInstallationID != "apple-installation" || service.deviceAuthorizationDeviceName != "Living Room" || service.deviceAuthorizationPlatform != "tvos" {
+		t.Fatalf("unexpected authorization input: installation=%q device=%q platform=%q", service.deviceAuthorizationInstallationID, service.deviceAuthorizationDeviceName, service.deviceAuthorizationPlatform)
 	}
 	var body struct {
 		UserCode                string `json:"userCode"`
@@ -41,10 +44,10 @@ func TestBeginDeviceAuthorizationReturnsPairingURLs(t *testing.T) {
 	}
 }
 
-func TestBeginDeviceAuthorizationReturnsDeterministicCapacityLimit(t *testing.T) {
+func TestBeginDeviceAuthorizationReturnsCapacityReleaseDelay(t *testing.T) {
 	api := testAPI(&fakeInstanceService{})
-	api.auth = &fakeAuthService{deviceAuthorizationErr: auth.ErrDeviceAuthorizationCapacity}
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/device-code", bytes.NewBufferString(`{"deviceName":"Living Room","platform":"tvos"}`))
+	api.auth = &fakeAuthService{deviceAuthorizationErr: &auth.DeviceAuthorizationCapacityError{RetryAfter: 3*time.Minute + 17*time.Millisecond}}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/device-code", bytes.NewBufferString(`{"installationId":"apple-installation","deviceName":"Living Room","platform":"tvos"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 
@@ -53,8 +56,8 @@ func TestBeginDeviceAuthorizationReturnsDeterministicCapacityLimit(t *testing.T)
 	if response.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want 429: %s", response.Code, response.Body.String())
 	}
-	if response.Header().Get("Retry-After") != "60" {
-		t.Fatalf("Retry-After = %q, want 60", response.Header().Get("Retry-After"))
+	if response.Header().Get("Retry-After") != "181" {
+		t.Fatalf("Retry-After = %q, want 181", response.Header().Get("Retry-After"))
 	}
 	var body errorEnvelope
 	decodeResponse(t, response, &body)

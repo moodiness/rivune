@@ -1341,6 +1341,39 @@ func TestDecidePlaybackSourceAllowsOnlyDirectOrAdvertisedRemux(t *testing.T) {
 	}
 }
 
+func TestPlaybackModeRequiresSegmentCompatibleCopyCodecs(t *testing.T) {
+	source := Source{Mode: "direct", Protocol: "http", Container: "mkv"}
+	capabilities := Capabilities{
+		StreamingProtocols:  []string{"hls"},
+		Containers:          []string{"mp4"},
+		VideoCodecs:         []string{"h264", "hevc"},
+		AudioCodecs:         []string{"aac", "opus"},
+		ProcessingModes:     []string{processingRemux},
+		HLSSegmentContainer: "mp4",
+	}
+	hevc := MediaInspection{
+		Container:   "matroska",
+		VideoTracks: []MediaTrack{{Codec: "hevc"}},
+		AudioTracks: []MediaTrack{{Codec: "aac", Channels: 2}},
+	}
+	if mode, _ := playbackMode(source, hevc, capabilities); mode != processingRemux {
+		t.Fatalf("HEVC fMP4 mode = %q, want remux", mode)
+	}
+
+	capabilities.HLSSegmentContainer = "ts"
+	if mode, _ := playbackMode(source, hevc, capabilities); mode != "" {
+		t.Fatalf("HEVC transport-stream mode = %q, want no copy plan", mode)
+	}
+	h264Opus := MediaInspection{
+		Container:   "matroska",
+		VideoTracks: []MediaTrack{{Codec: "h264"}},
+		AudioTracks: []MediaTrack{{Codec: "opus", Channels: 2}},
+	}
+	if mode, _ := playbackMode(source, h264Opus, capabilities); mode != "" {
+		t.Fatalf("Opus transport-stream mode = %q, want no copy plan", mode)
+	}
+}
+
 func TestPlaybackModeRemuxesWithPlayableAlternateAudio(t *testing.T) {
 	mode, _ := playbackMode(Source{Mode: "direct", Protocol: "http", Container: "mkv"}, MediaInspection{
 		Container:   "mkv",
@@ -1660,7 +1693,7 @@ func TestPlaybackDecisionOrdersDirectPlayHLSDirectStreamAndTranscodes(t *testing
 func TestHighBitrateHEVCUsesAudioOnlyTranscodeWhenClientDeclaresDecode(t *testing.T) {
 	capabilities := Capabilities{
 		StreamingProtocols: []string{"hls"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h265", "h264"}, AudioCodecs: []string{"aac"},
-		HDRFormats: []string{"hdr10"}, ProcessingModes: []string{processingTranscodeAudio, processingTranscode},
+		HDRFormats: []string{"hdr10"}, ProcessingModes: []string{processingTranscodeAudio, processingTranscode}, HLSSegmentContainer: "mp4",
 		MediaProfiles: []MediaProfile{
 			{Container: "mp4", VideoCodec: "h265", AudioCodec: "aac", Transcoding: true, MaximumVideoBitDepth: 10},
 			{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", Transcoding: true, MaximumVideoBitDepth: 8},
@@ -1695,7 +1728,7 @@ func TestHighBitrateHEVCUsesAudioOnlyTranscodeWhenClientDeclaresDecode(t *testin
 func TestDolbyVisionHDR10BaseUsesAudioOnlyTranscode(t *testing.T) {
 	capabilities := Capabilities{
 		StreamingProtocols: []string{"hls"}, Containers: []string{"mp4"}, VideoCodecs: []string{"h265", "h264"}, AudioCodecs: []string{"aac"},
-		HDRFormats: []string{"sdr", "hdr10", "hlg"}, ProcessingModes: []string{processingTranscodeAudio, processingTranscode},
+		HDRFormats: []string{"sdr", "hdr10", "hlg"}, ProcessingModes: []string{processingTranscodeAudio, processingTranscode}, HLSSegmentContainer: "mp4",
 		MediaProfiles: []MediaProfile{
 			{Container: "mp4", VideoCodec: "h265", AudioCodec: "aac", Transcoding: true, MaximumVideoBitDepth: 10},
 			{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", Transcoding: true, MaximumVideoBitDepth: 8},

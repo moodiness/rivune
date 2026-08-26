@@ -310,8 +310,8 @@ func insertApprovedQuotaDeviceAuthorization(t *testing.T, pool *pgxpool.Pool, us
 		command, err := pool.Exec(context.Background(), `
 			INSERT INTO device_authorizations (
 				device_code_hash, user_code, device_name, platform, source_hash, approved_user_id,
-				approved_category_id, approved_at, expires_at
-			) VALUES ($1, $2, 'Quota paired device', 'test', $3, $4::uuid, $5::uuid, now(), now() + interval '10 minutes')
+				approved_category_id, approved_at, expires_at, native_installation_hash
+			) VALUES ($1, $2, 'Quota paired device', 'test', $3, $4::uuid, $5::uuid, now(), now() + interval '10 minutes', $1)
 			ON CONFLICT DO NOTHING
 		`, tokenDigest(deviceCode), userCode, sourceHash[:], userID, categoryID)
 		if err != nil {

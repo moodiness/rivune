@@ -16,60 +16,63 @@ import (
 )
 
 type fakeAuthService struct {
-	loginInput                 auth.LoginInput
-	loginCalls                 int
-	loginTokens                auth.TokenPair
-	loginErr                   error
-	jellyfinLoginInput         auth.JellyfinProfileLoginInput
-	jellyfinLoginResult        auth.JellyfinProfileLoginResult
-	jellyfinLoginErr           error
-	jellyfinLoginCalls         int
-	refreshToken               string
-	refreshTokens              auth.TokenPair
-	refreshErr                 error
-	authenticateToken          string
-	principal                  auth.Principal
-	authenticateErr            error
-	account                    auth.Account
-	accountErr                 error
-	logoutPrincipal            auth.Principal
-	logoutErr                  error
-	sessions                   []auth.Session
-	sessionsErr                error
-	revokedSessionID           string
-	revokeErr                  error
-	profileSessions            []auth.Session
-	profileSessionsErr         error
-	profileSessionsID          string
-	revokedProfileID           string
-	revokedProfileSessionID    string
-	revokeProfileSessionErr    error
-	notifications              []auth.SessionNotification
-	notificationsAfterID       int64
-	notificationsCalls         int
-	notificationsErr           error
-	acknowledgedNotificationID int64
-	acknowledgeCalls           int
-	acknowledgeErr             error
-	broadcastID                string
-	broadcastMessage           string
-	broadcastPrincipal         auth.Principal
-	broadcastResult            auth.NotificationBroadcast
-	broadcastCalls             int
-	broadcastErr               error
-	notifiedProfileID          string
-	notifiedSessionID          string
-	notifiedMessage            string
-	sentNotification           auth.SessionNotification
-	sendNotificationCalls      int
-	sendNotificationErr        error
-	deviceAuthorization        auth.DeviceAuthorization
-	deviceAuthorizationErr     error
-	approvalInput              auth.DeviceAuthorizationApproval
-	approvalErr                error
-	exchangedDeviceCode        string
-	exchangeTokens             auth.TokenPair
-	exchangeErr                error
+	loginInput                        auth.LoginInput
+	loginCalls                        int
+	loginTokens                       auth.TokenPair
+	loginErr                          error
+	jellyfinLoginInput                auth.JellyfinProfileLoginInput
+	jellyfinLoginResult               auth.JellyfinProfileLoginResult
+	jellyfinLoginErr                  error
+	jellyfinLoginCalls                int
+	refreshToken                      string
+	refreshTokens                     auth.TokenPair
+	refreshErr                        error
+	authenticateToken                 string
+	principal                         auth.Principal
+	authenticateErr                   error
+	account                           auth.Account
+	accountErr                        error
+	logoutPrincipal                   auth.Principal
+	logoutErr                         error
+	sessions                          []auth.Session
+	sessionsErr                       error
+	revokedSessionID                  string
+	revokeErr                         error
+	profileSessions                   []auth.Session
+	profileSessionsErr                error
+	profileSessionsID                 string
+	revokedProfileID                  string
+	revokedProfileSessionID           string
+	revokeProfileSessionErr           error
+	notifications                     []auth.SessionNotification
+	notificationsAfterID              int64
+	notificationsCalls                int
+	notificationsErr                  error
+	acknowledgedNotificationID        int64
+	acknowledgeCalls                  int
+	acknowledgeErr                    error
+	broadcastID                       string
+	broadcastMessage                  string
+	broadcastPrincipal                auth.Principal
+	broadcastResult                   auth.NotificationBroadcast
+	broadcastCalls                    int
+	broadcastErr                      error
+	notifiedProfileID                 string
+	notifiedSessionID                 string
+	notifiedMessage                   string
+	sentNotification                  auth.SessionNotification
+	sendNotificationCalls             int
+	sendNotificationErr               error
+	deviceAuthorizationInstallationID string
+	deviceAuthorizationDeviceName     string
+	deviceAuthorizationPlatform       string
+	deviceAuthorization               auth.DeviceAuthorization
+	deviceAuthorizationErr            error
+	approvalInput                     auth.DeviceAuthorizationApproval
+	approvalErr                       error
+	exchangedDeviceCode               string
+	exchangeTokens                    auth.TokenPair
+	exchangeErr                       error
 }
 
 func (f *fakeAuthService) Login(_ context.Context, input auth.LoginInput) (auth.TokenPair, error) {
@@ -77,6 +80,12 @@ func (f *fakeAuthService) Login(_ context.Context, input auth.LoginInput) (auth.
 	f.loginInput = input
 	return f.loginTokens, f.loginErr
 }
+func (f *fakeAuthService) LoginWeb(_ context.Context, input auth.LoginInput) (auth.TokenPair, error) {
+	f.loginCalls++
+	f.loginInput = input
+	return f.loginTokens, f.loginErr
+}
+
 
 func (f *fakeAuthService) LoginJellyfinProfile(_ context.Context, input auth.JellyfinProfileLoginInput) (auth.JellyfinProfileLoginResult, error) {
 	f.jellyfinLoginCalls++
@@ -87,6 +96,15 @@ func (f *fakeAuthService) LoginJellyfinProfile(_ context.Context, input auth.Jel
 func (f *fakeAuthService) Refresh(_ context.Context, token string) (auth.TokenPair, error) {
 	f.refreshToken = token
 	return f.refreshTokens, f.refreshErr
+}
+func (f *fakeAuthService) RefreshWeb(_ context.Context, token string) (auth.TokenPair, error) {
+	f.refreshToken = token
+	return f.refreshTokens, f.refreshErr
+}
+
+func (f *fakeAuthService) ExchangeWebDeviceAuthorization(_ context.Context, code string) (auth.TokenPair, error) {
+	f.exchangedDeviceCode = code
+	return f.exchangeTokens, f.exchangeErr
 }
 
 func (f *fakeAuthService) Authenticate(_ context.Context, token string) (auth.Principal, error) {
@@ -102,6 +120,11 @@ func (f *fakeAuthService) Logout(_ context.Context, principal auth.Principal) er
 	f.logoutPrincipal = principal
 	return f.logoutErr
 }
+func (f *fakeAuthService) LogoutWeb(_ context.Context, token string) error {
+	f.refreshToken = token
+	return f.logoutErr
+}
+
 
 func (f *fakeAuthService) Sessions(context.Context, auth.Principal) ([]auth.Session, error) {
 	return f.sessions, f.sessionsErr
@@ -151,7 +174,10 @@ func (f *fakeAuthService) SendProfileSessionNotification(_ context.Context, _ au
 	return f.sentNotification, f.sendNotificationErr
 }
 
-func (f *fakeAuthService) BeginDeviceAuthorization(context.Context, string, string) (auth.DeviceAuthorization, error) {
+func (f *fakeAuthService) BeginDeviceAuthorization(_ context.Context, installationID, deviceName, platform string) (auth.DeviceAuthorization, error) {
+	f.deviceAuthorizationInstallationID = installationID
+	f.deviceAuthorizationDeviceName = deviceName
+	f.deviceAuthorizationPlatform = platform
 	return f.deviceAuthorization, f.deviceAuthorizationErr
 }
 
@@ -260,6 +286,44 @@ func TestLoginReturnsOpaqueSessionTokens(t *testing.T) {
 	if body.TokenType != "Bearer" || body.AccessToken != "rivune_at_access" || body.RefreshToken != "rivune_rt_refresh" ||
 		body.SessionID != "session-id" || body.AuthorizationScope != auth.AuthorizationScopeGlobalAdministrator || body.Category != nil {
 		t.Fatalf("unexpected token response: %+v", body)
+	}
+}
+
+func TestRefreshReturnsPairedDeviceTokenBody(t *testing.T) {
+	pairedExpiryInLocalTime := time.Date(10000, time.January, 1, 0, 59, 59, 0, time.FixedZone("CET", 60*60))
+	now := time.Now().UTC().Truncate(time.Second)
+	categoryName := "Uncategorized"
+	service := &fakeAuthService{refreshTokens: auth.TokenPair{
+		AccessToken:        "rivune_at_rotated",
+		AccessExpiresAt:    now.Add(15 * time.Minute),
+		RefreshToken:       "rivune_rt_rotated",
+		RefreshExpiresAt:   pairedExpiryInLocalTime,
+		SessionID:          "629903e5-a234-420a-9037-9c40c3d8308b",
+		DeviceID:           "fc15aeab-88f9-4928-a7d2-d9199ba9c70d",
+		AuthorizationScope: auth.AuthorizationScopeCategory,
+		Category: &category.CategoryRef{
+			ID:   "4cf5ee5b-25f4-41c1-8b60-4c1d6a073c4d",
+			Name: categoryName,
+		},
+	}}
+	api := testAPI(&fakeInstanceService{})
+	api.auth = service
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", bytes.NewBufferString(`{"refreshToken":"rivune_rt_existing"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	var body tokenResponse
+	decodeResponse(t, response, &body)
+	if body.AccessToken != "rivune_at_rotated" || body.RefreshToken != "rivune_rt_rotated" || body.AuthorizationScope != auth.AuthorizationScopeCategory || body.Category == nil {
+		t.Fatalf("unexpected paired refresh response: %+v", body)
+	}
+	if !body.RefreshTokenExpiresAt.Equal(time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)) {
+		t.Fatalf("paired refresh expiry = %s, want canonical UTC maximum", body.RefreshTokenExpiresAt)
 	}
 }
 

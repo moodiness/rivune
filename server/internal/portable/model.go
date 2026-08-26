@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	DocumentVersion      = 1
+	DocumentVersion      = 2
 	MaximumDocumentBytes = 16 << 20
+	MaximumAvatarBytes   = 2 << 20
 	maximumAddons        = 256
 	maximumCollections   = 100
 	maximumTitles        = 100_000
@@ -31,6 +32,7 @@ var (
 type Document struct {
 	Version             int                  `json:"version"`
 	ExportedAt          time.Time            `json:"exportedAt"`
+	Identity            Identity             `json:"identity"`
 	Settings            settings.Values      `json:"settings"`
 	Addons              []Addon              `json:"addons"`
 	Collections         []PortableCollection `json:"collections"`
@@ -39,7 +41,28 @@ type Document struct {
 	Progress            []ProgressState      `json:"progress"`
 	Favorites           []FavoriteState      `json:"favorites"`
 	UserData            []UserDataState      `json:"userData"`
+	ContinueDismissals  []ContinueDismissal  `json:"continueDismissals"`
 	TrackingPreferences []TrackingPreference `json:"trackingPreferences"`
+}
+
+type Identity struct {
+	Name        string `json:"name"`
+	Description *string `json:"description,omitempty"`
+	IsChild     bool `json:"isChild"`
+	Avatar      Avatar `json:"avatar"`
+}
+
+type Avatar struct {
+	Kind        string `json:"kind"`
+	PresetID    string `json:"presetId,omitempty"`
+	ContentType string `json:"contentType,omitempty"`
+	SHA256      string `json:"sha256,omitempty"`
+	Data        []byte `json:"data,omitempty"`
+}
+
+type CreateInput struct {
+	CategoryID string `json:"categoryId"`
+	Archive    Document `json:"archive"`
 }
 
 func (document *Document) UnmarshalJSON(data []byte) error {
@@ -64,8 +87,15 @@ func (document *Document) UnmarshalJSON(data []byte) error {
 }
 
 func validateRequiredArchiveMembers(data []byte) error {
-	root, err := requiredObject(data, "$", "version", "exportedAt", "settings", "addons", "collections", "titles", "library", "progress", "favorites", "userData", "trackingPreferences")
+	root, err := requiredObject(data, "$", "version", "exportedAt", "identity", "settings", "addons", "collections", "titles", "library", "progress", "favorites", "userData", "continueDismissals", "trackingPreferences")
 	if err != nil {
+		return err
+	}
+	identity, err := requiredObject(root["identity"], "identity", "name", "isChild", "avatar")
+	if err != nil {
+		return err
+	}
+	if _, err := requiredObject(identity["avatar"], "identity.avatar", "kind"); err != nil {
 		return err
 	}
 	if err := validateRequiredArray(root["addons"], "addons", func(value json.RawMessage, path string) error {
@@ -94,6 +124,7 @@ func validateRequiredArchiveMembers(data []byte) error {
 		required []string
 	}{
 		{"library", []string{"titleKey", "addedAt", "updatedAt"}},
+		{"continueDismissals", []string{"titleKey", "dismissedAt"}},
 		{"progress", []string{"titleKey", "positionSeconds", "durationSeconds", "completed", "version", "lastWatchedAt", "updatedAt"}},
 		{"favorites", []string{"titleKey", "createdAt", "updatedAt"}},
 		{"userData", []string{"titleKey", "ratingSet", "playedPercentageSet", "unplayedItemCountSet", "playCountSet", "likesSet", "lastPlayedDateSet", "updatedAt"}},
@@ -253,6 +284,10 @@ type ProgressState struct {
 	Version         int64     `json:"version"`
 	LastWatchedAt   time.Time `json:"lastWatchedAt"`
 	UpdatedAt       time.Time `json:"updatedAt"`
+}
+type ContinueDismissal struct {
+	TitleKey   string    `json:"titleKey"`
+	DismissedAt time.Time `json:"dismissedAt"`
 }
 
 type FavoriteState struct {

@@ -122,7 +122,7 @@ func (processor *seekableFixtureHLSProcessor) ProcessHLS(_ context.Context, asse
 	playlist.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:3\n#EXT-X-MEDIA-SEQUENCE:0\n")
 	for index := range 4 {
 		name := fmt.Sprintf("segment-%06d.ts", index)
-		contents := []byte(fmt.Sprintf("start=%.0f,index=%d", asset.StartSeconds, index))
+		contents := fmt.Appendf(nil, "start=%.0f,index=%d", asset.StartSeconds, index)
 		if err := os.WriteFile(filepath.Join(directory, name), contents, 0o600); err != nil {
 			return err
 		}
@@ -156,7 +156,7 @@ func (processor *blockingSeekableFixtureHLSProcessor) ProcessHLS(ctx context.Con
 		return ctx.Err()
 	case <-release:
 	}
-	contents := []byte(fmt.Sprintf("start=%.0f,index=0", asset.StartSeconds))
+	contents := fmt.Appendf(nil, "start=%.0f,index=0", asset.StartSeconds)
 	if err := os.WriteFile(filepath.Join(directory, "segment-000000.ts"), contents, 0o600); err != nil {
 		return err
 	}

@@ -206,8 +206,8 @@ func TestApproveDeviceAuthorizationSerializesManagedProfileCategoryMoves(t *test
 		deviceCodeHash := tokenDigest(deviceCodes[index])
 		if _, err := setupTx.Exec(ctx, `
 			INSERT INTO device_authorizations (
-				device_code_hash, user_code, device_name, platform, source_hash, expires_at
-			) VALUES ($1, $2, $3, 'test', $4, now() + interval '10 minutes')
+				device_code_hash, user_code, device_name, platform, source_hash, expires_at, native_installation_hash
+			) VALUES ($1, $2, $3, 'test', $4, now() + interval '10 minutes', $1)
 		`, deviceCodeHash, code, fmt.Sprintf("Approval device %d", index), legacySourceHash[:]); err != nil {
 			t.Fatalf("insert device authorization %d: %v", index, err)
 		}

@@ -105,11 +105,14 @@ type TMDBSource struct {
 
 type TMDBFilters struct {
 	Genres           []int64  `json:"genres,omitempty"`
+	ExcludedGenres   []int64  `json:"excludedGenres,omitempty"`
 	ReleaseDateFrom  string   `json:"releaseDateFrom,omitempty"`
 	ReleaseDateTo    string   `json:"releaseDateTo,omitempty"`
 	VoteAverageMin   *float64 `json:"voteAverageMin,omitempty"`
 	VoteAverageMax   *float64 `json:"voteAverageMax,omitempty"`
 	VoteCountMin     *int     `json:"voteCountMin,omitempty"`
+	RuntimeMin       *int     `json:"runtimeMin,omitempty"`
+	RuntimeMax       *int     `json:"runtimeMax,omitempty"`
 	OriginalLanguage string   `json:"originalLanguage,omitempty"`
 	OriginCountry    string   `json:"originCountry,omitempty"`
 	Keywords         []int64  `json:"keywords,omitempty"`
@@ -195,6 +198,7 @@ type Item struct {
 
 type SourcePage struct {
 	Items           []Item
+	ExactTitleMatch bool `json:"-"`
 	Page            int
 	HasMore         bool
 	CoverImageURL   string
@@ -227,4 +231,16 @@ type LookupResult struct {
 type Genre struct {
 	ID   int64  `json:"id"`
 	Name string `json:"name"`
+}
+
+type Country struct {
+	Code        string `json:"code"`
+	EnglishName string `json:"englishName"`
+	NativeName  string `json:"nativeName"`
+}
+
+type SemanticCatalogLocale struct {
+	MovieGenres  []Genre   `json:"movieGenres"`
+	SeriesGenres []Genre   `json:"seriesGenres"`
+	Countries    []Country `json:"countries"`
 }

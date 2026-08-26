@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/moodiness/rivune/server/internal/auth"
 )
@@ -14,8 +15,9 @@ func (a *API) beginDeviceAuthorization(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		DeviceName string `json:"deviceName"`
-		Platform   string `json:"platform"`
+		InstallationID string `json:"installationId"`
+		DeviceName     string `json:"deviceName"`
+		Platform       string `json:"platform"`
 	}
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -28,12 +30,17 @@ func (a *API) beginDeviceAuthorization(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
-	authorization, err := a.auth.BeginDeviceAuthorization(r.Context(), request.DeviceName, request.Platform)
+	authorization, err := a.auth.BeginDeviceAuthorization(r.Context(), request.InstallationID, request.DeviceName, request.Platform)
 	switch {
 	case errors.Is(err, auth.ErrInvalidInput):
 		writeError(w, http.StatusUnprocessableEntity, "invalid_device", authInputMessage(err))
 	case errors.Is(err, auth.ErrDeviceAuthorizationCapacity):
-		w.Header().Set("Retry-After", "60")
+		var capacityError *auth.DeviceAuthorizationCapacityError
+		if errors.As(err, &capacityError) {
+			setRetryAfter(w, capacityError.RetryAfter)
+		} else {
+			setRetryAfter(w, 60*time.Second)
+		}
 		writeError(w, http.StatusTooManyRequests, "device_code_capacity", "Too many device authorizations are pending; retry later")
 	case err != nil:
 		a.internalError(w, "begin device authorization", err)

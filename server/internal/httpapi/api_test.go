@@ -24,6 +24,30 @@ import (
 	"github.com/moodiness/rivune/server/internal/tracking"
 )
 
+type semanticExtensionWorkerStub struct {
+	context context.Context
+	err     error
+	calls   int
+}
+
+func (worker *semanticExtensionWorkerStub) WarmSemanticExtension(ctx context.Context) error {
+	worker.calls++
+	worker.context = ctx
+	return worker.err
+}
+
+func TestWarmSemanticExtensionDelegatesToConfiguredWorker(t *testing.T) {
+	wantErr := errors.New("warmup failure")
+	worker := &semanticExtensionWorkerStub{err: wantErr}
+	api := &API{semanticExtensionWarmup: worker}
+	ctx := context.WithValue(context.Background(), struct{}{}, "warmup")
+
+	err := api.WarmSemanticExtension(ctx)
+	if !errors.Is(err, wantErr) || worker.calls != 1 || worker.context != ctx {
+		t.Fatalf("warmup error=%v calls=%d context=%v", err, worker.calls, worker.context)
+	}
+}
+
 func TestNativeRequestIDIsValidatedReturnedAndLogged(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -63,6 +87,46 @@ func TestNativeRequestIDIsValidatedReturnedAndLogged(t *testing.T) {
 				t.Fatalf("completion log lacks correlated ID: %s", logs.String())
 			}
 		})
+	}
+}
+
+func TestCanceledUncommittedRequestLogsCanceledOutcomeWithoutBody(t *testing.T) {
+	var logs bytes.Buffer
+	api := testAPI(&fakeInstanceService{})
+	api.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	handler := api.middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/search/semantic", nil).WithContext(ctx)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Body.Len() != 0 || response.Result().ContentLength > 0 {
+		t.Fatalf("canceled response wrote a body: %q", response.Body.String())
+	}
+	if logged := logs.String(); !strings.Contains(logged, "status=499") || !strings.Contains(logged, "outcome=canceled") || !strings.Contains(logged, "request_id=") {
+		t.Fatalf("canceled request log = %s", logged)
+	}
+}
+
+func TestCanceledCommittedRequestPreservesStatusAndLogsCanceledOutcome(t *testing.T) {
+	var logs bytes.Buffer
+	api := testAPI(&fakeInstanceService{})
+	api.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	handler := api.middleware(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusOK)
+		_, _ = response.Write([]byte("stream prefix"))
+		response.(http.Flusher).Flush()
+		cancel()
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/stream", nil).WithContext(ctx)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("committed response status = %d", response.Code)
+	}
+	if logged := logs.String(); !strings.Contains(logged, "status=200") || !strings.Contains(logged, "outcome=canceled") {
+		t.Fatalf("committed canceled request log = %s", logged)
 	}
 }
 
@@ -316,7 +380,7 @@ func TestDiscoveryDescribesUnconfiguredServer(t *testing.T) {
 		Capabilities      []string `json:"capabilities"`
 	}
 	decodeResponse(t, response, &body)
-	if body.Name != "Rivune" || body.ProtocolVersion != 20 || body.APIBaseURL != "https://media.example/api/v1" ||
+	if body.Name != "Rivune" || body.ProtocolVersion != 22 || body.APIBaseURL != "https://media.example/api/v1" ||
 		body.Timezone != "Europe/Paris" || body.InterfaceLanguage != "en" || !body.SetupRequired ||
 		!slices.Equal(body.Capabilities, nativeCapabilities[:]) {
 		t.Fatalf("unexpected discovery response: %+v", body)

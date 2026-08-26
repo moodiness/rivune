@@ -46,6 +46,38 @@ func TestParseKeyringEncryptsWithActiveAndDecryptsRetainedVersion(t *testing.T) 
 	}
 }
 
+func TestKeyringBlindIndexIsDomainSeparatedVersionedAndRotationCold(t *testing.T) {
+	material := bytes.Repeat([]byte{0x42}, 32)
+	keyring, err := NewKeyring([]Key{{Version: 7, Bytes: material}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := keyring.BlindIndex("semantic-extension", []byte("normalized input"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeated, _ := keyring.BlindIndex("semantic-extension", []byte("normalized input"))
+	otherDomain, _ := keyring.BlindIndex("tracking", []byte("normalized input"))
+	otherValue, _ := keyring.BlindIndex("semantic-extension", []byte("other input"))
+	if first.Version != 7 || first != repeated || first.Digest == otherDomain.Digest || first.Digest == otherValue.Digest {
+		t.Fatalf("blind indexes are not stable and domain separated: first=%v repeated=%v domain=%v value=%v", first, repeated, otherDomain, otherValue)
+	}
+	rotated, err := NewKeyring([]Key{{Version: 8, Bytes: bytes.Repeat([]byte{0x43}, 32)}, {Version: 7, Bytes: material}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterRotation, _ := rotated.BlindIndex("semantic-extension", []byte("normalized input"))
+	if afterRotation.Version != 8 || afterRotation.Digest == first.Digest {
+		t.Fatalf("rotation did not produce a cold blind index: before=%v after=%v", first, afterRotation)
+	}
+	if _, err := (*Keyring)(nil).BlindIndex("semantic-extension", nil); err == nil {
+		t.Fatal("nil keyring produced a blind index")
+	}
+	if _, err := keyring.BlindIndex(" ", nil); err == nil {
+		t.Fatal("empty blind-index domain was accepted")
+	}
+}
+
 func TestParseKeyringRejectsMalformedOrUnsafeInput(t *testing.T) {
 	valid := strings.Repeat("12", 32)
 	tests := []struct {

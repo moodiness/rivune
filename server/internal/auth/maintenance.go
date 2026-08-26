@@ -41,6 +41,19 @@ const (
 		USING expired
 		WHERE token.token_hash = expired.token_hash
 	`
+	cleanupExpiredWebAccessTokensSQL = `
+		WITH expired AS (
+			SELECT token_hash
+			FROM auth_web_access_tokens
+			WHERE expires_at <= now()
+			ORDER BY expires_at, token_hash
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED
+		)
+		DELETE FROM auth_web_access_tokens token
+		USING expired
+		WHERE token.token_hash = expired.token_hash
+	`
 	cleanupExpiredSessionsSQL = `
 		WITH candidates AS (
 			SELECT id, inactive_at
@@ -116,6 +129,9 @@ func (s *Service) Cleanup(ctx context.Context) error {
 	}
 	if _, err := s.pool.Exec(ctx, cleanupConsumedRefreshTokensSQL, authenticationCleanupBatch); err != nil {
 		cleanupErrors = append(cleanupErrors, fmt.Errorf("delete consumed refresh token history: %w", err))
+	}
+	if _, err := s.pool.Exec(ctx, cleanupExpiredWebAccessTokensSQL, authenticationCleanupBatch); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("delete expired web access tokens: %w", err))
 	}
 	if _, err := s.pool.Exec(ctx, cleanupExpiredSessionsSQL, authenticationCleanupBatch); err != nil {
 		cleanupErrors = append(cleanupErrors, fmt.Errorf("delete inactive authentication sessions: %w", err))

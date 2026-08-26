@@ -508,6 +508,25 @@ func TestLocalizeLibraryPagePreservesRegisteredArtworkReference(t *testing.T) {
 	}
 }
 
+func TestLocalizeRecommendationPageUsesSameOriginReferences(t *testing.T) {
+	pool := openArtworkTestPool(t)
+	fixture := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer fixture.Close()
+	service := newArtworkTestService(t, pool, fixture.Client(), 1<<20)
+
+	poster := fixture.URL + "/recommendation-poster.jpg"
+	background := fixture.URL + "/recommendation-background.jpg"
+	page := watchstate.RecommendationPage{Items: []watchstate.Recommendation{{
+		Item: watchstate.RecommendationTitle{PosterURL: poster, BackgroundURL: background},
+	}}}
+	service.LocalizeRecommendationPage(context.Background(), &page)
+
+	item := page.Items[0].Item
+	if !strings.HasPrefix(item.PosterURL, publicPrefix) || !strings.HasPrefix(item.BackgroundURL, publicPrefix) {
+		t.Fatalf("recommendation artwork was not localized: %+v", item)
+	}
+}
+
 func TestLocalizeMetadataIncludesCastProfilesAndNestedSeriesArtwork(t *testing.T) {
 	pool := openArtworkTestPool(t)
 	fixture := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))

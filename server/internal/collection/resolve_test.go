@@ -26,12 +26,24 @@ func (provider artworkTMDBProvider) ResolveCollectionSource(context.Context, TMD
 	return provider.page, nil
 }
 
+func (provider artworkTMDBProvider) SearchCollectionTitles(context.Context, string, TMDBSource, int, string, string) (SourcePage, error) {
+	return provider.page, nil
+}
+
 func (artworkTMDBProvider) LookupCollectionSource(context.Context, string, string, string, int) ([]LookupResult, error) {
 	return nil, nil
 }
 
 func (artworkTMDBProvider) CollectionGenres(context.Context, string, string) ([]Genre, error) {
 	return nil, nil
+}
+
+func (artworkTMDBProvider) SemanticCatalogLanguages(context.Context) ([]string, error) {
+	return nil, nil
+}
+
+func (artworkTMDBProvider) SemanticCatalogLocale(context.Context, string) (SemanticCatalogLocale, error) {
+	return SemanticCatalogLocale{}, nil
 }
 
 func (provider artworkTMDBProvider) ResolveExternalID(_ context.Context, _ string, source, externalID string) (string, error) {

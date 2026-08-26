@@ -1,6 +1,8 @@
 package portable
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -11,6 +13,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/collection"
 	"github.com/moodiness/rivune/server/internal/settings"
+	"github.com/moodiness/rivune/server/internal/profile"
 )
 
 var (
@@ -31,12 +34,15 @@ func Validate(document Document, now time.Time) error {
 	if document.ExportedAt.IsZero() || !validArchiveTime(document.ExportedAt, now) {
 		return invalid("exportedAt is outside the supported range")
 	}
+	if err := validateIdentity(document.Identity); err != nil {
+		return err
+	}
 	if err := settings.ValidatePortableProfileValues(document.Settings); err != nil {
 		return invalid("settings are invalid")
 	}
 	if len(document.Addons) > maximumAddons || len(document.Collections) > maximumCollections || len(document.Titles) > maximumTitles ||
 		len(document.Library) > maximumStateRows || len(document.Progress) > maximumStateRows ||
-		len(document.Favorites) > maximumStateRows || len(document.UserData) > maximumStateRows {
+		len(document.Favorites) > maximumStateRows || len(document.UserData) > maximumStateRows || len(document.ContinueDismissals) > maximumStateRows {
 		return invalid("section cardinality limit exceeded")
 	}
 	collectionInputs := make([]collection.SaveInput, len(document.Collections))
@@ -146,6 +152,38 @@ func Validate(document Document, now time.Time) error {
 	return nil
 }
 
+func validateIdentity(identity Identity) error {
+	if !validText(identity.Name, 80) || identity.Name == "" || identity.Description != nil && !validText(*identity.Description, 500) {
+		return invalid("profile identity is invalid")
+	}
+	switch identity.Avatar.Kind {
+	case "preset":
+		if identity.Avatar.PresetID == "" || identity.Avatar.ContentType != "" || identity.Avatar.SHA256 != "" || len(identity.Avatar.Data) != 0 {
+			return invalid("profile avatar is invalid")
+		}
+		if _, found := profile.AvatarPresetSVG(identity.Avatar.PresetID); !found {
+			return invalid("profile avatar preset is invalid")
+		}
+	case "image":
+		if identity.Avatar.PresetID != "" || identity.Avatar.ContentType != "image/png" || len(identity.Avatar.Data) == 0 || len(identity.Avatar.Data) > MaximumAvatarBytes {
+			return invalid("profile avatar image is invalid")
+		}
+		if len(identity.Avatar.Data) < 8 || string(identity.Avatar.Data[:8]) != "\x89PNG\r\n\x1a\n" {
+			return invalid("profile avatar image is invalid")
+		}
+		digest := sha256.Sum256(identity.Avatar.Data)
+		if identity.Avatar.SHA256 != hex.EncodeToString(digest[:]) {
+			return invalid("profile avatar digest is invalid")
+		}
+		if _, err := profile.NormalizeAvatarImage(identity.Avatar.Data); err != nil {
+			return invalid("profile avatar image is invalid")
+		}
+	default:
+		return invalid("profile avatar kind is invalid")
+	}
+	return nil
+}
+
 func validateTitlesAndState(document Document, now time.Time, addonKeys map[string]struct{}) error {
 	titles := make(map[string]Title, len(document.Titles))
 	globalIdentities := make(map[string]struct{})
@@ -192,6 +230,16 @@ func validateTitlesAndState(document Document, now time.Time, addonKeys map[stri
 			(state.DurationSeconds != 0 && state.PositionSeconds > state.DurationSeconds) || state.Version < 1 ||
 			!validArchiveTime(state.LastWatchedAt, now) || !validArchiveTime(state.UpdatedAt, now) {
 			return invalid("progress state is invalid")
+		}
+	}
+	seenDismissals := make(map[string]struct{})
+	for _, state := range document.ContinueDismissals {
+		if err := validateStateReference(state.TitleKey, titles, seenDismissals, "continue dismissal"); err != nil {
+			return err
+		}
+		mediaType := titles[state.TitleKey].MediaType
+		if mediaType != "movie" && mediaType != "episode" || !validArchiveTime(state.DismissedAt, now) {
+			return invalid("continue dismissal state is invalid")
 		}
 	}
 	seenFavorites := make(map[string]struct{})

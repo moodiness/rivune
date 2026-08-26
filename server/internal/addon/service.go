@@ -18,15 +18,23 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/secretcrypto"
 )
 
+type IncidentObserver interface {
+	RecordFailure(context.Context, string, string, string, string) error
+	RecordSuccess(context.Context, string, string) error
+}
+
 type Service struct {
-	pool           *pgxpool.Pool
-	transport      Transport
-	logger         *slog.Logger
-	requestTimeout time.Duration
-	retryDelay     time.Duration
-	diagnostics    *diagnosticStore
+	pool             *pgxpool.Pool
+	transport        Transport
+	logger           *slog.Logger
+	requestTimeout   time.Duration
+	retryDelay       time.Duration
+	diagnostics      *diagnosticStore
+	incidents        IncidentObserver
+	verificationKeys *secretcrypto.Keyring
 }
 
 func NewService(pool *pgxpool.Pool, transport Transport, logger *slog.Logger) *Service {
@@ -47,49 +55,99 @@ func NewService(pool *pgxpool.Pool, transport Transport, logger *slog.Logger) *S
 	}
 }
 
+func (service *Service) SetIncidentObserver(observer IncidentObserver) {
+	service.incidents = observer
+}
+
+func (service *Service) SetVerificationEncryptionKeys(keyring *secretcrypto.Keyring) {
+	service.verificationKeys = keyring
+}
+
+func (service *Service) recordIncident(ctx context.Context, principal auth.Principal, addonID, addonName string, err error) {
+	if service.incidents == nil || principal.ActiveProfileID == nil || isClientCancellation(err) {
+		return
+	}
+	profileID := *principal.ActiveProfileID
+	incidentContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	var recordErr error
+	if err == nil {
+		recordErr = service.incidents.RecordSuccess(incidentContext, profileID, addonID)
+	} else {
+		code := "unhealthy"
+		switch classifyDiagnosticError(err) {
+		case DiagnosticErrorTimeout:
+			code = "timeout"
+		case DiagnosticErrorInvalidResponse:
+			code = "invalid_response"
+		case DiagnosticErrorUnavailable:
+			code = "unavailable"
+		}
+		recordErr = service.incidents.RecordFailure(incidentContext, profileID, addonID, addonName, code)
+	}
+	if recordErr != nil {
+		service.effectiveLogger().ErrorContext(ctx, "record addon incident", "addonId", addonID, "error", recordErr)
+	}
+}
+
 func (service *Service) install(ctx context.Context, principal auth.Principal, input InstallInput) (InstalledAddon, error) {
-	profileID, err := activeProfileID(principal)
-	if err != nil {
-		return InstalledAddon{}, err
-	}
-	assignments, err := normalizeInstallAssignments(input.ProfileIDs, input.CategoryIDs, profileID)
-	if err != nil {
-		return InstalledAddon{}, err
-	}
-	transportURL, err := NormalizeTransportURL(input.TransportURL)
-	if err != nil {
-		return InstalledAddon{}, err
-	}
 	if !principal.IsGlobalAdministrator() {
 		return InstalledAddon{}, ErrForbidden
 	}
-	authorizationTx, err := service.pool.Begin(ctx)
-	if err != nil {
-		return InstalledAddon{}, fmt.Errorf("begin addon installation authorization: %w", err)
+	verificationID := strings.ToLower(strings.TrimSpace(input.VerificationID))
+	if !validUUID(verificationID) {
+		return InstalledAddon{}, ErrInvalidInput
 	}
-	defer func() { _ = authorizationTx.Rollback(ctx) }()
-	if err := authorizeGlobalAddonOrigin(ctx, authorizationTx, principal); err != nil {
-		return InstalledAddon{}, err
-	}
-	if err := authorizeAssignments(ctx, authorizationTx, principal, profileID, assignments); err != nil {
-		return InstalledAddon{}, err
-	}
-	if err := authorizationTx.Commit(ctx); err != nil {
-		return InstalledAddon{}, fmt.Errorf("commit addon installation authorization: %w", err)
-	}
-	diagnosticAttempt := service.diagnostics.start("")
-	manifest, rawManifest, err := service.transport.Manifest(ctx, transportURL)
+	profileID, err := activeProfileID(principal)
 	if err != nil {
 		return InstalledAddon{}, err
 	}
 	tx, err := service.pool.Begin(ctx)
 	if err != nil {
-		return InstalledAddon{}, fmt.Errorf("begin addon installation: %w", err)
+		return InstalledAddon{}, fmt.Errorf("begin verified addon installation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if err := authorizeGlobalAddonOrigin(ctx, tx, principal); err != nil {
 		return InstalledAddon{}, err
 	}
+	var transportCiphertext, rawManifest []byte
+	var status string
+	var manifestID, manifestVersion *string
+	var transportCipherVersion, transportKeyVersion int
+	var profileIDs, categoryIDs []string
+	var expiresAt time.Time
+	var consumedAt *time.Time
+	err = tx.QueryRow(ctx, `
+		SELECT transport_url_ciphertext,COALESCE(transport_url_cipher_version,0),COALESCE(transport_url_key_version,0),manifest,manifest_id,manifest_version,profile_ids,category_ids,status,expires_at,consumed_at
+		FROM addon_verifications
+		WHERE id=$1::uuid AND requested_by_user_id=$2::uuid AND addon_id IS NULL AND profile_id=$3::uuid
+		FOR UPDATE
+	`, verificationID, principal.UserID, profileID).Scan(&transportCiphertext, &transportCipherVersion, &transportKeyVersion, &rawManifest, &manifestID, &manifestVersion, &profileIDs, &categoryIDs, &status, &expiresAt, &consumedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return InstalledAddon{}, ErrNotFound
+	}
+	if err != nil {
+		return InstalledAddon{}, fmt.Errorf("lock addon verification snapshot: %w", err)
+	}
+	if consumedAt != nil {
+		return InstalledAddon{}, ErrVerificationConsumed
+	}
+	if !expiresAt.After(time.Now().UTC()) {
+		return InstalledAddon{}, ErrVerificationExpired
+	}
+	if status != "passed" || service.verificationKeys == nil || len(transportCiphertext) == 0 {
+		return InstalledAddon{}, ErrVerificationFailed
+	}
+	transportPlaintext, decryptErr := service.verificationKeys.Decrypt(secretcrypto.Envelope{Ciphertext: transportCiphertext, CipherVersion: transportCipherVersion, KeyVersion: transportKeyVersion}, verificationTransportAAD(verificationID, transportKeyVersion))
+	if decryptErr != nil {
+		return InstalledAddon{}, ErrVerificationFailed
+	}
+	transportURL := string(transportPlaintext)
+	manifest, compactManifest, err := ParseManifest(rawManifest)
+	if err != nil || manifestID == nil || manifestVersion == nil || manifest.ID != *manifestID || manifest.Version != *manifestVersion {
+		return InstalledAddon{}, ErrVerificationFailed
+	}
+	assignments := addonAssignments{profileIDs: profileIDs, categoryIDs: categoryIDs}
 	if err := authorizeAssignments(ctx, tx, principal, profileID, assignments); err != nil {
 		return InstalledAddon{}, err
 	}
@@ -102,34 +160,43 @@ func (service *Service) install(ctx context.Context, principal auth.Principal, i
 	}
 	var addonID string
 	err = tx.QueryRow(ctx, `
-		INSERT INTO profile_addons (
-			profile_id, transport_url, manifest, manifest_id, manifest_version, position
-		)
-		VALUES (
-			$1::uuid, $2, $3::jsonb, $4, $5,
-			(SELECT COALESCE(max(position) + 1, 0) FROM profile_addons WHERE profile_id = $1::uuid)
-		)
+		INSERT INTO profile_addons (profile_id,transport_url,manifest,manifest_id,manifest_version,position)
+		VALUES ($1::uuid,$2,$3::jsonb,$4,$5,(SELECT COALESCE(max(position)+1,0) FROM profile_addons WHERE profile_id=$1::uuid))
 		RETURNING id::text
-	`, profileID, transportURL, rawManifest, manifest.ID, manifest.Version).Scan(&addonID)
+	`, profileID, transportURL, compactManifest, manifest.ID, manifest.Version).Scan(&addonID)
 	if err != nil {
 		var databaseError *pgconn.PgError
 		if errors.As(err, &databaseError) && databaseError.Code == "23505" {
 			return InstalledAddon{}, ErrAlreadyInstalled
 		}
-		return InstalledAddon{}, fmt.Errorf("install addon: %w", err)
+		return InstalledAddon{}, fmt.Errorf("install verified addon: %w", err)
 	}
 	if err := writeAddonAssignments(ctx, tx, addonID, assignments); err != nil {
 		return InstalledAddon{}, err
+	}
+	result, err := consumeAddonVerification(ctx, tx, verificationID)
+	if err != nil {
+		return InstalledAddon{}, fmt.Errorf("consume addon verification: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return InstalledAddon{}, ErrVerificationConsumed
 	}
 	installed, err := queryAddon(tx.QueryRow(ctx, addonForManagementQuery, addonID, profileID))
 	if err != nil {
 		return InstalledAddon{}, fmt.Errorf("query installed addon: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return InstalledAddon{}, fmt.Errorf("commit addon installation: %w", err)
+		return InstalledAddon{}, fmt.Errorf("commit verified addon installation: %w", err)
 	}
-	service.diagnostics.complete(installed.ID, diagnosticAttempt, nil)
 	return installed, nil
+}
+
+func consumeAddonVerification(ctx context.Context, tx pgx.Tx, verificationID string) (pgconn.CommandTag, error) {
+	return tx.Exec(ctx, `
+		UPDATE addon_verifications
+		SET consumed_at=GREATEST(clock_timestamp(),created_at),transport_url_ciphertext=NULL,transport_url_cipher_version=NULL,transport_url_key_version=NULL
+		WHERE id=$1::uuid AND consumed_at IS NULL
+	`, verificationID)
 }
 
 func (service *Service) Install(ctx context.Context, principal auth.Principal, input InstallInput) (ManagedAddon, error) {
@@ -138,52 +205,6 @@ func (service *Service) Install(ctx context.Context, principal auth.Principal, i
 		return ManagedAddon{}, err
 	}
 	return managedAddon(installed, principal.IsGlobalAdministrator()), nil
-}
-
-func (service *Service) Preview(ctx context.Context, principal auth.Principal, input InstallInput) (AddonPreview, error) {
-	if !principal.IsGlobalAdministrator() {
-		return AddonPreview{}, ErrForbidden
-	}
-	profileID, err := activeProfileID(principal)
-	if err != nil {
-		return AddonPreview{}, err
-	}
-	assignments, err := normalizeInstallAssignments(input.ProfileIDs, input.CategoryIDs, profileID)
-	if err != nil {
-		return AddonPreview{}, err
-	}
-	transportURL, err := NormalizeTransportURL(input.TransportURL)
-	if err != nil {
-		return AddonPreview{}, err
-	}
-	authorizationTx, err := service.pool.Begin(ctx)
-	if err != nil {
-		return AddonPreview{}, fmt.Errorf("begin addon preview authorization: %w", err)
-	}
-	defer func() { _ = authorizationTx.Rollback(ctx) }()
-	if err := authorizeGlobalAddonOrigin(ctx, authorizationTx, principal); err != nil {
-		return AddonPreview{}, err
-	}
-	if err := authorizeAssignments(ctx, authorizationTx, principal, profileID, assignments); err != nil {
-		return AddonPreview{}, err
-	}
-	if err := authorizationTx.Commit(ctx); err != nil {
-		return AddonPreview{}, fmt.Errorf("commit addon preview authorization: %w", err)
-	}
-	manifest, _, err := service.transport.Manifest(ctx, transportURL)
-	if err != nil {
-		return AddonPreview{}, err
-	}
-	if manifest.Types == nil {
-		manifest.Types = []string{}
-	}
-	if manifest.Catalogs == nil {
-		manifest.Catalogs = []ManifestCatalog{}
-	}
-	return AddonPreview{
-		Manifest: manifest, Capabilities: capabilitiesFor(manifest),
-		ProfileIDs: assignments.profileIDs, CategoryIDs: assignments.categoryIDs,
-	}, nil
 }
 
 func (service *Service) List(ctx context.Context, principal auth.Principal) ([]InstalledAddon, error) {
@@ -485,6 +506,7 @@ func (service *Service) Refresh(ctx context.Context, principal auth.Principal, a
 	manifest, rawManifest, err := service.transport.Manifest(ctx, current.transportURL)
 	if err != nil {
 		service.diagnostics.complete(addonID, diagnosticAttempt, err)
+		service.recordIncident(ctx, principal, addonID, current.parsedManifest.Name, err)
 		return InstalledAddon{}, err
 	}
 	tx, err := service.pool.Begin(ctx)
@@ -517,6 +539,7 @@ func (service *Service) Refresh(ctx context.Context, principal auth.Principal, a
 		return InstalledAddon{}, fmt.Errorf("commit addon refresh: %w", err)
 	}
 	service.diagnostics.complete(addonID, diagnosticAttempt, nil)
+	service.recordIncident(ctx, principal, addonID, installed.parsedManifest.Name, nil)
 	return installed, nil
 }
 
@@ -732,17 +755,19 @@ func (service *Service) fetch(ctx context.Context, principal auth.Principal, add
 	diagnosticAttempt := service.diagnostics.start(addonID)
 	payload, cache, providerErr := service.transport.Resource(ctx, installed.transportURL, path)
 	if providerErr != nil {
+		service.diagnostics.complete(addonID, diagnosticAttempt, providerErr)
+		service.recordIncident(ctx, principal, addonID, installed.parsedManifest.Name, providerErr)
 		if revalidationErr := service.revalidateAddon(ctx, principal, installed); revalidationErr != nil {
 			return ResourceResult{}, revalidationErr
 		}
-		service.diagnostics.complete(addonID, diagnosticAttempt, providerErr)
 		return ResourceResult{}, providerErr
 	}
 	result := resultFor(installed, path, payload, cache)
+	service.diagnostics.complete(addonID, diagnosticAttempt, nil)
+	service.recordIncident(ctx, principal, addonID, installed.parsedManifest.Name, nil)
 	if err := service.revalidateAddon(ctx, principal, installed); err != nil {
 		return ResourceResult{}, err
 	}
-	service.diagnostics.complete(addonID, diagnosticAttempt, nil)
 	return result, nil
 }
 
@@ -1027,6 +1052,7 @@ func (service *Service) executeRequest(ctx context.Context, principal auth.Princ
 	diagnosticAttempt := service.diagnostics.start(request.addon.ID)
 	defer func() {
 		service.diagnostics.complete(request.addon.ID, diagnosticAttempt, err)
+		service.recordIncident(ctx, principal, request.addon.ID, request.addon.parsedManifest.Name, err)
 	}()
 	payload, cache, err = service.executeTransportRequest(ctx, request, budget)
 	if err == nil || ctx.Err() != nil || !isTemporaryProviderError(err) {

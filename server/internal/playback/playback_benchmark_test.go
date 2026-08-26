@@ -70,8 +70,7 @@ func BenchmarkDirectorySize(b *testing.B) {
 		b.Fatalf("directory size = %d, want %d", size, expectedBytes)
 	}
 	b.ReportAllocs()
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		benchmarkDirectoryBytes = directorySize(root)
 	}
 }

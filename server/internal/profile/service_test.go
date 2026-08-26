@@ -546,7 +546,7 @@ func TestCategoryBoundariesRejectDirectAndBatchProfileTampering(t *testing.T) {
 		t.Fatalf("count profile addons: %v", err)
 	}
 	addonService := addon.NewService(pool, categoryBoundaryAddonTransport{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if _, err := addonService.Install(ctx, principal, addon.InstallInput{
+	if _, err := addonService.VerifyCandidate(ctx, principal, addon.VerificationInput{
 		TransportURL: "https://category-boundary.invalid/manifest.json",
 		ProfileIDs:   []string{profileAID, profileBID},
 	}); !errors.Is(err, addon.ErrForbidden) {

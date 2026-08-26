@@ -1,8 +1,12 @@
 package settings
 
+import "fmt"
 // ValidatePortableProfileValues applies the same value and profile-scope rules
 // as a profile settings update without requiring a database transaction.
 func ValidatePortableProfileValues(values Values) error {
+	if values.NotificationsEnabled != nil || values.NotificationDurationSeconds != nil || values.NotificationPollIntervalSeconds != nil {
+		return fmt.Errorf("%w: notification settings are not portable profile settings", ErrInvalidInput)
+	}
 	patch := Patch{
 		InterfaceLanguage:                optionalString(values.InterfaceLanguage),
 		Theme:                            optionalString(values.Theme),
@@ -38,9 +42,6 @@ func ValidatePortableProfileValues(values Values) error {
 		SubtitleSizePercent:              optionalInt(values.SubtitleSizePercent),
 		SubtitleTextColor:                optionalString(values.SubtitleTextColor),
 		SubtitleBackgroundOpacityPercent: optionalInt(values.SubtitleBackgroundOpacityPercent),
-		NotificationsEnabled:             optionalBool(values.NotificationsEnabled),
-		NotificationDurationSeconds:      optionalInt(values.NotificationDurationSeconds),
-		NotificationPollIntervalSeconds:  optionalInt(values.NotificationPollIntervalSeconds),
 	}
 	if portablePatchEmpty(patch) {
 		return nil
@@ -72,6 +73,5 @@ func portablePatchEmpty(patch Patch) bool {
 		!patch.ForcedSubtitleLanguage.Set && !patch.AutoplayNextEpisode.Set && !patch.SkipIntroEnabled.Set &&
 		!patch.SkipRecapEnabled.Set && !patch.SkipOutroEnabled.Set && !patch.CardDensity.Set &&
 		!patch.AnimationsEnabled.Set && !patch.SubtitleSizePercent.Set && !patch.SubtitleTextColor.Set &&
-		!patch.SubtitleBackgroundOpacityPercent.Set && !patch.NotificationsEnabled.Set &&
-		!patch.NotificationDurationSeconds.Set && !patch.NotificationPollIntervalSeconds.Set
+		!patch.SubtitleBackgroundOpacityPercent.Set
 }
