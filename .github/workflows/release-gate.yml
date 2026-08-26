@@ -445,6 +445,8 @@ jobs:
             file_name: Rivune-arm64.exe
             machine: '0xAA64'
     runs-on: ${{ matrix.runner }}
+    env:
+      NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
