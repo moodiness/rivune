@@ -216,8 +216,6 @@
     <string name="preferences_aspect_fit">Ajustar</string>
     <string name="preferences_aspect_fill">Preencher</string>
     <string name="preferences_aspect_zoom">Zoom</string>
-    <string name="preferences_wifi_quality">Qualidade no Wi-Fi</string>
-    <string name="preferences_wifi_quality_body">Limita streams no Wi-Fi e Ethernet. Sem uma fonte direta compatível ou acesso à transcodificação, a reprodução pode ficar indisponível.</string>
     <string name="preferences_mobile_quality">Qualidade nos dados móveis</string>
     <string name="preferences_mobile_quality_body">Limita streams em redes celulares e outras redes não locais. Sem uma fonte direta compatível ou acesso à transcodificação, a reprodução pode ficar indisponível.</string>
     <string name="preferences_quality_automatic">Automática</string>
@@ -402,4 +400,19 @@
     <string name="error_session_expired">Sua sessão expirou. Pareie este dispositivo novamente.</string>
     <string name="error_no_profiles">Não há perfis disponíveis para este dispositivo.</string>
     <string name="error_logout_failed">O Rivune não conseguiu desconectar completamente a sessão deste dispositivo.</string>
+    <string name="viewer_coordination_devices_title">Reproduzir em outro dispositivo</string>
+    <string name="viewer_coordination_play">Reproduzir</string>
+    <string name="viewer_coordination_pause">Pausar</string>
+    <string name="viewer_coordination_match_position">Sincronizar posição</string>
+    <string name="viewer_coordination_stop">Parar</string>
+    <string name="viewer_coordination_room_start">Criar sala de exibição</string>
+    <string name="viewer_coordination_room_join">Entrar em uma sala</string>
+    <string name="viewer_coordination_room_label">Sala %1$s</string>
+    <string name="viewer_coordination_room_default">Sala de exibição</string>
+    <plurals name="viewer_coordination_watching_count"><item quantity="one">%1$d pessoa assistindo</item><item quantity="other">%1$d pessoas assistindo</item></plurals>
+    <string name="viewer_coordination_room_leave">Sair</string>
+    <string name="viewer_coordination_join_title">Entrar na sala de exibição</string>
+    <string name="viewer_coordination_room_code">Código da sala</string>
+    <string name="viewer_coordination_join_confirm">Entrar</string>
+    <string name="viewer_coordination_cancel">Cancelar</string>
 </resources>
