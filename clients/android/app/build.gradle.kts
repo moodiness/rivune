@@ -22,7 +22,7 @@ val releaseVersionName = System.getenv("RIVUNE_ANDROID_VERSION_NAME")?.also { va
     require(Regex("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$").matches(value)) {
         "RIVUNE_ANDROID_VERSION_NAME must be SemVer without a v prefix"
     }
-} ?: "1.12.4"
+} ?: "1.13.0"
 val releaseVersionCode = System.getenv("RIVUNE_ANDROID_VERSION_CODE")?.let { value ->
     require(value.matches(Regex("[1-9][0-9]*"))) {
         "RIVUNE_ANDROID_VERSION_CODE must be a positive decimal integer"

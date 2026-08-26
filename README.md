@@ -15,14 +15,14 @@ Requirements: Docker Engine with Compose v2, Bash, and OpenSSL. macOS also needs
 ```sh
 git clone https://github.com/moodiness/rivune.git
 cd rivune
-./rivune setup --public-url https://media.example.com --version 1.12.4
+./rivune setup --public-url https://media.example.com --version 1.13.0
 ./rivune up
 ./rivune doctor
 ```
 
 Omit `--public-url` for loopback-only use, then open [http://localhost:8080](http://localhost:8080). A public installation must use HTTPS through Pangolin/Newt or another reverse proxy targeting `rivune:8080` on the dedicated `rivune-edge` network. Never expose raw port 8080 publicly.
 
-On Windows, create `.env` with `./scripts/create-env.ps1`, then use `./rivune.ps1 up|status|logs|down`. Run `./rivune help` for lifecycle, backup, restore, and diagnostics commands. Keep `.env`, backup signing material, and every version of `RIVUNE_ENCRYPTION_KEYS` private and backed up separately.
+On Windows, create `.env` with `./scripts/create-env.ps1`, then use `./rivune.ps1 up|status|logs|down`; native Windows application packages are built on a Windows runner. Run `./rivune help` for lifecycle, backup, restore, and diagnostics commands. Before every upgrade, create and verify an authenticated database backup. Keep `.env`, backup signing material, and every version of `RIVUNE_ENCRYPTION_KEYS` private and backed up separately; see [Operations](docs/operations.md#secrets-and-upgrades).
 
 ## Applications
 
@@ -32,10 +32,14 @@ The [applications page](https://moodiness.github.io/rivune/) provides current do
 | --- | --- | --- |
 | Android | Phone, tablet, Android TV | Signed APK |
 | Apple | iPhone, iPad, Apple TV, Vision Pro, macOS | Unsigned IPA/DMG |
-| Windows | x64, ARM64 | Unsigned portable executable |
-| TV | LG webOS, Samsung Tizen | Unsigned IPK/WGT |
+| Windows | x64, ARM64 | Unsigned universal setup executable |
+| TV | LG webOS 4.0+, Samsung Tizen 5.5+ | Unsigned IPK/WGT |
 
-Apple device archives require local signing. Windows and macOS may show trust warnings. Verify the release URL and digest before running unsigned software.
+Apple device archives require local signing, and tvOS update notices lead to a release QR code rather than installing in-app. Windows and macOS may show trust warnings. webOS and Tizen can update the signed, digest-verified shared runtime in-app when persistent TV storage is available, but full IPK/WGT upgrades still require the local TV installer and platform developer mode; Tizen packages are signed locally with an authorized certificate profile. Verify the release URL, manifest signature, and digest before running unsigned software.
+
+## Protocol 22
+
+Rivune Server and bundled clients use wire protocol **22**. Clients discover `GET /.well-known/rivune`, follow its `apiBaseUrl`, and reject unsupported protocol versions. Protocol 22 adds durable add-on verification, idempotent playback command results, profile archive v2, bounded playback explanations, profile queues, playback failover, saved searches and smart collections, extension incidents, media and device-session notifications, and profile accessibility preferences. See the exact compatibility boundary in [Protocol compatibility](protocol/COMPATIBILITY.md#version-22) and the operator upgrade procedure in [Operations](docs/operations.md#secrets-and-upgrades).
 
 ## Development
 

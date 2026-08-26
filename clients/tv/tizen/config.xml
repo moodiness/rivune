@@ -2,7 +2,7 @@
 <widget xmlns="http://www.w3.org/ns/widgets"
         xmlns:tizen="http://tizen.org/ns/widgets"
         id="https://github.com/moodiness/rivune/tizen"
-        version="1.12.4"
+        version="1.13.0"
         viewmodes="maximized">
   <tizen:application id="RivuneTV01.Rivune" package="RivuneTV01" required_version="5.5" />
   <content src="index.html" />
