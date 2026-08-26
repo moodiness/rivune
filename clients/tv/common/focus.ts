@@ -10,13 +10,19 @@ const focusableSelector = [
 type Direction = "left" | "right" | "up" | "down";
 
 function visible(element: HTMLElement): boolean {
+  if (element.closest("[hidden], [inert], [aria-hidden='true']")) return false;
   const style = window.getComputedStyle(element);
   const rect = element.getBoundingClientRect();
   return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
 }
 
-function candidates(): HTMLElement[] {
-  return Array.from(document.querySelectorAll<HTMLElement>(focusableSelector)).filter(visible);
+function activeFocusRoot(): HTMLElement | null {
+  const scopes = Array.from(document.querySelectorAll<HTMLElement>("[data-tv-focus-scope='true']")).filter(visible);
+  return scopes[scopes.length - 1] ?? null;
+}
+
+function candidates(root: ParentNode = activeFocusRoot() ?? document): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(focusableSelector)).filter(visible);
 }
 
 function center(element: HTMLElement) {
@@ -24,11 +30,11 @@ function center(element: HTMLElement) {
   return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
 }
 
-function nextFocus(current: HTMLElement, direction: Direction): HTMLElement | null {
+function nextFocus(current: HTMLElement, direction: Direction, root: ParentNode): HTMLElement | null {
   const origin = center(current);
   let result: HTMLElement | null = null;
   let best = Number.POSITIVE_INFINITY;
-  for (const candidate of candidates()) {
+  for (const candidate of candidates(root)) {
     if (candidate === current) continue;
     const target = center(candidate);
     const dx = target.x - origin.x;
@@ -58,7 +64,9 @@ function editingText(element: HTMLElement, direction: Direction): boolean {
 
 export function focusFirst(root: ParentNode = document): void {
   window.requestAnimationFrame(() => {
-    const target = Array.from(root.querySelectorAll<HTMLElement>(focusableSelector)).find(visible);
+    const activeRoot = activeFocusRoot();
+    const targetRoot = activeRoot && (root === document || !root.contains(activeRoot)) ? activeRoot : root;
+    const target = candidates(targetRoot)[0];
     target?.focus();
     target?.scrollIntoView({ block: "nearest", inline: "nearest" });
   });
@@ -67,6 +75,25 @@ export function focusFirst(root: ParentNode = document): void {
 export function installSpatialNavigation(onBack: () => void): () => void {
   const handler = (event: KeyboardEvent) => {
     const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusRoot = activeFocusRoot();
+    if (event.key === "Tab" && focusRoot) {
+      const scopedCandidates = candidates(focusRoot);
+      if (scopedCandidates.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const currentIndex = active ? scopedCandidates.indexOf(active) : -1;
+      const nextIndex = event.shiftKey
+        ? (currentIndex <= 0 ? scopedCandidates.length - 1 : currentIndex - 1)
+        : (currentIndex < 0 || currentIndex === scopedCandidates.length - 1 ? 0 : currentIndex + 1);
+      if (currentIndex < 0 || (event.shiftKey ? currentIndex === 0 : currentIndex === scopedCandidates.length - 1)) {
+        event.preventDefault();
+        const target = scopedCandidates[nextIndex];
+        target.focus();
+        target.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }
+      return;
+    }
     const direction: Direction | null = event.key === "ArrowLeft" ? "left"
       : event.key === "ArrowRight" ? "right"
         : event.key === "ArrowUp" ? "up"
@@ -74,15 +101,16 @@ export function installSpatialNavigation(onBack: () => void): () => void {
             : null;
     if (direction) {
       if (active && editingText(active, direction)) return;
-      if (!active || !visible(active)) {
-        const first = candidates()[0];
+      const scopedCandidates = candidates(focusRoot ?? document);
+      if (!active || !visible(active) || (focusRoot && !focusRoot.contains(active))) {
+        const first = scopedCandidates[0];
         if (!first) return;
         event.preventDefault();
         first.focus();
         first.scrollIntoView({ block: "nearest", inline: "nearest" });
         return;
       }
-      const target = nextFocus(active, direction);
+      const target = nextFocus(active, direction, focusRoot ?? document);
       if (!target) return;
       event.preventDefault();
       target.focus();
@@ -96,7 +124,9 @@ export function installSpatialNavigation(onBack: () => void): () => void {
       event.keyCode === 461 || event.keyCode === 10009;
     if (back) {
       event.preventDefault();
-      onBack();
+      const dismiss = activeFocusRoot()?.querySelector<HTMLButtonElement>("[data-tv-dismiss-scope='true']");
+      if (dismiss) dismiss.click();
+      else onBack();
     }
   };
   document.addEventListener("keydown", handler, true);
