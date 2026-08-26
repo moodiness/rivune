@@ -61,7 +61,7 @@ jobs:
           fi
           target="server/internal/webui/dist/tv-runtime/${tag}"
           mkdir -p "${target}"
-          for asset_name in rivune-update.json Rivune-TV-runtime.json; do
+          for asset_name in rivune-update.json rivune-update.json.sig Rivune-TV-runtime.json; do
             asset_id="$(jq -er '[.assets[] | select(.name == $name and .state == "uploaded" and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")))] | select(length == 1) | .[0].id' --arg name "${asset_name}" <<<"${release}")"
             gh api --header 'Accept: application/octet-stream' "repos/${REPOSITORY}/releases/assets/${asset_id}" > "${target}/${asset_name}"
             expected="$(jq -er '[.assets[] | select(.id == ($id | tonumber))] | select(length == 1) | .[0].digest' --arg id "${asset_id}" <<<"${release}")"
