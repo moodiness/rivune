@@ -17,15 +17,16 @@ import (
 )
 
 const (
-	Repository                 = "moodiness/rivune"
-	WebOSPackageName           = "Rivune-webOS.ipk"
-	TizenPackageName           = "Rivune-Tizen.wgt"
-	ManifestName               = "rivune-update.json"
-	WindowsInstallerName       = "Rivune-TV-Installer-Windows.exe"
-	MacOSInstallerName         = "Rivune-TV-Installer-macOS.dmg"
-	maximumMetadataBytes int64 = 512 * 1024
-	maximumManifestBytes int64 = 256 * 1024
-	maximumPackageBytes  int64 = 256 * 1024 * 1024
+	Repository                  = "moodiness/rivune"
+	WebOSPackageName            = "Rivune-webOS.ipk"
+	TizenPackageName            = "Rivune-Tizen.wgt"
+	ManifestName                = "rivune-update.json"
+	ManifestSignatureName       = ManifestName + ".sig"
+	WindowsInstallerName        = "Rivune-TV-Installer-Windows.exe"
+	MacOSInstallerName          = "Rivune-TV-Installer-macOS.dmg"
+	maximumMetadataBytes  int64 = 512 * 1024
+	maximumManifestBytes  int64 = 256 * 1024
+	maximumPackageBytes   int64 = 256 * 1024 * 1024
 )
 
 var (
@@ -44,6 +45,7 @@ var (
 		"Rivune-visionOS-unsigned.ipa",
 		WebOSPackageName,
 		ManifestName,
+		ManifestSignatureName,
 	}
 )
 
@@ -71,18 +73,20 @@ type Release struct {
 }
 
 type Client struct {
-	HTTP              *http.Client
-	APIEndpoint       string
-	ReleasePagePrefix string
-	DownloadPrefix    string
+	HTTP                    *http.Client
+	APIEndpoint             string
+	ReleasePagePrefix       string
+	DownloadPrefix          string
+	VerifyManifestSignature func([]byte, []byte) error
 }
 
 func NewClient() *Client {
 	return &Client{
-		HTTP:              &http.Client{Timeout: 45 * time.Second},
-		APIEndpoint:       "https://api.github.com/repos/" + Repository + "/releases/latest",
-		ReleasePagePrefix: "https://github.com/" + Repository + "/releases/tag/",
-		DownloadPrefix:    "https://github.com/" + Repository + "/releases/download/",
+		HTTP:                    &http.Client{Timeout: 45 * time.Second},
+		APIEndpoint:             "https://api.github.com/repos/" + Repository + "/releases/latest",
+		ReleasePagePrefix:       "https://github.com/" + Repository + "/releases/tag/",
+		DownloadPrefix:          "https://github.com/" + Repository + "/releases/download/",
+		VerifyManifestSignature: verifyManifestSignature,
 	}
 }
 
@@ -154,6 +158,17 @@ func (client *Client) Latest(ctx context.Context) (Release, error) {
 	manifestBytes, err := client.verifiedBytes(ctx, manifestAsset, maximumManifestBytes)
 	if err != nil {
 		return Release{}, fmt.Errorf("load verified update manifest: %w", err)
+	}
+	signatureBytes, err := client.verifiedBytes(ctx, assets[ManifestSignatureName], maximumManifestSignatureBytes)
+	if err != nil {
+		return Release{}, fmt.Errorf("load update manifest signature: %w", err)
+	}
+	verifier := client.VerifyManifestSignature
+	if verifier == nil {
+		verifier = verifyManifestSignature
+	}
+	if err := verifier(manifestBytes, signatureBytes); err != nil {
+		return Release{}, fmt.Errorf("verify update manifest signature: %w", err)
 	}
 	var manifest updateManifest
 	if err := strictJSON(manifestBytes, &manifest); err != nil {
