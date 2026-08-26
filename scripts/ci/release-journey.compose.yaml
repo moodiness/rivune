@@ -1,0 +1,121 @@
+services:
+  postgres:
+    image: postgres:18-trixie@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    environment:
+      POSTGRES_DB: rivune
+      POSTGRES_USER: rivune
+      POSTGRES_PASSWORD: ${RIVUNE_DATABASE_PASSWORD:?missing database password}
+    volumes:
+      - database:/var/lib/postgresql
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev
+      - /var/run/postgresql:rw,noexec,nosuid,nodev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rivune -d rivune"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  fixture:
+    image: python:3.13-alpine@sha256:540c7d91f98ff6880174c40e99067bf5941eb54d818a7a5e094d188b196a934d
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    command:
+      - python3
+      - /fixture/release-journey-fixture.py
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8081"
+      - --assets
+      - /assets
+      - --public-origin
+      - http://172.29.254.10:8081
+    volumes:
+      - type: bind
+        source: ${RIVUNE_SOURCE_ROOT:?missing source root}/scripts/ci/release-journey-fixture.py
+        target: /fixture/release-journey-fixture.py
+        read_only: true
+      - type: bind
+        source: ${RIVUNE_SOURCE_ROOT:?missing source root}/server/internal/demo/assets
+        target: /assets
+        read_only: true
+    networks:
+      default:
+        ipv4_address: 172.29.254.10
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=2).read()"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 2s
+
+  rivune:
+    image: ${RIVUNE_RELEASE_IMAGE:?missing exact release image}
+    restart: "no"
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      fixture:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      RIVUNE_LISTEN_ADDRESS: ":8080"
+      RIVUNE_DATABASE_URL: postgresql://rivune:${RIVUNE_DATABASE_PASSWORD}@postgres:5432/rivune?sslmode=disable
+      RIVUNE_SETUP_TOKEN: ${RIVUNE_SETUP_TOKEN:?missing setup token}
+      RIVUNE_ENCRYPTION_KEYS: ${RIVUNE_ENCRYPTION_KEYS:?missing encryption keyring}
+      RIVUNE_MEDIA_TEMP_DIR: /var/lib/rivune/media
+      RIVUNE_TMDB_ACCESS_TOKEN: ""
+      RIVUNE_FANART_API_KEY: ""
+      RIVUNE_MDBLIST_API_KEY: ""
+      RIVUNE_TVDB_API_KEY: ""
+      RIVUNE_TRAKT_CLIENT_ID: ""
+      RIVUNE_TRAKT_CLIENT_SECRET: ""
+      RIVUNE_SIMKL_CLIENT_ID: ""
+    ports:
+      - "127.0.0.1::8080"
+    volumes:
+      - artwork:/var/lib/rivune/artwork
+      - media:/var/lib/rivune/media
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,mode=1777,size=256m
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/docker-entrypoint.sh", "--healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 45
+      start_period: 10s
+
+volumes:
+  database:
+  artwork:
+  media:
+
+networks:
+  default:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.29.254.0/24
