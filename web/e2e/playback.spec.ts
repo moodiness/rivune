@@ -68,6 +68,55 @@ async function installDeterministicMedia(page: Page, duration = 1800) {
   }, duration);
 }
 
+test("player switches once to an ordered backup and can cancel future failover", async ({ page, rivune }) => {
+  await installDeterministicMedia(page);
+  const expiresAt = "2099-01-01T00:00:00Z";
+  let cancellationRequests = 0;
+  await page.route("**/api/v1/playback/sources", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({
+      sources: [
+        { id: "primary", sourceRef: "primary-source-reference", stableIdentity: "primary", addonId: "fixture-addon", manifestId: "fixture-manifest", addonName: "Fixture Add-on", streamIndex: 0, name: "Primary 1080p", protocol: "http", container: "mp4", expiresAt },
+        { id: "backup", sourceRef: "backup-source-reference", stableIdentity: "backup", addonId: "fixture-addon", manifestId: "fixture-manifest", addonName: "Fixture Add-on", streamIndex: 1, name: "Backup 1080p", protocol: "http", container: "mp4", expiresAt },
+      ],
+      providerErrors: [],
+    }) });
+  });
+  await page.route("**/api/v1/playback/failovers", async (route) => {
+    const input = route.request().postDataJSON();
+    expect(input).toEqual({ candidateSourceRefs: ["primary-source-reference", "backup-source-reference"], selectedSourceRef: "primary-source-reference" });
+    await route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ id: "11111111-1111-4111-8111-111111111111", currentSourceRef: "primary-source-reference", currentPosition: 0, positionSeconds: 0, attemptCount: 0, maximumAttempts: 1, revision: 1, status: "active", candidateHealth: [{ position: 0, status: "current" }, { position: 1, status: "available" }], expiresAt }) });
+  });
+  await page.route("**/api/v1/playback/failovers/11111111-1111-4111-8111-111111111111/advance", async (route) => {
+    expect(route.request().postDataJSON()).toMatchObject({ error: "source_failed", positionSeconds: 415, expectedRevision: 1 });
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ id: "11111111-1111-4111-8111-111111111111", currentSourceRef: "backup-source-reference", currentPosition: 1, positionSeconds: 415, attemptCount: 1, maximumAttempts: 1, revision: 2, status: "active", lastError: "source_failed", explanation: "safe fixed explanation", candidateHealth: [{ position: 0, status: "cooling_down", cooldownUntil: expiresAt }, { position: 1, status: "current" }], expiresAt }) });
+  });
+  await page.route("**/api/v1/playback/failovers/11111111-1111-4111-8111-111111111111", async (route) => {
+    if (route.request().method() === "DELETE") {
+      cancellationRequests += 1;
+      await route.fulfill({ status: 204 });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+  await page.getByRole("radio", { name: /Primary 1080p/ }).click();
+  await page.getByRole("button", { name: "Play episode" }).click();
+  const player = page.getByRole("dialog", { name: "Playing First Light" });
+  await expect(player).toBeVisible();
+  await page.locator("video").evaluate((video) => {
+    video.currentTime = 415;
+    video.dispatchEvent(new Event("error"));
+  });
+
+  await expect(player.getByRole("status").filter({ hasText: "Switched to backup source 2" })).toContainText("6:55");
+  await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").map((request) => request.body.sourceRef)).toContain("backup-source-reference");
+  await player.getByRole("button", { name: "Cancel" }).click();
+  await expect(player.getByRole("status").filter({ hasText: "Automatic source switching is off" })).toBeVisible();
+  await expect.poll(() => cancellationRequests).toBe(1);
+});
+
 test("HDR formats require a high dynamic range output", async ({ page, rivune }) => {
   await page.addInitScript(() => {
     const nativeMatchMedia = window.matchMedia.bind(window);
@@ -97,6 +146,43 @@ test("HDR formats require a high dynamic range output", async ({ page, rivune })
   const sourceRequest = await rivune.waitForRequest("/api/v1/playback/sources", "POST");
   expect(sourceRequest.body.capabilities.hdrFormats).toEqual(expect.arrayContaining(["sdr", "hdr10", "hlg", "dolby_vision"]));
 });
+test("economy quality caps playback requests on the local network", async ({ page, rivune }) => {
+  await page.addInitScript(() => localStorage.setItem("rivune.playback-quality.v1", JSON.stringify({ local: "economy", remote_wifi: "balanced", mobile: "automatic" })));
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+  await page.getByRole("radio", { name: /Fixture 1080p/ }).click();
+  const sourceRequest = await rivune.waitForRequest("/api/v1/playback/sources", "POST");
+  expect(sourceRequest.body.capabilities).toMatchObject({ maximumHeight: 480, maximumVideoBitrateKbps: 2000 });
+});
+
+test("handoff waits for applied before closing the source player", async ({ page, rivune: _rivune }) => {
+  await installDeterministicMedia(page);
+  let outgoingReads = 0;
+  await page.route("**/api/v1/playback/devices", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ devices: [{ sessionId: "target-session", deviceId: "target-device", name: "Living room", platform: "tv", capabilities: ["playback", "remote-control", "load"], state: { status: "idle", positionMilliseconds: 0, durationMilliseconds: 0, updatedAt: "2099-01-01T00:00:00Z" }, revision: 7, current: false, lastSeenAt: "2099-01-01T00:00:00Z" }] }) }));
+  await page.route("**/api/v1/playback/devices/target-session/commands", async (route) => {
+    const input = route.request().postDataJSON();
+    expect(input).toMatchObject({ command: "load", mode: "handoff", targetRevision: 7 });
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ...input, senderDeviceName: "Fixture browser", status: "pending", createdAt: "2099-01-01T00:00:00Z", expiresAt: "2099-01-01T00:02:00Z" }) });
+  });
+  await page.route("**/api/v1/playback/commands/outgoing/*", async (route) => {
+    outgoingReads += 1;
+    const operationId = new URL(route.request().url()).pathname.split("/").at(-1);
+    const status = outgoingReads === 1 ? "pending" : "applied";
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ operationId, command: "load", mode: "handoff", senderDeviceName: "Fixture browser", status, ...(status === "applied" ? { resultCode: "applied" } : {}), createdAt: "2099-01-01T00:00:00Z", expiresAt: "2099-01-01T00:02:00Z" }) });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+  await page.getByRole("radio", { name: /Fixture 1080p/ }).click();
+  await page.getByRole("button", { name: "Play episode" }).click();
+  const player = page.getByRole("dialog", { name: "Playing First Light" });
+  await page.getByRole("button", { name: "Remote control" }).click();
+  await selectOption(page.getByRole("combobox", { name: "Transfer mode" }), "handoff");
+  await page.getByRole("button", { name: "Send to device" }).click();
+  await expect.poll(() => outgoingReads).toBeGreaterThanOrEqual(1);
+  if (outgoingReads === 1) await expect(player).toBeVisible();
+  await expect(player).not.toBeVisible();
+});
+
 
 test("player resumes, selects tracks, and autoplays the next episode", async ({ page, rivune }) => {
   await installDeterministicMedia(page);
@@ -221,18 +307,19 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
 
   const resolvesBeforeSubtitleChanges = rivune.matching("/api/v1/playback/resolve", "POST").length;
   const activeSessionBeforeBurn = `session-${resolvesBeforeSubtitleChanges}`;
-  await page.getByRole("button", { name: "Subtitles" }).click();
+  const subtitleTrigger = page.locator('[data-player-action="subtitles"]');
+  await subtitleTrigger.click();
   await page.getByRole("radio", { name: /FR.*Subtitle track/ }).click();
   await expect(page.locator("video track[srclang='fr']")).toHaveAttribute("src", "https://fixtures.rivune.test/subtitles-fr.vtt");
   await expect.poll(() => rivune.matching("/api/v1/playback/resolve", "POST").length).toBe(resolvesBeforeSubtitleChanges);
 
-  await page.getByRole("button", { name: "Subtitles" }).click();
+  await subtitleTrigger.click();
   await expect(page.getByRole("radio", { name: /ES.*Subtitle track/ })).toHaveCount(0);
   await page.getByRole("radio", { name: /EN.*Subtitle track/ }).click();
   await page.locator("video track[srclang='en']").dispatchEvent("error");
   const subtitleFailure = page.getByRole("alert").filter({ hasText: "Subtitles" });
   await expect(subtitleFailure).toContainText("Unavailable");
-  await page.getByRole("button", { name: "Subtitles" }).click();
+  await subtitleTrigger.click();
   await expect(page.getByRole("radio", { name: "Off" })).toHaveAttribute("aria-checked", "true");
   await expect(page.getByRole("dialog", { name: "Playing First Light" })).not.toHaveAttribute("data-player-state", "failed");
   await page.getByRole("radio", { name: /FR.*Subtitle track/ }).click();
@@ -243,7 +330,7 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   });
 
   rivune.delayNextPlaybackStop(500);
-  await page.getByRole("button", { name: "Subtitles" }).click();
+  await subtitleTrigger.click();
   await page.getByRole("radio", { name: /JA.*Subtitle track/ }).click();
   await expect.poll(() => rivune.matching(`/api/v1/playback/sessions/${activeSessionBeforeBurn}`, "DELETE").length).toBe(1);
   expect(rivune.matching("/api/v1/playback/resolve", "POST")).toHaveLength(resolvesBeforeSubtitleChanges);
@@ -259,7 +346,7 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   await expect.poll(() => rivune.requests.some((request) => request.pathname.endsWith("/assets/master.m3u8") && request.search.get("file") === "master.m3u8")).toBe(true);
   const burnedSession = `session-${resolvesBeforeSubtitleChanges + 1}`;
   expect(rivune.matching(`/api/v1/playback/sessions/${burnedSession}`, "DELETE")).toHaveLength(0);
-  await page.getByRole("button", { name: "Subtitles" }).click();
+  await subtitleTrigger.click();
   await expect(page.getByRole("radio", { name: /JA.*Subtitle track/ })).toHaveAttribute("aria-checked", "true");
   rivune.delayNextPlaybackStop(500);
   await page.getByRole("radio", { name: "Off" }).click();
@@ -276,7 +363,7 @@ test("player resumes, selects tracks, and autoplays the next episode", async ({ 
   expect(rivune.requests.indexOf(burnReleaseForOff)).toBeLessThan(rivune.requests.indexOf(offResolve));
   const replacementSession = `session-${resolvesBeforeSubtitleChanges + 2}`;
   expect(rivune.matching(`/api/v1/playback/sessions/${replacementSession}`, "DELETE")).toHaveLength(0);
-  await page.getByRole("button", { name: "Subtitles" }).click();
+  await subtitleTrigger.click();
   await expect(page.getByRole("radio", { name: "Off" })).toHaveAttribute("aria-checked", "true");
   await page.getByRole("button", { name: "Close settings" }).click();
   const speedTrigger = page.locator('[data-player-action="speed"]');
@@ -357,6 +444,50 @@ test("localized compact player controls do not depend on English accessible labe
   await expect(speed).toBeHidden();
   await expect(page.locator('[data-player-action="playback"]')).toBeVisible();
   await expect(page.locator('[data-player-action="close"]')).toBeVisible();
+});
+
+test("player contains focus and restores the source action on close", async ({ page, rivune: _rivune }) => {
+  await installDeterministicMedia(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+  await page.getByRole("radio", { name: /Fixture 1080p/ }).click();
+  const invoker = page.locator('[data-media-action="play-selected-stream"]');
+  await invoker.click();
+
+  const player = page.getByRole("dialog", { name: "Playing First Light" });
+  await expect(player).toBeVisible();
+  await expect(page.locator("#root")).toHaveAttribute("inert", "");
+  await expect(page.locator("#root")).toHaveAttribute("aria-hidden", "true");
+  const primaryControl = player.locator('[data-player-action="playback"]');
+  await expect(primaryControl).toBeFocused();
+
+  const boundaries = await player.evaluate((root) => {
+    const selector = "button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), iframe, [contenteditable='true'], [tabindex]:not([tabindex='-1'])";
+    const controls = Array.from(root.querySelectorAll<HTMLElement>(selector)).filter((element) => element.getClientRects().length > 0 && !element.closest("[inert], [aria-hidden='true']"));
+    controls[0]?.setAttribute("data-focus-boundary", "first");
+    controls.at(-1)?.setAttribute("data-focus-boundary", "last");
+    return controls.length;
+  });
+  expect(boundaries).toBeGreaterThan(1);
+  const first = player.locator('[data-focus-boundary="first"]');
+  const last = player.locator('[data-focus-boundary="last"]');
+  await last.focus();
+  await page.keyboard.press("Tab");
+  await expect(first).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(last).toBeFocused();
+
+  const speedTrigger = player.locator('[data-player-action="speed"]');
+  await speedTrigger.click();
+  await expect(player.getByRole("radio", { name: "1×", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(speedTrigger).toBeFocused();
+  await page.keyboard.press("Escape");
+
+  await expect(player).toHaveCount(0);
+  await expect(page.locator("#root")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("#root")).not.toHaveAttribute("aria-hidden", "true");
+  await expect(invoker).toBeFocused();
 });
 
 test("seekable TS resumes and seeks in place without rebuilding playback", async ({ page, rivune: _rivune }) => {
@@ -820,4 +951,76 @@ test("stream add-on categories filter exact sources without duplicate options", 
   await filter.press("Escape");
   await expect(page.getByRole("radio")).toHaveCount(2);
   await expect(page.locator(".details-stream-toolbar__status")).toContainText("2 available");
+});
+
+test("playback heartbeat publishes only v22 device states", async ({ page, rivune }) => {
+  await installDeterministicMedia(page);
+  await page.addInitScript(() => {
+    const states: Array<Record<string, unknown>> = [];
+    (window as Window & { __heartbeatStates?: Array<Record<string, unknown>> }).__heartbeatStates = states;
+    window.addEventListener("rivune:playback-state", (event) => states.push((event as CustomEvent<Record<string, unknown>>).detail));
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+  await page.getByRole("radio", { name: /Fixture 1080p/ }).click();
+  await page.getByRole("button", { name: "Play episode" }).click();
+  await expect(page.getByRole("dialog", { name: "Playing First Light" })).toBeVisible();
+
+  const states = await page.evaluate(() => (window as Window & { __heartbeatStates?: Array<Record<string, unknown>> }).__heartbeatStates ?? []);
+  expect(states.length).toBeGreaterThan(0);
+  expect(states.map((state) => state.status)).toEqual(expect.arrayContaining(["paused", "playing"]));
+  expect(states.every((state) => ["idle", "playing", "paused", "ended"].includes(String(state.status)))).toBe(true);
+  const responseStatuses = await page.evaluate(async () => {
+    const captured = (window as Window & { __heartbeatStates?: Array<Record<string, unknown>> }).__heartbeatStates ?? [];
+    return Promise.all(captured.map(async (state) => {
+      const response = await fetch("/api/v1/playback/device", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ capabilities: ["playback", "remote-control", "load"], state }) });
+      if (!response.ok) throw new Error(`heartbeat failed: ${response.status}`);
+      return state.status;
+    }));
+  });
+  expect(responseStatuses.length).toBe(states.length);
+  expect(rivune.matching("/api/v1/playback/device", "PUT").length).toBeGreaterThanOrEqual(states.length);
+});
+
+test("playback coordination suspends hidden work and slows idle command polling", async ({ page, rivune }) => {
+  await page.clock.install();
+  await page.goto("/");
+  await rivune.waitForRequest("/api/v1/playback/device", "PUT");
+  await rivune.waitForRequest("/api/v1/playback/commands", "GET");
+
+  const initialHeartbeats = rivune.matching("/api/v1/playback/device", "PUT").length;
+  const initialPolls = rivune.matching("/api/v1/playback/commands", "GET").length;
+  await page.clock.runFor(29_000);
+  expect(rivune.matching("/api/v1/playback/commands", "GET")).toHaveLength(initialPolls);
+  expect(rivune.matching("/api/v1/playback/device", "PUT").length).toBeGreaterThan(initialHeartbeats);
+
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  const hiddenHeartbeats = rivune.matching("/api/v1/playback/device", "PUT").length;
+  const hiddenPolls = rivune.matching("/api/v1/playback/commands", "GET").length;
+  await page.clock.runFor(60_000);
+  expect(rivune.matching("/api/v1/playback/device", "PUT")).toHaveLength(hiddenHeartbeats);
+  expect(rivune.matching("/api/v1/playback/commands", "GET")).toHaveLength(hiddenPolls);
+
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect.poll(() => rivune.matching("/api/v1/playback/device", "PUT").length).toBe(hiddenHeartbeats + 1);
+  await expect.poll(() => rivune.matching("/api/v1/playback/commands", "GET").length).toBe(hiddenPolls + 1);
+
+  const visiblePolls = rivune.matching("/api/v1/playback/commands", "GET").length;
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("rivune:playback-state", { detail: { status: "paused", positionMilliseconds: 0, durationMilliseconds: 0, updatedAt: new Date().toISOString() } })));
+  await page.clock.runFor(1);
+  await expect.poll(() => rivune.matching("/api/v1/playback/commands", "GET").length).toBeGreaterThan(visiblePolls);
+
+  await page.goto("/__e2e_seed__");
+  const unmountedHeartbeats = rivune.matching("/api/v1/playback/device", "PUT").length;
+  const unmountedPolls = rivune.matching("/api/v1/playback/commands", "GET").length;
+  await page.clock.runFor(60_000);
+  expect(rivune.matching("/api/v1/playback/device", "PUT")).toHaveLength(unmountedHeartbeats);
+  expect(rivune.matching("/api/v1/playback/commands", "GET")).toHaveLength(unmountedPolls);
 });

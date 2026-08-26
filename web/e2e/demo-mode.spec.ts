@@ -2,6 +2,16 @@ import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures/rivune";
 import type { RivuneHarness } from "./fixtures/rivune";
 
+const INSTALLATION_ID_KEY = "rivune.installation-id.v1";
+const INSTALLATION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function installationIdFrom(body: unknown): string {
+  if (!body || typeof body !== "object" || !("installationId" in body) || typeof body.installationId !== "string") {
+    throw new Error("Pairing request did not contain an installationId");
+  }
+  return body.installationId;
+}
+
 const demoChannel = {
   id: "world-news",
   type: "tv",
@@ -46,6 +56,76 @@ test("pre-setup welcome separates setup credentials from the tokenless demo entr
   expect(rivune.matching("/api/v1/demo/sessions", "POST")).toHaveLength(0);
 });
 
+test("localized sign-in keeps its accessible name while loading", async ({ page, rivune }) => {
+  await rivune.configureUnpaired(page);
+  rivune.setInterfaceLanguage("fr");
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connexion du propriétaire", exact: true }).click();
+  await page.getByLabel("Nom d’utilisateur").fill("owner");
+  await page.getByLabel("Mot de passe", { exact: true }).fill("correct-horse-battery-staple");
+
+  const loginStarted = Promise.withResolvers<void>();
+  const releaseLogin = Promise.withResolvers<void>();
+  await page.route("**/api/v1/auth/web/login", async (route) => {
+    loginStarted.resolve();
+    await releaseLogin.promise;
+    await route.fallback();
+  });
+
+  const signIn = page.getByRole("button", { name: "Se connecter", exact: true });
+  await signIn.click();
+  await loginStarted.promise;
+  await expect(signIn).toBeDisabled();
+  await expect(signIn).toHaveAttribute("aria-busy", "true");
+  await expect(signIn.locator(".spin")).toHaveAttribute("aria-hidden", "true");
+
+  releaseLogin.resolve();
+  await rivune.waitForRequest("/api/v1/auth/web/login", "POST");
+  await expect(signIn).toHaveCount(0);
+});
+
+test("field placeholders meet 4.5 to 1 contrast on their rendered surface", async ({ page, rivune }) => {
+  await rivune.configurePreSetup(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Set up server", exact: true }).click();
+  const setupToken = page.getByLabel("Setup token");
+
+  const contrast = await setupToken.evaluate((input) => {
+    type Color = [number, number, number, number];
+    const parse = (value: string): Color => {
+      const channels = value.match(/[\d.]+/g)?.map(Number) ?? [];
+      return [channels[0] ?? 0, channels[1] ?? 0, channels[2] ?? 0, channels[3] ?? 1];
+    };
+    const composite = (foreground: Color, background: Color): Color => {
+      const alpha = foreground[3] + background[3] * (1 - foreground[3]);
+      if (alpha === 0) return [0, 0, 0, 0];
+      return [
+        (foreground[0] * foreground[3] + background[0] * background[3] * (1 - foreground[3])) / alpha,
+        (foreground[1] * foreground[3] + background[1] * background[3] * (1 - foreground[3])) / alpha,
+        (foreground[2] * foreground[3] + background[2] * background[3] * (1 - foreground[3])) / alpha,
+        alpha,
+      ];
+    };
+    const layers: HTMLElement[] = [];
+    for (let element: HTMLElement | null = input.parentElement; element; element = element.parentElement) layers.push(element);
+    let background: Color = [0, 0, 0, 0];
+    for (const element of layers.reverse()) background = composite(parse(getComputedStyle(element).backgroundColor), background);
+    const foreground = composite(parse(getComputedStyle(input, "::placeholder").color), background);
+    const luminance = (color: Color) => {
+      const linear = color.slice(0, 3).map((channel) => {
+        const normalized = channel / 255;
+        return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * linear[0]! + 0.7152 * linear[1]! + 0.0722 * linear[2]!;
+    };
+    const lighter = Math.max(luminance(foreground), luminance(background));
+    const darker = Math.min(luminance(foreground), luminance(background));
+    return (lighter + 0.05) / (darker + 0.05);
+  });
+
+  expect(contrast).toBeGreaterThanOrEqual(4.5);
+});
+
 test("real setup keeps its setup token confined to the setup request", async ({ page, rivune }) => {
   await rivune.configurePreSetup(page);
   await page.goto("/");
@@ -64,7 +144,7 @@ test("real setup keeps its setup token confined to the setup request", async ({ 
     admin: { username: "owner", password: "correct-horse-battery-staple" },
     profileName: "Alex",
   });
-  await rivune.waitForRequest("/api/v1/auth/login", "POST");
+  await rivune.waitForRequest("/api/v1/auth/web/login", "POST");
   await rivune.waitForRequest("/api/v1/auth/me", "GET");
   expect(rivune.matching("/api/v1/demo/sessions", "POST")).toHaveLength(0);
 });
@@ -121,7 +201,7 @@ test("failed browser storage writes cannot resurrect stale credentials", async (
   expect(account.authorization).toBe("Bearer fixture-access");
 });
 
-test("intentional demo admission is bearer-free and preserves real credentials until success", async ({ page, rivune }) => {
+test("intentional demo admission is bearer-free, purges legacy secrets, and preserves tab access until success", async ({ page, rivune }) => {
   await rivune.configurePreSetup(page);
   await page.evaluate(() => {
     localStorage.setItem("rivune.access", "real-access");
@@ -145,7 +225,7 @@ test("intentional demo admission is bearer-free and preserves real credentials u
     refresh: localStorage.getItem("rivune.refresh"),
     session: localStorage.getItem("rivune.session"),
     sessionAccess: sessionStorage.getItem("rivune.access"),
-  }))).toEqual({ access: "real-access", refresh: "real-refresh", session: "real-session", sessionAccess: "real-access" });
+  }))).toEqual({ access: null, refresh: null, session: null, sessionAccess: "real-access" });
 
   admitted.resolve();
   await entering;
@@ -158,7 +238,7 @@ test("intentional demo admission is bearer-free and preserves real credentials u
   }))).toEqual({ access: null, refresh: null, session: null, sessionAccess: null });
 });
 
-test("refused intentional demo admission leaves real credentials intact", async ({ page, rivune }) => {
+test("refused intentional demo admission keeps tab access while legacy secrets stay purged", async ({ page, rivune }) => {
   await rivune.configurePreSetup(page);
   await page.evaluate(() => {
     localStorage.setItem("rivune.access", "real-access");
@@ -180,7 +260,7 @@ test("refused intentional demo admission leaves real credentials intact", async 
     refresh: localStorage.getItem("rivune.refresh"),
     session: localStorage.getItem("rivune.session"),
     sessionAccess: sessionStorage.getItem("rivune.access"),
-  }))).toEqual({ access: "real-access", refresh: "real-refresh", session: "real-session", sessionAccess: "real-access" });
+  }))).toEqual({ access: null, refresh: null, session: null, sessionAccess: "real-access" });
   await expect(page.locator(".demo-badge")).toHaveCount(0);
 });
 
@@ -237,9 +317,8 @@ test("demo entry sends no setup secret or bearer token and exposes content, prof
     request.pathname === "/api/v1/setup" ||
     request.pathname.startsWith("/api/v1/settings") ||
     request.pathname.startsWith("/api/v1/operations") ||
-    request.pathname === "/api/v1/auth/login" ||
-    request.pathname === "/api/v1/auth/refresh" ||
-    request.pathname === "/api/v1/auth/logout"
+    request.pathname === "/api/v1/auth/web/login" ||
+    request.pathname === "/api/v1/auth/web/refresh"
   )).toHaveLength(0);
 });
 
@@ -307,24 +386,37 @@ test("demo polling reacts to completed setup, purges caches, and routes to login
   expect(await page.evaluate(() => ({ hint: localStorage.getItem("rivune.demo"), cache: localStorage.getItem("rivune.home-cache.v2.demo") }))).toEqual({ hint: null, cache: null });
 });
 
-test("unpaired devices render a local accessible QR and preserve the server approval URI", async ({ page, rivune }) => {
+test("unpaired devices render a local accessible QR and preserve their installation identity across reloads", async ({ page, rivune }) => {
   await rivune.configureUnpaired(page);
+  await page.evaluate(({ key, value }) => localStorage.setItem(key, value), { key: INSTALLATION_ID_KEY, value: "x".repeat(129) });
   rivune.setDeviceAuthorization({
     verificationUri: "https://pairing.rivune.test/approve",
     verificationUriComplete: "/pair?code=BCDF-GHJK",
   });
   await page.goto("/");
-  await rivune.waitForRequest("/api/v1/auth/device-code", "POST");
+  const firstPairing = await rivune.waitForRequest("/api/v1/auth/device-code", "POST");
+  expect(firstPairing.body).toEqual({
+    deviceName: expect.any(String),
+    platform: "web",
+    installationId: expect.stringMatching(INSTALLATION_ID_PATTERN),
+  });
+  const installationId = installationIdFrom(firstPairing.body);
+  expect(await page.evaluate((key) => localStorage.getItem(key), INSTALLATION_ID_KEY)).toBe(installationId);
 
   await expect(page.getByText("BCDF-GHJK", { exact: true })).toBeVisible();
   await expect(page.getByRole("img", { name: "Pairing code" })).toBeVisible();
   const approvalLink = page.getByRole("link", { name: "https://pairing.rivune.test/approve" });
   await expect(approvalLink).toHaveAttribute("href", "https://pairing.rivune.test/approve");
   await expect(page.locator(".pairing-card__code time")).toContainText("Code expires");
+
+  await page.reload();
+  await expect.poll(() => rivune.matching("/api/v1/auth/device-code", "POST").length).toBe(2);
+  expect(installationIdFrom(rivune.matching("/api/v1/auth/device-code", "POST")[1]!.body)).toBe(installationId);
 });
 
 test("a terminal pairing expiry clears the stale code and retry resolves a relative server URI", async ({ page, rivune }) => {
   await rivune.configureUnpaired(page);
+  await page.evaluate((key) => localStorage.setItem(key, "   "), INSTALLATION_ID_KEY);
   rivune.setDeviceAuthorization({ intervalSeconds: 0.01 });
   rivune.setDeviceAuthorizationFailure("expired_device_code");
   await page.goto("/");
@@ -335,6 +427,13 @@ test("a terminal pairing expiry clears the stale code and retry resolves a relat
   const retry = page.getByRole("button", { name: "Generate a new code" });
   await expect(retry).toBeEnabled();
   expect(rivune.matching("/api/v1/auth/device-code", "POST")).toHaveLength(1);
+  const firstPairing = rivune.matching("/api/v1/auth/device-code", "POST")[0]!;
+  expect(firstPairing.body).toEqual({
+    deviceName: expect.any(String),
+    platform: "web",
+    installationId: expect.stringMatching(INSTALLATION_ID_PATTERN),
+  });
+  const installationId = installationIdFrom(firstPairing.body);
 
   rivune.setDeviceAuthorizationFailure(null);
   rivune.setDeviceAuthorization({
@@ -349,4 +448,10 @@ test("a terminal pairing expiry clears the stale code and retry resolves a relat
   const origin = await page.evaluate(() => window.location.origin);
   await expect(page.getByRole("link", { name: `${origin}/approve-device` })).toHaveAttribute("href", `${origin}/approve-device`);
   expect(rivune.matching("/api/v1/auth/device-code", "POST")).toHaveLength(2);
+  const retriedPairing = rivune.matching("/api/v1/auth/device-code", "POST")[1]!;
+  expect(retriedPairing.body).toEqual({
+    deviceName: expect.any(String),
+    platform: "web",
+    installationId,
+  });
 });

@@ -3,13 +3,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { principalIdentity, useAuth } from "../auth";
 import { safeSessionStorage } from "../browserStorage";
-import { ActionMenu, Button, EmptyState, HorizontalDragRow, MediaCard, Notice, SectionHeading, Select, Skeleton, handleDirectionalFocus } from "../components";
+import { ActionMenu, Button, EmptyState, HorizontalDragRow, MediaCard, Notice, SectionHeading, Select, Skeleton, allowsMotion, handleDirectionalFocus } from "../components";
 import { translate as t } from "../i18n";
 import { mediaFromLibraryItem, mediaIdentity, resolveMediaTitle } from "../mediaIdentity";
 import { homeCollectionSignature, homeFolderCacheKey, readContinueCache, readHomeCache, writeContinueCache, writeHomeCache, writeHomeFolderCache, type CachedContinueItem } from "../homeCache";
 import { notifyError, notifyErrorMessage, notifySuccess } from "../notifications";
 import { mediaSourceLabels, mediaTypeLabel } from "../media";
-import type { AddonCatalogDescriptor, Collection, CollectionListResponse, CurrentProgram, LibraryItem, LibraryPage, MediaItem, ResolvedFolder, ResourceBatch, ResourceResult, SourceReference, TVLibraryIdentity, TVLibraryMembershipResult } from "../types";
+import { ReadingQueuePanel } from "../ReadingQueuePanel";
+import { SavedSearchManager, SmartCollectionManager } from "../SavedCollections";
+import type { AddonCatalogDescriptor, Collection, CollectionListResponse, CurrentProgram, LibraryItem, LibraryPage, MediaItem, ResolvedFolder, ResourceBatch, ResourceResult, SemanticSearchPage, SemanticSearchRequest, SourceReference, TVLibraryIdentity, TVLibraryMembershipResult } from "../types";
 import type { ActionMenuAnchor } from "../components";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
@@ -266,26 +268,19 @@ function summarizeSearchOutcomes(outcomes: PromiseSettledResult<ResourceBatch>[]
 }
 
 const fallbackSearchTypes = ["movie", "series", "tv"];
-const leadingSearchTypes = ["movie", "series", "anime", "other"];
 
 function discoverSearchCatalogs(catalogs: AddonCatalogDescriptor[]): { descriptors: AddonCatalogDescriptor[]; types: string[] } {
   const descriptors = catalogs.filter((descriptor) => !descriptor.addonCatalog && descriptor.searchable && Boolean(descriptor.catalog.type.trim()));
   const seen = new Set<string>();
   const types: string[] = [];
   for (const descriptor of descriptors) {
-    const { type } = descriptor.catalog;
-    if (seen.has(type)) continue;
-    seen.add(type);
+    const type = descriptor.catalog.type.trim();
+    const key = type.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
     types.push(type);
   }
-  return {
-    descriptors,
-    types: [
-      ...leadingSearchTypes.filter((type) => seen.has(type)),
-      ...types.filter((type) => !leadingSearchTypes.includes(type) && type !== "tv"),
-      ...(seen.has("tv") ? ["tv"] : []),
-    ],
-  };
+  return { descriptors, types };
 }
 
 function searchTypeLabel(type: string): string {
@@ -303,41 +298,252 @@ function sourceReferenceKey(source: SourceReference): string {
 
 function mergeMediaItem(current: MediaItem, incoming: MediaItem): MediaItem {
   const sources = current.sources ?? [];
-  const seen = new Set(sources.map(sourceReferenceKey));
-  const additions = (incoming.sources ?? []).filter((source) => {
+  const seenSources = new Set(sources.map(sourceReferenceKey));
+  const sourceAdditions = (incoming.sources ?? []).filter((source) => {
     const key = sourceReferenceKey(source);
-    if (seen.has(key)) return false;
-    seen.add(key);
+    if (seenSources.has(key)) return false;
+    seenSources.add(key);
     return true;
   });
-  return additions.length > 0 ? { ...current, sources: [...sources, ...additions] } : current;
+  const externalIds = { ...incoming.externalIds, ...current.externalIds };
+  const hasExternalAdditions = Object.keys(externalIds).length > Object.keys(current.externalIds ?? {}).length;
+  if (sourceAdditions.length === 0 && !hasExternalAdditions) return current;
+  const incomingHasAuthoritativeSource = sources.length === 0 && sourceAdditions.length > 0;
+  return {
+    ...(incomingHasAuthoritativeSource ? incoming : current),
+    externalIds: hasExternalAdditions ? externalIds : current.externalIds,
+    sources: sourceAdditions.length > 0 ? [...sources, ...sourceAdditions] : current.sources,
+  };
+}
+
+function searchMediaIdentities(item: MediaItem): string[] {
+  if (!(["movie", "series", "episode"] as string[]).includes(item.mediaType)) {
+    const manifestId = item.sources?.find((source) => source.manifestId?.trim())?.manifestId?.trim();
+    const resourceId = item.resourceId?.trim() || item.id;
+    return [manifestId ? `custom:${JSON.stringify([item.mediaType, manifestId, resourceId])}` : mediaIdentity(item)];
+  }
+  const type = item.mediaType.toLowerCase();
+  const identities = new Set<string>();
+  const addExternal = (provider: string, value: string | undefined) => {
+    const normalized = value?.trim().toLowerCase();
+    if (normalized) identities.add(`${type}:external:${provider}:${normalized}`);
+  };
+  for (const provider of ["imdb", "tmdb", "tvdb", "trakt"]) addExternal(provider, item.externalIds?.[provider]);
+  const id = item.id.trim();
+  const namespaced = id.match(/^(imdb|tmdb|tvdb|trakt):(.+)$/i);
+  if (namespaced) addExternal(namespaced[1].toLowerCase(), namespaced[2]);
+  else if (/^tt\d+$/i.test(id)) addExternal("imdb", id);
+  else if (/^\d+$/.test(id)) addExternal("tmdb", id);
+  if (item.titleId?.trim()) identities.add(`${type}:title:${item.titleId.trim()}`);
+  identities.add(mediaIdentity(item));
+  return [...identities];
 }
 
 function searchMediaIdentity(item: MediaItem): string {
-  if (item.mediaType === "tv" || ["movie", "series", "episode"].includes(item.mediaType)) return mediaIdentity(item);
-  const manifestId = item.sources?.find((source) => source.manifestId?.trim())?.manifestId?.trim();
-  const resourceId = item.resourceId?.trim() || item.id;
-  return manifestId ? `custom:${JSON.stringify([item.mediaType, manifestId, resourceId])}` : mediaIdentity(item);
+  return searchMediaIdentities(item)[0];
 }
 
-function mergeUniqueMedia(current: MediaItem[], incoming: MediaItem[]): MediaItem[] {
-  const indexByIdentity = new Map(current.map((item, index) => [searchMediaIdentity(item), index]));
-  let merged = current;
-  for (const item of incoming) {
-    const identity = searchMediaIdentity(item);
-    const index = indexByIdentity.get(identity);
-    if (index === undefined) {
-      if (merged === current) merged = [...current];
-      indexByIdentity.set(identity, merged.length);
-      merged.push(item);
-      continue;
+function searchIdentitySet(items: MediaItem[]): Set<string> {
+  return new Set(items.flatMap(searchMediaIdentities));
+}
+
+export function mergeUniqueMedia(current: MediaItem[], incoming: MediaItem[]): MediaItem[] {
+  if (incoming.length === 0) return current;
+  const candidates = [...current, ...incoming];
+  const identities = candidates.map(searchMediaIdentities);
+  const parents = candidates.map((_, index) => index);
+  const first = candidates.map((_, index) => index);
+  const find = (index: number): number => {
+    let root = index;
+    while (parents[root] !== root) root = parents[root];
+    while (parents[index] !== index) {
+      const parent = parents[index];
+      parents[index] = root;
+      index = parent;
     }
-    const canonical = mergeMediaItem(merged[index], item);
-    if (canonical === merged[index]) continue;
-    if (merged === current) merged = [...current];
-    merged[index] = canonical;
+    return root;
+  };
+  const unite = (left: number, right: number) => {
+    let leftRoot = find(left);
+    let rightRoot = find(right);
+    if (leftRoot === rightRoot) return;
+    if (first[rightRoot] < first[leftRoot]) [leftRoot, rightRoot] = [rightRoot, leftRoot];
+    parents[rightRoot] = leftRoot;
+    first[leftRoot] = Math.min(first[leftRoot], first[rightRoot]);
+  };
+  const ownerByIdentity = new Map<string, number>();
+  identities.forEach((itemIdentities, index) => {
+    for (const identity of itemIdentities) {
+      const owner = ownerByIdentity.get(identity);
+      if (owner === undefined) ownerByIdentity.set(identity, index);
+      else unite(index, owner);
+    }
+  });
+  type ComponentAccumulator = {
+    representative: MediaItem;
+    authoritative: MediaItem;
+    sourceKeys: Set<string>;
+    sourceAdditions?: SourceReference[];
+    hasSources: boolean;
+    externalIds: Map<string, string>;
+    hasExternalAdditions: boolean;
+  };
+  const components = new Map<number, ComponentAccumulator>();
+  candidates.forEach((candidate, index) => {
+    const root = find(index);
+    const component = components.get(root);
+    if (!component) {
+      const sources = candidate.sources ?? [];
+      components.set(root, {
+        representative: candidate,
+        authoritative: candidate,
+        sourceKeys: new Set(sources.map(sourceReferenceKey)),
+        hasSources: sources.length > 0,
+        externalIds: new Map(Object.entries(candidate.externalIds ?? {})),
+        hasExternalAdditions: false,
+      });
+      return;
+    }
+
+    let addedSource = false;
+    for (const source of candidate.sources ?? []) {
+      const key = sourceReferenceKey(source);
+      if (component.sourceKeys.has(key)) continue;
+      component.sourceKeys.add(key);
+      (component.sourceAdditions ??= []).push(source);
+      addedSource = true;
+    }
+    if (!component.hasSources && addedSource) component.authoritative = candidate;
+    component.hasSources ||= addedSource;
+
+    for (const [key, value] of Object.entries(candidate.externalIds ?? {})) {
+      if (component.externalIds.has(key)) continue;
+      component.externalIds.set(key, value);
+      component.hasExternalAdditions = true;
+    }
+  });
+  const merged = [...components.values()].map((component) => {
+    if (!component.sourceAdditions && !component.hasExternalAdditions) return component.representative;
+    return {
+      ...component.authoritative,
+      externalIds: component.hasExternalAdditions ? Object.fromEntries(component.externalIds) : component.representative.externalIds,
+      sources: component.sourceAdditions
+        ? [...(component.representative.sources ?? []), ...component.sourceAdditions]
+        : component.representative.sources,
+    };
+  });
+  return merged.length === current.length && merged.every((item, index) => item === current[index]) ? current : merged;
+}
+
+const semanticSearchTimeoutMilliseconds = 12_000;
+
+async function boundedSemanticSearch(input: SemanticSearchRequest, signal: AbortSignal): Promise<SemanticSearchPage | undefined> {
+  const controller = new AbortController();
+  let resolveBoundary: (() => void) | undefined;
+  const boundary = new Promise<void>((resolve) => { resolveBoundary = resolve; });
+  const abort = () => {
+    controller.abort();
+    resolveBoundary?.();
+  };
+  if (signal.aborted) abort();
+  else signal.addEventListener("abort", abort, { once: true });
+  const timeout = window.setTimeout(abort, semanticSearchTimeoutMilliseconds);
+  const request = api.semanticSearch(input, controller.signal).then(
+    (value) => ({ completed: true as const, value }),
+    () => ({ completed: true as const, value: undefined }),
+  );
+  try {
+    const outcome = await Promise.race([request, boundary.then(() => ({ completed: false as const }))]);
+    if (!outcome.completed) {
+      void request;
+      return undefined;
+    }
+    return outcome.value;
+  } finally {
+    window.clearTimeout(timeout);
+    signal.removeEventListener("abort", abort);
   }
-  return merged;
+}
+
+type SemanticAddonSearchResult = {
+  semantic?: SemanticSearchPage;
+  outcomes: PromiseSettledResult<ResourceBatch>[];
+  addonQuery: string;
+  truncated: boolean;
+};
+
+const maximumSearchTypes = 16;
+const maximumConcurrentSearchRequests = 4;
+
+async function allSettledBounded<T, R>(values: T[], limit: number, worker: (value: T) => Promise<R>): Promise<PromiseSettledResult<R>[]> {
+  const outcomes = new Array<PromiseSettledResult<R>>(values.length);
+  let next = 0;
+  const run = async () => {
+    while (next < values.length) {
+      const index = next++;
+      try {
+        outcomes[index] = { status: "fulfilled", value: await worker(values[index]) };
+      } catch (reason) {
+        outcomes[index] = { status: "rejected", reason };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, values.length) }, run));
+  return outcomes;
+}
+
+async function semanticAddonSearch(input: {
+  semantic?: SemanticSearchRequest;
+  configuredTypes: string[];
+  inferTypes: boolean;
+  originalQuery: string;
+  skip: number;
+  limit: number;
+  signal: AbortSignal;
+  onAddonOutcome?: (outcome: PromiseSettledResult<ResourceBatch>) => void;
+  onSemantic?: (page: SemanticSearchPage) => void;
+}): Promise<SemanticAddonSearchResult> {
+  const allConfiguredTypes = [...new Map(input.configuredTypes.map((type) => [type.trim().toLowerCase(), type.trim()])).values()].filter(Boolean);
+  const configuredTypes = allConfiguredTypes.slice(0, maximumSearchTypes);
+  const truncated = allConfiguredTypes.length > configuredTypes.length;
+  let requestsStarted = 0;
+  const searchAddons = async (type: string, query: string, signal: AbortSignal): Promise<ResourceBatch> => {
+    if (signal.aborted) throw new DOMException("Search aborted", "AbortError");
+    if (requestsStarted >= maximumSearchTypes) throw new Error("search_type_limit");
+    requestsStarted += 1;
+    try {
+      const value = await api.search(type, query, input.skip, input.limit, signal);
+      input.onAddonOutcome?.({ status: "fulfilled", value });
+      return value;
+    } catch (reason) {
+      input.onAddonOutcome?.({ status: "rejected", reason });
+      throw reason;
+    }
+  };
+  const speculativeController = new AbortController();
+  const abortSpeculative = () => speculativeController.abort();
+  input.signal.addEventListener("abort", abortSpeculative, { once: true });
+  const speculative = allSettledBounded(configuredTypes, maximumConcurrentSearchRequests, (type) => searchAddons(type, input.originalQuery, speculativeController.signal));
+  try {
+    const semantic = input.semantic ? await boundedSemanticSearch(input.semantic, input.signal) : undefined;
+    if (semantic && !input.signal.aborted) input.onSemantic?.(semantic);
+    const inferredTypes = new Set(semantic?.mediaTypes.map((type) => type.trim().toLowerCase()).filter(Boolean) ?? []);
+    const intersection = input.inferTypes ? configuredTypes.filter((type) => inferredTypes.has(type.toLowerCase())) : [];
+    const finalTypes = intersection.length > 0 ? intersection : configuredTypes;
+    const residualQuery = semantic?.titleQuery.trim();
+    const addonQuery = residualQuery && residualQuery.length >= 2 ? residualQuery : input.originalQuery;
+    const planUnchanged = addonQuery === input.originalQuery
+      && finalTypes.length === configuredTypes.length
+      && finalTypes.every((type, index) => type === configuredTypes[index]);
+    if (planUnchanged) return { semantic, outcomes: await speculative, addonQuery, truncated };
+    speculativeController.abort();
+    const drained = await speculative;
+    if (input.signal.aborted) return { outcomes: drained, addonQuery: input.originalQuery, truncated };
+    const outcomes = await allSettledBounded(finalTypes, maximumConcurrentSearchRequests, (type) => searchAddons(type, addonQuery, input.signal));
+    return { semantic, outcomes, addonQuery, truncated };
+  } finally {
+    input.signal.removeEventListener("abort", abortSpeculative);
+  }
 }
 
 type SearchSourceVariant = {
@@ -419,7 +625,8 @@ function orderSearchSourceSections(sections: SearchSourceSection[], descriptors:
 
 function collectSearchSourcePage(resourceBatches: ResourceBatch[], descriptors: AddonCatalogDescriptor[], currentItems: MediaItem[] = [], pageSize = 24): { items: MediaItem[]; sections: SearchSourceSection[] } {
   const items = [...currentItems];
-  const indexByIdentity = new Map(items.map((item, index) => [searchMediaIdentity(item), index]));
+  const indexByIdentity = new Map<string, number>();
+  items.forEach((item, index) => searchMediaIdentities(item).forEach((identity) => indexByIdentity.set(identity, index)));
   const sectionsBySource = new Map<string, SearchSourceSection>();
   for (const result of orderedSearchResults(resourceBatches, descriptors)) {
     const descriptor = descriptorForResult(descriptors, result);
@@ -464,12 +671,14 @@ function collectSearchSourcePage(resourceBatches: ResourceBatch[], descriptors: 
       section.hasMore = section.variants.some((variant) => variant.hasMore);
     }
     for (const item of sourceItems) {
-      const identity = searchMediaIdentity(item);
-      const index = indexByIdentity.get(identity);
+      const identities = searchMediaIdentities(item);
+      const identity = identities[0];
+      const index = identities.map((candidate) => indexByIdentity.get(candidate)).find((value) => value !== undefined);
       if (index === undefined) {
-        indexByIdentity.set(identity, items.length);
+        identities.forEach((candidate) => indexByIdentity.set(candidate, items.length));
         items.push(item);
       } else {
+        identities.forEach((candidate) => indexByIdentity.set(candidate, index));
         items[index] = mergeMediaItem(items[index], item);
       }
       if (!section.identities.includes(identity)) {
@@ -479,6 +688,119 @@ function collectSearchSourcePage(resourceBatches: ResourceBatch[], descriptors: 
     }
   }
   return { items, sections: orderSearchSourceSections([...sectionsBySource.values()], descriptors) };
+}
+
+function mergeSearchSourceSections(current: SearchSourceSection[], incoming: SearchSourceSection[], descriptors: AddonCatalogDescriptor[]): SearchSourceSection[] {
+  const merged = current.map((section) => ({ ...section, variants: [...section.variants], identities: [...section.identities] }));
+  const indexByKey = new Map(merged.map((section, index) => [section.key, index]));
+  for (const candidate of incoming) {
+    const index = indexByKey.get(candidate.key);
+    if (index === undefined) {
+      indexByKey.set(candidate.key, merged.length);
+      merged.push({ ...candidate, variants: [...candidate.variants], identities: [...candidate.identities] });
+      continue;
+    }
+    const existing = merged[index];
+    const variants = [...existing.variants];
+    for (const variant of candidate.variants) {
+      const variantIndex = variants.findIndex((value) => value.key === variant.key);
+      if (variantIndex === -1) variants.push(variant);
+      else variants[variantIndex] = variant;
+    }
+    const identities = [...existing.identities];
+    for (const identity of candidate.identities) if (!identities.includes(identity)) identities.push(identity);
+    merged[index] = {
+      ...existing,
+      ...candidate,
+      variants,
+      identities,
+      count: identities.length,
+      hasMore: variants.some((variant) => variant.hasMore),
+      collapsed: existing.collapsed,
+    };
+  }
+  return orderSearchSourceSections(merged, descriptors);
+}
+
+type SearchPublication = {
+  items: MediaItem[];
+  sections: SearchSourceSection[];
+};
+
+function createSearchPublicationAccumulator(input: {
+  descriptors: AddonCatalogDescriptor[];
+  isCurrent: () => boolean;
+  publish: (snapshot: SearchPublication) => void;
+}) {
+  let snapshot: SearchPublication = { items: [], sections: [] };
+  let pending: SearchPublication[] = [];
+  let frame: number | undefined;
+
+  const flush = () => {
+    if (frame !== undefined) {
+      window.cancelAnimationFrame(frame);
+      frame = undefined;
+    }
+    if (!input.isCurrent()) {
+      pending = [];
+      return snapshot;
+    }
+    if (pending.length === 0) return snapshot;
+    let items = snapshot.items;
+    let sections = snapshot.sections;
+    for (const publication of pending) {
+      items = mergeUniqueMedia(items, publication.items);
+      if (publication.sections.length > 0) sections = mergeSearchSourceSections(sections, publication.sections, input.descriptors);
+    }
+    pending = [];
+    if (items !== snapshot.items || sections !== snapshot.sections) {
+      snapshot = { items, sections };
+      input.publish(snapshot);
+    }
+    return snapshot;
+  };
+
+  const enqueue = (publication: SearchPublication) => {
+    if (!input.isCurrent() || publication.items.length === 0 && publication.sections.length === 0) return;
+    pending.push(publication);
+    if (snapshot.items.length === 0 && publication.items.length > 0) {
+      flush();
+      return;
+    }
+    if (frame === undefined) {
+      frame = window.requestAnimationFrame(() => {
+        frame = undefined;
+        flush();
+      });
+    }
+  };
+
+  return {
+    enqueue,
+    finish(publication: SearchPublication) {
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
+      frame = undefined;
+      if (!input.isCurrent()) {
+        pending = [];
+        return snapshot;
+      }
+      let items = publication.items;
+      for (const queued of pending) items = mergeUniqueMedia(items, queued.items);
+      pending = [];
+      items = mergeUniqueMedia(items, snapshot.items);
+      const sections = publication.sections;
+      if (items !== snapshot.items || sections !== snapshot.sections) {
+        snapshot = { items, sections };
+        input.publish(snapshot);
+      }
+      return snapshot;
+    },
+    cancel() {
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
+      frame = undefined;
+      pending = [];
+    },
+  };
 }
 
 function tvSubtitle(item: MediaItem): string {
@@ -819,7 +1141,7 @@ export function HomePage({ onOpenMedia, mediaRevision, mediaPreferences }: { onO
   }, [mediaPreferences.profileID]);
 
   useEffect(() => {
-    if (!mediaPreferences.animationsEnabled || heroSlides.length < 2 || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    if (!mediaPreferences.animationsEnabled || heroSlides.length < 2 || !allowsMotion()) return;
     const timer = window.setInterval(() => setActiveHeroIndex((current) => (current + 1) % heroSlides.length), 8_000);
     return () => window.clearInterval(timer);
   }, [heroSlides.length, mediaPreferences.animationsEnabled]);
@@ -1258,6 +1580,7 @@ function FolderBrowser({ row, refresh, hideUnreleased, onBack, onOpenMedia, back
 }
 
 export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, mediaPreferences }: { onOpenMedia: OpenMedia; mediaRevision: number; onLibraryMutation: () => void; mediaPreferences: MediaPreferences }) {
+  const { discovery } = useAuth();
   const pageSize = 24;
   const [query, setQuery] = useState("");
   const [items, setItems] = useState<MediaItem[]>([]);
@@ -1282,6 +1605,8 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
   const searchRequestGenerationRef = useRef(0);
   const membershipRevisionRef = useRef(mediaRevision);
   const localMembershipRevisionPendingRef = useRef(false);
+  const addonSearchQueryRef = useRef("");
+  const searchPublicationRef = useRef<{ cancel: () => void } | null>(null);
   const normalizedQuery = query.trim();
   const discoveryReady = catalogDiscovery.profileID === mediaPreferences.profileID && catalogDiscovery.status !== "loading";
   const discoveredSearchTypes = discoveryReady ? catalogDiscovery.types : undefined;
@@ -1314,7 +1639,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     if (itemsByType.has("tv")) orderedTypes.push("tv");
     return orderedTypes.map((type) => ({ type, items: itemsByType.get(type)! }));
   }, [catalogDiscovery.types, filter, items]);
-  const itemByIdentity = useMemo(() => new Map(items.map((item) => [searchMediaIdentity(item), item])), [items]);
+  const itemByIdentity = useMemo(() => new Map(items.flatMap((item) => searchMediaIdentities(item).map((identity) => [identity, item] as const))), [items]);
 
   useEffect(() => {
     if (!mediaPreferences.profileID || loadedProfileRef.current === mediaPreferences.profileID) return;
@@ -1353,6 +1678,8 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
 
   useEffect(() => {
     const generation = ++searchRequestGenerationRef.current;
+    searchPublicationRef.current?.cancel();
+    searchPublicationRef.current = null;
     paginationControllerRef.current?.abort();
     for (const sourceController of sourcePaginationControllersRef.current.values()) sourceController.abort();
     sourcePaginationControllersRef.current.clear();
@@ -1396,17 +1723,96 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     setLoading(true);
     const controller = new AbortController();
     let active = true;
+    const semanticMediaType = filter === "movie" || filter === "series" || filter === "anime" || filter === "other" ? filter : undefined;
     const timer = window.setTimeout(() => {
       const run = async () => {
-        const outcomes = await Promise.allSettled(searchTypes.map((type) => api.search(type, normalizedQuery, 0, pageSize, controller.signal)));
-        if (!active || controller.signal.aborted || searchRequestGenerationRef.current !== generation) return;
+        const semanticInput: SemanticSearchRequest | undefined = discovery?.capabilities?.includes("semantic-search") && (filter === "all" || semanticMediaType !== undefined)
+          ? {
+            query: normalizedQuery,
+            mediaType: semanticMediaType,
+            language: api.metadataLocale(),
+            region: api.metadataRegion(),
+            page: 1,
+            limit: pageSize,
+            excludedIntentIds: [],
+          }
+          : undefined;
+        const isCurrentSearch = () => active && !controller.signal.aborted && searchRequestGenerationRef.current === generation;
+        let progressiveResultsPublished = false;
+        const publications = createSearchPublicationAccumulator({
+          descriptors: selectedSearchDescriptors,
+          isCurrent: isCurrentSearch,
+          publish: (snapshot) => {
+            progressiveResultsPublished ||= snapshot.items.length > 0;
+            visibleIdentityRef.current = searchIdentitySet(snapshot.items);
+            setItems(snapshot.items);
+            setSourceSections(snapshot.sections);
+          },
+        });
+        searchPublicationRef.current = publications;
+        const publishAddonOutcome = (outcome: PromiseSettledResult<ResourceBatch>) => {
+          if (!isCurrentSearch() || outcome.status !== "fulfilled") return;
+          const summary = summarizeSearchOutcomes([outcome], pageSize, catalogDiscovery.descriptors);
+          const sourcePage = filter === "all" ? undefined : collectSearchSourcePage(summary.resourceBatches, selectedSearchDescriptors);
+          publications.enqueue({ items: sourcePage?.items ?? mergeUniqueMedia([], summary.items), sections: sourcePage?.sections ?? [] });
+        };
+        const publishSemantic = (page: SemanticSearchPage) => {
+          if (!isCurrentSearch() || page.items.length === 0) return;
+          const semanticItems = mergeUniqueMedia([], page.items);
+          const sections: SearchSourceSection[] = filter === "all" ? [] : [{
+            key: `semantic:${filter}`,
+            type: filter,
+            label: searchTypeLabel(filter),
+            variants: [],
+            identities: semanticItems.map(searchMediaIdentity),
+            count: semanticItems.length,
+            hasMore: false,
+            loading: false,
+            error: "",
+            collapsed: false,
+          }];
+          publications.enqueue({ items: semanticItems, sections });
+        };
+        const { semantic, outcomes, addonQuery, truncated } = await semanticAddonSearch({
+          semantic: semanticInput,
+          configuredTypes: searchTypes,
+          inferTypes: filter === "all",
+          originalQuery: normalizedQuery,
+          skip: 0,
+          limit: pageSize,
+          signal: controller.signal,
+          onAddonOutcome: publishAddonOutcome,
+          onSemantic: publishSemantic,
+        });
+        if (!isCurrentSearch()) {
+          publications.cancel();
+          return;
+        }
         const summary = summarizeSearchOutcomes(outcomes, pageSize, catalogDiscovery.descriptors);
         const hasFailures = summary.httpFailureCount + summary.internalFailureCount > 0;
         const hasSuccessfulResource = summary.successfulResourceResultCount > 0;
         const sourcePage = filter === "all" ? undefined : collectSearchSourcePage(summary.resourceBatches, selectedSearchDescriptors);
-        const displayedItems = hasFailures && !hasSuccessfulResource ? [] : sourcePage?.items ?? mergeUniqueMedia([], summary.items);
+        const addonItems = hasFailures && !hasSuccessfulResource ? [] : sourcePage?.items ?? mergeUniqueMedia([], summary.items);
+        const addonIdentities = searchIdentitySet(addonItems);
+        const semanticOnlyItems = mergeUniqueMedia([], semantic?.items ?? []).filter((item) => searchMediaIdentities(item).every((identity) => !addonIdentities.has(identity)));
+        const displayedItems = mergeUniqueMedia(addonItems, semantic?.items ?? []);
         const displayedSourceSections = hasFailures && !hasSuccessfulResource ? [] : sourcePage?.sections ?? [];
-        const identities = tvMembershipIdentities(displayedItems).slice(0, 100);
+        if (filter !== "all" && semanticOnlyItems.length > 0) {
+          displayedSourceSections.push({
+            key: `semantic:${filter}`,
+            type: filter,
+            label: searchTypeLabel(filter),
+            variants: [],
+            identities: semanticOnlyItems.map(searchMediaIdentity),
+            count: semanticOnlyItems.length,
+            hasMore: false,
+            loading: false,
+            error: "",
+            collapsed: false,
+          });
+        }
+        const finalSnapshot = publications.finish({ items: displayedItems, sections: displayedSourceSections });
+        const identities = tvMembershipIdentities(finalSnapshot.items).slice(0, 100);
         let membership = { checked: new Set<string>(), saved: new Map<string, string>() };
         if (identities.length > 0) {
           try {
@@ -1415,20 +1821,16 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
             if (controller.signal.aborted) return;
           }
         }
-        if (!active || controller.signal.aborted || searchRequestGenerationRef.current !== generation) return;
-        visibleIdentityRef.current = new Set(displayedItems.map(searchMediaIdentity));
-        setItems(displayedItems);
-        setSourceSections(displayedSourceSections);
-        setTvLibraryMembership(membership.saved);
-        setCheckedTvIdentities(membership.checked);
+        if (!isCurrentSearch()) return;
+        addonSearchQueryRef.current = addonQuery;
+        setTvLibraryMembership((current) => new Map([...current, ...membership.saved]));
+        setCheckedTvIdentities((current) => new Set([...current, ...membership.checked]));
         setNextSkip(pageSize);
-        setHasMore(filter === "all" && hasSuccessfulResource && summary.hasFullPage);
-        if (!hasFailures) {
+        const finalHasMore = filter === "all" && ((hasSuccessfulResource && summary.hasFullPage) || semantic?.hasMore === true) && finalSnapshot.items.length > 0;
+        setHasMore(finalHasMore);
+        if (!hasFailures || semantic?.items.length || progressiveResultsPublished) {
           setError("");
-          setWarning("");
-        } else if (hasSuccessfulResource) {
-          setError("");
-          setWarning(t("search.warning.sourcesUnavailable"));
+          setWarning(hasFailures || semantic?.partial || truncated ? t("search.warning.sourcesUnavailable") : "");
         } else {
           setError(t("search.error.sourcesUnavailable"));
           setWarning("");
@@ -1442,8 +1844,10 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
       active = false;
       window.clearTimeout(timer);
       controller.abort();
+      searchPublicationRef.current?.cancel();
+      searchPublicationRef.current = null;
     };
-  }, [catalogDiscovery, filter, mediaPreferences.profileID, normalizedQuery, retryVersion]);
+  }, [catalogDiscovery, discovery, filter, mediaPreferences.profileID, normalizedQuery, retryVersion]);
 
   useEffect(() => {
     if (membershipRevisionRef.current === mediaRevision) return;
@@ -1487,43 +1891,59 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     paginationControllerRef.current = controller;
     setLoadingMore(true);
     try {
-      const outcomes = await Promise.allSettled(searchTypes.map((type) => api.search(type, normalizedQuery, nextSkip, pageSize, controller.signal)));
+      const semanticInput: SemanticSearchRequest | undefined = discovery?.capabilities?.includes("semantic-search")
+        ? {
+          query: normalizedQuery,
+          language: api.metadataLocale(),
+          region: api.metadataRegion(),
+          page: Math.floor(nextSkip / pageSize) + 1,
+          limit: pageSize,
+          excludedIntentIds: [],
+        }
+        : undefined;
+      const { semantic, outcomes, truncated } = await semanticAddonSearch({
+        semantic: semanticInput,
+        configuredTypes: searchTypes,
+        inferTypes: true,
+        originalQuery: normalizedQuery,
+        skip: nextSkip,
+        limit: pageSize,
+        signal: controller.signal,
+      });
       if (controller.signal.aborted || searchRequestGenerationRef.current !== generation) return;
       const summary = summarizeSearchOutcomes(outcomes, pageSize, catalogDiscovery.descriptors);
       const hasFailures = summary.httpFailureCount + summary.internalFailureCount > 0;
-      if (summary.successfulResourceResultCount > 0) {
-        const additions = mergeUniqueMedia([], summary.items);
-        const identities = tvMembershipIdentities(additions).slice(0, 100);
-        let membership: TVMembershipMaps | undefined;
-        if (identities.length > 0) {
-          try {
-            membership = tvMembershipMaps(identities, await api.tvLibraryMembership(identities, controller.signal));
-          } catch {
-            if (controller.signal.aborted) return;
-          }
+      const incoming = mergeUniqueMedia(mergeUniqueMedia([], summary.items), semantic?.items ?? []);
+      const additions = incoming.filter((item) => searchMediaIdentities(item).every((identity) => !visibleIdentityRef.current.has(identity)));
+      const identities = tvMembershipIdentities(additions).slice(0, 100);
+      let membership: TVMembershipMaps | undefined;
+      if (identities.length > 0) {
+        try {
+          membership = tvMembershipMaps(identities, await api.tvLibraryMembership(identities, controller.signal));
+        } catch {
+          if (controller.signal.aborted) return;
         }
-        if (controller.signal.aborted || searchRequestGenerationRef.current !== generation) return;
-        if (membership) {
-          setTvLibraryMembership((current) => new Map([...current, ...membership.saved]));
-          setCheckedTvIdentities((current) => new Set([...current, ...membership.checked]));
-        }
-        setItems((current) => {
-          const merged = mergeUniqueMedia(current, additions);
-          visibleIdentityRef.current = new Set(merged.map(searchMediaIdentity));
-          return merged;
-        });
-        setNextSkip((current) => current + pageSize);
-        setHasMore(summary.hasFullPage);
-      } else if (!hasFailures) {
-        setHasMore(false);
       }
-      setWarning(hasFailures ? t("search.warning.sourcesUnavailable") : "");
+      if (controller.signal.aborted || searchRequestGenerationRef.current !== generation) return;
+      if (membership) {
+        setTvLibraryMembership((current) => new Map([...current, ...membership.saved]));
+        setCheckedTvIdentities((current) => new Set([...current, ...membership.checked]));
+      }
+      setItems((current) => {
+        const merged = mergeUniqueMedia(current, incoming);
+        visibleIdentityRef.current = searchIdentitySet(merged);
+        return merged;
+      });
+      setNextSkip((current) => current + pageSize);
+      setHasMore(((summary.successfulResourceResultCount > 0 && summary.hasFullPage) || semantic?.hasMore === true) && additions.length > 0);
+      setWarning(hasFailures || semantic?.partial || truncated ? t("search.warning.sourcesUnavailable") : "");
     } finally {
       if (!controller.signal.aborted && searchRequestGenerationRef.current === generation) setLoadingMore(false);
     }
   }
 
   async function loadMoreSource(sectionKey: string) {
+    if (loading) return;
     const section = sourceSections.find((candidate) => candidate.key === sectionKey);
     if (!section || section.loading || (!section.hasMore && !section.error)) return;
     const retrying = Boolean(section.error);
@@ -1537,7 +1957,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     try {
       const outcomes = await Promise.allSettled(targets.map(async (variant) => {
         const extras: { search?: string; skip?: number; limit?: number } = {};
-        if (variant.declaredExtras.includes("search")) extras.search = normalizedQuery;
+        if (variant.declaredExtras.includes("search")) extras.search = addonSearchQueryRef.current || normalizedQuery;
         if (variant.declaredExtras.includes("skip")) extras.skip = variant.nextSkip;
         if (variant.declaredExtras.includes("limit")) extras.limit = pageSize;
         const result = await api.addonCatalog(variant.addonId, variant.type, variant.catalogId, extras, controller.signal);
@@ -1575,7 +1995,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
       }
       if (pageItems.length > 0) setItems((current) => {
         const merged = mergeUniqueMedia(current, pageItems);
-        visibleIdentityRef.current = new Set(merged.map(searchMediaIdentity));
+        visibleIdentityRef.current = searchIdentitySet(merged);
         return merged;
       });
       setSourceSections((current) => current.map((candidate) => {
@@ -1615,9 +2035,9 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
   }
 
   function toggleSourceSection(sectionKey: string) {
+    if (loading) return;
     setSourceSections((current) => current.map((section) => section.key === sectionKey ? { ...section, collapsed: !section.collapsed } : section));
   }
-
   async function toggleTvLibrary(item: MediaItem) {
     const identity = mediaIdentity(item);
     const savedTitleID = tvLibraryMembership.get(identity);
@@ -1649,7 +2069,10 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
   }
 
   function updateQuery(value: string) {
+    addonSearchQueryRef.current = value.trim();
     searchRequestGenerationRef.current++;
+    searchPublicationRef.current?.cancel();
+    searchPublicationRef.current = null;
     paginationControllerRef.current?.abort();
     for (const controller of sourcePaginationControllersRef.current.values()) controller.abort();
     sourcePaginationControllersRef.current.clear();
@@ -1667,8 +2090,11 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
   }
 
   function selectSearchFilter(value: typeof filter) {
+    addonSearchQueryRef.current = normalizedQuery;
     if (value === filter) return;
     searchRequestGenerationRef.current++;
+    searchPublicationRef.current?.cancel();
+    searchPublicationRef.current = null;
     paginationControllerRef.current?.abort();
     for (const controller of sourcePaginationControllersRef.current.values()) controller.abort();
     sourcePaginationControllersRef.current.clear();
@@ -1685,7 +2111,7 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
   }
 
   function renderSearchResult(item: MediaItem) {
-    const identity = searchMediaIdentity(item);
+    const identity = mediaIdentity(item);
     const saved = item.mediaType === "tv" && tvLibraryMembership.has(identity);
     const metadata = item.mediaType === "tv" ? tvMetadata(item) : "";
     const sourceLabels = mediaSourceLabels(item);
@@ -1711,9 +2137,10 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
     </div>;
   }
 
-  return <div className="standard-page search-page page-enter">
+  return <div className="standard-page search-page page-enter" aria-busy={loading || undefined}>
     <SectionHeading eyebrow={t("search.eyebrow")} title={t("search.title")} description={t("search.description")} />
     <div className="search-box"><Search size={23} /><input type="search" value={query} onChange={(event) => updateQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape" && query) { event.preventDefault(); updateQuery(""); } }} aria-label={t("nav.search")} aria-keyshortcuts="Escape" placeholder={t("search.placeholder")} autoFocus />{query && <button type="button" className="search-box__clear" aria-label={t("common.close")} title={t("common.close")} onClick={() => updateQuery("")}><X size={17} /></button>}{loading && <LoaderCircle className="spin" />}</div>
+    <SavedSearchManager query={query} mediaType={filter} onOpen={(savedQuery, savedMediaType) => { updateQuery(savedQuery); selectSearchFilter(savedMediaType); }} />
     <div className="browse-toolbar">
       <div className="filter-pills" role="group" aria-label={t("media.filter.groupLabel")} onKeyDown={(event) => { handleDirectionalFocus(event, { orientation: "horizontal" }); }}>
         <button type="button" className={filter === "all" ? "is-active" : ""} aria-pressed={filter === "all"} onClick={() => selectSearchFilter("all")}><Compass size={16} /> {t("media.filter.all")}</button>
@@ -1732,17 +2159,17 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
         : items.length === 0
           ? <EmptyState icon={<Search size={42} />} title={t("search.empty.title")} description={t("search.empty.description")} />
           : filter === "all"
-            ? <div className="search-result-groups" onKeyDown={handleBrowseGridKeyDown}>{allSearchGroups.map((group) => <section className="search-result-section" key={group.type}>
+            ? <div className="search-result-groups" aria-busy={loading || undefined} onKeyDown={handleBrowseGridKeyDown}>{allSearchGroups.map((group) => <section className="search-result-section" key={group.type}>
               <SectionHeading title={searchTypeLabel(group.type)} />
               <div className="media-grid media-grid--adaptive">{group.items.map(renderSearchResult)}</div>
             </section>)}</div>
-            : <div className="search-result-groups search-source-groups" onKeyDown={handleBrowseGridKeyDown}>{sourceSections.map((section) => {
+            : <div className="search-result-groups search-source-groups" aria-busy={loading || undefined} onKeyDown={handleBrowseGridKeyDown}>{sourceSections.map((section) => {
               const bodyID = `search-source-${encodeURIComponent(section.key)}`;
               const titleID = `${bodyID}-title`;
               const countLabel = t(section.count === 1 ? "common.results.count.one" : "common.results.count.many", { count: section.count });
               return <section className={`search-result-section search-source-section${section.collapsed ? " is-collapsed" : ""}`} key={section.key}>
                 <header className="section-heading search-source-heading">
-                  <button type="button" className="search-source-heading__toggle" aria-labelledby={titleID} aria-expanded={!section.collapsed} aria-controls={bodyID} onClick={() => toggleSourceSection(section.key)}>
+                  <button type="button" className="search-source-heading__toggle" aria-labelledby={titleID} aria-expanded={!section.collapsed} aria-controls={bodyID} disabled={loading} onClick={() => toggleSourceSection(section.key)}>
                     <span className="search-source-heading__logo" aria-hidden="true">{section.logoUrl ? <img src={section.logoUrl} alt="" /> : <span>{sourceInitials(section.label)}</span>}</span>
                     <span className="search-source-heading__copy"><h2 id={titleID}>{section.label}</h2><small>{countLabel}</small></span>
                     <ArrowRight className="search-source-heading__chevron" size={18} aria-hidden="true" />
@@ -1753,8 +2180,8 @@ export function SearchPage({ onOpenMedia, mediaRevision, onLibraryMutation, medi
                     const item = itemByIdentity.get(identity);
                     return item ? [renderSearchResult(item)] : [];
                   })}</div>
-                  {section.error && <Notice tone="warning"><span>{section.error}</span><Button variant="ghost" loading={section.loading} onClick={() => void loadMoreSource(section.key)}><RefreshCw size={16} /> {t("common.actions.tryAgain")}</Button></Notice>}
-                  {!section.error && section.hasMore && <div className="search-source-actions"><Button variant="secondary" loading={section.loading} aria-label={t("common.actions.loadMore")} onClick={() => void loadMoreSource(section.key)}>{t("common.actions.loadMore")}</Button></div>}
+                  {section.error && <Notice tone="warning"><span>{section.error}</span><Button variant="ghost" loading={section.loading} disabled={loading} onClick={() => void loadMoreSource(section.key)}><RefreshCw size={16} /> {t("common.actions.tryAgain")}</Button></Notice>}
+                  {!section.error && section.hasMore && <div className="search-source-actions"><Button variant="secondary" loading={section.loading} disabled={loading} aria-label={t("common.actions.loadMore")} onClick={() => void loadMoreSource(section.key)}>{t("common.actions.loadMore")}</Button></div>}
                 </div>}
               </section>;
             })}</div>}
@@ -1899,6 +2326,8 @@ export function LibraryPage({ onOpenMedia, mediaRevision }: { onOpenMedia: OpenM
 
   return <div className="standard-page library-page page-enter">
     <SectionHeading eyebrow={t("library.eyebrow")} title={t("library.title")} description={t("library.description")} />
+    {profileID && <ReadingQueuePanel profileId={profileID} onOpenMedia={onOpenMedia} />}
+    <SmartCollectionManager onOpenMedia={onOpenMedia} />
     <div className="library-controls">
       <div className="search-box search-box--compact"><Search size={19} /><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape" && query) { event.preventDefault(); setQuery(""); } }} aria-label={t("nav.search")} aria-keyshortcuts="Escape" placeholder={t("search.placeholder")} />{query && <button type="button" className="search-box__clear" aria-label={t("common.close")} title={t("common.close")} onClick={() => setQuery("")}><X size={16} /></button>}</div>
       <label className="library-sort"><span>{t("admin.collections.sources.sortBy")}</span><Select value={sort} onChange={(value) => setSort(value as typeof sort)} options={[{ value: "added", label: t("admin.collections.sort.added") }, { value: "title", label: t("admin.collections.sort.title") }, { value: "released", label: t("admin.collections.sort.released") }]} /></label>

@@ -3,10 +3,14 @@ import { clearMediaCaches } from "./homeCache";
 import { clearMetadataCache } from "./metadataCache";
 import { safeLocalStorage, safeSessionStorage } from "./browserStorage";
 import type {
+  AccessibilityDocument,
+  AccessibilityUpdate,
   Account,
   AddonCatalogDescriptor,
+  AddonIncident,
+  AddonIncidentDetail,
   AddonDiagnosticsResponse,
-  AddonPreviewResponse,
+  AddonVerification,
   AccessCategory,
   AvatarPreset,
   CalendarResponse,
@@ -35,6 +39,10 @@ import type {
   MaintenanceSettings,
   ManagedDevice,
   MetadataRefreshSchedule,
+  MediaNotificationFollowInput,
+  MediaNotificationPage,
+  MediaNotificationSubscription,
+  MediaNotificationSubscriptions,
   MetadataRefreshScheduleInput,
   OperationAction,
   OperationRun,
@@ -46,23 +54,44 @@ import type {
   PlaybackMarkerList,
   PlaybackPreparation,
   PlaybackSession,
+  PlaybackCommand,
+  PlaybackCommandInput,
+  PlaybackCommandResultCode,
+  PlaybackDevice,
   PlaybackSourceList,
+  PlaybackFailoverError,
+  PlaybackFailoverState,
   Profile,
   ProfileSession,
+  ProfileArchiveDocument,
+  ProfileArchiveImportReport,
   ResolvedFolder,
   ResourceBatch,
   ResourceResult,
+  ReadingQueue,
+  ReadingQueueAddInput,
+  ReadingQueueMutation,
+  ReadingQueueMutationInput,
+  ReadingQueueReorderInput,
+  ReadingQueueUpdateInput,
   SettingsLayer,
   SessionNotification,
   SettingsIntegrations,
   SettingsIntegrationsPatch,
   SeasonMetadata,
+  SemanticSearchPage,
+  SemanticSearchRequest,
+  SavedSearch,
+  SavedSearchInput,
+  SmartCollection,
+  SmartCollectionInput,
+  SmartCollectionPage,
   SeriesMetadata,
   SettingsValues,
   TitleReference,
   SetWatchedBatchItem,
   SetWatchedBatchResult,
-  TokenPair,
+  WebSessionTokens,
   TrailerList,
   TrackingDeviceAuthorization,
   TrackingPreferences,
@@ -74,15 +103,16 @@ import type {
 
 const API_BASE = "/api/v1";
 const ACCESS_KEY = "rivune.access";
-const REFRESH_KEY = "rivune.refresh";
-const SESSION_KEY = "rivune.session";
 const DEVICE_KEY = "rivune.device";
+const INSTALLATION_ID_KEY = "rivune.installation-id.v1";
 const REFRESH_LOCK = "rivune.auth.refresh";
 const PROFILE_KEY = "rivune.profile";
 const PROFILE_CONTEXT_KEY = "rivune.profile.context";
 const TAB_SESSION_KEY = "rivune.tab.session";
-export const PROFILE_SELECTION_BROADCAST_KEY = "rivune.profile.selection";
-const SHARED_PROFILE_CONTEXT_KEY = "rivune.profile.shared-context";
+const LEGACY_SHARED_AUTH_KEYS = ["rivune.access", "rivune.refresh", "rivune.session", "rivune.profile.shared-context", "rivune.profile.selection"] as const;
+const AUTH_CHANNEL_NAME = "rivune.auth.v1";
+export type AuthCoordinationEvent = "auth-invalidated" | "profile-invalidated";
+const authChannel = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel(AUTH_CHANNEL_NAME);
 let refreshPromise: Promise<boolean> | null = null;
 let metadataLanguage = navigator.language;
 let trailerLanguage = navigator.language;
@@ -125,60 +155,63 @@ export function rememberDemoSession(): void {
   safeLocalStorage.setItem(DEMO_HINT_KEY, "1");
 }
 
+function installationId(): string {
+  const persisted = safeLocalStorage.getItem(INSTALLATION_ID_KEY)?.trim();
+  if (persisted && persisted.length <= 128) {
+    safeLocalStorage.setItem(INSTALLATION_ID_KEY, persisted);
+    return persisted;
+  }
+
+  const generated = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : (() => {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
+    bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  })();
+  safeLocalStorage.setItem(INSTALLATION_ID_KEY, generated);
+  return generated;
+}
+
 export class APIError extends Error {
   constructor(public status: number, public code: string, message: string) {
     super(message);
     this.name = "APIError";
   }
 }
-type SharedProfileContext = {
-  sessionId: string;
-  profileId: string;
-  profileContext: string;
-};
-
-function readSharedProfileContext(): SharedProfileContext | null {
-  try {
-    const parsed = JSON.parse(safeLocalStorage.getItem(SHARED_PROFILE_CONTEXT_KEY) ?? "null") as Partial<SharedProfileContext> | null;
-    if (!parsed || typeof parsed.sessionId !== "string" || typeof parsed.profileId !== "string" || typeof parsed.profileContext !== "string") return null;
-    if (!parsed.sessionId || parsed.sessionId !== safeLocalStorage.getItem(SESSION_KEY) || !parsed.profileId || !parsed.profileContext) return null;
-    return parsed as SharedProfileContext;
-  } catch {
-    return null;
-  }
+export function subscribeAuthCoordination(listener: (event: AuthCoordinationEvent) => void): () => void {
+  if (!authChannel) return () => undefined;
+  const receive = (message: MessageEvent<unknown>) => {
+    if (message.data === "auth-invalidated" || message.data === "profile-invalidated") listener(message.data);
+  };
+  authChannel.addEventListener("message", receive);
+  return () => authChannel.removeEventListener("message", receive);
 }
 
-function rememberSharedProfileContext(profileID: string, profileContext: string): void {
-  const sessionId = safeLocalStorage.getItem(SESSION_KEY);
-  if (!sessionId) return;
-  safeLocalStorage.setItem(SHARED_PROFILE_CONTEXT_KEY, JSON.stringify({ sessionId, profileId: profileID, profileContext } satisfies SharedProfileContext));
+function broadcastAuthCoordination(event: AuthCoordinationEvent): void {
+  authChannel?.postMessage(event);
 }
 
-function clearSharedProfileContext(expectedContext?: string): void {
-  if (expectedContext && readSharedProfileContext()?.profileContext !== expectedContext) return;
-  safeLocalStorage.removeItem(SHARED_PROFILE_CONTEXT_KEY);
+function clearLegacySharedAuth(): void {
+  for (const key of LEGACY_SHARED_AUTH_KEYS) safeLocalStorage.removeItem(key);
+}
+
+clearLegacySharedAuth();
+
+export function activeProfileRequestID(): string | null {
+  return safeSessionStorage.getItem(PROFILE_KEY);
 }
 
 export function profileRequestContext(profileID: string): string | null {
-  const tabContext = safeSessionStorage.getItem(PROFILE_KEY) === profileID
+  return safeSessionStorage.getItem(PROFILE_KEY) === profileID
     ? safeSessionStorage.getItem(PROFILE_CONTEXT_KEY)
     : null;
-  if (tabContext) {
-    rememberSharedProfileContext(profileID, tabContext);
-    return tabContext;
-  }
-  const shared = readSharedProfileContext();
-  if (!shared || shared.profileId !== profileID) return null;
-  safeSessionStorage.setItem(PROFILE_KEY, profileID);
-  safeSessionStorage.setItem(PROFILE_CONTEXT_KEY, shared.profileContext);
-  return shared.profileContext;
 }
 
 export function setProfileRequestContext(profileID: string | null, profileContext: string | null): void {
   if (profileID && profileContext) {
     safeSessionStorage.setItem(PROFILE_KEY, profileID);
     safeSessionStorage.setItem(PROFILE_CONTEXT_KEY, profileContext);
-    rememberSharedProfileContext(profileID, profileContext);
     return;
   }
   safeSessionStorage.removeItem(PROFILE_KEY);
@@ -186,26 +219,20 @@ export function setProfileRequestContext(profileID: string | null, profileContex
 }
 
 export function rejectProfileRequestContext(): void {
-  const rejectedContext = safeSessionStorage.getItem(PROFILE_CONTEXT_KEY);
-  if (rejectedContext) clearSharedProfileContext(rejectedContext);
+  setProfileRequestContext(null, null);
 }
 
 export function broadcastProfileSelectionChange(): void {
-  safeLocalStorage.setItem(PROFILE_SELECTION_BROADCAST_KEY, JSON.stringify({
-    sessionId: safeLocalStorage.getItem(SESSION_KEY),
-    nonce: `${Date.now()}-${Math.random()}`,
-  }));
+  broadcastAuthCoordination("profile-invalidated");
 }
 
 
 
-function saveTokens(tokens: TokenPair) {
+function saveTokens(tokens: WebSessionTokens) {
   safeSessionStorage.setItem(ACCESS_KEY, tokens.accessToken);
   safeSessionStorage.setItem(TAB_SESSION_KEY, tokens.sessionId);
-  safeLocalStorage.setItem(ACCESS_KEY, tokens.accessToken);
-  safeLocalStorage.setItem(SESSION_KEY, tokens.sessionId);
   safeLocalStorage.setItem(DEVICE_KEY, tokens.deviceId);
-  safeLocalStorage.setItem(REFRESH_KEY, tokens.refreshToken);
+  clearLegacySharedAuth();
 }
 
 export function clearSession() {
@@ -213,74 +240,36 @@ export function clearSession() {
   safeSessionStorage.removeItem(TAB_SESSION_KEY);
   safeSessionStorage.removeItem(PROFILE_KEY);
   safeSessionStorage.removeItem(PROFILE_CONTEXT_KEY);
-  safeLocalStorage.removeItem(ACCESS_KEY);
-  safeLocalStorage.removeItem(REFRESH_KEY);
-  safeLocalStorage.removeItem(SESSION_KEY);
-  clearSharedProfileContext();
-}
-
-function adoptNewerSharedSession(refreshToken: string, sessionId: string | null): boolean {
-  const sharedRefreshToken = safeLocalStorage.getItem(REFRESH_KEY);
-  const sharedAccessToken = safeLocalStorage.getItem(ACCESS_KEY);
-  const sharedSessionId = safeLocalStorage.getItem(SESSION_KEY);
-  if (!sessionId || sharedSessionId !== sessionId || !sharedRefreshToken || sharedRefreshToken === refreshToken || !sharedAccessToken) return false;
-  safeSessionStorage.setItem(ACCESS_KEY, sharedAccessToken);
-  safeSessionStorage.setItem(TAB_SESSION_KEY, sessionId);
-  return true;
-}
-
-function adoptChangedSharedAccessToken(sessionId: string | null): boolean {
-  const tabAccessToken = safeSessionStorage.getItem(ACCESS_KEY);
-  const tabSessionId = safeSessionStorage.getItem(TAB_SESSION_KEY);
-  const sharedAccessToken = safeLocalStorage.getItem(ACCESS_KEY);
-  const sharedSessionId = safeLocalStorage.getItem(SESSION_KEY);
-  if (!sessionId || (tabSessionId && tabSessionId !== sessionId) || sharedSessionId !== sessionId || !tabAccessToken || !sharedAccessToken || tabAccessToken === sharedAccessToken) return false;
-  safeSessionStorage.setItem(ACCESS_KEY, sharedAccessToken);
-  safeSessionStorage.setItem(TAB_SESSION_KEY, sessionId);
-  return true;
+  clearLegacySharedAuth();
 }
 
 async function refreshSession(): Promise<boolean> {
-  const sessionId = safeLocalStorage.getItem(SESSION_KEY);
-  if (adoptChangedSharedAccessToken(sessionId)) return true;
-  const refreshToken = safeLocalStorage.getItem(REFRESH_KEY);
-  if (!refreshToken) return false;
-
   const refresh = async () => {
-    if (safeLocalStorage.getItem(REFRESH_KEY) !== refreshToken) {
-      return adoptNewerSharedSession(refreshToken, sessionId);
-    }
-    const response = await fetch(`${API_BASE}/auth/refresh`, {
+    const response = await fetch(`${API_BASE}/auth/web/refresh`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refreshToken }),
+      headers: { "X-Rivune-CSRF": "1" },
+      credentials: "same-origin",
     });
     if (!response.ok) {
-      if (adoptNewerSharedSession(refreshToken, sessionId)) return true;
-      if (safeLocalStorage.getItem(REFRESH_KEY) === refreshToken) clearSession();
+      clearSession();
       return false;
     }
-    const tokens = (await response.json()) as TokenPair;
-    if (safeLocalStorage.getItem(REFRESH_KEY) !== refreshToken) {
-      return adoptNewerSharedSession(refreshToken, sessionId);
-    }
+    const tokens = (await response.json()) as WebSessionTokens;
     saveTokens(tokens);
     return true;
   };
 
-  if ("locks" in navigator) {
-    return navigator.locks.request(REFRESH_LOCK, refresh);
-  }
+  if ("locks" in navigator) return navigator.locks.request(REFRESH_LOCK, refresh);
   return refresh();
 }
 
 async function request<T>(path: string, init: RequestInit = {}, retry = true, attachSession = true, handleDemoUnavailable = true): Promise<T> {
-  const requestSessionId = safeLocalStorage.getItem(SESSION_KEY);
+  const requestSessionId = safeSessionStorage.getItem(TAB_SESSION_KEY);
   const headers = new Headers(init.headers);
   if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const token = attachSession ? safeSessionStorage.getItem(ACCESS_KEY) ?? safeLocalStorage.getItem(ACCESS_KEY) : null;
+  const token = attachSession ? safeSessionStorage.getItem(ACCESS_KEY) : null;
   if (token && !headers.has("Authorization")) headers.set("Authorization", `Bearer ${token}`);
   const profileContext = token ? safeSessionStorage.getItem(PROFILE_CONTEXT_KEY) : null;
   if (profileContext && !headers.has("X-Rivune-Profile-Context")) {
@@ -288,9 +277,9 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true, at
   }
   const requestURL = path.startsWith("/.well-known") || path === "/health" ? path : `${API_BASE}${path}`;
   const response = await fetch(requestURL, { ...init, headers, credentials: "same-origin" });
-  if (response.status === 401 && retry && safeLocalStorage.getItem(REFRESH_KEY)) {
+  if (response.status === 401 && retry && attachSession) {
     refreshPromise ??= refreshSession().finally(() => { refreshPromise = null; });
-    if (await refreshPromise && requestSessionId !== null && safeLocalStorage.getItem(SESSION_KEY) === requestSessionId) {
+    if (await refreshPromise && requestSessionId !== null && safeSessionStorage.getItem(TAB_SESSION_KEY) === requestSessionId) {
       return request<T>(path, init, false, attachSession, handleDemoUnavailable);
     }
   }
@@ -342,7 +331,11 @@ type ProfileAccessInput = {
 };
 
 export const api = {
-  discovery: () => request<Discovery>("/.well-known/rivune", {}, false, false),
+  discovery: async () => {
+    const discovered = await request<Discovery>("/.well-known/rivune", {}, false, false);
+    if (discovered.protocolVersion !== 22) throw new APIError(426, "unsupported_protocol", `Unsupported Rivune protocol ${discovered.protocolVersion}`);
+    return discovered;
+  },
   setup: async (input: { instanceName: string; admin: { username: string; password: string }; profileName: string }, token: string) => {
     const result = await request<{ instance: { id: string }; admin: { id: string }; profile: { id: string } }>("/setup", {
       method: "POST", headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify(input),
@@ -355,23 +348,27 @@ export const api = {
   resetDemo: () => request<{ account: Account }>("/demo/session/reset", { method: "POST" }, false, false),
   exitDemo: () => request<void>("/demo/session", { method: "DELETE" }, false, false),
   login: async (username: string, password: string) => {
-    const tokens = await request<TokenPair>("/auth/login", {
+    const tokens = await request<WebSessionTokens>("/auth/web/login", {
       method: "POST",
+      headers: { "X-Rivune-CSRF": "1" },
       body: JSON.stringify({ username, password, device: { id: safeLocalStorage.getItem(DEVICE_KEY) || undefined, name: browserName(), platform: "web" } }),
     }, false, false);
     saveTokens(tokens);
+    broadcastAuthCoordination("auth-invalidated");
     return tokens;
   },
   beginDeviceAuthorization: () => request<DeviceAuthorization>("/auth/device-code", {
     method: "POST",
-    body: JSON.stringify({ deviceName: browserName(), platform: "web" }),
+    body: JSON.stringify({ deviceName: browserName(), platform: "web", installationId: installationId() }),
   }, false, false),
   exchangeDeviceAuthorization: async (deviceCode: string) => {
-    const tokens = await request<TokenPair>("/auth/device-code/token", {
+    const tokens = await request<WebSessionTokens>("/auth/web/device-code/token", {
       method: "POST",
+      headers: { "X-Rivune-CSRF": "1" },
       body: JSON.stringify({ deviceCode }),
     }, false, false);
     saveTokens(tokens);
+    broadcastAuthCoordination("auth-invalidated");
     return tokens;
   },
   approveDeviceAuthorization: (input: { userCode: string; categoryId: string; deviceName?: string; internalNote?: string | null }) => request<void>("/auth/device-code/approve", {
@@ -380,7 +377,12 @@ export const api = {
   }),
   restore: refreshSession,
   logout: async () => {
-    try { await request<void>("/auth/logout", { method: "POST" }, false); } finally { clearSession(); }
+    try {
+      await request<void>("/auth/web/refresh", { method: "DELETE", headers: { "X-Rivune-CSRF": "1" } }, false, false);
+    } finally {
+      clearSession();
+      broadcastAuthCoordination("auth-invalidated");
+    }
   },
   me: () => request<Account>("/auth/me"),
   categories: async () => (await request<{ categories: AccessCategory[] }>("/categories")).categories,
@@ -397,7 +399,7 @@ export const api = {
   selectProfile: (id: string, pin?: string) => request<{ profile: Profile; expiresAt: string; profileContext: string }>(`/profiles/${id}/select`, { method: "POST", body: JSON.stringify(pin ? { pin } : {}) }),
   clearProfile: async () => {
     await request<void>("/profiles/selection", { method: "DELETE" });
-    clearSharedProfileContext();
+    setProfileRequestContext(null, null);
   },
   avatarPresets: () => request<{ presets: AvatarPreset[] }>("/profile-avatars"),
   createProfile: (input: { name: string; description?: string | null; categoryId: string; isChild?: boolean; pin?: string } & ProfileAccessInput) => request<Profile>("/profiles", { method: "POST", body: JSON.stringify(input) }),
@@ -411,6 +413,9 @@ export const api = {
   acknowledgeSessionNotification: (notificationId: string) => request<void>(`/auth/notifications/${notificationId}`, { method: "DELETE" }),
   broadcastSessionNotification: (idempotencyKey: string, message: string) => request<NotificationBroadcast>("/auth/notifications/broadcast", { method: "POST", body: JSON.stringify({ idempotencyKey, message }) }),
   sendProfileSessionNotification: (profileId: string, sessionId: string, message: string) => request<SessionNotification>(`/profiles/${profileId}/sessions/${sessionId}/notifications`, { method: "POST", body: JSON.stringify({ message }) }),
+  exportProfileArchive: (profileId: string) => request<ProfileArchiveDocument>(`/profiles/${encodeURIComponent(profileId)}/archive`),
+  importProfileArchive: (profileId: string, archive: ProfileArchiveDocument) => request<ProfileArchiveImportReport>(`/profiles/${encodeURIComponent(profileId)}/archive/import`, { method: "POST", body: JSON.stringify(archive) }),
+  createProfileFromArchive: (categoryId: string, archive: ProfileArchiveDocument) => request<ProfileArchiveImportReport>("/profiles/archive", { method: "POST", body: JSON.stringify({ categoryId, archive }) }),
 
   collections: (signal?: AbortSignal) => request<CollectionListResponse>("/collections", { signal }),
   calendar: (from: string, to: string, signal?: AbortSignal) => request<CalendarResponse>(`/calendar${query({ from, to, language: metadataLanguage })}`, { signal }),
@@ -439,13 +444,27 @@ export const api = {
   resolveFolder: (collectionId: string, folderId: string, page = 1, signal?: AbortSignal) => request<ResolvedFolder>(`/collections/${collectionId}/folders/${folderId}/items${query({ page, limit: 100, language: metadataLanguage, region: metadataRegion })}`, { signal }),
   tmdbLookup: (kind: string, search: string) => request<{ results: { id: number; name: string; imageUrl?: string }[] }>(`/collections/tmdb/lookup${query({ kind, query: search, language: metadataLanguage, page: 1 })}`),
   tmdbGenres: (mediaType: string) => request<{ genres: { id: number; name: string }[] }>(`/collections/tmdb/genres${query({ mediaType, language: metadataLanguage })}`),
+  addonIncidents: () => request<{ incidents: AddonIncident[] }>("/operations/extension-incidents"),
+  addonIncident: (id: string) => request<AddonIncidentDetail>(`/operations/extension-incidents/${encodeURIComponent(id)}`),
+  acknowledgeAddonIncident: (id: string) => request<AddonIncident>(`/operations/extension-incidents/${encodeURIComponent(id)}/acknowledgement`, { method: "POST" }),
+  semanticSearch: (input: SemanticSearchRequest, signal?: AbortSignal) => request<SemanticSearchPage>("/search/semantic", { method: "POST", body: JSON.stringify(input), signal }),
+  savedSearches: () => request<{ savedSearches: SavedSearch[] }>("/saved-searches"),
+  createSavedSearch: (input: SavedSearchInput) => request<SavedSearch>("/saved-searches", { method: "POST", body: JSON.stringify(input) }),
+  updateSavedSearch: (id: string, input: SavedSearchInput) => request<SavedSearch>(`/saved-searches/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(input) }),
+  deleteSavedSearch: (id: string, expectedRevision: number) => request<void>(`/saved-searches/${encodeURIComponent(id)}${query({ expectedRevision })}`, { method: "DELETE" }),
+  smartCollections: () => request<{ smartCollections: SmartCollection[] }>("/smart-collections"),
+  createSmartCollection: (input: SmartCollectionInput) => request<SmartCollection>("/smart-collections", { method: "POST", body: JSON.stringify(input) }),
+  updateSmartCollection: (id: string, input: SmartCollectionInput) => request<SmartCollection>(`/smart-collections/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(input) }),
+  deleteSmartCollection: (id: string, expectedRevision: number) => request<void>(`/smart-collections/${encodeURIComponent(id)}${query({ expectedRevision })}`, { method: "DELETE" }),
+  smartCollectionItems: (id: string, page = 1, pageSize = 100) => request<SmartCollectionPage>(`/smart-collections/${encodeURIComponent(id)}/items${query({ page, pageSize })}`),
+  metadataRegion: () => metadataRegion,
 
   addons: () => request<{ addons: InstalledAddon[] }>("/addons"),
   addonDiagnostics: () => request<AddonDiagnosticsResponse>("/addons/diagnostics"),
-  previewAddon: (input: InstallAddonInput, signal?: AbortSignal) => request<AddonPreviewResponse>("/addons/preview", { method: "POST", body: JSON.stringify(input), signal }),
-  installAddon: (input: InstallAddonInput) => request<ManagedAddon>("/addons", { method: "POST", body: JSON.stringify(input) }),
+  verifyAddonCandidate: (input: InstallAddonInput, signal?: AbortSignal) => request<AddonVerification>("/addons/verifications", { method: "POST", body: JSON.stringify(input), signal }),
+  verifyInstalledAddon: (id: string, signal?: AbortSignal) => request<AddonVerification>(`/addons/${encodeURIComponent(id)}/verifications`, { method: "POST", signal }),
+  installAddon: (verificationId: string) => request<ManagedAddon>("/addons", { method: "POST", body: JSON.stringify({ verificationId }) }),
   addonManagement: (id: string) => request<ManagedAddon>(`/addons/${id}/management`),
-  refreshAddon: (id: string) => request<InstalledAddon>(`/addons/${id}/refresh`, { method: "POST" }),
   updateAddon: (id: string, input: UpdateAddonInput) => request<ManagedAddon>(`/addons/${id}`, { method: "PUT", body: JSON.stringify(input) }),
   reorderAddons: (addonIds: string[]) => request<{ addons: InstalledAddon[] }>("/addons/order", { method: "PUT", body: JSON.stringify({ addonIds }) }),
   deleteAddon: (id: string) => request<void>(`/addons/${id}`, { method: "DELETE" }),
@@ -481,7 +500,19 @@ export const api = {
     request<PlaybackPreparation>("/playback/prepare", { method: "POST", body: JSON.stringify(input), signal }),
   resolvePlayback: (input: { sourceRef: string; titleId?: string; startSeconds?: number; preferredAudioTrack?: number; preferredSubtitleId?: string }) =>
     request<PlaybackSession>("/playback/resolve", { method: "POST", body: JSON.stringify(input) }),
+  createPlaybackFailover: (input: { candidateSourceRefs: string[]; selectedSourceRef: string; maximumAttempts?: number }) =>
+    request<PlaybackFailoverState>("/playback/failovers", { method: "POST", body: JSON.stringify(input) }),
+  playbackFailover: (failoverId: string) => request<PlaybackFailoverState>(`/playback/failovers/${encodeURIComponent(failoverId)}`),
+  advancePlaybackFailover: (failoverId: string, input: { error: PlaybackFailoverError; positionSeconds: number; expectedRevision: number }) =>
+    request<PlaybackFailoverState>(`/playback/failovers/${encodeURIComponent(failoverId)}/advance`, { method: "POST", body: JSON.stringify(input) }),
+  cancelPlaybackFailover: (failoverId: string) => request<void>(`/playback/failovers/${encodeURIComponent(failoverId)}`, { method: "DELETE" }),
   stopPlayback: (sessionId: string) => request<void>(`/playback/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE", keepalive: true }),
+  playbackHeartbeat: (input: { capabilities: PlaybackDevice["capabilities"]; state: PlaybackDevice["state"] }) => request<PlaybackDevice>("/playback/device", { method: "PUT", body: JSON.stringify(input) }),
+  playbackDevices: () => request<{ devices: PlaybackDevice[] }>("/playback/devices"),
+  sendPlaybackCommand: (sessionId: string, input: PlaybackCommandInput) => request<PlaybackCommand>(`/playback/devices/${encodeURIComponent(sessionId)}/commands`, { method: "POST", body: JSON.stringify(input) }),
+  playbackCommands: (after?: string) => request<{ commands: PlaybackCommand[] }>(`/playback/commands${query({ after })}`),
+  completePlaybackCommand: (operationId: string, status: Exclude<PlaybackCommand["status"], "pending">, code: PlaybackCommandResultCode) => request<PlaybackCommand>(`/playback/commands/incoming/${encodeURIComponent(operationId)}/result`, { method: "PUT", body: JSON.stringify({ status, code }) }),
+  outgoingPlaybackCommand: (operationId: string) => request<PlaybackCommand>(`/playback/commands/outgoing/${encodeURIComponent(operationId)}`),
   playbackActivity: () => request<PlaybackActivity>("/playback/activity"),
   stopPlaybackActivitySession: (sessionId: string) => request<void>(`/playback/activity/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }),
   operations: () => request<OperationsOverview>("/operations"),
@@ -508,6 +539,25 @@ export const api = {
     request<SetWatchedBatchResult>("/titles/watched/batch", { method: "PUT", body: JSON.stringify({ items }), signal }),
   addLibrary: (titleId: string) => request(`/library/${encodeURIComponent(titleId)}`, { method: "PUT" }),
   removeLibrary: (titleId: string) => request<void>(`/library/${encodeURIComponent(titleId)}`, { method: "DELETE" }),
+  mediaNotificationSubscriptions: () => request<MediaNotificationSubscriptions>("/media-notification-subscriptions"),
+  followMediaNotifications: (titleId: string, input: MediaNotificationFollowInput) =>
+    request<MediaNotificationSubscription>(`/media-notification-subscriptions/${encodeURIComponent(titleId)}`, { method: "PUT", body: JSON.stringify(input) }),
+  unfollowMediaNotifications: (titleId: string) => request<void>(`/media-notification-subscriptions/${encodeURIComponent(titleId)}`, { method: "DELETE" }),
+  mediaNotifications: (cursor = "", limit = 30) => request<MediaNotificationPage>(`/media-notifications${query({ cursor, limit })}`),
+  acknowledgeMediaNotification: (notificationId: string, state: "read" | "dismissed") =>
+    request<void>(`/media-notifications/${encodeURIComponent(notificationId)}/acknowledgement`, { method: "POST", body: JSON.stringify({ state }) }),
+  readingQueue: (profileId: string, signal?: AbortSignal) =>
+    request<ReadingQueue>(`/profiles/${encodeURIComponent(profileId)}/queue`, { signal }),
+  addReadingQueueItem: (profileId: string, input: ReadingQueueAddInput) =>
+    request<ReadingQueueMutation>(`/profiles/${encodeURIComponent(profileId)}/queue/items`, { method: "POST", body: JSON.stringify(input) }),
+  updateReadingQueueItem: (profileId: string, itemId: string, input: ReadingQueueUpdateInput) =>
+    request<ReadingQueueMutation>(`/profiles/${encodeURIComponent(profileId)}/queue/items/${encodeURIComponent(itemId)}`, { method: "PATCH", body: JSON.stringify(input) }),
+  reorderReadingQueue: (profileId: string, input: ReadingQueueReorderInput) =>
+    request<ReadingQueueMutation>(`/profiles/${encodeURIComponent(profileId)}/queue/order`, { method: "PUT", body: JSON.stringify(input) }),
+  removeReadingQueueItem: (profileId: string, itemId: string, input: ReadingQueueMutationInput) =>
+    request<ReadingQueueMutation>(`/profiles/${encodeURIComponent(profileId)}/queue/items/${encodeURIComponent(itemId)}`, { method: "DELETE", body: JSON.stringify(input) }),
+  consumeReadingQueueItem: (profileId: string, itemId: string, input: ReadingQueueMutationInput) =>
+    request<ReadingQueueMutation>(`/profiles/${encodeURIComponent(profileId)}/queue/items/${encodeURIComponent(itemId)}/consume`, { method: "POST", body: JSON.stringify(input) }),
 
   instanceSettings: () => request<SettingsLayer>("/settings"),
   maintenanceSettings: () => request<MaintenanceSettings>("/settings/maintenance"),
@@ -516,6 +566,8 @@ export const api = {
   effectiveSettings: (id: string) => request<{ schemaVersion: number; settings: SettingsValues; sources: Record<string, string> }>(`/profiles/${id}/settings/effective`),
   updateInstanceSettings: (settings: SettingsValues) => request<SettingsLayer>("/settings", { method: "PATCH", body: JSON.stringify(settings) }),
   updateProfileSettings: (id: string, settings: SettingsValues) => request<SettingsLayer>(`/profiles/${id}/settings`, { method: "PATCH", body: JSON.stringify(settings) }),
+  accessibilityPreferences: (profileId: string) => request<AccessibilityDocument>(`/profiles/${encodeURIComponent(profileId)}/accessibility-preferences`),
+  updateAccessibilityPreferences: (profileId: string, input: AccessibilityUpdate) => request<AccessibilityDocument>(`/profiles/${encodeURIComponent(profileId)}/accessibility-preferences`, { method: "PUT", body: JSON.stringify(input) }),
   settingsIntegrations: () => request<SettingsIntegrations>("/settings/integrations"),
   updateSettingsIntegrations: (settings: SettingsIntegrationsPatch) => request<SettingsIntegrations>("/settings/integrations", { method: "PATCH", body: JSON.stringify(settings) }),
   settingsAudit: (cursor?: number, limit = 50) => request<ConfigurationAuditPage>(`/settings/audit${query({ cursor, limit })}`),

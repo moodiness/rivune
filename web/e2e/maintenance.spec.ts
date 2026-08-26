@@ -46,7 +46,7 @@ test("administrator can update the global maintenance settings", async ({ page, 
   await expect(page.getByText("Maintenance settings updated.")).toBeVisible();
 });
 
-test("interface language inherits server defaults and supports profile RTL overrides", async ({ page, rivune }) => {
+test("interface language inherits server defaults and supports profile overrides", async ({ page, rivune }) => {
   await page.goto("/#admin");
   await page.locator('[data-admin-tab="settings"]').click();
   const scope = page.locator(".settings-profile-picker").getByRole("combobox");
@@ -56,7 +56,7 @@ test("interface language inherits server defaults and supports profile RTL overr
 
   const language = page.locator('[role="combobox"][name="interfaceLanguage"]');
   await expect.poll(async () => (await selectOptions(language)).map((option) => option.value)).toEqual([
-    "", "en", "fr", "fr-CA", "es", "es-MX", "es-AR", "es-CL", "es-CO", "es-PE", "it", "de", "ru", "pt-PT", "pt-BR", "ar", "ja", "ko", "zh-CN", "zh-TW", "pl", "hy", "nl", "sv", "da", "fi", "nb", "tr", "uk", "cs", "sk", "ro", "el", "he", "hi", "id", "vi", "th", "hu", "bg", "hr", "sr", "ms", "ca", "fa", "fil",
+    "", "en", "fr", "de", "es", "it", "pt-BR",
   ]);
   await selectOption(language, "fr");
   await savePreferences.click();
@@ -80,22 +80,21 @@ test("interface language inherits server defaults and supports profile RTL overr
     const request = response.request();
     return new URL(response.url()).pathname === "/api/v1/profiles/alice/settings/effective" && request.method() === "GET";
   });
-  await selectOption(language, "he");
+  await selectOption(language, "de");
   await savePreferences.click();
 
   const firstProfileRequest = await rivune.waitForRequest("/api/v1/profiles/alice/settings", "PATCH");
-  expect(firstProfileRequest.body).toMatchObject({ interfaceLanguage: "he" });
+  expect(firstProfileRequest.body).toMatchObject({ interfaceLanguage: "de" });
   await expect.poll(() => rivune.matching("/api/v1/profiles/alice/settings/effective", "GET").length).toBe(effectiveRequestCount + 1);
 
-  await selectOption(language, "ar");
+  await selectOption(language, "es");
   await savePreferences.click();
   await expect.poll(() => rivune.matching("/api/v1/profiles/alice/settings", "PATCH").length).toBe(2);
-  expect(rivune.matching("/api/v1/profiles/alice/settings", "PATCH").at(-1)?.body).toMatchObject({ interfaceLanguage: "ar" });
-  await expect(page.locator("html")).toHaveAttribute("lang", "ar");
-  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
-  await expect(page.getByRole("button", { name: "الرئيسية", exact: true })).toBeVisible();
+  expect(rivune.matching("/api/v1/profiles/alice/settings", "PATCH").at(-1)?.body).toMatchObject({ interfaceLanguage: "es" });
+  await expect(page.locator("html")).toHaveAttribute("lang", "es");
+  await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
   await delayedEffectiveSettings;
-  await expect(page.locator("html")).toHaveAttribute("lang", "ar");
+  await expect(page.locator("html")).toHaveAttribute("lang", "es");
 
   await expect(language).toBeVisible();
   await selectOption(language, "");

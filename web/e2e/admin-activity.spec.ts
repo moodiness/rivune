@@ -28,6 +28,7 @@ const activity = {
       expiresAt: "2026-07-31T13:00:00Z",
       decision: {
         reason: "video_transcode_required",
+        reasons: ["resolution_limit", "bitrate_limit"],
         videoAction: "transcode",
         audioAction: "transcode",
         subtitleAction: "burn",

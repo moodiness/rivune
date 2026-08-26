@@ -11,6 +11,7 @@ import type { CanonicalRouteMetadata } from "./media";
 import { clearMetadataCache } from "./metadataCache";
 import { clearNotifications, configureNotificationDuration, notifyInfo } from "./notifications";
 import { restoreOneShotNavigation } from "./oneShotNavigationGuard";
+import { usePlaybackCoordination } from "./playbackCoordination";
 import { Shell } from "./Shell";
 import type { View } from "./Shell";
 import { LoginPage, SetupPage } from "./pages/Onboarding";
@@ -18,12 +19,13 @@ import { ProfileGate } from "./pages/ProfileGate";
 import { DevicePairingPage, PairApprovalPage } from "./pages/Pairing";
 import type { InterfaceLanguage, MediaItem, SettingsValues } from "./types";
 
-const validViews: Record<string, View> = { home: "home", search: "search", library: "library", calendar: "calendar", admin: "admin" };
+const validViews: Record<string, View> = { home: "home", search: "search", library: "library", calendar: "calendar", notifications: "notifications", admin: "admin" };
 const AdminPage = lazy(() => import("./pages/Admin").then((module) => ({ default: module.AdminPage })));
 const HomePage = lazy(() => import("./pages/Explore").then((module) => ({ default: module.HomePage })));
 const SearchPage = lazy(() => import("./pages/Explore").then((module) => ({ default: module.SearchPage })));
 const LibraryPage = lazy(() => import("./pages/Explore").then((module) => ({ default: module.LibraryPage })));
 const CalendarPage = lazy(() => import("./pages/Calendar").then((module) => ({ default: module.CalendarPage })));
+const NotificationsPage = lazy(() => import("./pages/Notifications").then((module) => ({ default: module.NotificationsPage })));
 const MediaDetails = lazy(() => import("./media").then((module) => ({ default: module.MediaDetails })));
 
 type MediaRoute = {
@@ -431,6 +433,7 @@ export default function App() {
   const lastPrincipal = useRef<string | null | undefined>(undefined);
   const principalRef = useRef(principal);
   principalRef.current = principal;
+  usePlaybackCoordination(Boolean(activeProfile && mode !== "demo" && discovery?.capabilities?.includes("playback-command-results")), (item) => openMedia(item));
 
   function restoreOriginFocus() {
     const invokingElement = invokingElementRef.current;
@@ -720,7 +723,7 @@ export default function App() {
   return <Shell view={visibleView} onView={setView}>
     <div key={principal ?? "anonymous"} ref={routeSurfaceRef} tabIndex={-1} className={visibleMediaRoute ? "route-surface route-surface--hidden" : "route-surface"}>
       <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingSpace")}</span></div>}>
-        {visibleView === "home" ? <HomePage key={homeResetKey} onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.home} mediaPreferences={{ profileID: activeProfile.id, hideUnreleased: settings.hideUnreleased, animationsEnabled: settings.animationsEnabled, maximumDirectTitles: settings.maximumDirectTitles }} /> : visibleView === "search" ? <SearchPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.search} onLibraryMutation={invalidateLibrarySurfaces} mediaPreferences={{ profileID: activeProfile.id, hideUnreleased: settings.hideUnreleased, animationsEnabled: settings.animationsEnabled, maximumDirectTitles: settings.maximumDirectTitles }} /> : visibleView === "library" ? <LibraryPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.library} /> : visibleView === "calendar" ? <CalendarPage onOpenMedia={openMedia} /> : <AdminPage />}
+        {visibleView === "home" ? <HomePage key={homeResetKey} onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.home} mediaPreferences={{ profileID: activeProfile.id, hideUnreleased: settings.hideUnreleased, animationsEnabled: settings.animationsEnabled, maximumDirectTitles: settings.maximumDirectTitles }} /> : visibleView === "search" ? <SearchPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.search} onLibraryMutation={invalidateLibrarySurfaces} mediaPreferences={{ profileID: activeProfile.id, hideUnreleased: settings.hideUnreleased, animationsEnabled: settings.animationsEnabled, maximumDirectTitles: settings.maximumDirectTitles }} /> : visibleView === "library" ? <LibraryPage onOpenMedia={openMedia} mediaRevision={mediaDataRevisions.library} /> : visibleView === "calendar" ? <CalendarPage onOpenMedia={openMedia} /> : visibleView === "notifications" ? <NotificationsPage /> : <AdminPage />}
       </Suspense>
     </div>
     {visibleMediaRoute && <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" /><span>{t("app.loadingTitle")}</span></div>}><MediaDetails key={`${mediaIdentity(visibleMediaRoute.item)}:${visibleMediaRoute.item.titleId ?? ""}`} item={visibleMediaRoute.item} maximumCastMembers={settings.maximumCastMembers} onCanonicalRoute={canonicalizeMediaRoute} onClose={closeMedia} onNavigateContext={updateMediaRoute} onOpenMedia={openNestedMedia} onOpenSeason={returnToSeason} onLibraryMutation={invalidateLibrarySurfaces} /></Suspense>}

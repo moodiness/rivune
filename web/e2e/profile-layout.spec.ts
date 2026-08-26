@@ -213,7 +213,7 @@ test("portrait keeps all destinations and exposes profile, server, and sign-out 
 
   const mobileNavigation = page.locator(".mobile-nav");
   const destinations = mobileNavigation.getByRole("button");
-  await expect(destinations).toHaveCount(5);
+  await expect(destinations).toHaveCount(6);
   for (const destination of await destinations.all()) {
     await expect(destination).toBeVisible();
     expect((await destination.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(48);
@@ -295,12 +295,11 @@ test("horizontal rows keep keyboard focus visible in RTL and stop inertia for re
   await expect.poll(() => cards.last().locator(".media-card__visual").evaluate((visual) => Math.max(...getComputedStyle(visual).transitionDuration.split(",").map((duration) => Number.parseFloat(duration))))).toBeLessThanOrEqual(0.001);
 });
 
-test("profile chooser stays directional, scrollable, and recoverable on a 360px RTL viewport", async ({ page, rivune }) => {
+test("profile chooser stays directional, scrollable, and recoverable on a 360px viewport", async ({ page, rivune }) => {
   rivune.setProfileCategory("bob", CATEGORY_IDS.household);
   rivune.setProfileCategory("casey", CATEGORY_IDS.household);
   rivune.setProfileAvailability("bob", { enabled: false, accessible: false });
   rivune.seedProfiles(12);
-  rivune.setInterfaceLanguage("ar");
   await page.setViewportSize({ width: 1024, height: 800 });
   await page.goto("/");
   await rivune.waitForRequest("/api/v1/collections", "GET");
@@ -309,7 +308,7 @@ test("profile chooser stays directional, scrollable, and recoverable on a 360px 
 
   const gate = page.locator(".profile-gate");
   await expect(gate).toBeVisible();
-  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
   const alice = page.locator(".profile-card").filter({ hasText: "Alice" });
   const bob = page.locator(".profile-card").filter({ hasText: "Bob" });
   const casey = page.locator(".profile-card").filter({ hasText: "Casey" });
@@ -327,7 +326,7 @@ test("profile chooser stays directional, scrollable, and recoverable on a 360px 
   expect(rivune.matching("/api/v1/profiles/bob/select", "POST")).toHaveLength(0);
 
   await alice.focus();
-  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("ArrowRight");
   await expect(bob).toBeFocused();
   await casey.focus();
   await page.keyboard.press("Enter");

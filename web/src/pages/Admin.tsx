@@ -1,15 +1,20 @@
 import { Activity, Bell, Boxes, Captions, Check, ChevronDown, ChevronUp, CircleStop, CircleUserRound, Clock3, Copy, Cpu, Database, ExternalLink, Eye, EyeOff, Film, GripVertical, HardDrive, ImagePlus, KeyRound, Languages, Layers3, Link, LoaderCircle, MonitorSmartphone, Palette, Pencil, Plus, Radio, RefreshCw, Save, Search, Send, Server, Settings2, Shield, Sparkles, Trash2, Upload, Users, WandSparkles, Wrench, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent } from "react";
 import { api, APIError } from "../api";
+import { AccessibilitySettings } from "../AccessibilitySettings";
 import { useAuth } from "../auth";
 import { AddTile, Button, ConfirmDialog, EmptyState, handleDirectionalFocus, IconButton, Modal, Notice, Select, Skeleton } from "../components";
 import { interfaceLanguages, locale, translate, type TranslationKey } from "../i18n";
 import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "../notifications";
 import { acquireOneShotNavigationGuard } from "../oneShotNavigationGuard";
+import { playbackDecisionOutcome, playbackDecisionReasons } from "../playbackDecision";
+import { classifyNetwork, loadQualityPreferences, saveQualityPreference } from "../playbackQuality";
+import { downloadProfileArchive, readProfileArchive } from "../profileArchive";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "../titleProviders";
-import { integrationCredentialNames, type AccessCategory, type AddonDiagnostic, type AddonDiagnosticErrorCode, type AddonDiagnosticState, type AddonDiagnosticsResponse, type AddonManifest, type AddonPreviewResponse, type AvatarPreset, type CategoryInput, type Collection, type CollectionFolder, type CollectionSaveInput, type CollectionSource, type ConfigurationAuditPage, type DeviceUpdateInput, type HardwareAccelerationMode, type InstallAddonInput, type InstalledAddon, type IntegrationCredentialName, type InterfaceLanguage, type JellyfinCredentialSecret, type JellyfinCredentialStatus, type MaintenanceSettings, type ManagedAddon, type ManagedDevice, type MetadataRefreshScheduleInput, type OperationAction, type OperationRun, type OperationsOverview, type PlaybackActivity, type PlaybackActivitySession, type Profile, type ProfileSession, type RuntimeApplication, type RuntimeSettingsValues, type SettingsIntegrations, type SettingsIntegrationsPatch, type SettingsValues, type TrackingDeviceAuthorization, type TrackingProvider, type TrackingStatus, type UpdateAddonInput } from "../types";
+import { integrationCredentialNames, type AccessCategory, type AddonDiagnostic, type AddonDiagnosticErrorCode, type AddonDiagnosticState, type AddonDiagnosticsResponse, type AddonIncident, type AddonManifest, type AddonVerification, type AvatarPreset, type CategoryInput, type Collection, type CollectionFolder, type CollectionSaveInput, type CollectionSource, type ConfigurationAuditPage, type DeviceUpdateInput, type HardwareAccelerationMode, type InstallAddonInput, type InstalledAddon, type IntegrationCredentialName, type InterfaceLanguage, type JellyfinCredentialSecret, type JellyfinCredentialStatus, type MaintenanceSettings, type ManagedAddon, type ManagedDevice, type MetadataRefreshScheduleInput, type NetworkClass, type OperationAction, type OperationRun, type OperationsOverview, type PlaybackActivity, type PlaybackActivitySession, type Profile, type ProfileArchiveDocument, type ProfileArchiveImportReport, type ProfileSession, type QualityPreferences, type QualityPreset, type RuntimeApplication, type RuntimeSettingsValues, type SettingsIntegrations, type SettingsIntegrationsPatch, type SettingsValues, type TrackingDeviceAuthorization, type TrackingProvider, type TrackingStatus, type UpdateAddonInput } from "../types";
 
 type AdminTab = "categories" | "profiles" | "devices" | "addons" | "collections" | "activity" | "operations" | "settings";
+
 type AdminTabGroup = "access" | "catalog" | "supervision" | "preferences";
 
 const adminTabGroups: Array<{ id: AdminTabGroup; labelKey: TranslationKey }> = [
@@ -613,6 +618,13 @@ function ProfilesAdmin() {
   const pendingMessageRequestRef = useRef<{ profileId: string; sessionId: string; modalId: number } | null>(null);
   const nextMessageModalIdRef = useRef(0);
   const broadcastKeyRef = useRef<string | null>(null);
+  const archiveFileRef = useRef<HTMLInputElement>(null);
+  const [archive, setArchive] = useState<ProfileArchiveDocument | null>(null);
+  const [archiveTarget, setArchiveTarget] = useState<Profile | "new" | null>(null);
+  const [archiveCategoryId, setArchiveCategoryId] = useState("");
+  const [archiveBusy, setArchiveBusy] = useState(false);
+  const [archiveReport, setArchiveReport] = useState<ProfileArchiveImportReport | null>(null);
+  const [archiveError, setArchiveError] = useState("");
   const messageCharacterCount = countCodePoints(message);
   const broadcastCharacterCount = countCodePoints(broadcastMessage);
 
@@ -899,6 +911,50 @@ function ProfilesAdmin() {
       setSendingBroadcast(false);
     }
   }
+  async function exportArchive(profile: Profile) {
+    setArchiveBusy(true);
+    setArchiveError("");
+    try {
+      downloadProfileArchive(await api.exportProfileArchive(profile.id), profile.name);
+      notifySuccess(translate("admin.profiles.archive.exported"), translate("admin.profiles.archive.title"));
+    } catch (cause) {
+      setArchiveError(notifyError(cause, translate("admin.profiles.archive.error")));
+    } finally { setArchiveBusy(false); }
+  }
+
+  async function selectArchiveFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setArchiveError("");
+    setArchiveReport(null);
+    try {
+      setArchive(await readProfileArchive(file));
+      setArchiveTarget(null);
+      setArchiveCategoryId(categories.find((category) => category.isDefault)?.id ?? categories[0]?.id ?? "");
+    } catch {
+      setArchive(null);
+      setArchiveError(translate("admin.profiles.archive.invalid"));
+    }
+  }
+
+  async function applyArchive() {
+    if (!archive || !archiveTarget || archiveBusy || archiveTarget === "new" && !archiveCategoryId) return;
+    setArchiveBusy(true);
+    setArchiveError("");
+    try {
+      const report = archiveTarget === "new" ? await api.createProfileFromArchive(archiveCategoryId, archive) : await api.importProfileArchive(archiveTarget.id, archive);
+      setArchiveReport(report);
+      setArchive(null);
+      setArchiveTarget(null);
+      const next = await api.profiles();
+      setProfiles(next.profiles);
+      await refreshAccount();
+    } catch (cause) {
+      setArchiveError(notifyError(cause, translate("admin.profiles.archive.error")));
+    } finally { setArchiveBusy(false); }
+  }
+
   const visibleProfiles = categoryFilter === "all" ? profiles : profiles.filter((profile) => profile.categoryId === categoryFilter);
   const enabledProfiles = profiles.filter((profile) => profile.enabled).length;
   const protectedProfiles = profiles.filter((profile) => profile.hasPin).length;
@@ -909,7 +965,7 @@ function ProfilesAdmin() {
     <div className="admin-section__header">
       <div><span>{translate("admin.profiles.eyebrow")}</span><h2>{translate("admin.profiles.title")}</h2><p>{translate("admin.profiles.description")}</p></div>
       <div className="admin-section__actions">
-        {isGlobalAdmin && <Button variant="secondary" onClick={openBroadcast}><Radio size={18} /> {translate("admin.broadcast.open")}</Button>}
+        {isGlobalAdmin && <><input ref={archiveFileRef} hidden type="file" accept="application/json,.json" onChange={(event) => void selectArchiveFile(event)} /><Button variant="secondary" disabled={archiveBusy} onClick={() => archiveFileRef.current?.click()}><Upload size={18} /> {translate("admin.profiles.archive.import")}</Button><Button variant="secondary" onClick={openBroadcast}><Radio size={18} /> {translate("admin.broadcast.open")}</Button></>}
         <Button disabled={isGlobalAdmin && (categoriesLoading || categories.length === 0)} onClick={() => openEditor("new")}><Plus size={18} /> {translate("admin.profiles.actions.new")}</Button>
       </div>
     </div>
@@ -924,6 +980,7 @@ function ProfilesAdmin() {
       {selectedProfileValues.length > 0 && <div className="bulk-move-bar" role="status"><strong>{translate("admin.profiles.bulk.selected", { count: selectedProfileValues.length })}</strong><Button variant="secondary" onClick={() => openProfileMove(selectedProfileValues)}><Layers3 size={16} /> {translate("admin.profiles.bulk.move")}</Button></div>}
     </div>}
     {error && <Notice>{error}</Notice>}
+    {archiveError && !archive && <Notice>{archiveError}</Notice>}
     {visibleProfiles.length ? <div className="profile-admin-grid">{visibleProfiles.map((profile) =>
       <article key={profile.id} className={`profile-admin-card ${isGlobalAdmin ? "profile-admin-card--selectable" : ""}`}>
         {isGlobalAdmin && <label className="admin-select-control profile-admin-card__select"><input type="checkbox" disabled={profile.id === activeProfile?.id} checked={selectedProfiles.has(profile.id)} aria-label={translate("admin.profiles.bulk.select", { name: profile.name })} onChange={(event) => setSelectedProfiles((current) => { const next = new Set(current); if (event.target.checked) next.add(profile.id); else next.delete(profile.id); return next; })} /><span /></label>}
@@ -932,6 +989,7 @@ function ProfilesAdmin() {
         <div className="profile-admin-card__actions">
           <Button variant="secondary" onClick={() => void openSessions(profile)}><MonitorSmartphone size={16} /> {translate("admin.profiles.actions.devices")}</Button>
           <Button variant="ghost" onClick={() => openEditor(profile)}><Pencil size={16} /> {translate("common.actions.edit")}</Button>
+          {isGlobalAdmin && <Button variant="ghost" disabled={archiveBusy} onClick={() => void exportArchive(profile)}><Upload size={16} /> {translate("admin.profiles.archive.export")}</Button>}
           {isGlobalAdmin && profile.id !== activeProfile?.id && <Button variant="ghost" disabled={categories.length < 2} onClick={() => openProfileMove([profile])}><Layers3 size={16} /> {translate("admin.profiles.move.action")}</Button>}
           {profile.id !== activeProfile?.id && <Button variant="ghost" className="admin-destructive-action" onClick={() => setDeleting(profile)}><Trash2 size={16} /> {translate("common.actions.delete")}</Button>}
         </div>
@@ -1048,6 +1106,8 @@ function ProfilesAdmin() {
         </div>
       </form>
     </Modal>}
+    {archive && <Modal onClose={() => { if (!archiveBusy) { setArchive(null); setArchiveTarget(null); } }} className="editor-modal profile-archive-modal"><div className="editor-modal__heading"><span><Upload size={18} /> {translate("admin.profiles.archive.title")}</span><h2>{archive.identity.name}</h2><p>{translate("admin.profiles.archive.secretWarning")}</p></div>{archiveError && <Notice>{archiveError}</Notice>}<div className="form-stack"><label className="field"><span>{translate("admin.profiles.archive.destination")}</span><div><Select value={archiveTarget === "new" ? "new" : archiveTarget?.id ?? ""} onChange={(value) => setArchiveTarget(value === "new" ? "new" : profiles.find((profile) => profile.id === value) ?? null)} options={[{ value: "", label: translate("admin.profiles.archive.choose"), disabled: true }, { value: "new", label: translate("admin.profiles.archive.create") }, ...profiles.map((profile) => ({ value: profile.id, label: translate("admin.profiles.archive.merge", { name: profile.name }) }))]} /></div></label>{archiveTarget === "new" && <label className="field"><span>{translate("admin.profiles.editor.category")}</span><div><Select value={archiveCategoryId} onChange={setArchiveCategoryId} options={categories.map((category) => ({ value: category.id, label: category.name }))} /></div></label>}<Notice tone="warning">{translate(archiveTarget === "new" ? "admin.profiles.archive.createConfirm" : "admin.profiles.archive.mergeConfirm")}</Notice><div className="modal-actions"><Button variant="secondary" disabled={archiveBusy} onClick={() => { setArchive(null); setArchiveTarget(null); }}>{translate("common.cancel")}</Button><Button loading={archiveBusy} disabled={!archiveTarget || archiveTarget === "new" && !archiveCategoryId} onClick={() => void applyArchive()}>{translate("common.confirm")}</Button></div></div></Modal>}
+    {archiveReport && <Modal onClose={() => setArchiveReport(null)} className="editor-modal profile-archive-modal"><div className="editor-modal__heading"><span><Check size={18} /> {translate("admin.profiles.archive.report")}</span><h2>{translate(archiveReport.mode === "create" ? "admin.profiles.archive.created" : "admin.profiles.archive.merged")}</h2></div><div className="profile-archive-report">{archiveReport.sections.map((section) => <article key={section.section}><strong>{section.section}</strong><span>{translate("admin.profiles.archive.sectionReport", { created: section.created, updated: section.updated, unchanged: section.unchanged })}</span></article>)}</div><div className="modal-actions"><Button onClick={() => setArchiveReport(null)}>{translate("common.close")}</Button></div></Modal>}
     {sessionsProfile && revokingSession && <ConfirmDialog title={translate("admin.profiles.sessions.revoke.title", { deviceName: revokingSession.deviceName })} description={translate("admin.profiles.sessions.revoke.description")} confirmLabel={translate("admin.profiles.sessions.revoke.confirm")} onCancel={() => setRevokingSession(null)} onConfirm={() => void revokeSession(revokingSession)} />}
     {deleting && <ConfirmDialog title={translate("admin.profiles.delete.title", { name: deleting.name })} description={translate("admin.profiles.delete.description")} confirmLabel={translate("admin.profiles.delete.confirm")} onCancel={() => setDeleting(null)} onConfirm={() => void remove(deleting)} />}
   </div>;
@@ -1091,9 +1151,11 @@ function AddonsAdmin() {
   const [error, setError] = useState("");
   const [diagnostics, setDiagnostics] = useState<AddonDiagnosticsResponse | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState("");
-  const [addonPreview, setAddonPreview] = useState<(AddonPreviewResponse & { input: InstallAddonInput }) | null>(null);
-  const [previewError, setPreviewError] = useState("");
-  const [previewing, setPreviewing] = useState(false);
+  const [addonVerification, setAddonVerification] = useState<(AddonVerification & { input: InstallAddonInput }) | null>(null);
+  const [verificationError, setVerificationError] = useState("");
+  const [verifying, setVerifying] = useState(false);
+  const [warningConfirmed, setWarningConfirmed] = useState(false);
+  const [installedVerifications, setInstalledVerifications] = useState<Record<string, AddonVerification>>({});
   const [deleting, setDeleting] = useState<InstalledAddon | null>(null);
   const [editingAddon, setEditingAddon] = useState<ManagedAddon | null>(null);
   const [editTransportUrl, setEditTransportUrl] = useState("");
@@ -1104,7 +1166,7 @@ function AddonsAdmin() {
   const [reordering, setReordering] = useState(false);
   const reorderInFlight = useRef(false);
   const initialLoadStarted = useRef(false);
-  const previewRequestRef = useRef<{ controller: AbortController } | null>(null);
+  const verificationRequestRef = useRef<{ controller: AbortController } | null>(null);
   const installAssignmentInitialized = useRef(Boolean(activeProfile));
 
   async function load() {
@@ -1132,8 +1194,8 @@ function AddonsAdmin() {
     void load();
   }, []);
   useEffect(() => () => {
-    const request = previewRequestRef.current;
-    previewRequestRef.current = null;
+    const request = verificationRequestRef.current;
+    verificationRequestRef.current = null;
     request?.controller.abort();
   }, []);
   useEffect(() => {
@@ -1142,35 +1204,37 @@ function AddonsAdmin() {
     setInstallProfileIds([activeProfile.id]);
   }, [activeProfile]);
 
-  function invalidateAddonPreview() {
-    previewRequestRef.current?.controller.abort();
-    previewRequestRef.current = null;
-    setAddonPreview(null);
-    setPreviewError("");
-    setPreviewing(false);
+  function invalidateAddonVerification() {
+    verificationRequestRef.current?.controller.abort();
+    verificationRequestRef.current = null;
+    setAddonVerification(null);
+    setVerificationError("");
+    setVerifying(false);
+    setWarningConfirmed(false);
   }
 
-  async function previewAddon(event: FormEvent) {
+  async function verifyAddon(event: FormEvent) {
     event.preventDefault();
-    if (!isGlobalAdmin || previewRequestRef.current || working === "install" || !transportUrl || installProfileIds.length + installCategoryIds.length === 0) return;
+    if (!isGlobalAdmin || verificationRequestRef.current || working === "install" || !transportUrl || installProfileIds.length + installCategoryIds.length === 0) return;
     const input: InstallAddonInput = { transportUrl, profileIds: [...installProfileIds], categoryIds: [...installCategoryIds] };
     const request = { controller: new AbortController() };
-    previewRequestRef.current = request;
-    setAddonPreview(null);
-    setPreviewError("");
-    setPreviewing(true);
+    verificationRequestRef.current = request;
+    setAddonVerification(null);
+    setVerificationError("");
+    setVerifying(true);
+    setWarningConfirmed(false);
     setError("");
     try {
-      const response = await api.previewAddon(input, request.controller.signal);
-      if (previewRequestRef.current !== request) return;
-      setAddonPreview({ ...response, input });
+      const response = await api.verifyAddonCandidate(input, request.controller.signal);
+      if (verificationRequestRef.current !== request) return;
+      setAddonVerification({ ...response, input });
     } catch {
-      if (previewRequestRef.current !== request) return;
-      setPreviewError(translate("admin.addons.errors.preview"));
+      if (verificationRequestRef.current !== request) return;
+      setVerificationError(translate("admin.addons.errors.preview"));
     } finally {
-      if (previewRequestRef.current === request) {
-        previewRequestRef.current = null;
-        setPreviewing(false);
+      if (verificationRequestRef.current === request) {
+        verificationRequestRef.current = null;
+        setVerifying(false);
       }
     }
   }
@@ -1250,30 +1314,41 @@ function AddonsAdmin() {
   }
 
   async function install() {
-    if (!isGlobalAdmin || !addonPreview || working === "install") return;
-    const profileSelectionMatches = addonPreview.input.profileIds.length === installProfileIds.length && addonPreview.input.profileIds.every((value, index) => value === installProfileIds[index]);
-    const categorySelectionMatches = addonPreview.input.categoryIds.length === installCategoryIds.length && addonPreview.input.categoryIds.every((value, index) => value === installCategoryIds[index]);
-    if (addonPreview.input.transportUrl !== transportUrl || !profileSelectionMatches || !categorySelectionMatches) {
-      invalidateAddonPreview();
+    if (!isGlobalAdmin || !addonVerification || addonVerification.status !== "passed" || working === "install") return;
+    const profileSelectionMatches = addonVerification.input.profileIds.length === installProfileIds.length && addonVerification.input.profileIds.every((value, index) => value === installProfileIds[index]);
+    const categorySelectionMatches = addonVerification.input.categoryIds.length === installCategoryIds.length && addonVerification.input.categoryIds.every((value, index) => value === installCategoryIds[index]);
+    if (addonVerification.input.transportUrl !== transportUrl || !profileSelectionMatches || !categorySelectionMatches || Date.now() >= Date.parse(addonVerification.expiresAt)) {
+      invalidateAddonVerification();
+      setVerificationError(translate("admin.addons.verification.expired"));
+      return;
+    }
+    const hasWarning = Boolean(addonVerification.manifest?.behaviorHints?.p2p || addonVerification.manifest?.behaviorHints?.adult || addonVerification.manifest?.behaviorHints?.configurationRequired);
+    if (hasWarning && !warningConfirmed) {
+      setWarningConfirmed(true);
       return;
     }
     setWorking("install");
     setError("");
     try {
-      const installed = await api.installAddon(addonPreview.input);
-      invalidateAddonPreview();
+      const installed = await api.installAddon(addonVerification.id);
+      invalidateAddonVerification();
       setTransportUrl("");
       await load();
       notifySuccess(translate("admin.addons.notifications.installedMessage", { name: installed.manifest.name }), translate("admin.addons.notifications.installedTitle"));
-    } catch (cause) { setError(notifyError(cause, translate("admin.addons.errors.install"))); } finally { setWorking(""); }
+    } catch (cause) {
+      if (cause instanceof APIError && (cause.status === 404 || cause.status === 409 || cause.status === 410)) {
+        invalidateAddonVerification();
+        setVerificationError(translate("admin.addons.verification.expired"));
+      } else setError(notifyError(cause, translate("admin.addons.errors.install")));
+    } finally { setWorking(""); }
   }
 
   async function refresh(id: string) {
     setWorking(id);
     try {
-      const updated = await api.refreshAddon(id);
-      await load();
-      notifySuccess(translate("admin.addons.notifications.refreshedMessage", { name: updated.manifest.name }), translate("admin.addons.notifications.refreshedTitle"));
+      const verification = await api.verifyInstalledAddon(id);
+      setInstalledVerifications((current) => ({ ...current, [id]: verification }));
+      notifySuccess(translate("admin.addons.verification.installedComplete"), translate("admin.addons.verification.title"));
     } catch (cause) {
       setError(notifyError(cause, translate("admin.addons.errors.refresh")));
     } finally {
@@ -1350,13 +1425,13 @@ function AddonsAdmin() {
     </section>
     {isGlobalAdmin && <section className="admin-tool-card" aria-labelledby="install-addon-title">
       <header><div><span>{translate("admin.addons.install.eyebrow")}</span><h3 id="install-addon-title">{translate("admin.addons.install.title")}</h3><p>{translate("admin.addons.install.description")}</p></div></header>
-      <form className="install-addon" onSubmit={previewAddon}>
-        <label className="field"><span>{translate("admin.addons.install.manifestUrl")}</span><div><WandSparkles size={19} /><input type="url" value={transportUrl} onChange={(event) => { invalidateAddonPreview(); setTransportUrl(event.target.value); }} placeholder={translate("admin.addons.manifestUrlPlaceholder")} required /></div></label>
-        <Button type="submit" loading={previewing} disabled={working === "install" || installProfileIds.length + installCategoryIds.length === 0}><Search size={18} /> {translate("admin.addons.actions.preview")}</Button>
+      <form className="install-addon" onSubmit={verifyAddon}>
+        <label className="field"><span>{translate("admin.addons.install.manifestUrl")}</span><div><WandSparkles size={19} /><input type="url" value={transportUrl} onChange={(event) => { invalidateAddonVerification(); setTransportUrl(event.target.value); }} placeholder={translate("admin.addons.manifestUrlPlaceholder")} required /></div></label>
+        <Button type="submit" loading={verifying} disabled={working === "install" || installProfileIds.length + installCategoryIds.length === 0}><Search size={18} /> {translate("admin.addons.verification.action")}</Button>
       </form>
-      <AssignmentPicker categories={categories} profiles={profiles} profileIds={installProfileIds} categoryIds={installCategoryIds} onChange={({ profileIds, categoryIds }) => { installAssignmentInitialized.current = true; invalidateAddonPreview(); setInstallProfileIds(profileIds); setInstallCategoryIds(categoryIds); }} />
-      {previewError && <Notice>{previewError}</Notice>}
-      {addonPreview && <AddonInstallPreview preview={addonPreview} installing={working === "install"} onInstall={() => void install()} />}
+      <AssignmentPicker categories={categories} profiles={profiles} profileIds={installProfileIds} categoryIds={installCategoryIds} onChange={({ profileIds, categoryIds }) => { installAssignmentInitialized.current = true; invalidateAddonVerification(); setInstallProfileIds(profileIds); setInstallCategoryIds(categoryIds); }} />
+      {verificationError && <Notice>{verificationError}</Notice>}
+      {addonVerification && <AddonInstallVerification verification={addonVerification} installing={working === "install"} warningConfirmed={warningConfirmed} onInstall={() => void install()} />}
     </section>}
     {error && <Notice>{error}</Notice>}
     {diagnosticsError && <Notice>{diagnosticsError}</Notice>}
@@ -1364,39 +1439,30 @@ function AddonsAdmin() {
     {loading
       ? <div className="addon-list" aria-label={translate("admin.addons.loadingLabel")}>{[0, 1].map((value) => <Skeleton key={value} className="addon-skeleton" />)}</div>
       : addons.length
-        ? <div className="addon-list">{addons.map((addon, addonIndex) => <AddonCard key={addon.id} addon={addon} reach={effectiveProfileIds(addon, profiles).length} diagnostic={diagnosticsByAddonId.get(addon.id)} index={addonIndex} total={addons.length} working={working === addon.id} reordering={reordering} dragging={draggedAddonIndex === addonIndex} onDragStart={(event) => { setDraggedAddonIndex(addonIndex); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(addonIndex)); }} onDragEnter={(event) => { event.preventDefault(); if (draggedAddonIndex !== null) stageAddonMove(draggedAddonIndex, addonIndex); }} onDragOver={(event) => { if (draggedAddonIndex !== null) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); void saveAddonOrder(); }} onDragEnd={() => { if (draggedAddonIndex !== null) void saveAddonOrder(); }} onMove={(toIndex) => void moveAddon(addonIndex, toIndex)} onRefresh={() => void refresh(addon.id)} onEdit={() => void openAddonEditor(addon)} onRemove={() => setDeleting(addon)} />)}</div>
+        ? <div className="addon-list">{addons.map((addon, addonIndex) => <AddonCard key={addon.id} addon={addon} reach={effectiveProfileIds(addon, profiles).length} diagnostic={diagnosticsByAddonId.get(addon.id)} verification={installedVerifications[addon.id]} index={addonIndex} total={addons.length} working={working === addon.id} reordering={reordering} dragging={draggedAddonIndex === addonIndex} onDragStart={(event) => { setDraggedAddonIndex(addonIndex); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(addonIndex)); }} onDragEnter={(event) => { event.preventDefault(); if (draggedAddonIndex !== null) stageAddonMove(draggedAddonIndex, addonIndex); }} onDragOver={(event) => { if (draggedAddonIndex !== null) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); void saveAddonOrder(); }} onDragEnd={() => { if (draggedAddonIndex !== null) void saveAddonOrder(); }} onMove={(toIndex) => void moveAddon(addonIndex, toIndex)} onRefresh={() => void refresh(addon.id)} onEdit={() => void openAddonEditor(addon)} onRemove={() => setDeleting(addon)} />)}</div>
         : <EmptyState icon={<Boxes size={44} />} title={translate(error ? "admin.addons.errors.unavailableTitle" : "admin.addons.empty.title")} description={translate(error ? "admin.addons.errors.retryDescription" : "admin.addons.empty.description")} action={error ? <Button variant="secondary" onClick={() => void load()}><RefreshCw size={17} /> {translate("common.actions.tryAgain")}</Button> : undefined} />}
     {editingAddon && <Modal onClose={() => { if (!addonEditSaving) closeAddonEditor(); }} className="editor-modal addon-edit-modal"><form onSubmit={saveAddon}><div className="editor-modal__heading"><span><Pencil size={18} /> {translate("admin.addons.editor.title")}</span><h2>{editingAddon.manifest.name}</h2><p>{translate("admin.addons.editor.description")}</p></div>{error && <Notice>{error}</Notice>}{account?.session.authorizationScope === "global_admin" && <><label className="field"><span>{translate("admin.addons.editor.transportUrl")}</span><div><WandSparkles size={18} /><input type="url" value={editTransportUrl} disabled={addonEditSaving} onChange={(event) => setEditTransportUrl(event.target.value)} placeholder={translate("admin.addons.manifestUrlPlaceholder")} /></div></label><section className="addon-availability" aria-labelledby="addon-availability-title" aria-describedby="addon-availability-description"><div><strong id="addon-availability-title">{translate("admin.addons.editor.availability")}</strong><p id="addon-availability-description">{translate("admin.addons.editor.availabilityDescription")}</p><span className={`addon-availability__status ${editEnabled ? "is-enabled" : "is-disabled"}`}>{translate(editEnabled ? "common.status.enabled" : "common.status.disabled")}</span></div><Button type="button" variant="secondary" className="addon-availability__toggle" aria-pressed={editEnabled} disabled={addonEditSaving} onClick={() => setEditEnabled((value) => !value)}>{translate(editEnabled ? "admin.addons.actions.disable" : "admin.addons.actions.enable")}</Button></section></>}<AssignmentPicker categories={categories} profiles={profiles} profileIds={editProfileIds} categoryIds={editCategoryIds} disabled={addonEditSaving} onChange={({ profileIds, categoryIds }) => { setEditProfileIds(profileIds); setEditCategoryIds(categoryIds); }} /><div className="modal-actions"><Button type="button" variant="ghost" disabled={addonEditSaving} onClick={closeAddonEditor}>{translate("common.cancel")}</Button><Button type="submit" loading={addonEditSaving} disabled={editProfileIds.length + editCategoryIds.length === 0}><Save size={18} /> {translate("admin.addons.actions.save")}</Button></div></form></Modal>}
     {deleting && <ConfirmDialog title={translate("admin.addons.remove.title", { name: deleting.manifest.name })} description={translate("admin.addons.remove.description")} confirmLabel={translate("admin.addons.remove.confirm")} loading={working === deleting.id} onCancel={() => setDeleting(null)} onConfirm={() => void remove(deleting)} />}
   </div>;
 }
 
-function AddonInstallPreview({ preview, installing, onInstall }: { preview: AddonPreviewResponse; installing: boolean; onInstall: () => void }) {
-  const { manifest, capabilities } = preview;
-  const hasWarnings = Boolean(manifest.behaviorHints?.p2p || manifest.behaviorHints?.adult || manifest.behaviorHints?.configurationRequired);
-  return <section className="addon-preview" aria-labelledby="addon-preview-title">
-    <header>
-      <div><h4 id="addon-preview-title">{translate("admin.addons.preview.title")}</h4><p>{translate("admin.addons.preview.description")}</p></div>
-    </header>
-    <div className="addon-preview__manifest">
+function AddonInstallVerification({ verification, installing, warningConfirmed, onInstall }: { verification: AddonVerification; installing: boolean; warningConfirmed: boolean; onInstall: () => void }) {
+  const manifest = verification.manifest;
+  const capabilities = verification.capabilities;
+  const hasWarnings = Boolean(manifest?.behaviorHints?.p2p || manifest?.behaviorHints?.adult || manifest?.behaviorHints?.configurationRequired);
+  const expired = Date.now() >= Date.parse(verification.expiresAt);
+  return <section className={`addon-preview addon-verification is-${verification.status}`} aria-labelledby="addon-verification-title">
+    <header><div><h4 id="addon-verification-title">{translate("admin.addons.verification.title")}</h4><p>{translate(`admin.addons.verification.summary.${verification.summary}` as TranslationKey)}</p></div></header>
+    <div className="addon-preview__checks" role="list">{verification.checks.map((check) => <span role="listitem" className={`is-${check.status}`} key={check.code}>{translate(`admin.addons.verification.check.${check.code}` as TranslationKey)} · {translate(`admin.addons.verification.checkStatus.${check.status}` as TranslationKey)}</span>)}</div>
+    {manifest && <div className="addon-preview__manifest">
       <div className="addon-card__logo" aria-hidden="true">{manifest.name.slice(0, 2).toUpperCase()}</div>
-      <div className="addon-preview__body">
-        <div className="addon-preview__identity"><strong>{manifest.name}</strong><span>v{manifest.version}</span></div>
-        {manifest.description && <p>{manifest.description}</p>}
-        <div className="addon-card__types" role="list" aria-label={translate("admin.addons.overview.contentTypes")}>{manifest.types.map((type, index) => <i role="listitem" key={`${type}-${index}`}>{type}</i>)}</div>
-        <div className="addon-preview__capabilities" role="list">
-          {(capabilities.search || capabilities.searchPagination) && <span role="listitem">{translate("admin.addons.diagnostics.capability.search")}</span>}
-          {(capabilities.pagination || capabilities.searchPagination) && <span role="listitem">{translate("admin.addons.diagnostics.capability.pagination")}</span>}
-          {capabilities.resources.map((resource, index) => <span role="listitem" key={`${resource}-${index}`}>{resource}</span>)}
-        </div>
-        {hasWarnings && <div className="addon-preview__warnings" role="list">
-          {manifest.behaviorHints?.p2p && <span role="listitem">P2P</span>}
-          {manifest.behaviorHints?.adult && <span role="listitem">{translate("admin.addons.preview.adult")}</span>}
-          {manifest.behaviorHints?.configurationRequired && <span role="listitem">{translate("admin.addons.preview.configurationRequired")}</span>}
-        </div>}
+      <div className="addon-preview__body"><div className="addon-preview__identity"><strong>{manifest.name}</strong><span>v{manifest.version}</span></div>{manifest.description && <p>{manifest.description}</p>}<div className="addon-card__types" role="list" aria-label={translate("admin.addons.overview.contentTypes")}>{manifest.types.map((type, index) => <i role="listitem" key={`${type}-${index}`}>{type}</i>)}</div>{capabilities && <div className="addon-preview__capabilities" role="list">{(capabilities.search || capabilities.searchPagination) && <span role="listitem">{translate("admin.addons.diagnostics.capability.search")}</span>}{(capabilities.pagination || capabilities.searchPagination) && <span role="listitem">{translate("admin.addons.diagnostics.capability.pagination")}</span>}{capabilities.resources.map((resource, index) => <span role="listitem" key={`${resource}-${index}`}>{resource}</span>)}</div>}
+        {hasWarnings && <div className="addon-preview__warnings" role="list">{manifest.behaviorHints?.p2p && <span role="listitem">P2P</span>}{manifest.behaviorHints?.adult && <span role="listitem">{translate("admin.addons.preview.adult")}</span>}{manifest.behaviorHints?.configurationRequired && <span role="listitem">{translate("admin.addons.preview.configurationRequired")}</span>}</div>}
       </div>
-    </div>
-    <Button type="button" loading={installing} onClick={onInstall}><Plus size={18} /> {translate("admin.addons.actions.install")}</Button>
+    </div>}
+    {warningConfirmed && hasWarnings && <Notice tone="warning">{translate("admin.addons.verification.confirmWarning")}</Notice>}
+    {expired && <Notice tone="warning">{translate("admin.addons.verification.expired")}</Notice>}
+    <Button type="button" loading={installing} disabled={verification.status !== "passed" || expired} onClick={onInstall}><Plus size={18} /> {translate(hasWarnings && !warningConfirmed ? "admin.addons.verification.reviewWarnings" : "admin.addons.actions.install")}</Button>
   </section>;
 }
 
@@ -1414,10 +1480,11 @@ const diagnosticErrorKeys: Record<AddonDiagnosticErrorCode, TranslationKey> = {
   request_failed: "admin.addons.diagnostics.error.requestFailed",
 };
 
-function AddonCard({ addon, reach, diagnostic, index, total, working, reordering, dragging, onDragStart, onDragEnter, onDragOver, onDrop, onDragEnd, onMove, onRefresh, onEdit, onRemove }: {
+function AddonCard({ addon, reach, diagnostic, verification, index, total, working, reordering, dragging, onDragStart, onDragEnter, onDragOver, onDrop, onDragEnd, onMove, onRefresh, onEdit, onRemove }: {
   addon: InstalledAddon;
   reach: number;
   diagnostic?: AddonDiagnostic;
+  verification?: AddonVerification;
   index: number;
   total: number;
   working: boolean;
@@ -1442,27 +1509,10 @@ function AddonCard({ addon, reach, diagnostic, index, total, working, reordering
       <p>{manifest.description || translate("admin.addons.card.noDescription")}</p>
       <div className="addon-card__types">{manifest.types.map((type) => <i key={type}>{type}</i>)}</div>
       <span className="assignment-reach">{reach} {translate("admin.common.profilesReached")}</span>
-      {diagnostic && <div className="addon-diagnostics">
-        <div className="addon-diagnostics__summary">
-          <span className={`addon-diagnostics__state addon-diagnostics__state--${diagnostic.state}`}>{translate(diagnosticStateKeys[diagnostic.state])}</span>
-          <div className="addon-diagnostics__capabilities">
-            {(diagnostic.capabilities.search || diagnostic.capabilities.searchPagination) && <span>{translate("admin.addons.diagnostics.capability.search")}</span>}
-            {(diagnostic.capabilities.pagination || diagnostic.capabilities.searchPagination) && <span>{translate("admin.addons.diagnostics.capability.pagination")}</span>}
-            {diagnostic.capabilities.resources.map((resource) => <span key={resource}>{resource}</span>)}
-          </div>
-        </div>
-        {(diagnostic.lastSuccessAt || diagnostic.approximateLatencyMs !== undefined || diagnostic.lastError) && <div className="addon-diagnostics__history">
-          {diagnostic.lastSuccessAt && <span>{translate("admin.addons.diagnostics.lastSuccess", { date: new Date(diagnostic.lastSuccessAt).toLocaleString() })}</span>}
-          {diagnostic.approximateLatencyMs !== undefined && <span>{translate("admin.addons.diagnostics.latency", { milliseconds: diagnostic.approximateLatencyMs })}</span>}
-          {diagnostic.lastError && <span>{translate("admin.addons.diagnostics.lastError", { error: translate(diagnosticErrorKeys[diagnostic.lastError.code]) })}</span>}
-        </div>}
-      </div>}
+      {verification && <div className={`addon-verification-history is-${verification.status}`}><strong>{translate("admin.addons.verification.installedLatest")}</strong><span>{translate(`admin.addons.verification.summary.${verification.summary}` as TranslationKey)}</span><small>{new Date(verification.createdAt).toLocaleString()}</small></div>}
+      {diagnostic && <div className="addon-diagnostics"><div className="addon-diagnostics__summary"><span className={`addon-diagnostics__state addon-diagnostics__state--${diagnostic.state}`}>{translate(diagnosticStateKeys[diagnostic.state])}</span><div className="addon-diagnostics__capabilities">{(diagnostic.capabilities.search || diagnostic.capabilities.searchPagination) && <span>{translate("admin.addons.diagnostics.capability.search")}</span>}{(diagnostic.capabilities.pagination || diagnostic.capabilities.searchPagination) && <span>{translate("admin.addons.diagnostics.capability.pagination")}</span>}{diagnostic.capabilities.resources.map((resource) => <span key={resource}>{resource}</span>)}</div></div>{(diagnostic.lastSuccessAt || diagnostic.approximateLatencyMs !== undefined || diagnostic.lastError) && <div className="addon-diagnostics__history">{diagnostic.lastSuccessAt && <span>{translate("admin.addons.diagnostics.lastSuccess", { date: new Date(diagnostic.lastSuccessAt).toLocaleString() })}</span>}{diagnostic.approximateLatencyMs !== undefined && <span>{translate("admin.addons.diagnostics.latency", { milliseconds: diagnostic.approximateLatencyMs })}</span>}{diagnostic.lastError && <span>{translate("admin.addons.diagnostics.lastError", { error: translate(diagnosticErrorKeys[diagnostic.lastError.code]) })}</span>}</div>}</div>}
     </div>
-    <div className="addon-card__controls">
-      {working ? <span className="admin-working" role="status"><LoaderCircle className="spin" size={18} /> {translate("common.status.working")}</span> : <>
-        <div className="addon-card__order" aria-label={translate("admin.addons.reorder.groupLabel", { name: manifest.name })}><IconButton label={translate("admin.addons.reorder.moveUp", { name: manifest.name })} disabled={reordering || index === 0} onClick={() => onMove(index - 1)}><ChevronUp size={17} /></IconButton><IconButton label={translate("admin.addons.reorder.moveDown", { name: manifest.name })} disabled={reordering || index === total - 1} onClick={() => onMove(index + 1)}><ChevronDown size={17} /></IconButton></div>
-        <div className="addon-card__actions"><Button variant="ghost" disabled={reordering} onClick={onEdit}><Pencil size={16} /> {translate("common.actions.edit")}</Button><Button variant="ghost" disabled={reordering} onClick={onRefresh}><RefreshCw size={16} /> {translate("common.actions.refresh")}</Button><Button variant="ghost" className="admin-destructive-action" disabled={reordering} onClick={onRemove}><Trash2 size={16} /> {translate("common.actions.remove")}</Button></div>
-      </>}
+    <div className="addon-card__controls">{working ? <span className="admin-working" role="status"><LoaderCircle className="spin" size={18} /> {translate("common.status.working")}</span> : <><div className="addon-card__order" aria-label={translate("admin.addons.reorder.groupLabel", { name: manifest.name })}><IconButton label={translate("admin.addons.reorder.moveUp", { name: manifest.name })} disabled={reordering || index === 0} onClick={() => onMove(index - 1)}><ChevronUp size={17} /></IconButton><IconButton label={translate("admin.addons.reorder.moveDown", { name: manifest.name })} disabled={reordering || index === total - 1} onClick={() => onMove(index + 1)}><ChevronDown size={17} /></IconButton></div><div className="addon-card__actions"><Button variant="ghost" disabled={reordering} onClick={onEdit}><Pencil size={16} /> {translate("common.actions.edit")}</Button><Button variant="ghost" disabled={reordering} onClick={onRefresh}><RefreshCw size={16} /> {translate("admin.addons.verification.action")}</Button><Button variant="ghost" className="admin-destructive-action" disabled={reordering} onClick={onRemove}><Trash2 size={16} /> {translate("common.actions.remove")}</Button></div></>}
     </div>
   </article>;
 }
@@ -2115,6 +2165,13 @@ function numericList(value: string): number[] {
 
 const metadataRefreshIntervals: MetadataRefreshScheduleInput["intervalHours"][] = [6, 12, 24, 168];
 
+const semanticExtensionStatusKeys: Record<OperationsOverview["semanticExtension"]["warmupStatus"], TranslationKey> = {
+  disabled: "admin.operations.resources.semantic.status.disabled",
+  pending: "admin.operations.resources.semantic.status.pending",
+  ready: "admin.operations.resources.semantic.status.ready",
+  failed: "admin.operations.resources.semantic.status.failed",
+};
+
 const operationActionCards: Array<{
   action: OperationAction;
   icon: typeof Database;
@@ -2201,13 +2258,14 @@ function OperationsAdmin() {
     void load(true);
     let active = true;
     const interval = window.setInterval(() => {
-      void api.playbackActivity().then((value) => {
-        if (active) {
-          setActivity(value);
-          setStreamAvailable(true);
-        }
-      }).catch(() => {
-        if (active) setStreamAvailable(false);
+      void Promise.all([
+        api.operations().then((value) => ({ value })).catch(() => ({ value: null })),
+        api.playbackActivity().then((value) => ({ value })).catch(() => ({ value: null })),
+      ]).then(([operations, playback]) => {
+        if (!active) return;
+        if (operations.value) setOverview(operations.value);
+        if (playback.value) setActivity(playback.value);
+        setStreamAvailable(playback.value !== null);
       });
     }, 5_000);
     return () => {
@@ -2317,7 +2375,7 @@ function OperationsAdmin() {
   const refresh = overview.metadataRefresh;
   const stream = activity?.summary;
   return <div className="admin-section operations-admin">
-    <div className="admin-section__header"><div><span>{translate("admin.operations.eyebrow")}</span><h2>{translate("admin.operations.title")}</h2><p>{translate("admin.operations.description")}</p></div><div className="admin-section__actions"><Button variant="secondary" onClick={() => void load()} loading={refreshing} disabled={scheduleDirty || maintenanceDirty || Boolean(runningAction) || savingSchedule || savingMaintenance}><RefreshCw size={16} /> {translate("common.actions.refresh")}</Button></div></div>
+    <div className="admin-section__header"><div><span>{translate("admin.operations.eyebrow")}</span><h2>{translate("admin.operations.title")}</h2><p>{translate("admin.operations.description")}</p></div><div className="admin-section__actions"><Button variant="secondary" aria-label={`${translate("common.actions.refresh")} ${translate("admin.operations.title")}`} onClick={() => void load()} loading={refreshing} disabled={scheduleDirty || maintenanceDirty || Boolean(runningAction) || savingSchedule || savingMaintenance}><RefreshCw size={16} /> {translate("common.actions.refresh")}</Button></div></div>
     {error && <Notice>{error}</Notice>}
 
     <section className="operations-panel" aria-labelledby="operations-metadata-title">
@@ -2373,6 +2431,36 @@ function OperationsAdmin() {
             [translate("admin.operations.resources.playback.transcoding"), overview.playback.transcoding],
           ]}
         />
+        <OperationAggregate
+          icon={<Sparkles />}
+          title={translate("admin.operations.resources.semantic.classifier.title")}
+          values={[
+            [translate("admin.operations.resources.semantic.enabled"), translate(overview.semanticExtension.enabled ? "common.status.enabled" : "common.status.disabled")],
+            [translate("admin.operations.resources.semantic.warmup"), translate(semanticExtensionStatusKeys[overview.semanticExtension.warmupStatus])],
+            [translate("admin.operations.resources.semantic.persistence"), translate(semanticExtensionStatusKeys[overview.semanticExtension.persistentStatus])],
+            [translate("admin.operations.resources.semantic.active"), formatOperationsCount(overview.semanticExtension.active)],
+            [translate("admin.operations.resources.semantic.queued"), formatOperationsCount(overview.semanticExtension.queued)],
+            [translate("admin.operations.resources.semantic.executions"), formatOperationsCount(overview.semanticExtension.executions)],
+            [translate("admin.operations.resources.semantic.successes"), formatOperationsCount(overview.semanticExtension.successes)],
+            [translate("admin.operations.resources.semantic.timeouts"), formatOperationsCount(overview.semanticExtension.timeouts)],
+            [translate("admin.operations.resources.semantic.failures"), formatOperationsCount(overview.semanticExtension.failures)],
+            [translate("admin.operations.resources.semantic.cancellations"), formatOperationsCount(overview.semanticExtension.cancellations)],
+            [translate("admin.operations.resources.semantic.busyFallbacks"), formatOperationsCount(overview.semanticExtension.busyFallbacks)],
+          ]}
+        />
+        <OperationAggregate
+          icon={<HardDrive />}
+          title={translate("admin.operations.resources.semantic.cache.title")}
+          values={[
+            [translate("admin.operations.resources.semantic.memoryEntries"), formatOperationsCount(overview.semanticExtension.memoryEntries)],
+            [translate("admin.operations.resources.semantic.persistentEntries"), formatOperationsCount(overview.semanticExtension.persistentEntries)],
+            [translate("admin.operations.resources.semantic.hits"), formatOperationsCount(overview.semanticExtension.hits)],
+            [translate("admin.operations.resources.semantic.misses"), formatOperationsCount(overview.semanticExtension.misses)],
+            [translate("admin.operations.resources.semantic.coalescedWaiters"), formatOperationsCount(overview.semanticExtension.coalescedWaiters)],
+            [translate("admin.operations.resources.semantic.latencyP50"), formatOperationsDuration(overview.semanticExtension.latencyP50Milliseconds)],
+            [translate("admin.operations.resources.semantic.latencyP95"), formatOperationsDuration(overview.semanticExtension.latencyP95Milliseconds)],
+          ]}
+        />
       </div>
     </section>
 
@@ -2395,6 +2483,8 @@ function OperationsAdmin() {
       {refresh.lastResult && <p className="operations-result" role="status">{translate("admin.operations.schedule.lastResult", { candidates: refresh.lastResult.candidates, refreshed: refresh.lastResult.refreshed, failed: refresh.lastResult.failed })}{metadataFailedTitlesMessage(refresh.lastResult)}</p>}
       <footer><div><strong>{translate(schedule.enabled ? "admin.operations.schedule.enabledSummary" : "admin.operations.schedule.disabledSummary")}</strong><small>{translate("admin.operations.schedule.durableDescription")}</small></div><Button variant="secondary" disabled={!scheduleDirty || savingSchedule} onClick={() => setSchedule(savedSchedule)}>{translate("common.actions.discardChanges")}</Button><Button loading={savingSchedule} disabled={!scheduleDirty || !scheduleValid || Boolean(runningAction)} onClick={() => void saveSchedule()}><Save size={17} /> {translate("admin.operations.schedule.save")}</Button></footer>
     </section>
+
+    <AddonIncidentsPanel />
 
     <section className="operations-panel" aria-labelledby="operations-stream-title">
       <header><div><span>{translate("admin.operations.stream.eyebrow")}</span><h3 id="operations-stream-title">{translate("admin.operations.stream.title")}</h3><p>{translate("admin.operations.stream.description")}</p></div><small>{translate(streamAvailable ? "admin.operations.stream.live" : "admin.operations.stream.unavailable")}</small></header>
@@ -2433,6 +2523,53 @@ function OperationsAdmin() {
   </div>;
 }
 
+function AddonIncidentsPanel() {
+  const [incidents, setIncidents] = useState<AddonIncident[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [acknowledging, setAcknowledging] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const response = await api.addonIncidents();
+      setIncidents(response.incidents);
+      setError("");
+    } catch (cause) {
+      setError(notifyError(cause, translate("admin.incidents.loadFailed")));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function acknowledge(incident: AddonIncident) {
+    setAcknowledging(incident.id);
+    try {
+      const updated = await api.acknowledgeAddonIncident(incident.id);
+      setIncidents((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setError("");
+    } catch (cause) {
+      setError(notifyError(cause, translate("admin.incidents.acknowledgeFailed")));
+    } finally {
+      setAcknowledging(null);
+    }
+  }
+
+  return <section className="operations-panel addon-incidents-panel" aria-labelledby="addon-incidents-title">
+    <header><div><span>{translate("admin.incidents.eyebrow")}</span><h3 id="addon-incidents-title">{translate("admin.incidents.title")}</h3><p>{translate("admin.incidents.description")}</p></div><Button variant="secondary" aria-label={`${translate("common.actions.refresh")} ${translate("admin.incidents.title")}`} onClick={() => void load()} disabled={loading || Boolean(acknowledging)}><RefreshCw size={16} /> {translate("common.actions.refresh")}</Button></header>
+    {error && <Notice>{error}</Notice>}
+    {loading ? <div className="addon-incidents__loading" role="status"><LoaderCircle className="spin" size={18} /> {translate("admin.incidents.loading")}</div>
+      : incidents.length === 0 ? <EmptyState icon={<Shield size={40} />} title={translate("admin.incidents.emptyTitle")} description={translate("admin.incidents.emptyDescription")} />
+        : <ul className="addon-incidents__list">{incidents.map((incident) => <li key={incident.id} className={`addon-incident is-${incident.state}`}>
+          <div className="addon-incident__heading"><div><strong>{incident.addonName}</strong><span>{translate(`admin.incidents.code.${incident.code}` as TranslationKey)}</span></div><span className={`addon-incident__state is-${incident.state}`}>{translate(`admin.incidents.state.${incident.state}` as TranslationKey)}</span></div>
+          <p>{translate(`admin.incidents.impact.${incident.impact}` as TranslationKey)}</p>
+          <dl><div><dt>{translate("admin.incidents.occurrences", { count: incident.occurrenceCount })}</dt><dd>{translate("admin.incidents.lastOccurrence", { date: new Date(incident.lastOccurredAt).toLocaleString() })}</dd></div><div><dt>{incident.lastSuccessAt ? translate("admin.incidents.lastSuccess", { date: new Date(incident.lastSuccessAt).toLocaleString() }) : translate("admin.incidents.notRecovered")}</dt><dd>{incident.resolvedAt ? translate("admin.incidents.recovered", { date: new Date(incident.resolvedAt).toLocaleString() }) : translate("admin.incidents.notRecovered")}</dd></div></dl>
+          <footer>{incident.acknowledgedAt ? <span><Check size={15} aria-hidden="true" /> {translate("admin.incidents.acknowledged", { date: new Date(incident.acknowledgedAt).toLocaleString() })}</span> : <Button variant="secondary" loading={acknowledging === incident.id} disabled={Boolean(acknowledging)} onClick={() => void acknowledge(incident)}><Check size={16} /> {translate("admin.incidents.acknowledge")}</Button>}</footer>
+        </li>)}</ul>}
+  </section>;
+}
+
 function OperationMetric({ icon, value, label, tone = "" }: { icon: React.ReactNode; value: string | number; label: string; tone?: "success" | "warning" | "" }) {
   return <article className={`operation-metric ${tone ? `is-${tone}` : ""}`}><span aria-hidden="true">{icon}</span><div><strong>{value}</strong><small>{label}</small></div></article>;
 }
@@ -2454,8 +2591,17 @@ function formatOperationsDate(value: string): string {
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
 }
 
+function boundedOperationsValue(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, value));
+}
+
+function formatOperationsCount(value: number): string {
+  return new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(Math.trunc(boundedOperationsValue(value)));
+}
+
 function formatOperationsDuration(milliseconds: number): string {
-  const duration = Math.max(0, milliseconds);
+  const duration = boundedOperationsValue(milliseconds);
   const [value, unit] = duration >= 86_400_000
     ? [duration / 86_400_000, "day"] as const
     : duration >= 3_600_000
@@ -2686,13 +2832,7 @@ function ActivityJobProgress({ job }: { job?: PlaybackActivity["jobs"][number] }
 }
 
 function ActivitySessionDecision({ decision }: { decision: NonNullable<PlaybackActivitySession["decision"]> }) {
-  const reasonKeys = {
-    direct_supported: "admin.activity.reasons.directSupported",
-    remux_required: "admin.activity.reasons.remuxRequired",
-    audio_transcode_required: "admin.activity.reasons.audioTranscodeRequired",
-    video_transcode_required: "admin.activity.reasons.videoTranscodeRequired",
-    subtitle_burn_required: "admin.activity.reasons.subtitleBurnRequired",
-  } as const;
+  const reasons = playbackDecisionReasons(decision);
   const actionKeys = {
     copy: "admin.activity.actions.copy",
     transcode: "admin.activity.actions.transcode",
@@ -2706,9 +2846,10 @@ function ActivitySessionDecision({ decision }: { decision: NonNullable<PlaybackA
   const targetAudio = decision.target?.audioCodec?.toUpperCase() ?? (decision.audioAction === "copy" ? sourceAudio : undefined);
   const sourceHeight = decision.source?.height;
   const targetHeight = decision.target?.height ?? (decision.videoAction === "copy" ? sourceHeight : undefined);
-  const reasonKey = reasonKeys[decision.reason];
+  const outcome = playbackDecisionOutcome(decision);
   return <dl className="activity-session__decision">
-    {reasonKey && <div className="activity-session__decision-reason"><dt className="visually-hidden">{translate("player.panel.diagnostics")}</dt><dd>{translate(reasonKey)}</dd></div>}
+    <div className="activity-session__decision-reason"><dt className="visually-hidden">{translate("player.diagnostics.outcome")}</dt><dd>{outcome}</dd></div>
+    {reasons.map((reason) => <div className="activity-session__decision-reason" key={reason}><dt className="visually-hidden">{translate("player.diagnostics.reason")}</dt><dd>{reason}</dd></div>)}
     <div><dt>{sourceVideo && targetVideo ? translate("admin.activity.details.video", { source: sourceVideo, target: targetVideo }) : translate("player.diagnostics.video")}</dt><dd>{translate(actionKeys[decision.videoAction])}</dd></div>
     <div><dt>{sourceAudio && targetAudio ? translate("admin.activity.details.audio", { source: sourceAudio, target: targetAudio }) : translate("player.diagnostics.audio")}</dt><dd>{translate(actionKeys[decision.audioAction])}</dd></div>
     {sourceHeight && targetHeight && <div><dt>{translate("admin.activity.details.resolution", { source: `${sourceHeight}p`, target: `${targetHeight}p` })}</dt></div>}
@@ -3308,7 +3449,7 @@ function SettingsAdmin() {
             ? <ConfigurationAudit />
             : serverSelected
               ? <SettingsCard activeSection={visibleSection} serverScope runtimeApplication={runtimeApplication} title={translate("settings.server.title")} description={translate("settings.server.description")} icon={<Server />} values={instance} defaults={rivuneSettingDefaults} onChange={setInstance} onSave={() => void requestSave()} onReset={() => setInstance(savedInstance)} saving={saving || checkingTranscodingDisable} dirty={settingsDirty} emptyLabel={translate("settings.defaults.rivune")} />
-              : <SettingsCard activeSection={visibleSection} canConfigureTranscoding={canManageServer} title={translate("settings.profile.title", { profileName })} description={translate("settings.profile.description")} icon={<CircleUserRound />} values={profile} defaults={{ ...rivuneSettingDefaults, ...inherited }} onChange={setProfile} onSave={() => void requestSave()} onReset={() => setProfile(savedProfile)} saving={saving} dirty={settingsDirty} emptyLabel={translate("settings.defaults.server")} />}
+              : <SettingsCard activeSection={visibleSection} canConfigureTranscoding={canManageServer} showAccessibility={settingsTarget === activeProfile?.id} title={translate("settings.profile.title", { profileName })} description={translate("settings.profile.description")} icon={<CircleUserRound />} values={profile} defaults={{ ...rivuneSettingDefaults, ...inherited }} onChange={setProfile} onSave={() => void requestSave()} onReset={() => setProfile(savedProfile)} saving={saving} dirty={settingsDirty} emptyLabel={translate("settings.defaults.server")} />}
     </main>
     {transcodingDisableCount !== null && <ConfirmDialog
       title={translate("settings.transcoding.disableConfirmTitle")}
@@ -3921,7 +4062,19 @@ function RuntimeSettingsPanel({ values, application, onChange }: { values: Setti
   </SettingsGroup>;
 }
 
-function SettingsCard({ activeSection, serverScope = false, canConfigureTranscoding = false, runtimeApplication, values, defaults = {}, onChange, onSave, onReset, saving, dirty, emptyLabel = translate("settings.defaults.server") }: { activeSection: SettingsSection; serverScope?: boolean; canConfigureTranscoding?: boolean; runtimeApplication?: RuntimeApplication; title: string; description: string; icon: React.ReactNode; values: SettingsValues; defaults?: SettingsValues; onChange: (values: SettingsValues) => void; onSave: () => void; onReset: () => void; saving: boolean; dirty: boolean; emptyLabel?: string }) {
+const qualityNetworks: NetworkClass[] = ["local", "remote_wifi", "mobile"];
+
+function LocalQualitySettings() {
+  const [preferences, setPreferences] = useState<QualityPreferences>(loadQualityPreferences);
+  const currentNetwork = classifyNetwork();
+  const options = (["automatic", "economy", "balanced", "maximum"] as QualityPreset[]).map((preset) => ({ value: preset, label: translate(`settings.quality.preset.${preset}` as TranslationKey) }));
+  return <section className="setting-control setting-control--quality" aria-labelledby="local-quality-title">
+    <div><strong id="local-quality-title">{translate("settings.quality.title")}</strong><small>{translate("settings.quality.description")}</small></div>
+    <div className="form-grid form-grid--three">{qualityNetworks.map((network) => <label className="field" key={network}><span>{translate(`settings.quality.network.${network}` as TranslationKey)}{network === currentNetwork ? ` · ${translate("settings.quality.current")}` : ""}</span><div><Select value={preferences[network]} onChange={(value) => setPreferences(saveQualityPreference(network, value as QualityPreset))} options={options} /></div></label>)}</div>
+  </section>;
+}
+
+function SettingsCard({ activeSection, serverScope = false, canConfigureTranscoding = false, showAccessibility = false, runtimeApplication, values, defaults = {}, onChange, onSave, onReset, saving, dirty, emptyLabel = translate("settings.defaults.server") }: { activeSection: SettingsSection; serverScope?: boolean; canConfigureTranscoding?: boolean; showAccessibility?: boolean; runtimeApplication?: RuntimeApplication; title: string; description: string; icon: React.ReactNode; values: SettingsValues; defaults?: SettingsValues; onChange: (values: SettingsValues) => void; onSave: () => void; onReset: () => void; saving: boolean; dirty: boolean; emptyLabel?: string }) {
   const effective = {
     interfaceLanguage: defaults.interfaceLanguage ?? rivuneSettingDefaults.interfaceLanguage,
     theme: defaults.theme ?? rivuneSettingDefaults.theme,
@@ -3970,6 +4123,7 @@ function SettingsCard({ activeSection, serverScope = false, canConfigureTranscod
         <InheritedToggle label={translate("settings.fields.animations")} description={translate("settings.fields.animationsDescription")} value={values.animationsEnabled} defaultValue={effective.animationsEnabled} onChange={(value) => change("animationsEnabled", value)} emptyLabel={emptyLabel} />
         <InheritedToggle label={translate("settings.fields.hideUnreleased")} description={translate("settings.fields.hideUnreleasedDescription")} value={values.hideUnreleased} defaultValue={effective.hideUnreleased} onChange={(value) => change("hideUnreleased", value)} emptyLabel={emptyLabel} />
         <BoundedInheritedNumberSetting serverScope={serverScope} value={values.maximumDirectTitles} serverValue={effective.maximumDirectTitles} saving={saving} label={translate("settings.fields.maximumDirectTitles")} description={translate("settings.fields.maximumDirectTitlesDescription")} modeLabel={translate("settings.fields.maximumDirectTitlesMode")} name="maximumDirectTitles" defaultValue={20} minimum={1} absoluteMaximum={100} onChange={(value) => change("maximumDirectTitles", value)} />
+        {showAccessibility && <AccessibilitySettings />}
       </SettingsGroup>}
 
       {activeSection === "playback" && <SettingsGroup sectionId="playback" icon={<Film />} title={translate("settings.groups.playback.title")} description={translate("settings.groups.playback.description")}>
@@ -3982,6 +4136,7 @@ function SettingsCard({ activeSection, serverScope = false, canConfigureTranscod
         </div>}
         <SelectSetting label={translate("settings.fields.maximumResolution")} value={values.maximumResolution} defaultValue={effective.maximumResolution} options={settingOptions.resolution} emptyLabel={emptyLabel} onChange={(value) => change("maximumResolution", value)} />
         <MaximumCastMembersSetting serverScope={serverScope} value={values.maximumCastMembers} serverValue={effective.maximumCastMembers} saving={saving} onChange={(value) => change("maximumCastMembers", value)} />
+        {!serverScope && <LocalQualitySettings />}
         <InheritedToggle label={translate("settings.fields.preferDirectPlay")} description={translate("settings.fields.preferDirectPlayDescription")} value={values.preferDirectPlay} defaultValue={effective.preferDirectPlay} onChange={(value) => change("preferDirectPlay", value)} emptyLabel={emptyLabel} />
         <InheritedToggle label={translate("settings.fields.autoplayNextEpisode")} description={translate("settings.fields.autoplayNextEpisodeDescription")} value={values.autoplayNextEpisode} defaultValue={effective.autoplayNextEpisode} onChange={(value) => change("autoplayNextEpisode", value)} emptyLabel={emptyLabel} />
         <InheritedToggle label={translate("settings.skipIntro")} description={translate("settings.skipIntroDescription")} value={values.skipIntroEnabled} defaultValue={effective.skipIntroEnabled} onChange={(value) => change("skipIntroEnabled", value)} emptyLabel={emptyLabel} />
