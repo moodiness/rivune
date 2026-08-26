@@ -1,4 +1,15 @@
-export type InterfaceLanguage = "en" | "fr" | "fr-CA" | "es" | "es-MX" | "es-AR" | "es-CL" | "es-CO" | "es-PE" | "it" | "de" | "ru" | "pt-PT" | "pt-BR" | "ar" | "ja" | "ko" | "zh-CN" | "zh-TW" | "pl" | "hy" | "nl" | "sv" | "da" | "fi" | "nb" | "tr" | "uk" | "cs" | "sk" | "ro" | "el" | "he" | "hi" | "id" | "vi" | "th" | "hu" | "bg" | "hr" | "sr" | "ms" | "ca" | "fa" | "fil";
+export type InterfaceLanguage = "en" | "fr" | "de" | "es" | "it" | "pt-BR";
+
+export type AccessibilityPreferences = {
+  reducedMotion: "system" | "reduce" | "no-preference";
+  highContrast: "system" | "more" | "standard";
+  textScale: 100 | 115 | 130;
+  captions: "system" | "on" | "off";
+  audioDescription: boolean;
+  focusIndicators: "standard" | "enhanced";
+};
+export type AccessibilityDocument = AccessibilityPreferences & { revision: number };
+export type AccessibilityUpdate = AccessibilityPreferences & { revision: number };
 
 export type Discovery = {
   name: string;
@@ -26,12 +37,10 @@ type ScopedAuthorization =
   | { authorizationScope: "global_admin"; category: null }
   | { authorizationScope: "category"; category: CategoryRef };
 
-export type TokenPair = {
+export type WebSessionTokens = {
   tokenType: "Bearer";
   accessToken: string;
   accessTokenExpiresAt: string;
-  refreshToken: string;
-  refreshTokenExpiresAt: string;
   sessionId: string;
   deviceId: string;
 } & ScopedAuthorization;
@@ -299,6 +308,74 @@ export type MediaItem = {
   currentProgram?: CurrentProgram;
   raw?: Record<string, unknown>;
 };
+export type SemanticSearchMediaType = "movie" | "series" | "anime" | "tv" | "other";
+export type SemanticSearchRequest = {
+  query: string;
+  mediaType?: SemanticSearchMediaType;
+  language?: string;
+  region?: string;
+  page: number;
+  limit: number;
+  excludedIntentIds: string[];
+};
+export type SemanticSearchIntent = {
+  id: string;
+  kind: "media_type" | "genre" | "theme" | "country" | "release_year" | "release_decade" | "release_recency" | "rating_min" | "rating_quality" | "runtime_min" | "runtime_max" | "exclude_genre";
+  value: string;
+  label: string;
+};
+export type SemanticSearchPage = {
+  intents: SemanticSearchIntent[];
+  titleQuery: string;
+  mediaTypes: SemanticSearchMediaType[];
+  items: MediaItem[];
+  page: number;
+  hasMore: boolean;
+  partial: boolean;
+};
+export type SavedSearchSort = "relevance" | "title" | "year" | "rating" | "added";
+export type SavedSearch = {
+  id: string;
+  name: string;
+  query: string;
+  mediaType?: "movie" | "series" | "season" | "episode" | "video" | "tv";
+  sort: SavedSearchSort;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+};
+export type SavedSearchInput = Omit<SavedSearch, "id" | "revision" | "createdAt" | "updatedAt"> & { expectedRevision?: number };
+export type SmartRuleField = "media_type" | "year" | "genre" | "status" | "rating" | "source";
+export type SmartRule =
+  | { type: "all" | "any"; rules: SmartRule[] }
+  | { type: SmartRuleField; operator: "equals" | "not_equals" | "one_of" | "gte" | "lte"; value?: string; values?: string[]; number?: number };
+export type SmartCollection = {
+  id: string;
+  name: string;
+  rules: SmartRule;
+  sort: "title" | "year" | "rating" | "added";
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+};
+export type SmartCollectionInput = Omit<SmartCollection, "id" | "revision" | "createdAt" | "updatedAt"> & { expectedRevision?: number };
+export type SmartCollectionItem = {
+  id: string;
+  mediaType: string;
+  title: string;
+  posterUrl?: string;
+  backgroundUrl?: string;
+  releaseInfo?: string;
+  released?: string;
+  communityRating?: number;
+  genres: string[];
+  resourceId?: string;
+  resourceProvider?: string;
+  sourceAddonId?: string;
+  sourceCatalogId?: string;
+  sourceName?: string;
+};
+export type SmartCollectionPage = { items: SmartCollectionItem[]; page: number; pageSize: number; total: number; totalPages: number };
 export type TrailerMetadata = {
   youtubeId: string;
   name: string;
@@ -397,6 +474,24 @@ export type ResolvedFolder = {
   errors: { sourceId: string; kind: string; code: string; message: string }[];
 };
 
+export type ProfileArchiveDocument = {
+  version: 2;
+  exportedAt: string;
+  identity: { name: string; description?: string | null; isChild: boolean; avatar: { kind: "preset"; presetId: string } | { kind: "image"; contentType: "image/png"; sha256: string; data: string } };
+  settings: Record<string, unknown>;
+  addons: unknown[];
+  collections: unknown[];
+  titles: unknown[];
+  library: unknown[];
+  progress: unknown[];
+  favorites: unknown[];
+  userData: unknown[];
+  trackingPreferences: unknown[];
+  continueDismissals: unknown[];
+};
+export type ProfileArchiveSectionReport = { section: string; created: number; updated: number; unchanged: number };
+export type ProfileArchiveImportReport = { mode: "merge" | "create"; profileId: string; sections: ProfileArchiveSectionReport[]; trackingAccountsUpdated: number };
+
 export type AddonManifest = {
   id: string;
   name: string;
@@ -407,6 +502,9 @@ export type AddonManifest = {
   types: string[];
   behaviorHints?: { adult?: boolean; p2p?: boolean; configurable?: boolean; configurationRequired?: boolean };
 };
+export type AddonVerificationStatus = "passed" | "failed";
+export type AddonVerificationSummary = "ready" | "manifest_unavailable" | "manifest_invalid" | "catalog_unavailable";
+export type AddonVerification = { id: string; status: AddonVerificationStatus; summary: AddonVerificationSummary; checks: Array<{ code: "manifest_fetch" | "manifest_valid" | "catalog_probe"; status: "passed" | "failed" | "skipped" }>; manifest?: AddonManifest; capabilities?: AddonDiagnosticCapabilities; profileIds: string[]; categoryIds: string[]; createdAt: string; expiresAt: string };
 export type InstalledAddon = {
   id: string;
   manifest: AddonManifest;
@@ -438,12 +536,6 @@ export type AddonDiagnosticCapabilities = {
   search: boolean;
   pagination: boolean;
   searchPagination: boolean;
-};
-export type AddonPreviewResponse = {
-  manifest: AddonManifest;
-  capabilities: AddonDiagnosticCapabilities;
-  profileIds: string[];
-  categoryIds: string[];
 };
 export type AddonDiagnostic = {
   addonId: string;
@@ -489,8 +581,11 @@ export type CustomSeriesResolveResult = {
 export type PlaybackMediaProfile = { container: string; videoCodec: string; audioCodec?: string; maximumVideoBitDepth?: number };
 export type PlaybackProcessingMode = "remux" | "transcode_audio" | "transcode";
 export type PlaybackSubtitleMode = "external" | "burn";
+export type PlaybackDecisionReason = "container_not_supported" | "video_codec_not_supported" | "audio_codec_not_supported" | "resolution_limit" | "bitrate_limit" | "hdr_not_supported" | "subtitle_burn_required";
+
 export type PlaybackDecision = {
   reason: "direct_supported" | "remux_required" | "audio_transcode_required" | "video_transcode_required" | "subtitle_burn_required";
+  reasons: PlaybackDecisionReason[];
   videoAction: "copy" | "transcode";
   audioAction: "copy" | "transcode";
   subtitleAction: "none" | "external" | "copy" | "burn";
@@ -510,9 +605,13 @@ export type PlaybackDecision = {
     audioCodec?: string;
     height?: number;
     videoBitDepth?: number;
+
     videoBitrateKbps?: number;
   };
 };
+export type NetworkClass = "local" | "remote_wifi" | "mobile";
+export type QualityPreset = "automatic" | "economy" | "balanced" | "maximum";
+export type QualityPreferences = Record<NetworkClass, QualityPreset>;
 export type PlaybackCapabilities = {
   streamingProtocols: string[];
   containers: string[];
@@ -544,6 +643,22 @@ export type PlaybackSourceOption = {
 };
 export type PlaybackProviderFailure = { addonId: string; manifestId: string; code: string; message: string };
 export type PlaybackSourceList = { sources: PlaybackSourceOption[]; providerErrors: PlaybackProviderFailure[] };
+export type PlaybackFailoverError = "source_failed" | "source_timeout" | "ended_early" | "decode_failed" | "access_denied" | "user_cancelled";
+export type PlaybackFailoverCandidateHealth = { position: number; status: "current" | "available" | "cooling_down"; cooldownUntil?: string };
+export type PlaybackFailoverState = {
+  id: string;
+  currentSourceRef: string;
+  currentPosition: number;
+  positionSeconds: number;
+  attemptCount: number;
+  maximumAttempts: number;
+  revision: number;
+  status: "active" | "exhausted" | "cancelled";
+  lastError?: PlaybackFailoverError;
+  explanation?: string;
+  candidateHealth: PlaybackFailoverCandidateHealth[];
+  expiresAt: string;
+};
 
 export type PlaybackMediaTrack = {
   index: number;
@@ -575,6 +690,15 @@ export type PlaybackPreparation = {
   subtitleCount: number;
   expiresAt: string;
 };
+
+export type PlaybackCoordinationItem = { titleId: string; mediaType: string; resourceId: string; sourceAddonId?: string; title: string; posterUrl?: string };
+export type PlaybackDeviceState = { status: "idle" | "playing" | "paused" | "ended"; item?: PlaybackCoordinationItem; positionMilliseconds: number; durationMilliseconds: number; updatedAt: string };
+export type PlaybackDevice = { sessionId: string; deviceId: string; name: string; platform: string; capabilities: Array<"playback" | "remote-control" | "load">; state: PlaybackDeviceState; current: boolean; revision: number; lastSeenAt: string };
+export type PlaybackLoadMode = "handoff" | "play-copy";
+export type PlaybackCommandStatus = "pending" | "applied" | "failed" | "expired";
+export type PlaybackCommandResultCode = "applied" | "unsupported" | "invalid_state" | "stale_target" | "expired" | "execution_failed";
+export type PlaybackCommand = { operationId: string; command: "play" | "pause" | "seek" | "load" | "stop"; mode?: PlaybackLoadMode; targetRevision?: number; item?: PlaybackCoordinationItem; positionMilliseconds?: number; senderDeviceName: string; status: PlaybackCommandStatus; resultCode?: PlaybackCommandResultCode; createdAt: string; expiresAt: string };
+export type PlaybackCommandInput = Pick<PlaybackCommand, "operationId" | "command"> & Partial<Pick<PlaybackCommand, "mode" | "targetRevision" | "item" | "positionMilliseconds">>;
 
 export type PlaybackSource = {
   id: string;
@@ -683,6 +807,18 @@ export type PlaybackActivity = {
   jobsTruncated: boolean;
 };
 export type PlaybackPurgeResult = { sessionsRemoved: number; jobsStopped: number; storageBytes: number };
+export type AddonIncidentCode = "timeout" | "unavailable" | "invalid_response" | "unhealthy";
+export type AddonIncidentState = "open" | "recovering" | "resolved";
+export type AddonIncident = {
+  id: string; profileId: string; addonId: string; addonName: string;
+  code: AddonIncidentCode; state: AddonIncidentState;
+  impact: "availability" | "response_integrity"; occurrenceCount: number;
+  firstOccurredAt: string; lastOccurredAt: string; lastSuccessAt: string | null;
+  recoveryStartedAt: string | null; resolvedAt: string | null;
+  acknowledgedAt: string | null; acknowledgedByUserId: string | null; updatedAt: string;
+};
+export type AddonIncidentEvent = { id: number; type: "opened" | "occurred" | "recovering" | "resolved" | "acknowledged"; code: AddonIncidentCode; occurredAt: string };
+export type AddonIncidentDetail = { incident: AddonIncident; events: AddonIncidentEvent[] };
 export type OperationAction = "fetch-missing-metadata" | "run-housekeeping" | "clear-metadata-cache" | "clear-stream-cache";
 export type MetadataRefreshResult = { candidates: number; refreshed: number; failed: number; failedTitles?: string[] };
 export type MetadataRefreshScheduleInput = {
@@ -733,6 +869,27 @@ export type PlaybackOperationsStatus = {
   active: number;
   transcoding: number;
 };
+export type SemanticExtensionStatus = "disabled" | "pending" | "ready" | "failed";
+export type SemanticExtensionOperationsStatus = {
+  enabled: boolean;
+  warmupStatus: SemanticExtensionStatus;
+  persistentStatus: SemanticExtensionStatus;
+  memoryEntries: number;
+  persistentEntries: number;
+  hits: number;
+  misses: number;
+  coalescedWaiters: number;
+  executions: number;
+  successes: number;
+  timeouts: number;
+  failures: number;
+  cancellations: number;
+  busyFallbacks: number;
+  active: number;
+  queued: number;
+  latencyP50Milliseconds: number;
+  latencyP95Milliseconds: number;
+};
 export type OperationsOverview = {
   metadataCache: MetadataCacheStatus;
   metadataRefresh: MetadataRefreshSchedule;
@@ -740,6 +897,7 @@ export type OperationsOverview = {
   trackingOutbox: TrackingOutboxStatus;
   addons: AddonOperationsStatus;
   playback: PlaybackOperationsStatus;
+  semanticExtension: SemanticExtensionOperationsStatus;
   housekeepingIntervalMinutes: number;
 };
 export type OperationRun = {
@@ -780,6 +938,32 @@ export type LibraryItem = {
   addedAt: string;
   updatedAt: string;
 };
+export type MediaNotificationKind = "calendar-event-upcoming" | "season-available" | "episode-available" | "movie-release";
+export type MediaNotification = {
+  id: string;
+  kind: MediaNotificationKind;
+  titleId: string;
+  subjectTitleId?: string;
+  title: string;
+  seriesTitle?: string;
+  releaseDate?: string;
+  seasonNumber?: number;
+  episodeNumber?: number;
+  availableAt: string;
+  readAt?: string;
+  createdAt: string;
+};
+export type MediaNotificationPage = { notifications: MediaNotification[]; nextCursor?: string };
+export type MediaNotificationSubscription = {
+  titleId: string;
+  timezone: string;
+  horizonDays: number;
+  leadDays: number;
+  createdAt: string;
+  updatedAt: string;
+};
+export type MediaNotificationFollowInput = { timezone: string; horizonDays: number; leadDays: number };
+export type MediaNotificationSubscriptions = { subscriptions: MediaNotificationSubscription[] };
 export type LibraryPage = { items: LibraryItem[]; page: number; totalPages: number; totalResults: number };
 export type TVLibraryIdentity = { sourceAddonId: string; resourceId: string };
 export type TVLibraryMembership = TVLibraryIdentity & { titleId: string };
@@ -980,3 +1164,32 @@ export type ConfigurationAuditPage = {
   nextCursor: number | null;
 };
 export type AvatarPreset = { id: string; name: string; url: string };
+
+export type ReadingQueueMediaType = "movie" | "series" | "episode" | "tv";
+export type ReadingQueueItem = {
+  id: string;
+  mediaType: ReadingQueueMediaType;
+  resourceId: string;
+  sourceAddonId?: string;
+  titleId?: string;
+  title: string;
+  posterUrl?: string;
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+};
+export type ReadingQueue = { revision: number; items: ReadingQueueItem[] };
+export type ReadingQueueMutation = { revision: number; affectedItemId?: string; duplicate?: boolean };
+export type ReadingQueueAddInput = {
+  operationId: string;
+  expectedRevision: number;
+  mediaType: ReadingQueueMediaType;
+  resourceId: string;
+  sourceAddonId?: string;
+  titleId?: string;
+  title: string;
+  posterUrl?: string;
+};
+export type ReadingQueueMutationInput = { operationId: string; expectedRevision: number };
+export type ReadingQueueReorderInput = ReadingQueueMutationInput & { itemIds: string[] };
+export type ReadingQueueUpdateInput = ReadingQueueMutationInput & { title: string; posterUrl?: string };

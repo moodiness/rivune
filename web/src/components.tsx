@@ -13,10 +13,11 @@ export function RivuneMark({ compact = false }: { compact?: boolean }) {
   );
 }
 
-export function Button({ className = "", variant = "primary", loading = false, children, disabled, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" | "ghost" | "danger"; loading?: boolean }) {
+export function Button({ className = "", variant = "primary", loading = false, children, disabled, "aria-busy": ariaBusy, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" | "ghost" | "danger"; loading?: boolean }) {
   return (
-    <button className={`button button--${variant} ${className}`} disabled={disabled || loading} {...props}>
-      {loading ? <LoaderCircle size={18} className="spin" /> : children}
+    <button className={`button button--${variant} ${className}`} disabled={disabled || loading} aria-busy={loading ? true : ariaBusy} {...props}>
+      {loading && <LoaderCircle size={18} className="spin" aria-hidden="true" />}
+      {children}
     </button>
   );
 }
@@ -188,7 +189,7 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
     triggerRef.current?.focus({ preventScroll: true });
   }
 
-  const portalRoot = triggerRef.current?.closest("dialog") ?? (typeof document === "undefined" ? null : document.body);
+  const portalRoot = triggerRef.current?.closest<HTMLElement>("dialog, [role='dialog']") ?? (typeof document === "undefined" ? null : document.body);
   return <>
     <button
       ref={triggerRef}
@@ -281,17 +282,30 @@ const focusableSelector = [
   "button:not(:disabled)",
   "a[href]",
   "input:not(:disabled)",
+  "select:not(:disabled)",
   "textarea:not(:disabled)",
+  "iframe",
+  "[contenteditable='true']",
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
 
-function focusableElements(container: HTMLElement): HTMLElement[] {
+export function focusableElements(container: HTMLElement): HTMLElement[] {
   return Array.from(container.querySelectorAll<HTMLElement>(focusableSelector))
-    .filter((element) => element.getClientRects().length > 0 && element.getAttribute("aria-disabled") !== "true");
+    .filter((element) => element.getClientRects().length > 0 && element.getAttribute("aria-disabled") !== "true" && !element.closest("[inert], [aria-hidden='true']"));
 }
 
 export function allowsMotion(): boolean {
-  if (typeof document !== "undefined" && document.documentElement.dataset.animationsEnabled === "false") return false;
+  if (typeof document !== "undefined") {
+    if (document.documentElement.dataset.animationsEnabled === "false") return false;
+    const reducedMotion = document.documentElement.dataset.reducedMotion;
+    if (reducedMotion === "reduce") return false;
+    if (reducedMotion === "no-preference") return true;
+  }
+  return typeof window === "undefined" || !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function allowsDragMomentum(): boolean {
+  if (typeof document !== "undefined" && document.documentElement.dataset.reducedMotion === "reduce") return false;
   return typeof window === "undefined" || !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
@@ -361,13 +375,13 @@ export function HorizontalDragRow({
 
   function continueMomentum(element: HTMLDivElement, initialVelocity: number) {
     stopMomentum();
-    if (typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    if (!allowsDragMomentum()) return;
     let velocity = Math.max(-2.5, Math.min(2.5, initialVelocity));
     let previousTime = performance.now();
     // Preserve subpixel travel across frames because some browsers expose integer scrollLeft values.
     let intendedScrollLeft = element.scrollLeft;
     const advance = (time: number) => {
-      if (typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      if (!allowsDragMomentum()) {
         momentumFrame.current = 0;
         return;
       }

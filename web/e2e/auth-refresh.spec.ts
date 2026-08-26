@@ -1,197 +1,103 @@
 import type { Route } from "@playwright/test";
 import { expect, test } from "./fixtures/rivune";
 
-const expiredAccessToken = "expired-shared-access";
-const initialRefreshToken = "shared-refresh-before-rotation";
-const rotatedAccessToken = "rotated-shared-access";
-const rotatedRefreshToken = "shared-refresh-after-rotation";
+const rotatedAccessToken = "rotated-tab-access";
 
-test("concurrent tabs share one refresh rotation without clearing the new session", async ({ page, rivune }) => {
+async function fulfillWebRefresh(route: Route) {
+  expect(route.request().method()).toBe("POST");
+  expect(route.request().headers()["x-rivune-csrf"]).toBe("1");
+  expect(route.request().postData()).toBeNull();
+  await route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    headers: { "set-cookie": "rivune_web_refresh=opaque; HttpOnly; SameSite=Strict; Path=/api/v1/auth/web/refresh" },
+    body: JSON.stringify({
+      tokenType: "Bearer",
+      accessToken: rotatedAccessToken,
+      accessTokenExpiresAt: "2099-01-01T00:05:00Z",
+      sessionId: "session-1",
+      deviceId: "fixture-device",
+      authorizationScope: "global_admin",
+      category: null,
+    }),
+  });
+}
+
+test("two tabs refresh through the HttpOnly cookie without shared secrets", async ({ page, rivune }) => {
   await page.goto("/");
   const secondPage = await page.context().newPage();
   await rivune.install(secondPage);
   await secondPage.goto("/");
   await Promise.all([page.waitForLoadState("networkidle"), secondPage.waitForLoadState("networkidle")]);
 
-  for (const candidate of [page, secondPage]) {
-    await candidate.evaluate(({ accessToken, refreshToken }) => {
-      sessionStorage.setItem("rivune.access", accessToken);
-      localStorage.setItem("rivune.access", accessToken);
-      localStorage.setItem("rivune.refresh", refreshToken);
-      localStorage.setItem("rivune.session", "session-1");
-    }, { accessToken: expiredAccessToken, refreshToken: initialRefreshToken });
-  }
-
-  let refreshCalls = 0;
-  const handleRefresh = async (route: Route) => {
-    refreshCalls++;
-    expect(route.request().postDataJSON()).toEqual({ refreshToken: initialRefreshToken });
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        tokenType: "Bearer",
-        accessToken: rotatedAccessToken,
-        accessTokenExpiresAt: "2099-01-01T00:05:00Z",
-        refreshToken: rotatedRefreshToken,
-        refreshTokenExpiresAt: "2099-01-01T01:00:00Z",
-        sessionId: "session-1",
-        deviceId: "fixture-device",
-        authorizationScope: "global_admin",
-        category: null,
-      }),
-    });
-  };
-  await page.route("**/api/v1/auth/refresh", handleRefresh);
-  await secondPage.route("**/api/v1/auth/refresh", handleRefresh);
-  // Load the browser-only API module in the page realm; the Playwright worker has no navigator or storage.
-
+  await page.route("**/api/v1/auth/web/refresh", fulfillWebRefresh);
+  await secondPage.route("**/api/v1/auth/web/refresh", fulfillWebRefresh);
   const restored = await Promise.all([
     page.evaluate(() => import("/src/api.ts").then(({ api }) => api.restore())),
     secondPage.evaluate(() => import("/src/api.ts").then(({ api }) => api.restore())),
   ]);
 
   expect(restored).toEqual([true, true]);
-  expect(refreshCalls).toBe(1);
   for (const candidate of [page, secondPage]) {
     await expect.poll(() => candidate.evaluate(() => ({
-      sessionAccess: sessionStorage.getItem("rivune.access"),
-      sharedAccess: localStorage.getItem("rivune.access"),
-      sharedRefresh: localStorage.getItem("rivune.refresh"),
-      sharedSession: localStorage.getItem("rivune.session"),
-    }))).toEqual({
-      sessionAccess: rotatedAccessToken,
-      sharedAccess: rotatedAccessToken,
-      sharedRefresh: rotatedRefreshToken,
-      sharedSession: "session-1",
-    });
+      access: sessionStorage.getItem("rivune.access"),
+      localAccess: localStorage.getItem("rivune.access"),
+      localRefresh: localStorage.getItem("rivune.refresh"),
+      localSession: localStorage.getItem("rivune.session"),
+      sharedProfileContext: localStorage.getItem("rivune.profile.shared-context"),
+    }))).toEqual({ access: rotatedAccessToken, localAccess: null, localRefresh: null, localSession: null, sharedProfileContext: null });
   }
-
   await secondPage.close();
 });
 
-test("a tab joining after peer rotation adopts the shared session without a second refresh", async ({ page, rivune }) => {
+test("logout uses the cookie route and invalidates peer state without broadcasting secrets", async ({ page, rivune }) => {
   await page.goto("/");
   const secondPage = await page.context().newPage();
   await rivune.install(secondPage);
   await secondPage.goto("/");
   await Promise.all([page.waitForLoadState("networkidle"), secondPage.waitForLoadState("networkidle")]);
-
   for (const candidate of [page, secondPage]) {
-    await candidate.evaluate(({ accessToken, refreshToken }) => {
-      sessionStorage.setItem("rivune.access", accessToken);
-      localStorage.setItem("rivune.access", accessToken);
-      localStorage.setItem("rivune.refresh", refreshToken);
-      localStorage.setItem("rivune.session", "session-1");
-    }, { accessToken: expiredAccessToken, refreshToken: initialRefreshToken });
+    await candidate.evaluate(() => {
+      sessionStorage.setItem("rivune.access", "tab-access");
+      sessionStorage.setItem("rivune.tab.session", "session-1");
+      sessionStorage.setItem("rivune.profile", "alice");
+      sessionStorage.setItem("rivune.profile.context", "private-profile-context");
+    });
   }
 
-  let refreshCalls = 0;
-  const handleRefresh = async (route: Route) => {
-    refreshCalls++;
-    expect(route.request().postDataJSON()).toEqual({ refreshToken: initialRefreshToken });
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        tokenType: "Bearer",
-        accessToken: rotatedAccessToken,
-        accessTokenExpiresAt: "2099-01-01T00:05:00Z",
-        refreshToken: rotatedRefreshToken,
-        refreshTokenExpiresAt: "2099-01-01T01:00:00Z",
-        sessionId: "session-1",
-        deviceId: "fixture-device",
-        authorizationScope: "global_admin",
-        category: null,
-      }),
-    });
-  };
-  await page.route("**/api/v1/auth/refresh", handleRefresh);
-  await secondPage.route("**/api/v1/auth/refresh", handleRefresh);
-
-  await expect(page.evaluate(() => import("/src/api.ts").then(({ api }) => api.restore()))).resolves.toBe(true);
-  await expect(secondPage.evaluate(() => import("/src/api.ts").then(({ api }) => api.restore()))).resolves.toBe(true);
-
-  expect(refreshCalls).toBe(1);
-  await expect.poll(() => secondPage.evaluate(() => ({
-    sessionAccess: sessionStorage.getItem("rivune.access"),
-    sharedRefresh: localStorage.getItem("rivune.refresh"),
-  }))).toEqual({
-    sessionAccess: rotatedAccessToken,
-    sharedRefresh: rotatedRefreshToken,
+  let logoutRequest: { method: string; csrf?: string; body: string | null } | null = null;
+  await page.route("**/api/v1/auth/web/refresh", async (route) => {
+    if (route.request().method() !== "DELETE") return fulfillWebRefresh(route);
+    logoutRequest = { method: route.request().method(), csrf: route.request().headers()["x-rivune-csrf"], body: route.request().postData() };
+    await route.fulfill({ status: 204, headers: { "set-cookie": "rivune_web_refresh=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/api/v1/auth/web/refresh" } });
   });
 
+  await page.evaluate(() => import("/src/api.ts").then(({ api }) => api.logout()));
+  expect(logoutRequest).toEqual({ method: "DELETE", csrf: "1", body: null });
+  await expect.poll(() => secondPage.evaluate(() => ({
+    access: sessionStorage.getItem("rivune.access"),
+    profile: sessionStorage.getItem("rivune.profile"),
+    context: sessionStorage.getItem("rivune.profile.context"),
+  }))).toEqual({ access: null, profile: null, context: null });
+  expect(await secondPage.evaluate(() => JSON.stringify({ ...localStorage }))).not.toContain("private-profile-context");
   await secondPage.close();
 });
 
-test("a failed request is not replayed under a session opened in another tab", async ({ page, rivune }) => {
+test("legacy browser auth secrets are deleted at module load", async ({ page }) => {
   await page.goto("/");
-  const secondPage = await page.context().newPage();
-  await rivune.install(secondPage);
-  await secondPage.goto("/");
-  await Promise.all([page.waitForLoadState("networkidle"), secondPage.waitForLoadState("networkidle")]);
-
   await page.evaluate(() => {
-    sessionStorage.setItem("rivune.access", "account-a-access");
-    localStorage.setItem("rivune.access", "account-a-access");
-    localStorage.setItem("rivune.refresh", "account-a-refresh");
-    localStorage.setItem("rivune.session", "account-a-session");
-  });
-  await secondPage.evaluate(() => {
-    let releaseLock = () => {};
-    const lockHeld = new Promise<void>((resolve) => { releaseLock = resolve; });
-    const state = window as typeof window & { refreshLockHeld?: boolean; releaseRefreshLock?: () => void };
-    state.releaseRefreshLock = releaseLock;
-    void navigator.locks.request("rivune.auth.refresh", async () => {
-      state.refreshLockHeld = true;
-      await lockHeld;
-    });
-  });
-  await expect.poll(() => secondPage.evaluate(() =>
-    Boolean((window as typeof window & { refreshLockHeld?: boolean }).refreshLockHeld),
-  )).toBe(true);
-
-  const authorizationHeaders: Array<string | null> = [];
-  await page.route("**/api/v1/categories", async (route) => {
-    authorizationHeaders.push(route.request().headers()["authorization"] ?? null);
-    await route.fulfill({
-      status: 401,
-      contentType: "application/json",
-      body: JSON.stringify({ error: { code: "invalid_token", message: "expired" } }),
-    });
-  });
-  // Load the browser-only API module in the page realm; the Playwright worker has no navigator or storage.
-  const requestOutcome = page.evaluate(async () => {
-    try {
-      await (await import("/src/api.ts")).api.categories();
-      return { status: 200 };
-    } catch (error) {
-      return { status: (error as { status?: number }).status ?? 0 };
-    }
-  });
-  await expect.poll(() => authorizationHeaders.length).toBe(1);
-
-  await secondPage.evaluate(() => {
-    sessionStorage.setItem("rivune.access", "account-b-access");
-    localStorage.setItem("rivune.access", "account-b-access");
-    localStorage.setItem("rivune.refresh", "account-b-refresh");
-    localStorage.setItem("rivune.session", "account-b-session");
-    (window as typeof window & { releaseRefreshLock?: () => void }).releaseRefreshLock?.();
+    localStorage.setItem("rivune.access", "legacy-access");
+    localStorage.setItem("rivune.refresh", "legacy-refresh");
+    localStorage.setItem("rivune.session", "legacy-session");
+    localStorage.setItem("rivune.profile.shared-context", "legacy-profile-context");
   });
 
-  await expect(requestOutcome).resolves.toEqual({ status: 401 });
-  expect(authorizationHeaders).toEqual(["Bearer account-a-access"]);
-  await expect.poll(() => page.evaluate(() => ({
-    sharedAccess: localStorage.getItem("rivune.access"),
-    sharedRefresh: localStorage.getItem("rivune.refresh"),
-    sharedSession: localStorage.getItem("rivune.session"),
-    firstTabAccess: sessionStorage.getItem("rivune.access"),
-  }))).toEqual({
-    sharedAccess: "account-b-access",
-    sharedRefresh: "account-b-refresh",
-    sharedSession: "account-b-session",
-    firstTabAccess: "account-a-access",
-  });
+  await page.evaluate(() => import(`/src/api.ts?cutover=${Date.now()}`));
 
-  await secondPage.close();
+  expect(await page.evaluate(() => ({
+    access: localStorage.getItem("rivune.access"),
+    refresh: localStorage.getItem("rivune.refresh"),
+    session: localStorage.getItem("rivune.session"),
+    context: localStorage.getItem("rivune.profile.shared-context"),
+  }))).toEqual({ access: null, refresh: null, session: null, context: null });
 });

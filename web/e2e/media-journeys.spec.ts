@@ -656,7 +656,7 @@ test("an episode opened from its season toggles its resolved watched state once 
   await page.getByRole("button", { name: /First Light/ }).first().click();
 
   const detailsActions = page.locator(".details-actions");
-  const watchedButton = detailsActions.locator("button").last();
+  const watchedButton = detailsActions.getByRole("button", { name: /Mark (?:un)?watched/ });
   await expect(watchedButton).toHaveText("Mark watched");
   await expect(watchedButton.locator("svg.lucide-eye")).toHaveCount(1);
   const watchedPath = "/api/v1/titles/episode-1/watched";

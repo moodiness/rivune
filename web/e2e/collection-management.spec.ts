@@ -90,6 +90,7 @@ test("collection assignment hydrates categories independently and persists exact
   await dialog.locator(".assignment-picker__categories label").filter({ hasText: "Guest" }).getByRole("checkbox").check();
   await expect(save).toBeEnabled();
   await save.click();
+  await expect.poll(() => writes.length).toBe(2);
 
   expect(writes[1]?.method).toBe("POST");
   expect(writes[1]?.body.profileIds).toEqual([]);

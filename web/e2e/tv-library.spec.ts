@@ -44,7 +44,7 @@ test("Search discovers anime catalogs and targets only the selected custom type"
   await expect(animeFilter).toBeVisible();
   await expect(page.getByRole("button", { name: "Documentary", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Community", exact: true })).toHaveCount(0);
-  await expect(page.locator(".search-page .filter-pills button")).toHaveText(["All", "Movies", "Series", "Anime", "Other", "Live TV"]);
+  await expect.poll(() => page.locator(".search-page .filter-pills button").allTextContents().then((labels) => labels.map((label) => label.trim()))).toEqual(["All", "Movies", "Series", "Live TV", "Other", "Anime"]);
   await expect(page.getByRole("button", { name: "Other", exact: true }).locator(".lucide-shapes")).toBeVisible();
 
   await animeFilter.click();

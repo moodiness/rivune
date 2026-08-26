@@ -8,11 +8,11 @@ import {
   hasDemoHint,
   profileRequestContext,
   prepareDemoAttempt,
-  PROFILE_SELECTION_BROADCAST_KEY,
   PROFILE_SELECTION_REQUIRED_EVENT,
   rejectProfileRequestContext,
   rememberDemoSession,
   setProfileRequestContext,
+  subscribeAuthCoordination,
 } from "./api";
 import { setLocale, translate as t } from "./i18n";
 import type { Account, Discovery, InterfaceLanguage, Profile } from "./types";
@@ -143,16 +143,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setAccount(null);
         });
     };
-    const sharedProfileChanged = (event: StorageEvent) => {
-      if (event.key === PROFILE_SELECTION_BROADCAST_KEY && event.newValue !== null) {
+    const unsubscribe = subscribeAuthCoordination((event) => {
+      if (event === "profile-invalidated") {
         requireProfileSelection();
+        return;
       }
-    };
+      const generation = ++authGeneration.current;
+      clearSession();
+      invalidateProfile();
+      setAccount(null);
+      void api.restore().then(async (restored) => {
+        if (!restored || authGeneration.current !== generation) return;
+        const next = await api.me();
+        if (authGeneration.current === generation) setAccount(next);
+      }).catch(() => undefined);
+    });
     window.addEventListener(PROFILE_SELECTION_REQUIRED_EVENT, requireProfileSelection);
-    window.addEventListener("storage", sharedProfileChanged);
     return () => {
       window.removeEventListener(PROFILE_SELECTION_REQUIRED_EVENT, requireProfileSelection);
-      window.removeEventListener("storage", sharedProfileChanged);
+      unsubscribe();
     };
   }, [invalidateProfile]);
 
@@ -219,8 +228,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             setAccount(current);
             const activeProfileID = current.session.activeProfile?.id ?? null;
             const context = activeProfileID ? profileRequestContext(activeProfileID) : null;
+            const activeProfile = activeProfileID ? current.profiles.find((profile) => profile.id === activeProfileID) : undefined;
             if (activeProfileID && context) confirmProfile(activeProfileID, context);
-            else invalidateProfile();
+            else if (activeProfileID && (!current.maintenance.enabled || activeProfile?.canManage)) {
+              const selection = await api.selectProfile(activeProfileID);
+              if (active) confirmProfile(selection.profile.id, selection.profileContext);
+            } else invalidateProfile();
           }
         }
       } catch {
