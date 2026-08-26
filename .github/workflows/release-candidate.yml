@@ -293,7 +293,9 @@ jobs:
 
           foreach ($target in $targets) {
             $publish = Join-Path $env:RUNNER_TEMP "rivune-portable-publish-$($target.Label.ToLowerInvariant())"
+            $lockFile = "packages.$($target.Runtime).lock.json"
             & dotnet publish $project --configuration Release --runtime $target.Runtime --output $publish --nologo `
+              -p:NuGetLockFilePath=$lockFile `
               -p:RestoreLockedMode=true `
               -p:Platform=$($target.Platform) `
               -p:WindowsPackageType=None `
@@ -357,6 +359,7 @@ jobs:
           $bootstrapperProject = Join-Path $env:GITHUB_WORKSPACE 'clients/windows/Rivune.Bootstrapper/Rivune.Bootstrapper.csproj'
           $bootstrapperPublish = Join-Path $env:RUNNER_TEMP 'rivune-bootstrapper-publish'
           & dotnet publish $bootstrapperProject --configuration Release --runtime win-x86 --output $bootstrapperPublish --nologo `
+            -p:NuGetLockFilePath=packages.win-x86.lock.json `
             -p:RestoreLockedMode=true `
             -p:Version=$versionName `
             -p:AssemblyVersion=$fileVersion `
@@ -626,16 +629,18 @@ jobs:
       - name: Build and inspect update manifest verifier
         env:
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        working-directory: clients/update
         shell: bash
         run: |
           set -euo pipefail
-          mkdir candidate-update-tool
-          CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o candidate-update-tool/rivune-update-tool ./clients/update
-          candidate-update-tool/rivune-update-tool help >/dev/null
-          digest="$(sha256sum candidate-update-tool/rivune-update-tool | cut -d ' ' -f1)"
+          artifact_dir="${GITHUB_WORKSPACE}/candidate-update-tool"
+          mkdir "${artifact_dir}"
+          CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o "${artifact_dir}/rivune-update-tool" .
+          "${artifact_dir}/rivune-update-tool" help >/dev/null
+          digest="$(sha256sum "${artifact_dir}/rivune-update-tool" | cut -d ' ' -f1)"
           jq -n --arg sourceSha "${GITHUB_SHA}" --arg tag "${RELEASE_TAG}" --arg digest "${digest}" \
             '{schemaVersion:1,sourceSha:$sourceSha,releaseTag:$tag,fileName:"rivune-update-tool",sha256:$digest}' \
-            > candidate-update-tool/candidate-update-tool.json
+            > "${artifact_dir}/candidate-update-tool.json"
       - name: Upload immutable update manifest verifier
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
