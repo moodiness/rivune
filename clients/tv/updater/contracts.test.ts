@@ -5,7 +5,9 @@ import {
   parseRuntimeBundle,
   prepareRuntime,
   parseUpdateManifest,
+  parseStoredRuntimeState,
   rollbackRuntime,
+  shouldPresentTvUpdateNotice,
   type RuntimeBundle,
 } from "./contracts";
 
@@ -22,6 +24,7 @@ const assetNames = [
   "Rivune-visionOS-unsigned.ipa",
   "Rivune-webOS.ipk",
   "rivune-update.json",
+  "rivune-update.json.sig",
 ];
 
 function release(version = "2.0.0") {
@@ -37,8 +40,8 @@ function release(version = "2.0.0") {
       id: index + 1,
       name,
       state: "uploaded",
-      size: name === "Rivune-TV-runtime.json" ? 4096 : name === "rivune-update.json" ? 8202 : 8192 + index,
-      digest: `sha256:${(name === "Rivune-TV-runtime.json" ? "3" : name === "rivune-update.json" ? "2" : String((index % 9) + 1)).repeat(64)}`,
+      size: name === "Rivune-TV-runtime.json" ? 4096 : name === "rivune-update.json" ? 8202 : name === "rivune-update.json.sig" ? 320 : 8192 + index,
+      digest: `sha256:${(name === "Rivune-TV-runtime.json" ? "3" : name === "rivune-update.json" ? "2" : name === "rivune-update.json.sig" ? "4" : String((index % 9) + 1)).repeat(64)}`,
       url: `https://api.github.com/repos/moodiness/rivune/releases/assets/${index + 1}`,
       browser_download_url: `https://github.com/moodiness/rivune/releases/download/${tag}/${name}`,
     })),
@@ -68,6 +71,11 @@ describe("GitHub TV release validation", () => {
           size: 8202,
           sha256: "2".repeat(64),
           mirrorUrl: "https://moodiness.github.io/rivune/tv-runtime/v2.0.0/rivune-update.json",
+        },
+        signature: {
+          size: 320,
+          sha256: "4".repeat(64),
+          mirrorUrl: "https://moodiness.github.io/rivune/tv-runtime/v2.0.0/rivune-update.json.sig",
         },
         runtime: {
           size: 4096,
@@ -135,6 +143,21 @@ describe("GitHub TV release validation", () => {
     });
     manifest.packages.tvRuntime.sha256 = "4".repeat(64);
     expect(() => parseUpdateManifest(manifest, checked.release, "webos")).toThrow();
+  });
+});
+
+describe("TV update notices", () => {
+  it("presents only a strictly newer verified version and persists the marker", () => {
+    expect(shouldPresentTvUpdateNotice(null, "2.0.0")).toBe(true);
+    expect(shouldPresentTvUpdateNotice("2.0.0", "2.0.0")).toBe(false);
+    expect(shouldPresentTvUpdateNotice("2.0.0", "2.0.1")).toBe(true);
+    expect(shouldPresentTvUpdateNotice("2.0.1", "2.0.0")).toBe(false);
+
+    const restored = parseStoredRuntimeState({
+      ...emptyStoredRuntimeState(),
+      lastPresentedVersion: "2.0.0",
+    });
+    expect(restored.lastPresentedVersion).toBe("2.0.0");
   });
 });
 

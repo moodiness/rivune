@@ -23,6 +23,7 @@ const expectedAssetNames = [
   "Rivune-visionOS-unsigned.ipa",
   "Rivune-webOS.ipk",
   "rivune-update.json",
+  "rivune-update.json.sig",
 ] as const;
 
 export type RuntimeBundle = {
@@ -45,6 +46,7 @@ export type AvailableRelease = {
   version: string;
   tagName: string;
   manifest: ReleaseArtifact;
+  signature: ReleaseArtifact;
   runtime: Omit<ReleaseArtifact, "mirrorUrl">;
 };
 
@@ -67,6 +69,7 @@ export type StoredRuntimeState = {
   staged: RuntimeBundle | null;
   pendingVersion: string | null;
   lastSuccessfulCheckAt: number;
+  lastPresentedVersion: string | null;
 };
 
 export type PreparedRuntime = {
@@ -124,6 +127,10 @@ export function compareStableVersions(left: string, right: string): number {
   return 0;
 }
 
+export function shouldPresentTvUpdateNotice(lastPresentedVersion: string | null, candidateVersion: string): boolean {
+  return lastPresentedVersion === null || compareStableVersions(candidateVersion, lastPresentedVersion) > 0;
+}
+
 export function parseLatestRelease(value: unknown, currentVersion: string, platform: RivuneRuntimePlatform): ReleaseCheck {
   if (!isStableVersion(currentVersion)) throw new Error("The current TV runtime version is invalid.");
   const release = record(value, "GitHub release");
@@ -170,10 +177,12 @@ export function parseLatestRelease(value: unknown, currentVersion: string, platf
   if (!assets.has(platformAsset)) throw new Error(`The GitHub release has no ${platform} package.`);
   const runtime = assets.get(runtimeFileName);
   const manifest = assets.get("rivune-update.json");
-  if (!runtime || !manifest) throw new Error("The GitHub release has no TV update manifest or runtime.");
+  const signature = assets.get("rivune-update.json.sig");
+  if (!runtime || !manifest || !signature) throw new Error("The GitHub release has no TV update manifest, signature, or runtime.");
   const runtimeSize = runtime.size as number;
   const manifestSize = manifest.size as number;
-  if (runtimeSize > maximumRuntimeBytes || manifestSize > 256 * 1024) throw new Error("The GitHub TV update metadata is too large.");
+  const signatureSize = signature.size as number;
+  if (runtimeSize > maximumRuntimeBytes || manifestSize > 256 * 1024 || signatureSize > 4 * 1024) throw new Error("The GitHub TV update metadata is too large.");
   return {
     updateAvailable: true,
     release: {
@@ -183,6 +192,11 @@ export function parseLatestRelease(value: unknown, currentVersion: string, platf
         size: manifestSize,
         sha256: (manifest.digest as string).slice("sha256:".length),
         mirrorUrl: `https://moodiness.github.io/rivune/tv-runtime/${tagName}/rivune-update.json`,
+      },
+      signature: {
+        size: signatureSize,
+        sha256: (signature.digest as string).slice("sha256:".length),
+        mirrorUrl: `https://moodiness.github.io/rivune/tv-runtime/${tagName}/rivune-update.json.sig`,
       },
       runtime: {
         size: runtimeSize,
@@ -295,18 +309,31 @@ export function emptyStoredRuntimeState(): StoredRuntimeState {
     staged: null,
     pendingVersion: null,
     lastSuccessfulCheckAt: 0,
+    lastPresentedVersion: null,
   };
 }
 
 export function parseStoredRuntimeState(value: unknown): StoredRuntimeState {
   try {
     const state = record(value, "stored TV runtime state");
-    exactKeys(state, ["schemaVersion", "active", "previous", "staged", "pendingVersion", "lastSuccessfulCheckAt"], "stored TV runtime state");
+    const hasPresentedVersion = Object.prototype.hasOwnProperty.call(state, "lastPresentedVersion");
+    exactKeys(
+      state,
+      hasPresentedVersion
+        ? ["schemaVersion", "active", "previous", "staged", "pendingVersion", "lastSuccessfulCheckAt", "lastPresentedVersion"]
+        : ["schemaVersion", "active", "previous", "staged", "pendingVersion", "lastSuccessfulCheckAt"],
+      "stored TV runtime state",
+    );
     if (state.schemaVersion !== 1) throw new Error("Unsupported stored state.");
     const parseOptionalRuntime = (candidate: unknown) => candidate === null ? null : parseRuntimeBundle(candidate);
     const pendingVersion = state.pendingVersion;
     if (pendingVersion !== null && (typeof pendingVersion !== "string" || !isStableVersion(pendingVersion))) {
       throw new Error("Invalid pending version.");
+    }
+    const lastPresentedVersion = hasPresentedVersion ? state.lastPresentedVersion : null;
+    if (lastPresentedVersion !== null &&
+        (typeof lastPresentedVersion !== "string" || !isStableVersion(lastPresentedVersion))) {
+      throw new Error("Invalid presented update version.");
     }
     const checkedAt = state.lastSuccessfulCheckAt;
     if (typeof checkedAt !== "number" || !Number.isSafeInteger(checkedAt) || checkedAt < 0) {
@@ -319,6 +346,7 @@ export function parseStoredRuntimeState(value: unknown): StoredRuntimeState {
       staged: parseOptionalRuntime(state.staged),
       pendingVersion,
       lastSuccessfulCheckAt: checkedAt,
+      lastPresentedVersion,
     };
   } catch {
     return emptyStoredRuntimeState();

@@ -14,6 +14,14 @@ import {
   type LibraryItem,
   type LibraryPage,
   type Movie,
+  type PlaybackDecision,
+  type PlaybackCommand,
+  type PlaybackCommandInput,
+  type PlaybackCommandList,
+  type PlaybackCommandResultInput,
+  type PlaybackDevice,
+  type PlaybackDeviceHeartbeatInput,
+  type PlaybackDeviceList,
   type PlaybackPreparation,
   type PlaybackProgress,
   type PlaybackSession,
@@ -26,11 +34,42 @@ import {
   type Season,
   type Series,
   type SeriesMappingProvider,
+  type SemanticSearchPage,
+  type SemanticSearchRequest,
   type TitleMediaType,
   type TitleReference,
   type TitleResolveInput,
   type TokenPair,
   type UpdatePlaybackProgressInput,
+} from "./types";
+import type {
+  AccessibilityPreferencesDocument,
+  AddonIncident,
+  AddonIncidentDetail,
+  AddonIncidentList,
+  MediaNotificationFollowInput,
+  MediaNotificationPage,
+  MediaNotificationSubscription,
+  MediaNotificationSubscriptions,
+  PlaybackFailoverAdvanceInput,
+  PlaybackFailoverCreateInput,
+  PlaybackFailoverState,
+  ReadingQueue,
+  ReadingQueueAddInput,
+  ReadingQueueMutation,
+  ReadingQueueMutationInput,
+  ReadingQueueReorderInput,
+  ReadingQueueUpdateInput,
+  SavedSearch,
+  SavedSearchInput,
+  SavedSearchList,
+  SavedSearchUpdateInput,
+  SmartCollection,
+  SmartCollectionInput,
+  SmartCollectionList,
+  SmartCollectionPage,
+  SmartCollectionUpdateInput,
+  SmartRule,
 } from "./types";
 
 export * from "./types";
@@ -40,6 +79,10 @@ const MAX_JSON_BYTES = 16 * 1024 * 1024;
 const SAFE_CAPABILITY = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const PROFILE_CONTEXT_HEADER = "X-Rivune-Profile-Context";
 const PLATFORM_HEADER = "X-Rivune-TV-Platform";
+const PLAYBACK_RESULT_STATUS: Record<string, true> = { applied: true, failed: true, expired: true };
+const PLAYBACK_RESULT_CODE: Record<string, true> = { applied: true, unsupported: true, invalid_state: true, stale_target: true, expired: true, execution_failed: true };
+const PLAYBACK_OUTCOME: Record<string, true> = { direct_supported: true, remux_required: true, audio_transcode_required: true, video_transcode_required: true, subtitle_burn_required: true };
+const PLAYBACK_REASON: Record<string, true> = { container_not_supported: true, video_codec_not_supported: true, audio_codec_not_supported: true, resolution_limit: true, bitrate_limit: true, hdr_not_supported: true, subtitle_burn_required: true };
 
 type Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -56,6 +99,7 @@ interface RequestOptions {
   authenticated?: boolean;
   profileContext?: boolean;
   retryAfterRefresh?: boolean;
+  signal?: AbortSignal;
 }
 
 interface AuthenticationSnapshot {
@@ -217,6 +261,31 @@ function decodeObject<T>(value: unknown, context: string): T {
   return responseObject(value, context) as T;
 }
 
+function publicPlaybackDecision(value: unknown): PlaybackDecision | null {
+  if (value === null || value === undefined) return null;
+  const object = responseObject(value, "playback decision");
+  const reason = requiredString(object.reason, "decision.reason");
+  if (!PLAYBACK_OUTCOME[reason] || !Array.isArray(object.reasons) || object.reasons.length > 7) {
+    throw new APIError(0, "invalid_response", "The playback decision outcome is invalid.");
+  }
+  const reasons: PlaybackDecision["reasons"] = [];
+  for (const candidate of object.reasons) {
+    if (typeof candidate !== "string" || !PLAYBACK_REASON[candidate] || reasons.includes(candidate as PlaybackDecision["reasons"][number])) {
+      throw new APIError(0, "invalid_response", "The playback decision reasons are invalid.");
+    }
+    reasons.push(candidate as PlaybackDecision["reasons"][number]);
+  }
+  return {
+    reason: reason as PlaybackDecision["reason"], reasons,
+    videoAction: requiredString(object.videoAction, "decision.videoAction"),
+    audioAction: requiredString(object.audioAction, "decision.audioAction"),
+    subtitleAction: requiredString(object.subtitleAction, "decision.subtitleAction"),
+    toneMapping: requiredBoolean(object.toneMapping, "decision.toneMapping"),
+    ...(object.source && typeof object.source === "object" && !Array.isArray(object.source) ? { source: object.source as PlaybackDecision["source"] } : {}),
+    ...(object.target && typeof object.target === "object" && !Array.isArray(object.target) ? { target: object.target as PlaybackDecision["target"] } : {}),
+  };
+}
+
 function decodeEnvelopeArray<T>(value: unknown, field: string): T[] {
   const object = responseObject(value, field);
   if (!Array.isArray(object[field])) {
@@ -277,6 +346,28 @@ function delay(seconds: number, signal?: AbortSignal): Promise<void> {
       reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
     }, { once: true });
   });
+}
+
+function validSmartRule(rule: SmartRule, depth = 0): boolean {
+  if (!rule || typeof rule !== "object" || depth > 8) return false;
+  if (rule.type === "all" || rule.type === "any") {
+    return Array.isArray(rule.rules) && rule.rules.length >= 1 && rule.rules.length <= 16 && rule.rules.every((child) => validSmartRule(child, depth + 1));
+  }
+  if (rule.type === "media_type") {
+    const allowed = new Set(["movie", "series", "season", "episode", "video", "tv"]);
+    return rule.operator === "one_of" && Array.isArray(rule.values) && rule.values.length >= 1 && rule.values.length <= 6 && new Set(rule.values).size === rule.values.length && rule.values.every((value) => allowed.has(value));
+  }
+  if (rule.type === "year" || rule.type === "rating") {
+    return ["equals", "gte", "lte"].includes(rule.operator) && Number.isFinite(rule.number) && rule.number >= 0 && rule.number <= 2100;
+  }
+  if (rule.type === "genre" || rule.type === "status" || rule.type === "source") {
+    return ["equals", "not_equals"].includes(rule.operator) && typeof rule.value === "string" && rule.value.length >= 1 && rule.value.length <= 128;
+  }
+  return false;
+}
+
+function assertSmartRule(rule: SmartRule): void {
+  if (!validSmartRule(rule)) throw new APIError(0, "invalid_smart_rule", "The smart collection rule is invalid.");
 }
 
 export class RivuneTvClient {
@@ -371,10 +462,10 @@ export class RivuneTvClient {
     return this.credentials !== null;
   }
 
-  async beginDeviceAuthorization(deviceName: string, platform: TvPlatform = this.platform): Promise<DeviceAuthorization> {
+  async beginDeviceAuthorization(installationId: string, deviceName: string, platform: TvPlatform = this.platform): Promise<DeviceAuthorization> {
     const value = await this.request("auth/device-code", {
       method: "POST",
-      body: { deviceName, platform },
+      body: { installationId, deviceName, platform },
       profileContext: false,
     });
     const authorization = decodeObject<DeviceAuthorization>(value, "device authorization");
@@ -529,6 +620,15 @@ export class RivuneTvClient {
   async addonCatalogs(): Promise<AddonCatalogDescriptor[]> {
     return decodeEnvelopeArray<AddonCatalogDescriptor>(await this.request("addons/catalogs", { authenticated: true }), "catalogs");
   }
+  async semanticSearch(input: SemanticSearchRequest, signal?: AbortSignal): Promise<SemanticSearchPage> {
+    return decodeObject<SemanticSearchPage>(await this.request("search/semantic", {
+      method: "POST",
+      body: input,
+      authenticated: true,
+      signal,
+    }), "semantic search");
+  }
+
 
   async searchAddonCatalogs(
     type: string,
@@ -537,6 +637,7 @@ export class RivuneTvClient {
     limit?: number,
     language?: string,
     extras: ReadonlyArray<readonly [string, string]> = [],
+    signal?: AbortSignal,
   ): Promise<AddonResourceBatch> {
     const parameters = new URLSearchParams({ search: query });
     if (skip !== undefined) parameters.append("skip", String(skip));
@@ -545,7 +646,7 @@ export class RivuneTvClient {
     for (const [name, value] of extras) parameters.append(name, value);
     return decodeObject<AddonResourceBatch>(await this.request(
       `addons/catalogs/search/${encodeURIComponent(type)}?${parameters}`,
-      { authenticated: true },
+      { authenticated: true, signal },
     ), "catalog search");
   }
 
@@ -636,7 +737,7 @@ export class RivuneTvClient {
     startSeconds?: number,
     externalPlayer = false,
   ): Promise<PlaybackPreparation> {
-    return decodeObject<PlaybackPreparation>(await this.request("playback/prepare", {
+    const preparation = decodeObject<PlaybackPreparation>(await this.request("playback/prepare", {
       method: "POST",
       body: {
         sourceRef,
@@ -645,6 +746,8 @@ export class RivuneTvClient {
       },
       authenticated: true,
     }), "playback preparation");
+    preparation.decision = publicPlaybackDecision(preparation.decision);
+    return preparation;
   }
 
   async resolvePlayback(sourceRef: string, input: ResolvePlaybackInput = {}): Promise<PlaybackSession> {
@@ -657,6 +760,7 @@ export class RivuneTvClient {
     session.subtitles ??= [];
     session.providerErrors ??= [];
     for (const source of session.sources) {
+      source.decision = publicPlaybackDecision(source.decision);
       if (source.url && !this.resolveMediaUrl(source.url)) {
         throw new APIError(0, "invalid_response", "The playback source URL is not allowed.");
       }
@@ -671,6 +775,180 @@ export class RivuneTvClient {
 
   async stopPlayback(sessionId: string): Promise<void> {
     await this.request(`playback/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE", authenticated: true });
+  }
+
+  async updatePlaybackDevice(input: PlaybackDeviceHeartbeatInput): Promise<PlaybackDevice> {
+    return decodeObject<PlaybackDevice>(await this.request("playback/device", { method: "PUT", body: input, authenticated: true }), "playback device");
+  }
+
+  async playbackDevices(): Promise<PlaybackDeviceList> {
+    const result = decodeObject<PlaybackDeviceList>(await this.request("playback/devices", { authenticated: true }), "playback devices");
+    result.devices ??= [];
+    return result;
+  }
+
+  async sendPlaybackCommand(sessionId: string, input: PlaybackCommandInput): Promise<PlaybackCommand> {
+    return decodeObject<PlaybackCommand>(await this.request(`playback/devices/${encodeURIComponent(sessionId)}/commands`, {
+      method: "POST", body: input, authenticated: true,
+    }), "playback command");
+  }
+
+  async playbackCommands(after?: string): Promise<PlaybackCommandList> {
+    const suffix = after ? `?after=${encodeURIComponent(after)}` : "";
+    const result = decodeObject<PlaybackCommandList>(await this.request(`playback/commands${suffix}`, { authenticated: true }), "playback commands");
+    result.commands ??= [];
+    return result;
+  }
+  async reportPlaybackCommandResult(operationId: string, input: PlaybackCommandResultInput): Promise<PlaybackCommand> {
+    if (!PLAYBACK_RESULT_STATUS[input.status] || !PLAYBACK_RESULT_CODE[input.code]) {
+      throw new APIError(0, "invalid_playback_result", "The playback command result is invalid.");
+    }
+    return decodeObject<PlaybackCommand>(await this.request(`playback/commands/incoming/${encodeURIComponent(operationId)}/result`, {
+      method: "PUT", body: input, authenticated: true,
+    }), "playback command result");
+  }
+
+  async outgoingPlaybackCommand(operationId: string): Promise<PlaybackCommand> {
+    return decodeObject<PlaybackCommand>(await this.request(`playback/commands/outgoing/${encodeURIComponent(operationId)}`, {
+      authenticated: true,
+    }), "outgoing playback command");
+  }
+
+  async readingQueue(profileId: string): Promise<ReadingQueue> {
+    return decodeObject<ReadingQueue>(await this.request(`profiles/${encodeURIComponent(profileId)}/queue`, { authenticated: true }), "reading queue");
+  }
+
+  async addReadingQueueItem(profileId: string, input: ReadingQueueAddInput): Promise<ReadingQueueMutation> {
+    return decodeObject<ReadingQueueMutation>(await this.request(`profiles/${encodeURIComponent(profileId)}/queue/items`, {
+      method: "POST", body: input, authenticated: true,
+    }), "reading queue mutation");
+  }
+
+  async reorderReadingQueue(profileId: string, input: ReadingQueueReorderInput): Promise<ReadingQueueMutation> {
+    return decodeObject<ReadingQueueMutation>(await this.request(`profiles/${encodeURIComponent(profileId)}/queue/order`, {
+      method: "PUT", body: input, authenticated: true,
+    }), "reading queue mutation");
+  }
+
+  async updateReadingQueueItem(profileId: string, itemId: string, input: ReadingQueueUpdateInput): Promise<ReadingQueueMutation> {
+    return decodeObject<ReadingQueueMutation>(await this.request(`profiles/${encodeURIComponent(profileId)}/queue/items/${encodeURIComponent(itemId)}`, {
+      method: "PATCH", body: input, authenticated: true,
+    }), "reading queue mutation");
+  }
+
+  async removeReadingQueueItem(profileId: string, itemId: string, input: ReadingQueueMutationInput): Promise<ReadingQueueMutation> {
+    return decodeObject<ReadingQueueMutation>(await this.request(`profiles/${encodeURIComponent(profileId)}/queue/items/${encodeURIComponent(itemId)}`, {
+      method: "DELETE", body: input, authenticated: true,
+    }), "reading queue mutation");
+  }
+
+  async consumeReadingQueueItem(profileId: string, itemId: string, input: ReadingQueueMutationInput): Promise<ReadingQueueMutation> {
+    return decodeObject<ReadingQueueMutation>(await this.request(`profiles/${encodeURIComponent(profileId)}/queue/items/${encodeURIComponent(itemId)}/consume`, {
+      method: "POST", body: input, authenticated: true,
+    }), "reading queue mutation");
+  }
+
+  async savedSearches(): Promise<SavedSearchList> {
+    return decodeObject<SavedSearchList>(await this.request("saved-searches", { authenticated: true }), "saved searches");
+  }
+
+  async createSavedSearch(input: SavedSearchInput): Promise<SavedSearch> {
+    return decodeObject<SavedSearch>(await this.request("saved-searches", { method: "POST", body: input, authenticated: true }), "saved search");
+  }
+
+  async updateSavedSearch(id: string, input: SavedSearchUpdateInput): Promise<SavedSearch> {
+    return decodeObject<SavedSearch>(await this.request(`saved-searches/${encodeURIComponent(id)}`, { method: "PUT", body: input, authenticated: true }), "saved search");
+  }
+
+  async deleteSavedSearch(id: string, expectedRevision: number): Promise<void> {
+    await this.request(`saved-searches/${encodeURIComponent(id)}?expectedRevision=${encodeURIComponent(String(expectedRevision))}`, { method: "DELETE", authenticated: true });
+  }
+
+  async smartCollections(): Promise<SmartCollectionList> {
+    return decodeObject<SmartCollectionList>(await this.request("smart-collections", { authenticated: true }), "smart collections");
+  }
+
+  async createSmartCollection(input: SmartCollectionInput): Promise<SmartCollection> {
+    assertSmartRule(input.rules);
+    return decodeObject<SmartCollection>(await this.request("smart-collections", { method: "POST", body: input, authenticated: true }), "smart collection");
+  }
+
+  async updateSmartCollection(id: string, input: SmartCollectionUpdateInput): Promise<SmartCollection> {
+    assertSmartRule(input.rules);
+    return decodeObject<SmartCollection>(await this.request(`smart-collections/${encodeURIComponent(id)}`, { method: "PUT", body: input, authenticated: true }), "smart collection");
+  }
+
+  async deleteSmartCollection(id: string, expectedRevision: number): Promise<void> {
+    await this.request(`smart-collections/${encodeURIComponent(id)}?expectedRevision=${encodeURIComponent(String(expectedRevision))}`, { method: "DELETE", authenticated: true });
+  }
+
+  async evaluateSmartCollection(id: string, page = 1, pageSize = 30): Promise<SmartCollectionPage> {
+    const query = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+    return decodeObject<SmartCollectionPage>(await this.request(`smart-collections/${encodeURIComponent(id)}/items?${query}`, { authenticated: true }), "smart collection items");
+  }
+
+  async extensionIncidents(): Promise<AddonIncidentList> {
+    return decodeObject<AddonIncidentList>(await this.request("operations/extension-incidents", { authenticated: true }), "extension incidents");
+  }
+
+  async extensionIncident(id: string): Promise<AddonIncidentDetail> {
+    return decodeObject<AddonIncidentDetail>(await this.request(`operations/extension-incidents/${encodeURIComponent(id)}`, { authenticated: true }), "extension incident");
+  }
+
+  async acknowledgeExtensionIncident(id: string): Promise<AddonIncident> {
+    return decodeObject<AddonIncident>(await this.request(`operations/extension-incidents/${encodeURIComponent(id)}/acknowledgement`, { method: "POST", authenticated: true }), "extension incident");
+  }
+
+  async mediaNotificationSubscriptions(): Promise<MediaNotificationSubscriptions> {
+    return decodeObject<MediaNotificationSubscriptions>(await this.request("media-notification-subscriptions", { authenticated: true }), "media notification subscriptions");
+  }
+
+  async followMediaNotifications(titleId: string, input: MediaNotificationFollowInput): Promise<MediaNotificationSubscription> {
+    return decodeObject<MediaNotificationSubscription>(await this.request(`media-notification-subscriptions/${encodeURIComponent(titleId)}`, {
+      method: "PUT", body: input, authenticated: true,
+    }), "media notification subscription");
+  }
+
+  async unfollowMediaNotifications(titleId: string): Promise<void> {
+    await this.request(`media-notification-subscriptions/${encodeURIComponent(titleId)}`, { method: "DELETE", authenticated: true });
+  }
+
+  async mediaNotifications(cursor?: string, limit = 30): Promise<MediaNotificationPage> {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (cursor) query.set("cursor", cursor);
+    return decodeObject<MediaNotificationPage>(await this.request(`media-notifications?${query}`, { authenticated: true }), "media notifications");
+  }
+
+  async acknowledgeMediaNotification(id: string, state: "read" | "dismissed"): Promise<void> {
+    await this.request(`media-notifications/${encodeURIComponent(id)}/acknowledgement`, { method: "POST", body: { state }, authenticated: true });
+  }
+
+  async createPlaybackFailover(input: PlaybackFailoverCreateInput): Promise<PlaybackFailoverState> {
+    return decodeObject<PlaybackFailoverState>(await this.request("playback/failovers", { method: "POST", body: input, authenticated: true }), "playback failover");
+  }
+
+  async playbackFailover(id: string): Promise<PlaybackFailoverState> {
+    return decodeObject<PlaybackFailoverState>(await this.request(`playback/failovers/${encodeURIComponent(id)}`, { authenticated: true }), "playback failover");
+  }
+
+  async cancelPlaybackFailover(id: string): Promise<void> {
+    await this.request(`playback/failovers/${encodeURIComponent(id)}`, { method: "DELETE", authenticated: true });
+  }
+
+  async advancePlaybackFailover(id: string, input: PlaybackFailoverAdvanceInput): Promise<PlaybackFailoverState> {
+    return decodeObject<PlaybackFailoverState>(await this.request(`playback/failovers/${encodeURIComponent(id)}/advance`, {
+      method: "POST", body: input, authenticated: true,
+    }), "playback failover");
+  }
+
+  async accessibilityPreferences(profileId: string): Promise<AccessibilityPreferencesDocument> {
+    return decodeObject<AccessibilityPreferencesDocument>(await this.request(`profiles/${encodeURIComponent(profileId)}/accessibility-preferences`, { authenticated: true }), "accessibility preferences");
+  }
+
+  async updateAccessibilityPreferences(profileId: string, input: AccessibilityPreferencesDocument): Promise<AccessibilityPreferencesDocument> {
+    return decodeObject<AccessibilityPreferencesDocument>(await this.request(`profiles/${encodeURIComponent(profileId)}/accessibility-preferences`, {
+      method: "PUT", body: input, authenticated: true,
+    }), "accessibility preferences");
   }
 
   resolveMediaUrl(value: string): string | null {
@@ -708,6 +986,9 @@ export class RivuneTvClient {
   ): Promise<unknown> {
     if (!this.apiBase) await this.discover();
     const base = this.apiBase;
+    if (options.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException("Aborted", "AbortError");
+    }
     if (!base) throw new APIError(0, "invalid_response", "The Rivune API base is unavailable.");
     return this.requestUrl(new URL(path, base), options, explicitAccessToken);
   }
@@ -745,6 +1026,7 @@ export class RivuneTvClient {
       credentials: "omit",
       redirect: "manual",
       cache: "no-store",
+      signal: options.signal,
     });
     if (response.redirected) {
       throw new APIError(response.status, "redirect_not_allowed", "Rivune API redirects are not allowed.", responseRetryAfter(response.headers));
@@ -763,7 +1045,13 @@ export class RivuneTvClient {
     if (response.status === 0 || (response.status >= 300 && response.status <= 399)) {
       throw new APIError(response.status, "redirect_not_allowed", "Rivune API redirects are not allowed.", responseRetryAfter(response.headers));
     }
+    if (options.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException("Aborted", "AbortError");
+    }
     const text = await readBoundedText(response);
+    if (options.signal?.aborted) {
+      throw options.signal.reason ?? new DOMException("Aborted", "AbortError");
+    }
     if (snapshot && snapshot.epoch !== this.authenticationEpoch) {
       throw new APIError(0, "authentication_changed", "Authentication state changed while the request was running.");
     }

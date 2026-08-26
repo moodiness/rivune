@@ -380,6 +380,7 @@
       hdrFormats: freezeList(hdrFormats),
       processingModes: freezeList(["direct", "remux", "transcode_audio", "transcode"]),
       maximumHeight: maximumHeight,
+      maximumVideoBitrateKbps: maximumHeight >= 2160 ? 40000 : 20000,
       maximumAudioChannels: maximumAudioChannels,
       subtitleModes: freezeList(["embedded", "external", "burn"])
     });
