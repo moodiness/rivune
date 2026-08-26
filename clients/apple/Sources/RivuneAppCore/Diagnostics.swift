@@ -15,6 +15,11 @@ public enum RivuneDiagnosticEventCode: String, Sendable {
     case catalogRefreshStarted = "CATALOG_REFRESH_STARTED"
     case catalogRefreshSucceeded = "CATALOG_REFRESH_SUCCEEDED"
     case catalogRefreshFailed = "CATALOG_REFRESH_FAILED"
+    case searchStarted = "SEARCH_STARTED"
+    case searchSucceeded = "SEARCH_SUCCEEDED"
+    case searchPartial = "SEARCH_PARTIAL"
+    case searchFailed = "SEARCH_FAILED"
+    case searchCanceled = "SEARCH_CANCELED"
     case playbackStarted = "PLAYBACK_STARTED"
     case playbackStopped = "PLAYBACK_STOPPED"
     case playbackFailed = "PLAYBACK_FAILED"
@@ -29,10 +34,14 @@ public enum RivuneDiagnosticEventCode: String, Sendable {
 public struct RivuneDiagnosticEvent: Equatable, Sendable {
     public let timestampMilliseconds: Int64
     public let code: RivuneDiagnosticEventCode
+    public let operationId: UUID?
 
-    public init(timestampMilliseconds: Int64, code: RivuneDiagnosticEventCode) {
+    public init(
+        timestampMilliseconds: Int64, code: RivuneDiagnosticEventCode, operationId: UUID? = nil
+    ) {
         self.timestampMilliseconds = timestampMilliseconds
         self.code = code
+        self.operationId = operationId
     }
 }
 
@@ -57,12 +66,16 @@ final class RivuneDiagnosticsBuffer: @unchecked Sendable {
         self.now = now
     }
 
-    func record(_ code: RivuneDiagnosticEventCode) {
-        record(code, timestampMilliseconds: now())
+    func record(_ code: RivuneDiagnosticEventCode, operationId: UUID? = nil) {
+        record(code, operationId: operationId, timestampMilliseconds: now())
     }
 
-    func record(_ code: RivuneDiagnosticEventCode, timestampMilliseconds: Int64) {
-        let event = RivuneDiagnosticEvent(timestampMilliseconds: timestampMilliseconds, code: code)
+    func record(
+        _ code: RivuneDiagnosticEventCode, operationId: UUID? = nil,
+        timestampMilliseconds: Int64
+    ) {
+        let event = RivuneDiagnosticEvent(
+            timestampMilliseconds: timestampMilliseconds, code: code, operationId: operationId)
         let buffered = BufferedEvent(
             event: event,
             bytes: RivuneDiagnosticsReport.serializedEventLine(event).utf8.count
@@ -159,7 +172,8 @@ struct RivuneDiagnosticReportInput {
     let accentColor: String?
     let frameRateMatching: String?
     let videoAspect: String?
-    let wifiQuality: String?
+    let localQuality: String?
+    let remoteWifiQuality: String?
     let mobileQuality: String?
     let events: [RivuneDiagnosticEvent]
 }
@@ -190,7 +204,8 @@ enum RivuneDiagnosticsReport {
         appendField("Accent color", safeScalar(input.accentColor), to: &report)
         appendField("Frame-rate matching", safeScalar(input.frameRateMatching), to: &report)
         appendField("Video aspect", safeScalar(input.videoAspect), to: &report)
-        appendField("Wi-Fi quality", safeScalar(input.wifiQuality), to: &report)
+        appendField("Local quality", safeScalar(input.localQuality), to: &report)
+        appendField("Remote Wi-Fi quality", safeScalar(input.remoteWifiQuality), to: &report)
         appendField("Mobile quality", safeScalar(input.mobileQuality), to: &report)
         report += "Events:\n"
 
@@ -228,7 +243,8 @@ enum RivuneDiagnosticsReport {
     }
 
     static func serializedEventLine(_ event: RivuneDiagnosticEvent) -> String {
-        "\(formatTimestamp(event.timestampMilliseconds)) \(event.code.rawValue)\n"
+        let operation = event.operationId.map { " operation=\($0.uuidString.lowercased())" } ?? ""
+        return "\(formatTimestamp(event.timestampMilliseconds)) \(event.code.rawValue)\(operation)\n"
     }
 
     private static func appendField(_ label: String, _ value: String?, to report: inout String) {

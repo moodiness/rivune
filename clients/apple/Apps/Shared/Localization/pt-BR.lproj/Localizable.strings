@@ -20,6 +20,9 @@
 "%d servers" = "%d servidores";
 "%d watching" = "%d assistindo";
 "%d. %@" = "%d. %@";
+"%dh %dm left" = "faltam %d h %d min";
+"%dh left" = "falta %d h";
+"%dm left" = "faltam %d min";
 "1×" = "1×";
 "4K" = "4K";
 "APPEARANCE" = "APARÊNCIA";
@@ -30,9 +33,11 @@
 "Address" = "Endereço";
 "All" = "Todos";
 "Animations" = "Animações";
+"Anime" = "Anime";
 "Apple player" = "Player da Apple";
 "Apple player could not play this stream: %@. Choose MPV under Settings > Player for broader format support." = "O player da Apple não conseguiu reproduzir esta transmissão: %@. Selecione MPV em Ajustes > Player para ter maior compatibilidade de formatos.";
 "Apple player: %@" = "Player da Apple: %@";
+"Approval received. Your profiles are loading now." = "Aprovação recebida. Seus perfis estão sendo carregados.";
 "Approved" = "Aprovado";
 "Ask every time" = "Perguntar sempre";
 "Audio" = "Áudio";
@@ -114,6 +119,7 @@
 "Home" = "Início";
 "In library" = "Na biblioteca";
 "Inherit" = "Herdar";
+"Incorrect PIN. Try again." = "PIN incorreto. Tente novamente.";
 "Installed version" = "Versão instalada";
 "Italian" = "Italiano";
 "Japanese" = "Japonês";
@@ -129,6 +135,7 @@
 "Load more" = "Carregar mais";
 "Loading details…" = "Carregando detalhes…";
 "Loading profile settings…" = "Carregando ajustes do perfil…";
+"Loading search filters…" = "Carregando filtros de busca…";
 "Loading titles…" = "Carregando títulos…";
 "Loading your home…" = "Carregando seu início…";
 "Loading your profiles…" = "Carregando seus perfis…";
@@ -163,6 +170,7 @@
 "NAVIGATION" = "NAVEGAÇÃO";
 "Nearby Rivune servers will appear here. This can take a few seconds." = "Os servidores Rivune próximos aparecerão aqui. Isso pode levar alguns segundos.";
 "Nearby servers" = "Servidores próximos";
+"New season" = "Nova temporada";
 "Next episode" = "Próximo episódio";
 "Next month" = "Próximo mês";
 "No" = "Não";
@@ -185,6 +193,8 @@
 "Open release" = "Abrir versão";
 "Open the verified GitHub release to download the unsigned Apple package and follow its installation instructions." = "Abra a versão verificada no GitHub para baixar o pacote Apple não assinado e siga as instruções de instalação.";
 "Open your Rivune web interface, go to Devices, and enter this one-time code." = "Abra a interface web do Rivune, acesse Dispositivos e insira este código de uso único.";
+"Other" = "Outros";
+"Outside access hours" = "Fora do horário de acesso";
 "PIN" = "PIN";
 "PLAYER" = "REPRODUTOR";
 "Pair this device" = "Emparelhar este dispositivo";
@@ -209,11 +219,15 @@
 "Profile settings could not be loaded." = "Não foi possível carregar as configurações do perfil.";
 "Profile settings could not be saved." = "Não foi possível salvar as configurações do perfil.";
 "Protocol" = "Protocolo";
+"Landscape" = "Horizontal";
+"Portrait" = "Vertical";
+"Recommendation cards" = "Cartões de recomendação";
 "Recommended for you" = "Recomendado para você";
 "Reduced" = "Reduzido";
 "Refresh nearby servers" = "Atualizar servidores próximos";
 "Request a new code" = "Solicitar novo código";
 "Requesting a code" = "Solicitando código";
+"Retrying automatically in %d s" = "Nova tentativa automática em %d s";
 "Resume" = "Retomar";
 "Return to full player" = "Voltar ao player completo";
 "Rivune" = "Rivune";
@@ -260,6 +274,7 @@
 "Switch profile" = "Trocar perfil";
 "System" = "Sistema";
 "Tap to copy" = "Toque para copiar";
+"The code expires automatically. Keep this screen open while approving the device." = "O código expira automaticamente. Mantenha esta tela aberta durante a aprovação do dispositivo.";
 "The Rivune server could not be reached." = "Não foi possível acessar o servidor Rivune.";
 "The device could not be paired." = "Não foi possível emparelhar o dispositivo.";
 "The encrypted offline file could not be played." = "Não foi possível reproduzir o arquivo offline criptografado.";
@@ -273,13 +288,14 @@
 "The profile PIN is incorrect." = "O PIN do perfil está incorreto.";
 "The recent event history is too large for one QR code. The complete bounded report remains visible below." = "O histórico de eventos recentes é grande demais para um único código QR. O relatório completo, dentro dos limites definidos, continua visível abaixo.";
 "The report is generated only from allowlisted system fields and recent in-memory event codes. It contains no token, media title, profile identifier, request payload, or error detail, and Rivune never uploads it." = "O relatório é gerado apenas com campos permitidos do sistema e códigos de eventos recentes mantidos na memória. Ele não contém token, título de mídia, identificador de perfil, conteúdo de solicitação nem detalhes de erros, e o Rivune nunca o envia.";
-"The server is handling too many pairing requests. Try again later." = "O servidor está processando solicitações demais de emparelhamento. Tente novamente mais tarde.";
+"The server is handling too many pairing requests. Rivune will retry automatically." = "O servidor está processando solicitações demais de emparelhamento. O Rivune tentará novamente de forma automática.";
 "The session expired. Pair this device again." = "A sessão expirou. Emparelhe este dispositivo novamente.";
 "The update check failed." = "Não foi possível verificar se há atualizações.";
 "The update check failed. No package was downloaded." = "Não foi possível verificar se há atualizações. Nenhum pacote foi baixado.";
 "The watched state could not be updated." = "Não foi possível atualizar o status de reprodução.";
 "This account has reached its device limit." = "Esta conta atingiu o limite de dispositivos.";
 "This code expires automatically." = "Este código expira automaticamente.";
+"This device is waiting for approval from a Rivune administrator." = "Este dispositivo está aguardando a aprovação de um administrador do Rivune.";
 "This folder contains no visible titles." = "Esta pasta não contém títulos visíveis.";
 "This server must be configured in a web browser first." = "Este servidor precisa ser configurado primeiro em um navegador da web.";
 "This server uses an incompatible Rivune protocol." = "Este servidor usa um protocolo Rivune incompatível.";
@@ -297,6 +313,7 @@
 "Unencrypted HTTP. Continue only on a trusted private network." = "HTTP não criptografado. Continue apenas em uma rede privada confiável.";
 "Unlock" = "Desbloquear";
 "Unlock %@" = "Desbloquear %@";
+"Unlock %@ to continue." = "Desbloqueie %@ para continuar.";
 "Unlock %@ with the 4–8 digit PIN." = "Desbloqueie %@ com o PIN de 4 a 8 dígitos.";
 "Unlocking…" = "Desbloqueando…";
 "Untitled" = "Sem título";

@@ -76,7 +76,8 @@ final class OfflineMediaStoreTests: XCTestCase {
 
         let firstItems = await store.items(in: firstScope)
         let secondItems = await store.items(in: secondScope)
-        XCTAssertEqual(firstItems, [item])
+        XCTAssertEqual(firstItems.map(\.id), [item.id])
+        XCTAssertEqual(firstItems.first?.expirationPolicyDays, 30)
         XCTAssertTrue(secondItems.isEmpty)
         do {
             _ = try await store.playbackURL(for: item, in: secondScope)
@@ -172,7 +173,8 @@ final class OfflineMediaStoreTests: XCTestCase {
             try await Task.sleep(nanoseconds: 1_000_000)
         }
         XCTAssertTrue(model.offlineAccessUnlocked)
-        XCTAssertEqual(model.offlineItems, [item])
+        XCTAssertEqual(model.offlineItems.map(\.id), [item.id])
+        XCTAssertEqual(model.offlineItems.first?.expirationPolicyDays, 30)
 
         model.handleSceneBackground()
         XCTAssertFalse(model.offlineAccessUnlocked)
@@ -205,7 +207,8 @@ final class OfflineMediaStoreTests: XCTestCase {
         model.handleSceneBackground()
 
         XCTAssertTrue(model.offlineAccessUnlocked)
-        XCTAssertEqual(model.offlineItems, [item])
+        XCTAssertEqual(model.offlineItems.map(\.id), [item.id])
+        XCTAssertEqual(model.offlineItems.first?.expirationPolicyDays, 30)
         XCTAssertNil(model.pendingOfflineProfile)
     }
 
@@ -325,6 +328,36 @@ final class OfflineMediaStoreTests: XCTestCase {
             progress: { _ in }
         )
         XCTAssertEqual(try secondWriter.finish(), 4)
+    }
+    func testOfflinePlaybackServerStartsBeforeAcceptingConnectionsAndServesRanges() async throws {
+        let scope = try XCTUnwrap(RivuneOfflineMediaScope(
+            serverOrigin: URL(string: "https://playback.example")!,
+            profileID: UUID()
+        ))
+        let store = RivuneOfflineMediaStore()
+        let directory = try await store.storageDirectory(for: scope)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineDownloadURLProtocol.self]
+        let item = try await store.download(
+            from: URL(string: "https://download.test/complete")!,
+            titleId: UUID(),
+            title: "Playable",
+            container: "mp4",
+            posterURL: nil,
+            in: scope,
+            configuration: configuration,
+            progress: { _ in }
+        )
+
+        let playbackURL = try await store.playbackURL(for: item, in: scope)
+        var request = URLRequest(url: playbackURL)
+        request.setValue("bytes=1-2", forHTTPHeaderField: "Range")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        await store.stopPlayback()
+
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 206)
+        XCTAssertEqual(data, Data([2, 3]))
     }
 }
 

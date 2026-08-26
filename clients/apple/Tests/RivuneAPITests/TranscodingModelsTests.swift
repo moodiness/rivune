@@ -8,6 +8,7 @@ final class TranscodingModelsTests: XCTestCase {
             streamingProtocols: ["hls"],
             containers: ["mp4"],
             processingModes: [.remux, .transcodeAudio, .transcode],
+            hlsSegmentContainer: "mp4",
             maximumHeight: 2160,
             maximumVideoBitrateKbps: 12_000,
             maximumAudioChannels: 6,
@@ -17,6 +18,7 @@ final class TranscodingModelsTests: XCTestCase {
 
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(capabilities)) as? [String: Any])
         XCTAssertEqual(object["processingModes"] as? [String], ["remux", "transcode_audio", "transcode"])
+        XCTAssertEqual(object["hlsSegmentContainer"] as? String, "mp4")
         XCTAssertEqual(object["maximumHeight"] as? Int, 2160)
         XCTAssertEqual(object["maximumVideoBitrateKbps"] as? Int, 12_000)
         XCTAssertEqual(object["maximumAudioChannels"] as? Int, 6)
@@ -58,7 +60,7 @@ final class TranscodingModelsTests: XCTestCase {
           "sources":[{
             "id":"source-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test",
             "mode":"transcode","protocol":"hls","mediaTimeline":"relative","compatible":true,
-            "decision":{"reason":"subtitle_burn_required","videoAction":"transcode","audioAction":"copy","subtitleAction":"burn","toneMapping":false,"source":{"container":"matroska","videoCodec":"hevc","height":2160,"videoBitrateKbps":24000,"hdrFormat":"dolby_vision"},"target":{"protocol":"hls","container":"mpegts","videoCodec":"h264","audioCodec":"aac","height":1080,"videoBitDepth":8,"videoBitrateKbps":12000},"futureDecisionField":true}
+            "decision":{"reason":"subtitle_burn_required","reasons":["container_not_supported","subtitle_burn_required"],"videoAction":"transcode","audioAction":"copy","subtitleAction":"burn","toneMapping":false,"source":{"container":"matroska","videoCodec":"hevc","height":2160,"videoBitrateKbps":24000,"hdrFormat":"dolby_vision"},"target":{"protocol":"hls","container":"mpegts","videoCodec":"h264","audioCodec":"aac","height":1080,"videoBitDepth":8,"videoBitrateKbps":12000},"futureDecisionField":true}
           }],
           "subtitles":[{"id":"subtitle-1","addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","default":true,"delivery":"burn","futureSubtitleField":"ignored"}],
           "providerErrors":[{"addonId":"66666666-6666-4666-8666-666666666666","manifestId":"org.test","code":"future_provider_code","message":"future"}],
@@ -88,7 +90,7 @@ final class TranscodingModelsTests: XCTestCase {
           "diagnostics":{"ffmpegVersion":"7.1","ffprobeVersion":"7.1","hardwareAcceleration":"software","videoEncoder":"libx264","preferredVideoCodec":"h264","encodeCodecs":["h264"],"decodeCodecs":["h264","hevc"],"hevcMain10":true,"qualityPreset":"balanced","hardwareToneMap":false,"toneMapBackend":"software","transcodeThreads":4,"maximumReadRate":2.0,"totals":{"started":5,"succeeded":3,"failed":1,"softwareFallbacks":1},"pools":{"process":{"active":1,"limit":2},"probe":{"active":0,"limit":2},"subtitle":{"active":0,"limit":2},"trickplay":{"active":0,"limit":1}}},
           "sessions":[{
             "id":"22222222-2222-4222-8222-222222222222","title":"Contract Movie","mediaType":"movie","mode":"transcode",
-            "decision":{"reason":"video_transcode_required","videoAction":"transcode","audioAction":"transcode","subtitleAction":"none","toneMapping":true,"target":{"videoCodec":"h264","height":1080,"videoBitrateKbps":12000}},
+            "decision":{"reason":"video_transcode_required","reasons":["resolution_limit","bitrate_limit"],"videoAction":"transcode","audioAction":"transcode","subtitleAction":"none","toneMapping":true,"target":{"videoCodec":"h264","height":1080,"videoBitrateKbps":12000}},
             "username":"admin","profileId":"44444444-4444-4444-8444-444444444444","profile":"Admin","device":"iPhone","platform":"ios",
             "processing":true,"positionSeconds":120,"durationSeconds":7200,
             "createdAt":"2026-08-03T10:00:00Z","lastSeenAt":"2026-08-03T10:01:00Z","expiresAt":"2026-08-03T12:00:00Z"

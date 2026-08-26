@@ -1,3 +1,4 @@
+import RivuneAPI
 import SwiftUI
 import UniformTypeIdentifiers
 #if os(iOS) || os(visionOS)
@@ -120,6 +121,30 @@ struct RivuneDiagnosticTextDocument: FileDocument {
 
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
         FileWrapper(regularFileWithContents: Data(report.utf8))
+    }
+}
+
+extension UTType {
+    static let rivuneProfileArchive = UTType(exportedAs: "io.rivune.profile-archive", conformingTo: .json)
+}
+
+struct RivuneProfileArchiveFileDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.rivuneProfileArchive, .json] }
+    static var writableContentTypes: [UTType] { [.rivuneProfileArchive] }
+
+    let archive: ProfileArchiveDocument
+
+    init(archive: ProfileArchiveDocument) { self.archive = archive }
+
+    init(configuration: ReadConfiguration) throws {
+        guard let data = configuration.file.regularFileContents else {
+            throw ProfileArchiveError.invalidDocument
+        }
+        archive = try ProfileArchiveDocument(data: data)
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: try archive.encodedData())
     }
 }
 
