@@ -112,7 +112,7 @@ export function LoginPage({ onBack, message }: { onBack?: () => void; message?: 
       <form onSubmit={submit} className="form-stack">
         {error && <Notice>{error}</Notice>}
         <label className="field"><span>{t("auth.username")}</span><div><UserRound size={18} /><input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" autoFocus required /></div></label>
-        <label className="field"><span>{t("auth.password")}</span><div><LockKeyhole size={18} /><input type={showPassword ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required /><button type="button" className="field__action" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? t("auth.hidePassword") : t("auth.showPassword")}>{showPassword ? <EyeOff size={18} /> : <Eye size={18} />}</button></div></label>
+        <div className="field"><span id="owner-password-label">{t("auth.password")}</span><div><LockKeyhole size={18} /><input aria-labelledby="owner-password-label" type={showPassword ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required /><button type="button" className="field__action" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? t("auth.hidePassword") : t("auth.showPassword")}>{showPassword ? <EyeOff size={18} /> : <Eye size={18} />}</button></div></div>
         {onBack && <Button type="button" variant="ghost" onClick={onBack}>{t("pairing.backToPairing")}</Button>}
         <Button type="submit" loading={loading}>{t("auth.signIn")} <ArrowRight size={18} /></Button>
       </form>

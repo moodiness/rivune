@@ -1,14 +1,18 @@
-import { ArrowLeft, AudioLines, Bookmark, Captions, Check, Clapperboard, ExternalLink, Eye, EyeOff, Gauge, Info, ListVideo, LoaderCircle, Maximize, Minimize, Pause, PictureInPicture, Play, RefreshCw, RotateCcw, RotateCw, ServerCrash, Settings2, SkipForward, Star, Volume2, VolumeX, X } from "lucide-react";
+import { ArrowLeft, AudioLines, Bookmark, Captions, Check, Clapperboard, ExternalLink, Eye, EyeOff, Gauge, Info, ListVideo, LoaderCircle, Maximize, Minimize, MonitorSmartphone, Pause, PictureInPicture, Play, RefreshCw, RotateCcw, RotateCw, ServerCrash, Settings2, SkipForward, Star, Volume2, VolumeX, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { api, APIError } from "./api";
-import { Button, HorizontalDragRow, IconButton, Notice, Select } from "./components";
+import { activeProfileRequestID, api, APIError } from "./api";
+import { Button, focusableElements, HorizontalDragRow, IconButton, Notice, Select } from "./components";
 import { translate as t } from "./i18n";
 import { mediaFromLibraryItem, mediaIdentity, mediaResourceID, resolveMediaTitle, titleReleaseDate } from "./mediaIdentity";
 import { cachedMediaItem, cacheMediaItem, flushMetadataCache } from "./metadataCache";
 import { notifyError, notifyErrorMessage, notifySuccess, notifyWarning } from "./notifications";
+import { playbackDecisionOutcome, playbackDecisionReasons } from "./playbackDecision";
+import { listenForPlaybackCommands, playbackItem, publishPlaybackCommandResult, publishPlaybackState } from "./playbackCoordination";
+import { applyQualityLimits } from "./playbackQuality";
+import { enqueueReadingQueue } from "./readingQueue";
 import { TITLE_ID_PROVIDERS, titleProviderURL } from "./titleProviders";
-import type { CastMember, CustomSeriesResolveResult, EpisodeMetadata, MediaItem, PlaybackCapabilities, PlaybackMarker, PlaybackPreparation, PlaybackProgress, PlaybackSource, PlaybackSourceOption, PlaybackSubtitle, ResourceBatch, ResourceResult, SeasonMetadata, SeriesMetadata, TrailerMetadata } from "./types";
+import type { CastMember, CustomSeriesResolveResult, EpisodeMetadata, MediaItem, PlaybackCapabilities, PlaybackCommand, PlaybackDevice, PlaybackFailoverError, PlaybackFailoverState, PlaybackLoadMode, PlaybackMarker, PlaybackPreparation, PlaybackProgress, PlaybackSource, PlaybackSourceOption, PlaybackSubtitle, ResourceBatch, ResourceResult, SeasonMetadata, SeriesMetadata, TrailerMetadata } from "./types";
 export type CanonicalRouteMetadata = {
   sourceID: string;
   sourceMediaType: string;
@@ -624,6 +628,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
   const [titleID, setTitleID] = useState(item.titleId);
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [queueSaving, setQueueSaving] = useState(false);
   const [actionError, setActionError] = useState("");
   const [trailers, setTrailers] = useState<TrailerMetadata[]>([]);
   const [selectedTrailer, setSelectedTrailer] = useState<TrailerMetadata>();
@@ -678,6 +683,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
   const customChooserHeadingRef = useRef<HTMLHeadingElement>(null);
   const customStreamHeadingRef = useRef<HTMLElement>(null);
   const customPanelFocusTargetRef = useRef<"chooser" | "streams" | undefined>(undefined);
+  const restorePlayerFocusRef = useRef(false);
   const [titleProgress, setTitleProgress] = useState<PlaybackProgress>();
   const [watchedBusy, setWatchedBusy] = useState("");
   const nextSourceRef = useRef<SourceIdentity | undefined>(undefined);
@@ -1143,7 +1149,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
       mediaType: playbackMediaType,
       resourceId: streamResourceID,
       addonId: item.mediaType === "tv" ? item.sourceAddonId : undefined,
-      capabilities: webPlaybackCapabilities(),
+      capabilities: applyQualityLimits(webPlaybackCapabilities()),
     }, controller.signal).then((response) => {
       if (!active) return;
       const options = response.sources;
@@ -1253,6 +1259,28 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
     }
   }
 
+  async function addToReadingQueue() {
+    const profileId = activeProfileRequestID();
+    if (customType || !profileId || !streamResourceID) return;
+    setQueueSaving(true);
+    setActionError("");
+    try {
+      await enqueueReadingQueue(profileId, {
+        mediaType: playbackMediaType as "movie" | "series" | "episode" | "tv",
+        resourceId: streamResourceID,
+        ...(details.sourceAddonId ? { sourceAddonId: details.sourceAddonId } : {}),
+        ...(details.titleId ? { titleId: details.titleId } : {}),
+        title: details.title,
+        ...(details.posterUrl ? { posterUrl: details.posterUrl } : {}),
+      });
+      notifySuccess(t("queue.notice.added", { title: details.title }));
+    } catch (cause) {
+      setActionError(notifyError(cause, t("queue.error.mutation")));
+    } finally {
+      setQueueSaving(false);
+    }
+  }
+
   async function showTrailer() {
     if (activeTrailers.length > 0 || activeTrailerLoading || activeTrailerUnavailable) return;
     trailerRevealPendingRef.current = true;
@@ -1353,6 +1381,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
 
   function playPlaybackStream(option: PlaybackSourceOption) {
     autoPlayNextRef.current = false;
+    restorePlayerFocusRef.current = false;
     if (selectedStream?.sourceRef === option.sourceRef && preparation) {
       playRequestedSourceRef.current = "";
       setPlaying(true);
@@ -1656,7 +1685,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
   const cachedSeriesContextPoster = item.mediaType === "series" || details.posterUrl !== item.posterUrl
     ? details.posterUrl
     : undefined;
-  const seriesContextPoster = selectedSeasonPoster || series?.posterUrl || (!series ? cachedSeriesContextPoster : undefined);
+  const seriesContextPoster = selectedSeasonPoster || cachedSeriesContextPoster || series?.posterUrl;
   const seriesContextBackdrop = selectedSeasonEpisode?.backdropUrl || selectedSeasonEpisode?.stillUrl || selectedSeasonBackdrop || series?.backdropUrl;
   const backdrop = seriesContextEnabled
     ? seriesContextBackdrop
@@ -1686,7 +1715,12 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
     : activeTrailer?.isFallback ? t("media.trailers.fallbackLanguage") : t("media.trailers.preferredLanguage");
 
   if (playing && selectedStream) {
-    return <Player item={activePlayerItem} sourceRef={selectedStream.sourceRef} startSeconds={preparationStartSeconds} autoplayNextEpisode={autoplayNextEpisode} onClose={() => setPlaying(false)} onSourceExpired={() => { setPlaying(false); setStreamRefreshVersion((version) => version + 1); }} onEnded={selectedEpisode ? handleEpisodeEnded : activeCustomVideo ? handleCustomVideoEnded : undefined} />;
+    const closePlayer = () => {
+      restorePlayerFocusRef.current = true;
+      setPlaying(false);
+    };
+    const candidateSourceRefs = [selectedStream.sourceRef, ...availableStreams.map((option) => option.sourceRef).filter((candidate) => candidate !== selectedStream.sourceRef)].slice(0, 8);
+    return <Player item={activePlayerItem} sourceRef={selectedStream.sourceRef} candidateSourceRefs={candidateSourceRefs} startSeconds={preparationStartSeconds} autoplayNextEpisode={autoplayNextEpisode} onClose={closePlayer} onSourceExpired={() => { closePlayer(); setStreamRefreshVersion((version) => version + 1); }} onEnded={selectedEpisode ? handleEpisodeEnded : activeCustomVideo ? handleCustomVideoEnded : undefined} />;
   }
 
   const isEpisodeContext = item.mediaType === "episode" || Boolean(customEpisodeContext);
@@ -1809,6 +1843,9 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                 {(item.mediaType === "movie" || item.mediaType === "episode") && <Button type="button" variant="secondary" loading={Boolean(watchedBusy)} aria-busy={Boolean(watchedBusy)} aria-label={t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")} onClick={() => void toggleTitleWatched()}>
                   {titleProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}
                   {t(titleProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")}
+                </Button>}
+                {!customType && <Button variant="secondary" loading={queueSaving} disabled={!streamResourceID} onClick={() => void addToReadingQueue()}>
+                  <ListVideo size={19} /> {t("queue.actions.add")}
                 </Button>}
                 {customEpisodeContext && activeCustomVideo && <Button type="button" variant="secondary" disabled={customVideoIsUpcoming(activeCustomVideo) || !activeCustomIdentity || !customProgressConfirmed} loading={customWatchPending || watchedBusy === activeCustomIdentity?.titleId} aria-busy={customWatchPending || watchedBusy === activeCustomIdentity?.titleId} aria-label={t(selectedProgress?.completed ? "media.watch.actions.markUnwatched" : "media.watch.actions.markWatched")} onClick={() => void toggleCustomVideoWatched(activeCustomVideo)}>
                   {selectedProgress?.completed ? <EyeOff size={19} /> : <Eye size={19} />}
@@ -2074,7 +2111,12 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                                         : <small>{t("common.status.selected")}</small>}
                                 </span>}
                               </button>
-                              {selected && <button type="button" className="episode-play" data-media-action="play-selected-stream" aria-label={`${item.mediaType === "episode" ? t("media.details.playEpisode") : t("media.details.playSelectedStream")}: ${option.name}`} disabled={playDisabled} onClick={() => playPlaybackStream(option)}>
+                              {selected && <button ref={(node) => {
+                                if (!node) return;
+                                if (!restorePlayerFocusRef.current) return;
+                                restorePlayerFocusRef.current = false;
+                                window.requestAnimationFrame(() => node.focus({ preventScroll: true }));
+                              }} type="button" className="episode-play" data-media-action="play-selected-stream" aria-label={`${item.mediaType === "episode" ? t("media.details.playEpisode") : t("media.details.playSelectedStream")}: ${option.name}`} disabled={playDisabled} onClick={() => playPlaybackStream(option)}>
                                 <Play size={16} fill="currentColor" />
                               </button>}
                             </div>;
@@ -2122,7 +2164,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
 }
 
 type PlayerPhase = "preparing" | "ready" | "playing" | "paused" | "buffering" | "recovering" | "failed" | "ended";
-type PlayerPanel = "sources" | "audio" | "subtitles" | "speed" | "stats" | null;
+type PlayerPanel = "sources" | "audio" | "subtitles" | "speed" | "stats" | "remote" | null;
 type PlayerPreferences = { volume: number; muted: boolean; rate: number };
 type PlayerStats = { bufferedAhead: number; droppedFrames: number; totalFrames: number; width: number; height: number };
 type ProgressWrite = { titleID: string; positionSeconds: number; durationSeconds: number; completed: boolean; expectedVersion: number };
@@ -2211,7 +2253,10 @@ function skipMarkerLabel(type: PlaybackMarker["type"]): string {
 }
 
 
-export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onClose, onSourceExpired, onEnded }: { item: MediaItem; sourceRef: string; startSeconds: number; autoplayNextEpisode: boolean; onClose: () => void; onSourceExpired: () => void; onEnded?: () => void }) {
+export function Player(
+  { item, sourceRef, candidateSourceRefs, startSeconds, autoplayNextEpisode, onClose, onSourceExpired, onEnded }:
+  { item: MediaItem; sourceRef: string; candidateSourceRefs: string[]; startSeconds: number; autoplayNextEpisode: boolean; onClose: () => void; onSourceExpired: () => void; onEnded?: () => void },
+) {
   const initialPreferences = useRef(loadPlayerPreferences()).current;
   const playerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -2242,6 +2287,12 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   const [playbackGeneration, setPlaybackGeneration] = useState(0);
   const [subtitleResolveGeneration, setSubtitleResolveGeneration] = useState(0);
   const [retryVersion, setRetryVersion] = useState(0);
+  const [activeSourceRef, setActiveSourceRef] = useState(sourceRef);
+  const [failoverReady, setFailoverReady] = useState(candidateSourceRefs.length < 2);
+  const [failoverState, setFailoverState] = useState<PlaybackFailoverState>();
+  const [failoverNotice, setFailoverNotice] = useState("");
+  const failoverRef = useRef<PlaybackFailoverState | undefined>(undefined);
+  const failoverPendingRef = useRef(false);
   const [seekPreview, setSeekPreview] = useState<number | null>(null);
   const [seekFeedback, setSeekFeedback] = useState<{ seconds: number; id: number }>();
   const [paused, setPaused] = useState(true);
@@ -2254,6 +2305,11 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   const [selectedSubtitleID, setSelectedSubtitleID] = useState("none");
   const [stats, setStats] = useState<PlayerStats>({ bufferedAhead: 0, droppedFrames: 0, totalFrames: 0, width: 0, height: 0 });
   const titleIDRef = useRef(item.titleId);
+  const [coordinationDevices, setCoordinationDevices] = useState<PlaybackDevice[]>([]);
+  const [coordinationTarget, setCoordinationTarget] = useState("");
+  const [coordinationMode, setCoordinationMode] = useState<PlaybackLoadMode>("play-copy");
+  const [coordinationPending, setCoordinationPending] = useState(false);
+  const [coordinationError, setCoordinationError] = useState("");
   const progressVersionRef = useRef(0);
   const resumePositionRef = useRef(startSeconds);
   const lastSavedPositionRef = useRef(0);
@@ -2266,7 +2322,49 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   const seekTransportRef = useRef<((position: number) => void) | undefined>(undefined);
   const pausedAtRef = useRef(0);
   const subtitlePreferenceRef = useRef<string | undefined>(undefined);
+  const coordinationOperationRef = useRef(typeof item.raw?.coordinationOperationId === "string" ? item.raw.coordinationOperationId : "");
+  const coordinationReportedRef = useRef(false);
   const subtitleHandoffRef = useRef(false);
+
+  useEffect(() => {
+    const candidates = [...new Set(candidateSourceRefs.map((candidate) => candidate.trim()).filter(Boolean))].slice(0, 8);
+    if (candidates.length < 2 || candidates[0] !== sourceRef) {
+      failoverRef.current = undefined;
+      setFailoverState(undefined);
+      setFailoverReady(true);
+      return;
+    }
+    let active = true;
+    setFailoverReady(false);
+    const storageKey = `rivune.playback-failover.v1:${item.titleId || item.id}:${sourceRef}`;
+    void (async () => {
+      const existingID = sessionStorage.getItem(storageKey);
+      if (existingID) {
+        try {
+          const existing = await api.playbackFailover(existingID);
+          if (existing.status === "active") {
+            if (!active) return;
+            failoverRef.current = existing;
+            setFailoverState(existing);
+            setActiveSourceRef(existing.currentSourceRef);
+            return;
+          }
+        } catch {
+          sessionStorage.removeItem(storageKey);
+        }
+      }
+      const created = await api.createPlaybackFailover({ candidateSourceRefs: candidates, selectedSourceRef: sourceRef });
+      if (!active) return;
+      failoverRef.current = created;
+      setFailoverState(created);
+      sessionStorage.setItem(storageKey, created.id);
+    })().catch(() => {
+      if (!active) return;
+      failoverRef.current = undefined;
+      setFailoverState(undefined);
+    }).finally(() => { if (active) setFailoverReady(true); });
+    return () => { active = false; };
+  }, [item.id, item.titleId, sourceRef]);
 
   useEffect(() => {
     setProgressReady(false);
@@ -2314,7 +2412,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   }, [item.episodeNumber, item.externalIds?.imdb, item.id, item.mediaType, item.seasonNumber]);
 
   useEffect(() => {
-    if (!progressReady) return;
+    if (!progressReady || !failoverReady) return;
     let active = true;
     setLoading(true);
     setPhase(subtitleHandoffRef.current || sessionIDRef.current ? "recovering" : "preparing");
@@ -2326,12 +2424,13 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     setVideoDuration(0);
     setPlaybackStart(undefined);
     setSeekPreview(null);
+    const captionPreference = document.documentElement.dataset.captions;
     void api.resolvePlayback({
-      sourceRef,
+      sourceRef: activeSourceRef,
       startSeconds: Math.max(0, Math.floor(resumePositionRef.current)),
       titleId: item.titleId,
       preferredAudioTrack,
-      preferredSubtitleId: subtitlePreferenceRef.current,
+      preferredSubtitleId: captionPreference === "off" ? "none" : subtitlePreferenceRef.current,
     }).then((session) => {
       if (!active) {
         void api.stopPlayback(session.id).catch(() => undefined);
@@ -2345,17 +2444,29 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       setStreams(resolvedSources);
       setSubtitles(resolvedSubtitles);
       setSelectedAudioTrack(session.selectedAudioTrack);
-      const requestedSubtitleID = session.selectedSubtitleId || "none";
-      const resolvedSubtitleID = resolvedSubtitles.some((subtitle) => subtitle.id === requestedSubtitleID && playbackSubtitleAvailable(subtitle)) ? requestedSubtitleID : "none";
+      const requestedSubtitleID = document.documentElement.dataset.captions === "off" ? "none" : session.selectedSubtitleId || "none";
+      const automaticSubtitle = document.documentElement.dataset.captions === "on" && requestedSubtitleID === "none"
+        ? resolvedSubtitles.find((subtitle) => playbackSubtitleAvailable(subtitle) && subtitle.delivery !== "burn" && subtitle.default)
+          ?? resolvedSubtitles.find((subtitle) => playbackSubtitleAvailable(subtitle) && subtitle.delivery !== "burn")
+        : undefined;
+      const resolvedSubtitleID = automaticSubtitle?.id ?? (resolvedSubtitles.some((subtitle) => subtitle.id === requestedSubtitleID && playbackSubtitleAvailable(subtitle)) ? requestedSubtitleID : "none");
       subtitlePreferenceRef.current = resolvedSubtitleID;
       setSelectedSubtitleID(resolvedSubtitleID);
       const compatible = resolvedSources.filter(playerSourceAvailable);
       const selectedIndex = compatible.findIndex((source) => source.id === session.selectedSourceId);
       setSelected(selectedIndex < 0 ? 0 : selectedIndex);
       setPhase("ready");
+      if (coordinationOperationRef.current && !coordinationReportedRef.current) {
+        coordinationReportedRef.current = true;
+        publishPlaybackCommandResult({ operationId: coordinationOperationRef.current, status: "applied", code: "applied" });
+      }
     }).catch((cause) => {
       if (!active) return;
       stopCurrentSession();
+      if (coordinationOperationRef.current && !coordinationReportedRef.current) {
+        coordinationReportedRef.current = true;
+        publishPlaybackCommandResult({ operationId: coordinationOperationRef.current, status: "failed", code: "execution_failed" });
+      }
       if (cause instanceof APIError && cause.code === "playback_source_expired") {
         onSourceExpired();
         return;
@@ -2379,7 +2490,72 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       setLoading(false);
     });
     return () => { active = false; };
-  }, [item.id, item.titleId, onSourceExpired, preferredAudioTrack, progressReady, retryVersion, sourceRef, subtitleResolveGeneration]);
+  }, [activeSourceRef, failoverReady, item.id, item.titleId, onSourceExpired, preferredAudioTrack, progressReady, retryVersion, subtitleResolveGeneration]);
+  useEffect(() => {
+    const stopListening = listenForPlaybackCommands((command: PlaybackCommand) => {
+      const video = videoRef.current;
+      if (!video) return "invalid_state";
+      if (command.command === "play") {
+        void video.play();
+        return "applied";
+      }
+      if (command.command === "pause") {
+        video.pause();
+        return "applied";
+      }
+      if (command.command === "seek" && command.positionMilliseconds !== undefined) {
+        commitSeek(command.positionMilliseconds / 1_000, true);
+        return "applied";
+      }
+      if (command.command === "stop") {
+        closePlayer();
+        return "applied";
+      }
+      return "unsupported";
+    });
+    return stopListening;
+  });
+  useEffect(() => {
+    if (panel !== "remote") return;
+    let active = true;
+    const refresh = () => void api.playbackDevices().then(({ devices }) => {
+      if (!active) return;
+      const targets = devices.filter((device) => !device.current && device.capabilities.includes("remote-control"));
+      setCoordinationDevices(targets);
+      setCoordinationTarget((current) => targets.some((device) => device.sessionId === current) ? current : targets[0]?.sessionId ?? "");
+    }).catch(() => { if (active) setCoordinationError(t("player.remote.loadFailed")); });
+    refresh();
+    const timer = window.setInterval(refresh, 5_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [panel]);
+
+  async function sendRemoteCommand(command: PlaybackCommand["command"], positionMilliseconds?: number) {
+    const target = coordinationDevices.find((device) => device.sessionId === coordinationTarget);
+    if (!target || coordinationPending) return;
+    setCoordinationPending(true);
+    setCoordinationError("");
+    try {
+      const operationId = crypto.randomUUID();
+      const itemState = playbackItem(item);
+      const sent = await api.sendPlaybackCommand(target.sessionId, { operationId, command, targetRevision: target.revision, ...(positionMilliseconds !== undefined ? { positionMilliseconds } : {}), ...(command === "load" ? { mode: coordinationMode, ...(itemState ? { item: itemState } : {}) } : {}) });
+      if (command !== "load") return;
+      let result = sent;
+      while (result.status === "pending" && Date.now() < Date.parse(result.expiresAt)) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 1_000));
+        result = await api.outgoingPlaybackCommand(operationId);
+      }
+      if (result.status !== "applied") throw new Error(result.resultCode ?? "expired");
+      if (coordinationMode === "handoff") closePlayer();
+    } catch {
+      setCoordinationError(t("player.remote.commandFailed"));
+    } finally { setCoordinationPending(false); }
+  }
+
+  useEffect(() => {
+    const itemState = playbackItem(item) ?? undefined;
+    publishPlaybackState({ status: phase === "playing" ? "playing" : phase === "ended" ? "ended" : phase === "failed" ? "idle" : "paused", item: itemState, positionMilliseconds: Math.max(0, Math.round(currentTime * 1_000)), durationMilliseconds: Math.max(0, Math.round(playbackDurationRef.current * 1_000)) });
+    return () => publishPlaybackState({ status: "idle", positionMilliseconds: 0, durationMilliseconds: 0 });
+  }, [currentTime, item, phase]);
 
   const playable = useMemo(() => streams.filter(playerSourceAvailable), [streams]);
   const stream = playable[selected];
@@ -2496,14 +2672,18 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         setPhase("failed");
       });
     };
-    const failPlayback = (message: string) => {
+    const failPlayback = (message: string, failure?: PlaybackFailoverError) => {
+      if (failure && failoverRef.current?.status === "active") {
+        void requestSourceFailover(failure, message);
+        return;
+      }
       setPaused(true);
       setError(notifyErrorMessage(message, t("player.error.unavailableTitle")));
       setPhase("failed");
     };
     const handleMediaError = (event: Event) => {
       if (event.target instanceof HTMLTrackElement) return;
-      failPlayback(t("player.error.sourcePlayFailed"));
+      failPlayback(t("player.error.sourcePlayFailed"), "source_failed");
     };
 
     video.volume = volume;
@@ -2539,11 +2719,9 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         });
         destroyHLS = () => hls.destroy();
         let mediaRecoveries = 0;
-        let networkRecoveries = 0;
         seekTransport = (position: number) => {
           hls.stopLoad();
           mediaRecoveries = 0;
-          networkRecoveries = 0;
           video.currentTime = position;
           hls.startLoad(position);
         };
@@ -2568,11 +2746,8 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
             hls.recoverMediaError();
             return;
           }
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRecoveries < 2) {
-            networkRecoveries += 1;
-            hls.stopLoad();
-            if (String(data.details).toLowerCase().includes("manifest")) hls.loadSource(sourceURL);
-            else hls.startLoad(video.currentTime);
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            failPlayback(t("player.error.hlsStopped"), String(data.details).toLowerCase().includes("timeout") ? "source_timeout" : "source_failed");
             return;
           }
           failPlayback(t("player.error.hlsStopped"));
@@ -2620,19 +2795,18 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
 
   useEffect(() => {
     const appRoot = document.getElementById("root");
-    if (!appRoot) return;
+    const player = playerRef.current;
+    if (!appRoot || !player) return;
     const wasInert = appRoot.inert;
     const previousAriaHidden = appRoot.getAttribute("aria-hidden");
     const previousBodyOverflow = document.body.style.overflow;
     const previousRootOverflow = document.documentElement.style.overflow;
-    if (document.activeElement instanceof HTMLElement && appRoot.contains(document.activeElement)) document.activeElement.blur();
+    player.focus({ preventScroll: true });
     appRoot.inert = true;
     appRoot.setAttribute("aria-hidden", "true");
     document.body.style.overflow = "hidden";
     document.documentElement.style.overflow = "hidden";
-    const focusFrame = window.requestAnimationFrame(() => playerRef.current?.focus());
     return () => {
-      window.cancelAnimationFrame(focusFrame);
       appRoot.inert = wasInert;
       if (previousAriaHidden === null) appRoot.removeAttribute("aria-hidden");
       else appRoot.setAttribute("aria-hidden", previousAriaHidden);
@@ -2642,8 +2816,27 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
   }, []);
 
   useEffect(() => {
-    if (!stream?.url && !stream?.infoHash) return;
-    const frame = window.requestAnimationFrame(() => playerRef.current?.querySelector<HTMLElement>(".player__external-action, .player__control-primary")?.focus());
+    const player = playerRef.current;
+    if (!player) return;
+    const containFocus = (event: FocusEvent) => {
+      const scope: HTMLElement = panelRef.current ?? player;
+      if (event.target instanceof Node && scope.contains(event.target)) return;
+      (focusableElements(scope)[0] ?? player).focus({ preventScroll: true });
+    };
+    document.addEventListener("focusin", containFocus, true);
+    return () => document.removeEventListener("focusin", containFocus, true);
+  }, [panel]);
+
+  useEffect(() => {
+    if (!stream) return;
+    const frame = window.requestAnimationFrame(() => {
+      const player = playerRef.current;
+      if (!player || panelRef.current) return;
+      const primaryControl = player.querySelector<HTMLElement>(".player__external-action")
+        ?? player.querySelector<HTMLElement>(".player__control-primary")
+        ?? player.querySelector<HTMLElement>("[data-player-action='close']");
+      primaryControl?.focus({ preventScroll: true });
+    });
     return () => window.cancelAnimationFrame(frame);
   }, [stream?.id, stream?.infoHash, stream?.url]);
 
@@ -2654,11 +2847,11 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       if (panel) {
         const panelElement = panelRef.current;
         const selectedOption = panelElement?.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]');
-        const firstControl = panelElement?.querySelector<HTMLElement>("[data-player-control]");
-        (selectedOption ?? firstControl)?.focus();
+        const firstControl = panelElement?.querySelector<HTMLElement>("[data-player-control], button:not(:disabled), [role='combobox']");
+        (selectedOption ?? firstControl)?.focus({ preventScroll: true });
         return;
       }
-      if (previousPanel && panelTriggerRef.current?.isConnected) panelTriggerRef.current.focus();
+      if (previousPanel && panelTriggerRef.current?.isConnected) panelTriggerRef.current.focus({ preventScroll: true });
     });
     return () => window.cancelAnimationFrame(frame);
   }, [panel]);
@@ -2696,8 +2889,23 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         event.preventDefault();
         if (panel) closePanel();
         else if (fullscreenKind !== "none" || document.fullscreenElement === playerRef.current) void exitPlayerFullscreen();
-        else if (!controlsVisible) revealControls();
         else closePlayer();
+        return;
+      }
+      if (event.key === "Tab") {
+        const player = playerRef.current;
+        if (!player) return;
+        const scope = panelRef.current ?? player;
+        const candidates = focusableElements(scope);
+        const activeIndex = document.activeElement instanceof HTMLElement ? candidates.indexOf(document.activeElement) : -1;
+        const nextIndex = event.shiftKey ? candidates.length - 1 : 0;
+        if (candidates.length === 0) {
+          event.preventDefault();
+          player.focus({ preventScroll: true });
+        } else if (activeIndex < 0 || !event.shiftKey && activeIndex === candidates.length - 1 || event.shiftKey && activeIndex === 0) {
+          event.preventDefault();
+          candidates[nextIndex]?.focus({ preventScroll: true });
+        }
         return;
       }
       if (interactive) return;
@@ -2853,6 +3061,57 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
 
   function stopCurrentSession() {
     void releaseCurrentSession().catch(() => undefined);
+  }
+
+  async function requestSourceFailover(failure: PlaybackFailoverError, fallbackMessage: string) {
+    const current = failoverRef.current;
+    if (!current || current.status !== "active" || failoverPendingRef.current) {
+      setPaused(true);
+      setError(notifyErrorMessage(fallbackMessage, t("player.error.unavailableTitle")));
+      setPhase("failed");
+      return;
+    }
+    failoverPendingRef.current = true;
+    const video = videoRef.current;
+    const position = Math.max(0, Math.floor(video ? playbackOffsetRef.current + video.currentTime : currentTime));
+    resumePositionRef.current = position;
+    setPaused(true);
+    setPhase("recovering");
+    setFailoverNotice("");
+    try {
+      const next = await api.advancePlaybackFailover(current.id, { error: failure, positionSeconds: position, expectedRevision: current.revision });
+      failoverRef.current = next;
+      setFailoverState(next);
+      if (next.status !== "active" || !next.currentSourceRef || next.currentSourceRef === activeSourceRef) {
+        setError(notifyErrorMessage(t("player.failover.exhausted"), t("player.error.unavailableTitle")));
+        setPhase("failed");
+        return;
+      }
+      await releaseCurrentSession().catch(() => undefined);
+      setError("");
+      setPlaybackStart(position);
+      setFailoverNotice(t("player.failover.switched", { position: formatPlaybackTime(position), source: next.currentPosition + 1 }));
+      setActiveSourceRef(next.currentSourceRef);
+    } catch (cause) {
+      setError(notifyError(cause, fallbackMessage, t("player.error.unavailableTitle")));
+      setPhase("failed");
+    } finally {
+      failoverPendingRef.current = false;
+    }
+  }
+
+  async function cancelSourceFailover() {
+    const current = failoverRef.current;
+    if (!current || current.status !== "active") return;
+    try {
+      await api.cancelPlaybackFailover(current.id);
+      const cancelled = { ...current, status: "cancelled" as const, revision: current.revision + 1 };
+      failoverRef.current = cancelled;
+      setFailoverState(cancelled);
+      setFailoverNotice(t("player.failover.cancelled"));
+    } catch (cause) {
+      notifyError(cause, t("player.failover.cancelFailed"), t("player.error.unavailableTitle"));
+    }
   }
 
   function closePlayer() {
@@ -3213,8 +3472,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
     const position = playbackOffsetRef.current + video.currentTime;
     const duration = playbackDurationRef.current;
     if (duration > 0 && position < duration - 10) {
-      setError(notifyErrorMessage(t("player.error.sourceEndedEarly"), t("player.error.sourceEndedEarlyTitle")));
-      setPhase("failed");
+      void requestSourceFailover("ended_early", t("player.error.sourceEndedEarly"));
       return;
     }
     setPhase("ended");
@@ -3324,7 +3582,8 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
       : panel === "subtitles" ? t("player.panel.subtitles")
         : panel === "speed" ? t("player.panel.speed")
           : panel === "stats" ? t("player.panel.diagnostics")
-            : "";
+        : panel === "remote" ? t("player.panel.remote")
+          : "";
 
   return createPortal(<div ref={playerRef} className={`player player--${phase}${controlsVisible ? " has-controls" : " controls-hidden"}`} role="dialog" aria-modal="true" aria-label={t("player.playingTitle", { title: item.title })} aria-busy={loading || phase === "preparing" || phase === "buffering" || phase === "recovering"} data-player-state={phase} data-controls-visible={controlsVisible} tabIndex={-1} onPointerMove={revealControls} onPointerDown={revealControls} onFocusCapture={revealControls}>
     <div className="player__surface" onClick={handleSurfaceClick} onDoubleClick={handleSurfaceDoubleClick} onPointerUp={handleSurfacePointerUp}>
@@ -3351,6 +3610,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
 
     {(loading || phase === "preparing") && <div className="player__loading" role="status" aria-live="polite" aria-busy="true"><span className="player__pulse"><LoaderCircle className="spin" /></span><strong>{t("player.loading.title")}</strong><p>{t("player.loading.description")}</p></div>}
     {(phase === "buffering" || phase === "recovering") && <div className="player__buffering" role="status" aria-live="polite" aria-busy="true"><LoaderCircle className="spin" /><span>{t(phase === "recovering" ? "player.status.recovering" : "player.status.buffering")}</span></div>}
+    {failoverNotice && <div className="player__failover" role="status" aria-live="polite"><span>{failoverNotice}</span>{failoverState?.status === "active" && <Button variant="secondary" onClick={() => void cancelSourceFailover()} data-player-control>{t("common.cancel")}</Button>}</div>}
     {seekFeedback && <div key={seekFeedback.id} className={`player__seek-feedback ${seekFeedback.seconds < 0 ? "is-backward" : "is-forward"}`}>{seekFeedback.seconds < 0 ? <RotateCcw /> : <RotateCw />}<span>{t("player.seek.feedbackSeconds", { sign: seekFeedback.seconds > 0 ? "+" : "", seconds: seekFeedback.seconds })}</span></div>}
     {playbackBlocked && phase !== "failed" && <button type="button" className="player__start" onClick={togglePlayback} data-player-control><Play size={30} fill="currentColor" /><span>{t("player.actions.play")}</span></button>}
     {phase === "failed" && <div className="player__failure" role="alert"><ServerCrash size={34} /><strong>{t("player.error.unavailableTitle")}</strong><p>{error || t("player.error.streamPlayFailed")}</p><div><Button onClick={retryPlayback} data-player-control><RefreshCw size={17} /> {t("common.actions.retry")}</Button><Button variant="secondary" onClick={closePlayer} data-player-control>{t("common.actions.goBack")}</Button></div></div>}
@@ -3396,6 +3656,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
           <button type="button" aria-label={t("player.panel.diagnostics")} aria-controls="player-panel-stats" aria-expanded={panel === "stats"} aria-haspopup="dialog" className={panel === "stats" ? "is-active" : ""} onClick={() => togglePanel("stats")} data-player-action="diagnostics" data-player-control><Info size={19} /></button>
           {document.pictureInPictureEnabled && <button type="button" aria-label={t("player.pictureInPicture.label")} onClick={() => void togglePictureInPicture()} data-player-action="picture-in-picture" data-player-control><PictureInPicture size={19} /></button>}
           {fullscreenSupported && <button type="button" className="player__fullscreen" aria-label={t(fullscreenKind === "none" ? "player.fullscreen.enter" : "player.fullscreen.exit")} aria-pressed={fullscreenKind !== "none"} onClick={() => void toggleFullscreen()} data-player-action="fullscreen" data-player-control>{fullscreenKind === "none" ? <Maximize size={19} /> : <Minimize size={19} />}</button>}
+          <button type="button" aria-label={t("player.panel.remote")} aria-controls="player-panel-remote" aria-expanded={panel === "remote"} aria-haspopup="dialog" className={panel === "remote" ? "is-active" : ""} onClick={() => togglePanel("remote")} data-player-action="remote" data-player-control><MonitorSmartphone size={19} /></button>
         </div>
       </div>
     </div>}
@@ -3420,6 +3681,12 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         {selectableSubtitles.map((subtitle) => <button key={subtitle.id} type="button" role="radio" aria-checked={selectedSubtitleID === subtitle.id} className={selectedSubtitleID === subtitle.id ? "is-active" : ""} onClick={() => selectSubtitle(subtitle.id)} data-player-control><span><strong>{(subtitle.language || t("common.fallback.unknown")).toUpperCase()}</strong><small>{t(subtitle.default ? "player.subtitles.defaultTrack" : "player.subtitles.track")}</small></span>{selectedSubtitleID === subtitle.id && <Check size={17} />}</button>)}
       </div>}
       {panel === "speed" && <div className="player__speed-grid" role="radiogroup" aria-label={panelTitle} data-player-layout="grid" data-player-columns="3">{playbackRates.map((rate) => <button key={rate} type="button" role="radio" aria-checked={playbackRate === rate} className={playbackRate === rate ? "is-active" : ""} onClick={() => changePlaybackRate(rate)} data-player-control>{rate}×</button>)}</div>}
+      {panel === "remote" && <div className="player__remote">
+        {coordinationError && <Notice>{coordinationError}</Notice>}
+        <label><span>{t("player.remote.target")}</span><Select value={coordinationTarget} disabled={coordinationPending} onChange={setCoordinationTarget} options={coordinationDevices.length ? coordinationDevices.map((device) => ({ value: device.sessionId, label: `${device.name} · ${device.platform}` })) : [{ value: "", label: t("player.remote.empty"), disabled: true }]} /></label>
+        <label><span>{t("player.remote.mode")}</span><Select value={coordinationMode} disabled={coordinationPending} onChange={(value) => setCoordinationMode(value as PlaybackLoadMode)} options={[{ value: "play-copy", label: t("player.remote.playCopy") }, { value: "handoff", label: t("player.remote.handoff") }]} /></label>
+        <div className="player__remote-actions"><Button loading={coordinationPending} disabled={!coordinationTarget} onClick={() => void sendRemoteCommand("load", Math.round(currentTime * 1_000))}>{t("player.remote.send")}</Button><Button variant="secondary" disabled={!coordinationTarget || coordinationPending} onClick={() => void sendRemoteCommand("play")}>{t("player.actions.play")}</Button><Button variant="secondary" disabled={!coordinationTarget || coordinationPending} onClick={() => void sendRemoteCommand("pause")}>{t("player.actions.pause")}</Button><Button variant="secondary" disabled={!coordinationTarget || coordinationPending} onClick={() => void sendRemoteCommand("seek", Math.round(currentTime * 1_000))}>{t("player.remote.syncPosition")}</Button></div>
+      </div>}
       {panel === "stats" && <dl className="player__stats">
         <div><dt>{t("player.diagnostics.status")}</dt><dd>{playerPhaseLabel(phase)}</dd></div>
         <div><dt>{t("player.diagnostics.mode")}</dt><dd>{modeLabel}</dd></div>
@@ -3429,6 +3696,7 @@ export function Player({ item, sourceRef, startSeconds, autoplayNextEpisode, onC
         <div><dt>{t("player.diagnostics.hdr")}</dt><dd>{stream?.media?.hdrFormat?.toUpperCase() || "SDR"}</dd></div>
         <div><dt>{t("player.diagnostics.buffer")}</dt><dd>{stats.bufferedAhead.toFixed(1)}s</dd></div>
         <div><dt>{t("player.diagnostics.droppedFrames")}</dt><dd>{stats.droppedFrames} / {stats.totalFrames}</dd></div>
+        {stream?.decision && <><div><dt>{t("player.diagnostics.outcome")}</dt><dd>{playbackDecisionOutcome(stream.decision)}</dd></div>{playbackDecisionReasons(stream.decision).map((reason) => <div key={reason}><dt>{t("player.diagnostics.reason")}</dt><dd>{reason}</dd></div>)}</>}
       </dl>}
     </section>}
   </div>, document.body);
