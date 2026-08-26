@@ -255,13 +255,14 @@
                 <Grid x:Name="AuthColumns" ColumnSpacing="0">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="2*" /><ColumnDefinition Width="3*" /></Grid.ColumnDefinitions>
                     <StackPanel x:Name="AuthIntro" Visibility="Collapsed" VerticalAlignment="Center" Margin="0,0,32,0" Spacing="16" MaxWidth="400">
-                        <StackPanel Orientation="Horizontal" Spacing="12">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                             <Border Width="48" Height="48" Background="{ThemeResource RivuneBrandMarkBrush}" BorderBrush="{ThemeResource RivuneStrongOutlineBrush}" BorderThickness="1" CornerRadius="{StaticResource RivuneRadiusSmall}"><ContentControl Width="48" Height="48" IsTabStop="False" Template="{StaticResource RivuneMarkTemplate}" /></Border>
-                            <StackPanel VerticalAlignment="Center">
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
                                 <TextBlock Text="Rivune" Style="{StaticResource RivuneTitleMediumTextStyle}" CharacterSpacing="-9" />
                                 <TextBlock Text="Your stories, gathered in one place." Style="{StaticResource RivuneBodySmallTextStyle}" />
                             </StackPanel>
-                        </StackPanel>
+                        </Grid>
                     </StackPanel>
                     <Border x:Name="AuthForm" Grid.Column="0" Grid.ColumnSpan="2" Style="{StaticResource RivuneFunctionalSurface}" MaxWidth="560" HorizontalAlignment="Stretch" VerticalAlignment="Center" Padding="24">
                         <Grid>
@@ -280,7 +281,7 @@
                                         <ListView.ItemTemplate>
                                             <DataTemplate>
                                                 <Grid MinHeight="56" Padding="8" ColumnSpacing="12">
-                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="2*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                                                     <StackPanel Spacing="2">
                                                         <TextBlock Text="{Binding Name}" Style="{StaticResource RivuneBodyMediumTextStyle}" />
                                                         <TextBlock Text="{Binding Address}" Style="{StaticResource RivuneBodySmallTextStyle}" />
@@ -291,20 +292,20 @@
                                         </ListView.ItemTemplate>
                                     </ListView>
                                 </StackPanel>
-                                <Button x:Name="DiscoverServersButton" Click="DiscoverServers_Click" Style="{StaticResource RivuneZoomTextButton}" HorizontalAlignment="Stretch">
-                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8"><FontIcon Glyph="&#xE968;" FontSize="20" /><TextBlock x:Name="DiscoverServersButtonLabel" Text="Find servers on this network" VerticalAlignment="Center" /></StackPanel>
+                                <Button x:Name="DiscoverServersButton" Click="DiscoverServers_Click" Style="{StaticResource RivuneZoomTextButton}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                                    <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><FontIcon Glyph="&#xE968;" FontSize="20" VerticalAlignment="Center" /><TextBlock Grid.Column="1" x:Name="DiscoverServersButtonLabel" Text="Find servers on this network" TextAlignment="Center" TextWrapping="Wrap" VerticalAlignment="Center" /></Grid>
                                 </Button>
                                 <StackPanel Spacing="6">
                                     <TextBlock Text="Server address" Style="{StaticResource RivuneBodyMediumTextStyle}" Foreground="{ThemeResource RivunePrimaryTextBrush}" />
-                                    <TextBox x:Name="ServerAddressBox" Height="52" PlaceholderText="https://rivune.example" InputScope="Url" Style="{StaticResource RivuneTextField}" VerticalContentAlignment="Center" Padding="12,14,12,6" AutomationProperties.Name="Server address" KeyDown="ServerAddressBox_KeyDown" TextChanged="ServerAddressBox_TextChanged" />
+                                    <TextBox x:Name="ServerAddressBox" MinHeight="52" PlaceholderText="https://rivune.example" InputScope="Url" Style="{StaticResource RivuneTextField}" VerticalContentAlignment="Center" Padding="12,14,12,6" AutomationProperties.Name="Server address" KeyDown="ServerAddressBox_KeyDown" TextChanged="ServerAddressBox_TextChanged" />
                                 </StackPanel>
                                 <TextBlock x:Name="ServerSupportText" Text="Example: https://media.example.com. HTTP is allowed only for localhost or a literal trusted-private address." Style="{StaticResource RivuneBodySmallTextStyle}" />
                                 <InfoBar x:Name="ServerError" IsOpen="False" Severity="Error" IsClosable="False" />
-                                <Grid HorizontalAlignment="Center" ColumnSpacing="24">
-                                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                                    <Button x:Name="ConnectButton" Click="Connect_Click" Style="{StaticResource RivuneZoomTextButton}"><StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8"><FontIcon Glyph="&#xE72A;" FontSize="20" /><TextBlock x:Name="ConnectButtonLabel" Text="Continue" VerticalAlignment="Center" /></StackPanel></Button>
-                                    <Button x:Name="CheckUpdatesButton" Grid.Column="1" Click="CheckUpdates_Click" Style="{StaticResource RivuneZoomTextButton}">
-                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8"><FontIcon Glyph="&#xE895;" FontSize="20" /><TextBlock Text="Check now" VerticalAlignment="Center" /></StackPanel>
+                                <Grid HorizontalAlignment="Stretch" ColumnSpacing="24">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                    <Button x:Name="ConnectButton" Click="Connect_Click" Style="{StaticResource RivuneZoomTextButton}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"><Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><FontIcon Glyph="&#xE72A;" FontSize="20" VerticalAlignment="Center" /><TextBlock Grid.Column="1" x:Name="ConnectButtonLabel" Text="Continue" TextAlignment="Center" TextWrapping="Wrap" VerticalAlignment="Center" /></Grid></Button>
+                                    <Button x:Name="CheckUpdatesButton" Grid.Column="1" Click="CheckUpdates_Click" Style="{StaticResource RivuneZoomTextButton}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                                        <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><FontIcon Glyph="&#xE895;" FontSize="20" VerticalAlignment="Center" /><TextBlock Grid.Column="1" Text="Check now" TextAlignment="Center" TextWrapping="Wrap" VerticalAlignment="Center" /></Grid>
                                     </Button>
                                 </Grid>
                             </StackPanel>
@@ -319,20 +320,21 @@
                                     <StackPanel Spacing="12" HorizontalAlignment="Stretch">
                                         <TextBlock Text="ONE-TIME CODE" Style="{StaticResource RivuneEyebrowStyle}" TextAlignment="Center" />
                                         <TextBlock x:Name="UserCodeText" FontFamily="Consolas" FontSize="44" FontWeight="SemiBold" CharacterSpacing="45" FlowDirection="LeftToRight" Foreground="{ThemeResource RivunePrimaryTextBrush}" TextWrapping="Wrap" TextAlignment="Center" HorizontalAlignment="Stretch" />
-                                        <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
-                                            <ProgressRing x:Name="PairingProgress" IsActive="True" Width="16" Height="16" Foreground="{ThemeResource RivuneAccentBrush}" />
-                                            <TextBlock x:Name="PairingStatus" Text="Creating a new code…" Style="{StaticResource RivuneBodyMediumTextStyle}" AutomationProperties.LiveSetting="Polite" VerticalAlignment="Center" TextAlignment="Center" />
-                                        </StackPanel>
+                                        <Grid ColumnSpacing="12" HorizontalAlignment="Stretch">
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                            <ProgressRing x:Name="PairingProgress" IsActive="True" Width="16" Height="16" Foreground="{ThemeResource RivuneAccentBrush}" VerticalAlignment="Center" />
+                                            <TextBlock Grid.Column="1" x:Name="PairingStatus" Text="Creating a new code…" Style="{StaticResource RivuneBodyMediumTextStyle}" AutomationProperties.LiveSetting="Polite" VerticalAlignment="Center" TextAlignment="Center" />
+                                        </Grid>
                                         <TextBlock x:Name="PairingExpiry" Style="{StaticResource RivuneBodySmallTextStyle}" FlowDirection="LeftToRight" Visibility="Collapsed" TextAlignment="Center" />
                                     </StackPanel>
                                 </Border>
                                 <InfoBar x:Name="PairingError" IsOpen="False" IsClosable="False" Severity="Error" AutomationProperties.LiveSetting="Assertive" />
                                 <Button x:Name="NewCodeButton" Content="Get a new code" Visibility="Collapsed" Click="NewCode_Click" Style="{StaticResource RivunePrimaryButton}" />
-                                <Grid x:Name="PairingActions" HorizontalAlignment="Center" ColumnSpacing="24" RowSpacing="8">
+                                <Grid x:Name="PairingActions" HorizontalAlignment="Stretch" ColumnSpacing="24" RowSpacing="8">
                                     <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
-                                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                                    <Button x:Name="CopyCodeButton" Click="CopyCode_Click" Style="{StaticResource RivuneZoomTextButton}" IsEnabled="False" AutomationProperties.Name="Copy code"><StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8"><FontIcon Glyph="&#xE8C8;" FontSize="20" /><TextBlock Text="Copy code" VerticalAlignment="Center" /></StackPanel></Button>
-                                    <Button x:Name="PairingDisconnectButton" Grid.Column="1" Click="ChangeServer_Click" Style="{StaticResource RivuneZoomDangerButton}" AutomationProperties.Name="Disconnect"><StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8"><FontIcon Glyph="&#xE8AC;" FontSize="20" /><TextBlock Text="Disconnect" VerticalAlignment="Center" /></StackPanel></Button>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                    <Button x:Name="CopyCodeButton" Click="CopyCode_Click" Style="{StaticResource RivuneZoomTextButton}" IsEnabled="False" AutomationProperties.Name="Copy code" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"><Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><FontIcon Glyph="&#xE8C8;" FontSize="20" VerticalAlignment="Center" /><TextBlock Grid.Column="1" Text="Copy code" TextAlignment="Center" TextWrapping="Wrap" VerticalAlignment="Center" /></Grid></Button>
+                                    <Button x:Name="PairingDisconnectButton" Grid.Column="1" Click="ChangeServer_Click" Style="{StaticResource RivuneZoomDangerButton}" AutomationProperties.Name="Disconnect" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"><Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><FontIcon Glyph="&#xE8AC;" FontSize="20" VerticalAlignment="Center" /><TextBlock Grid.Column="1" Text="Disconnect" TextAlignment="Center" TextWrapping="Wrap" VerticalAlignment="Center" /></Grid></Button>
                                 </Grid>
                             </StackPanel>
                         </Grid>
@@ -347,6 +349,8 @@
             <Grid Height="64" Padding="16,8" BorderBrush="{ThemeResource RivuneHairlineBrush}" BorderThickness="0,0,0,1">
                 <Border Width="40" Height="40" Background="{ThemeResource RivuneBrandMarkBrush}" BorderBrush="{ThemeResource RivuneStrongOutlineBrush}" BorderThickness="1" CornerRadius="{StaticResource RivuneRadiusSmall}" HorizontalAlignment="Center" VerticalAlignment="Center"><ContentControl Width="40" Height="40" IsTabStop="False" Template="{StaticResource RivuneMarkTemplate}" /></Border>
                 <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <Button x:Name="ExportProfileArchiveButton" Click="ExportProfileArchive_Click" Style="{StaticResource RivuneHeaderActionButton}" Foreground="White" AutomationProperties.Name="Export profile archive"><FontIcon Glyph="&#xE74E;" FontSize="20" /></Button>
+                    <Button x:Name="ImportProfileArchiveButton" Click="ImportProfileArchive_Click" Style="{StaticResource RivuneHeaderActionButton}" Foreground="White" AutomationProperties.Name="Import profile archive"><FontIcon Glyph="&#xE8B5;" FontSize="20" /></Button>
                     <Button x:Name="RefreshProfilesButton" Click="RefreshProfiles_Click" Style="{StaticResource RivuneHeaderActionButton}" Foreground="White" AutomationProperties.Name="Refresh profiles"><FontIcon Glyph="&#xE72C;" FontSize="20" /></Button>
                     <Button x:Name="ProfileLogoutButton" Click="ProfileLogout_Click" Style="{StaticResource RivuneHeaderActionButton}" Foreground="{ThemeResource RivuneDangerBrush}" AutomationProperties.Name="Disconnect"><FontIcon Glyph="&#xE8AC;" FontSize="20" /></Button>
                 </StackPanel>
@@ -444,7 +448,7 @@
                                     </Grid>
                                     <InfoBar x:Name="SearchBanner" IsOpen="False" IsClosable="False" />
                                     <Button x:Name="SearchRetryButton" Content="Retry" Click="SearchRetry_Click" Style="{StaticResource RivuneTextButton}" HorizontalAlignment="Left" Visibility="Collapsed" />
-                                    <Grid x:Name="SearchLoading" Visibility="Collapsed" ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><ProgressRing IsActive="True" Width="20" Height="20" /><TextBlock Grid.Column="1" Text="Searching your sources" Style="{StaticResource RivuneBodyMediumTextStyle}" VerticalAlignment="Center" /></Grid>
+                                    <Grid x:Name="SearchLoading" Visibility="Collapsed" ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><ProgressRing IsActive="True" Width="20" Height="20" /><TextBlock Grid.Column="1" Text="Searching your sources" Style="{StaticResource RivuneBodyMediumTextStyle}" AutomationProperties.LiveSetting="Polite" VerticalAlignment="Center" /></Grid>
                                     <Grid>
                                         <StackPanel x:Name="SearchResultContent" Spacing="20" Visibility="Collapsed">
                                             <TextBlock x:Name="SearchResultCount" Style="{StaticResource RivuneLabelLargeTextStyle}" />
@@ -589,20 +593,22 @@
         </Grid>
 
         <!-- Source side sheet over detail -->
-        <Grid x:Name="SourceOverlay" Visibility="Collapsed" AutomationProperties.IsDialog="True" AutomationProperties.Name="Playback sources">
-            <Button x:Name="CloseSourcesButton" Click="CloseSources_Click" Style="{StaticResource RivuneIconButton}" Margin="16" HorizontalAlignment="Left" VerticalAlignment="Top" AutomationProperties.Name="Back"><FontIcon Glyph="&#xE72B;" FontSize="20" /></Button>
-            <Border x:Name="SourcePane" Width="400" MaxWidth="440" MaxHeight="680" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="48,32" Background="Transparent" BorderThickness="0" Padding="0" TabFocusNavigation="Cycle">
+        <local:ModalDialog x:Name="SourceOverlay" Visibility="Collapsed" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" AutomationProperties.IsDialog="True" AutomationProperties.Name="Playback sources" TabFocusNavigation="Cycle">
+            <Grid>
+                <Button x:Name="CloseSourcesButton" Click="CloseSources_Click" Style="{StaticResource RivuneIconButton}" Margin="16" HorizontalAlignment="Left" VerticalAlignment="Top" AutomationProperties.Name="Back" XYFocusRight="{x:Bind RefreshSourcesButton}" XYFocusDown="{x:Bind RefreshSourcesButton}"><FontIcon Glyph="&#xE72B;" FontSize="20" /></Button>
+                <Border x:Name="SourcePane" MinWidth="320" MaxWidth="440" MaxHeight="680" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="48,32" Background="Transparent" BorderThickness="0" Padding="0">
                 <Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
                     <Grid ColumnSpacing="8">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                         <ScrollViewer x:Name="SourceFilterScrollViewer" HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Auto" VerticalScrollMode="Disabled" BringIntoViewOnFocusChange="True"><StackPanel x:Name="SourceFilters" Orientation="Horizontal" Spacing="8"><ToggleButton Content="All" IsChecked="True" Style="{StaticResource RivuneSourceFilterToggle}" /></StackPanel></ScrollViewer>
-                        <Button Grid.Column="1" x:Name="RefreshSourcesButton" Click="RefreshSources_Click" Style="{StaticResource RivuneSourceRefreshButton}" AutomationProperties.Name="Refresh sources" XYFocusDown="{x:Bind SourceList}"><Grid><FontIcon x:Name="RefreshSourcesIcon" Glyph="&#xE72C;" FontSize="20" HorizontalAlignment="Center" VerticalAlignment="Center" /><ProgressRing x:Name="RefreshSourcesProgress" Width="20" Height="20" IsActive="False" Visibility="Collapsed" Foreground="{ThemeResource RivunePrimaryTextBrush}" /></Grid></Button>
+                        <Button Grid.Column="1" x:Name="RefreshSourcesButton" Click="RefreshSources_Click" Style="{StaticResource RivuneSourceRefreshButton}" AutomationProperties.Name="Refresh sources" XYFocusUp="{x:Bind CloseSourcesButton}" XYFocusLeft="{x:Bind CloseSourcesButton}" XYFocusDown="{x:Bind SourceList}"><Grid><FontIcon x:Name="RefreshSourcesIcon" Glyph="&#xE72C;" FontSize="20" HorizontalAlignment="Center" VerticalAlignment="Center" /><ProgressRing x:Name="RefreshSourcesProgress" Width="20" Height="20" IsActive="False" Visibility="Collapsed" Foreground="{ThemeResource RivunePrimaryTextBrush}" /></Grid></Button>
                     </Grid>
                     <StackPanel Grid.Row="1" Spacing="8">
                         <TextBlock x:Name="SourceTitle" Style="{StaticResource RivuneTitleLargeTextStyle}" Visibility="Collapsed" />
                         <InfoBar x:Name="SourceBanner" IsOpen="False" IsClosable="False" />
                         <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><ProgressRing x:Name="SourceProgress" IsActive="False" Width="20" Height="20" /><TextBlock Grid.Column="1" x:Name="SourceStatus" Style="{StaticResource RivuneBodyMediumTextStyle}" AutomationProperties.LiveSetting="Polite" VerticalAlignment="Center" /></Grid>
+                        <TextBlock x:Name="PlaybackDecisionReasons" Style="{StaticResource RivuneBodySmallTextStyle}" TextWrapping="Wrap" Visibility="Collapsed" AutomationProperties.Name="Playback compatibility reasons" />
                     </StackPanel>
                     <ListView Grid.Row="2" x:Name="SourceList" IsItemClickEnabled="True" ItemClick="SourceList_ItemClick" SelectionMode="None" Margin="0,8" AutomationProperties.Name="Playback sources" XYFocusUp="{x:Bind RefreshSourcesButton}" XYFocusDown="{x:Bind PlaySourceButton}">
                         <ListView.ItemTemplate>
@@ -625,8 +631,9 @@
                         </Button>
                     </StackPanel>
                 </Grid>
-            </Border>
-        </Grid>
+                </Border>
+            </Grid>
+        </local:ModalDialog>
 
         <!-- Native Windows player with Android chrome hierarchy -->
         <Grid x:Name="PlayerView" Visibility="Collapsed" Background="{ThemeResource RivunePlayerCanvasBrush}">

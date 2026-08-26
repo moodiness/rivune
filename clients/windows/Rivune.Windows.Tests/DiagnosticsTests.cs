@@ -40,7 +40,7 @@ public sealed class DiagnosticsTests
             Server origin: https://media.example:8443
             Server name: Living Room
             Server version: 10.2.0
-            Server protocol: 20
+            Server protocol: 22
             Startup tab: library
             Preferred player: windows-native
             Animations: reduced
@@ -96,6 +96,114 @@ public sealed class DiagnosticsTests
         ], buffer.Snapshot());
     }
 
+    [Fact]
+    public void SearchEventsContainOnlyBoundedCodesAndNeverQueryText()
+    {
+        const string secretQuery = "private title token=never-log-this";
+        var report = DiagnosticsReport.Build(Input([
+            new DiagnosticEvent(DateTimeOffset.UnixEpoch, DiagnosticEventCode.SearchStarted),
+            new DiagnosticEvent(DateTimeOffset.UnixEpoch.AddSeconds(1), DiagnosticEventCode.SearchPartial),
+            new DiagnosticEvent(DateTimeOffset.UnixEpoch.AddSeconds(2), DiagnosticEventCode.SearchCanceled),
+        ]));
+
+        Assert.Contains("SEARCH_STARTED", report, StringComparison.Ordinal);
+        Assert.Contains("SEARCH_PARTIAL", report, StringComparison.Ordinal);
+        Assert.Contains("SEARCH_CANCELED", report, StringComparison.Ordinal);
+        Assert.DoesNotContain(secretQuery, report, StringComparison.Ordinal);
+        Assert.DoesNotContain("token=", report, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(0, "UPDATE_DOWNLOAD_FAILED")]
+    [InlineData(1, "UPDATE_PACKAGE_FAILED")]
+    [InlineData(2, "UPDATE_APPLY_FAILED")]
+    public void UpdateTerminalFailuresUseClosedSecretFreeCodes(
+        int phaseValue,
+        string stableCode)
+    {
+        const string sensitiveFailure = "https://user:password@example.test/pkg?token=secret /private/update.exe";
+        var code = AppUpdateFailureDiagnostics.TerminalCode((AppUpdateFailurePhase)phaseValue);
+        var report = DiagnosticsReport.Build(Input([
+            new DiagnosticEvent(DateTimeOffset.UnixEpoch, code),
+        ]));
+
+        Assert.Equal(stableCode, DiagnosticsReport.SerializedEventLine(new DiagnosticEvent(DateTimeOffset.UnixEpoch, code)).Split(' ')[1].Trim());
+        Assert.Contains(stableCode, report, StringComparison.Ordinal);
+        Assert.DoesNotContain(sensitiveFailure, report, StringComparison.Ordinal);
+        Assert.DoesNotContain("token=", report, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("update.exe", report, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(0, "UPDATE_DOWNLOAD_CANCELED", "UPDATE_DOWNLOAD_FAILED")]
+    [InlineData(1, "UPDATE_PACKAGE_CANCELED", "UPDATE_PACKAGE_FAILED")]
+    [InlineData(2, "UPDATE_APPLY_CANCELED", "UPDATE_APPLY_FAILED")]
+    public void ExplicitCancellationUsesItsPhaseAndIsNotFailure(int phaseValue, string canceledCode, string failureCode)
+    {
+        var phase = (AppUpdateFailurePhase)phaseValue;
+        var canceled = AppUpdateFailureDiagnostics.TerminalCode(phase, canceled: true);
+        var failure = AppUpdateFailureDiagnostics.TerminalCode(phase, canceled: false);
+        var buffer = new DiagnosticsBuffer();
+        buffer.Record(canceled, DateTimeOffset.UnixEpoch);
+
+        Assert.NotEqual(failure, canceled);
+        Assert.Single(buffer.Snapshot());
+        var report = DiagnosticsReport.Build(Input(buffer.Snapshot()));
+        Assert.Contains(canceledCode, report, StringComparison.Ordinal);
+        Assert.DoesNotContain(failureCode, report, StringComparison.Ordinal);
+        if (phase != AppUpdateFailurePhase.Download)
+            Assert.DoesNotContain("UPDATE_DOWNLOAD_CANCELED", report, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SupersededSearchesRetainOpaqueStartTerminalPairing()
+    {
+        var ticks = 0;
+        var buffer = new DiagnosticsBuffer(now: () => DateTimeOffset.UnixEpoch.AddSeconds(Interlocked.Increment(ref ticks)));
+        var first = buffer.BeginOperation(1, DiagnosticEventCode.SearchStarted);
+        var second = buffer.BeginOperation(2, DiagnosticEventCode.SearchStarted);
+
+        Assert.True(first.Complete(DiagnosticEventCode.SearchCanceled));
+        Assert.True(second.Complete(DiagnosticEventCode.SearchSucceeded));
+        Assert.False(first.Complete(DiagnosticEventCode.SearchFailed));
+
+        var events = buffer.Snapshot();
+        Assert.Equal([
+            new DiagnosticEvent(DateTimeOffset.UnixEpoch.AddSeconds(1), DiagnosticEventCode.SearchStarted, 1),
+            new DiagnosticEvent(DateTimeOffset.UnixEpoch.AddSeconds(2), DiagnosticEventCode.SearchStarted, 2),
+            new DiagnosticEvent(DateTimeOffset.UnixEpoch.AddSeconds(3), DiagnosticEventCode.SearchCanceled, 1),
+            new DiagnosticEvent(DateTimeOffset.UnixEpoch.AddSeconds(4), DiagnosticEventCode.SearchSucceeded, 2),
+        ], events);
+        var report = DiagnosticsReport.Build(Input(events));
+        Assert.Contains("SEARCH_STARTED op=0000000000000001", report, StringComparison.Ordinal);
+        Assert.Contains("SEARCH_CANCELED op=0000000000000001", report, StringComparison.Ordinal);
+        Assert.Contains("SEARCH_STARTED op=0000000000000002", report, StringComparison.Ordinal);
+        Assert.Contains("SEARCH_SUCCEEDED op=0000000000000002", report, StringComparison.Ordinal);
+        Assert.DoesNotContain("query", report, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("token=", report, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void TimeoutWithoutExplicitCancellationRemainsDownloadFailure()
+    {
+        var code = AppUpdateFailureDiagnostics.TerminalCode(AppUpdateFailurePhase.Download, canceled: false);
+        var report = DiagnosticsReport.Build(Input([
+            new DiagnosticEvent(DateTimeOffset.UnixEpoch, code),
+        ]));
+
+        Assert.Equal(DiagnosticEventCode.UpdateDownloadFailed, code);
+        Assert.Contains("UPDATE_DOWNLOAD_FAILED", report, StringComparison.Ordinal);
+        Assert.DoesNotContain("UPDATE_DOWNLOAD_CANCELED", report, StringComparison.Ordinal);
+    }
+
+    [Fact]
+
+    public void UnknownUpdateFailurePhaseIsRejected()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            AppUpdateFailureDiagnostics.TerminalCode((AppUpdateFailurePhase)99));
+    }
+
     private static DiagnosticReportInput Input(IReadOnlyList<DiagnosticEvent> events) => new()
     {
         GeneratedAt = DateTimeOffset.UnixEpoch,
@@ -108,7 +216,7 @@ public sealed class DiagnosticsTests
         ServerAddress = "https://diagnostic-user:diagnostic-password@media.example:8443/private-profile?access_token=diagnostic-token#diagnostic-fragment",
         ServerDisplayName = "Living Room",
         ServerVersion = "10.2.0",
-        ServerProtocolVersion = 20,
+        ServerProtocolVersion = 22,
         StartupTab = "library",
         PreferredPlayer = "windows-native",
         AnimationPreference = "reduced",

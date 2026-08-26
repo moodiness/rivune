@@ -15,7 +15,7 @@ namespace Rivune.App;
 
 public sealed partial class MainPage
 {
-    private readonly string[] _settingsCategoryNames = ["General", "Video", "IntroDB", "Audio & subtitles", "Metadata", "About"];
+    private readonly string[] _settingsCategoryNames = ["General", "Accessibility", "Queue & alerts", "Video", "IntroDB", "Audio & subtitles", "Metadata", "About"];
     private EffectiveSettings? _effectiveSettings;
     private SettingsLayer? _profileSettings;
     private string? _activeSettingsCategory;
@@ -117,8 +117,6 @@ public sealed partial class MainPage
                 Foreground = (Brush)Application.Current.Resources["RivuneSecondaryTextBrush"],
                 Style = (Style)Application.Current.Resources["RivuneBodySmallTextStyle"],
                 TextWrapping = TextWrapping.Wrap,
-                MaxLines = 2,
-                TextTrimming = TextTrimming.CharacterEllipsis,
             });
             Grid.SetColumn(copy, 1);
             row.Children.Add(copy);
@@ -142,6 +140,8 @@ public sealed partial class MainPage
     private static string CategoryIcon(string category) => category switch
     {
         "General" => "\uE775",
+        "Accessibility" => "\uE776",
+        "Queue & alerts" => "\uE7F4",
         "Video" => "\uE714",
         "IntroDB" => "\uE893",
         "Audio & subtitles" => "\uE7F6",
@@ -152,6 +152,8 @@ public sealed partial class MainPage
     private static string CategoryDescription(string category) => category switch
     {
         "General" => "Startup, playback, motion, language, and color",
+        "Accessibility" => "Motion, contrast, text, captions, audio description, and focus",
+        "Queue & alerts" => "Reading queue, saved searches, smart collections, notifications, and add-on incidents",
         "Video" => "Resolution, display matching, framing, and network quality",
         "IntroDB" => "Detected intro, recap, and credits actions, including automatic skipping on this device",
         "Audio & subtitles" => "Preferred audio and subtitle tracks",
@@ -378,6 +380,16 @@ public sealed partial class MainPage
             RenderAboutSettings();
             return;
         }
+        if (category == "Accessibility")
+        {
+            _ = RenderAccessibilitySettingsAsync();
+            return;
+        }
+        if (category == "Queue & alerts")
+        {
+            _ = RenderProfileFeatureSettingsAsync();
+            return;
+        }
         var settings = _effectiveSettings?.Settings;
         var sources = _effectiveSettings?.Sources;
         if (settings is null || sources is null)
@@ -416,6 +428,11 @@ public sealed partial class MainPage
                 AddReadOnly("Transcoding", SourceDescription(settings.AllowTranscoding == true ? "Available on this server" : "Unavailable on this server", sources.AllowTranscoding, settings.AllowTranscoding == true ? "Available" : "Unavailable"));
                 AddBooleanPreference("Autoplay next episode", "Continue into the next episode automatically.", settings.AutoplayNextEpisode, sources.AutoplayNextEpisode, value => SaveSettingsAsync(new SettingsPatch { AutoplayNextEpisode = BooleanPatch(value) }));
                 AddDeviceChoice("Default video aspect", "Initial fit mode for the native player on this device.", new[] { "Fit", "Fill", "Zoom" }[_devicePreferences.VideoAspectIndex], ["Fit", "Fill", "Zoom"], (preferences, value) => preferences with { VideoAspectIndex = value switch { "Fill" => 1, "Zoom" => 2, _ => 0 } });
+                AddDeviceChoice("Local network quality", "Quality used for playback from a server on this LAN.", _devicePreferences.LocalQuality.ToString(), ["Automatic", "Economy", "Balanced", "Maximum"], (preferences, value) => preferences with { LocalQuality = Enum.Parse<PlaybackQualityPreset>(value) });
+                AddDeviceChoice("Remote Wi-Fi quality", "Quality used on unmetered Wi-Fi away from the server LAN.", _devicePreferences.RemoteWifiQuality.ToString(), ["Automatic", "Economy", "Balanced", "Maximum"], (preferences, value) => preferences with { RemoteWifiQuality = Enum.Parse<PlaybackQualityPreset>(value) });
+                AddDeviceChoice("Mobile quality", "Quality used on metered, roaming, or unknown networks.", _devicePreferences.MobileQuality.ToString(), ["Automatic", "Economy", "Balanced", "Maximum"], (preferences, value) => preferences with { MobileQuality = Enum.Parse<PlaybackQualityPreset>(value) });
+                AddDeviceChoice("Offline expiration", "Remove expired downloads after this many days; Never disables expiration.", _devicePreferences.OfflineExpirationDays == 0 ? "Never" : _devicePreferences.OfflineExpirationDays.ToString(CultureInfo.InvariantCulture), ["7", "30", "90", "Never"], (preferences, value) => preferences with { OfflineExpirationDays = value == "Never" ? 0 : int.Parse(value, CultureInfo.InvariantCulture) });
+                AddDeviceBoolean("Download on mobile", "Allow offline downloads on metered or roaming networks.", _devicePreferences.DownloadOnMobile, (preferences, value) => preferences with { DownloadOnMobile = value });
                 break;
             case "IntroDB":
                 AddBooleanPreference("Detect intros", "Allow compatible players to offer intro skipping.", settings.SkipIntroEnabled, sources.SkipIntroEnabled, value => SaveSettingsAsync(new SettingsPatch { SkipIntroEnabled = BooleanPatch(value) }));
@@ -614,14 +631,17 @@ public sealed partial class MainPage
 
     private Button AboutSecondaryAction(string label, string glyph, Func<Task> action)
     {
-        var content = new StackPanel
+        var content = new Grid
         {
-            Orientation = Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Spacing = 10,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            ColumnSpacing = 10,
         };
-        content.Children.Add(new FontIcon { Glyph = glyph, FontSize = 18 });
-        content.Children.Add(new TextBlock { Text = UiText(label), VerticalAlignment = VerticalAlignment.Center });
+        content.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        content.ColumnDefinitions.Add(new ColumnDefinition());
+        content.Children.Add(new FontIcon { Glyph = glyph, FontSize = 18, VerticalAlignment = VerticalAlignment.Center });
+        var text = new TextBlock { Text = UiText(label), TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
+        Grid.SetColumn(text, 1);
+        content.Children.Add(text);
         var button = new Button
         {
             Content = content,

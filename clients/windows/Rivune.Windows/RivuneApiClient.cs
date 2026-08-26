@@ -8,7 +8,7 @@ using System.Text.Json.Serialization;
 
 namespace Rivune.Windows;
 
-public sealed class RivuneApiClient : IDisposable
+public sealed partial class RivuneApiClient : IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -177,6 +177,7 @@ public sealed class RivuneApiClient : IDisposable
     private readonly Uri _serverUrl;
     private readonly string _credentialIssuer;
     private readonly HttpClient _httpClient;
+    public Uri ServerOrigin => new(_serverUrl.GetLeftPart(UriPartial.Authority), UriKind.Absolute);
     private readonly ICredentialStore _credentialStore;
     private readonly bool _ownsCredentialStore;
     private readonly SemaphoreSlim _discoveryGate = new(1, 1);
@@ -388,6 +389,23 @@ public sealed class RivuneApiClient : IDisposable
         var exception = DecodeServerError(statusCode, body, retryAfter);
         CryptographicOperations.ZeroMemory(body);
         throw exception;
+    }
+
+    public static ProfileArchiveDocument ParseProfileArchive(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.Length > MaximumResponseBodyBytes) throw new ArgumentException("Profile archive exceeds the 16 MiB limit.", nameof(bytes));
+        try
+        {
+            return JsonSerializer.Deserialize<ProfileArchiveDocument>(bytes, JsonOptions) ?? throw new InvalidResponseException();
+        }
+        catch (JsonException exception) { throw new InvalidResponseException(exception); }
+        catch (NotSupportedException exception) { throw new InvalidResponseException(exception); }
+    }
+
+    public static byte[] SerializeProfileArchive(ProfileArchiveDocument archive)
+    {
+        ValidateProfileArchiveSize(archive);
+        return JsonSerializer.SerializeToUtf8Bytes(archive, JsonOptions);
     }
 
     public async Task<bool> RestoreSessionAsync(CancellationToken cancellationToken = default)
@@ -639,6 +657,7 @@ public sealed class RivuneApiClient : IDisposable
             cancellationToken);
 
     public Task<DeviceAuthorizationResponse> BeginDeviceAuthorizationAsync(
+        string installationId,
         string deviceName,
         string platform,
         CancellationToken cancellationToken = default) =>
@@ -646,7 +665,7 @@ public sealed class RivuneApiClient : IDisposable
             HttpMethod.Post,
             ["auth", "device-code"],
             null,
-            new DeviceAuthorizationRequest { DeviceName = deviceName, Platform = platform },
+            new DeviceAuthorizationRequest { InstallationId = installationId, DeviceName = deviceName, Platform = platform },
             false,
             cancellationToken);
 
@@ -879,6 +898,23 @@ public sealed class RivuneApiClient : IDisposable
             ["addons", "catalogs", "search", type],
             query,
             null,
+            true,
+            cancellationToken);
+    }
+
+    public Task<SemanticSearchPage> SemanticSearchAsync(
+        SemanticSearchRequest input,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentException.ThrowIfNullOrWhiteSpace(input.Query);
+        if (input.Page < 1) throw new ArgumentOutOfRangeException(nameof(input), "Semantic search page must be at least 1.");
+        if (input.Limit is < 1 or > 40) throw new ArgumentOutOfRangeException(nameof(input), "Semantic search limit must be between 1 and 40.");
+        return RequestJsonAsync<SemanticSearchPage>(
+            HttpMethod.Post,
+            ["search", "semantic"],
+            null,
+            input,
             true,
             cancellationToken);
     }
@@ -1123,11 +1159,14 @@ public sealed class RivuneApiClient : IDisposable
     public Task<PlaybackCommand> SendPlaybackCommandAsync(Guid sessionId, PlaybackCommandInput input, CancellationToken cancellationToken = default) =>
         RequestJsonAsync<PlaybackCommand>(HttpMethod.Post, ["playback", "devices", sessionId.ToString("D"), "commands"], null, input, true, cancellationToken);
 
-    public Task<PlaybackCommandList> GetPlaybackCommandsAsync(long after = 0, CancellationToken cancellationToken = default) =>
-        RequestJsonAsync<PlaybackCommandList>(HttpMethod.Get, ["playback", "commands"], Query(("after", after.ToString(System.Globalization.CultureInfo.InvariantCulture))), null, true, cancellationToken);
+    public Task<PlaybackCommandList> GetPlaybackCommandsAsync(Guid? after = null, CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<PlaybackCommandList>(HttpMethod.Get, ["playback", "commands"], Query(("after", after?.ToString("D"))), null, true, cancellationToken);
 
-    public Task AcknowledgePlaybackCommandAsync(long id, CancellationToken cancellationToken = default) =>
-        RequestEmptyAsync(HttpMethod.Post, ["playback", "commands", id.ToString(System.Globalization.CultureInfo.InvariantCulture), "ack"], true, cancellationToken);
+    public Task<PlaybackCommand> PutPlaybackCommandResultAsync(Guid operationId, PlaybackOperationResultInput input, CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<PlaybackCommand>(HttpMethod.Put, ["playback", "commands", "incoming", operationId.ToString("D"), "result"], null, input, true, cancellationToken);
+
+    public Task<PlaybackCommand> GetOutgoingPlaybackCommandAsync(Guid operationId, CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<PlaybackCommand>(HttpMethod.Get, ["playback", "commands", "outgoing", operationId.ToString("D")], null, null, true, cancellationToken);
 
     public Task<PlaybackRoom> CreatePlaybackRoomAsync(PlaybackRoomCreateInput input, CancellationToken cancellationToken = default) =>
         RequestJsonAsync<PlaybackRoom>(HttpMethod.Post, ["playback", "rooms"], null, input, true, cancellationToken);
@@ -1144,8 +1183,24 @@ public sealed class RivuneApiClient : IDisposable
     public Task LeavePlaybackRoomAsync(Guid id, CancellationToken cancellationToken = default) =>
         RequestEmptyAsync(HttpMethod.Delete, ["playback", "rooms", id.ToString("D")], true, cancellationToken);
 
-    public Task<LocalRecommendationPage> GetLocalRecommendationsAsync(int limit = 20, CancellationToken cancellationToken = default) =>
-        RequestJsonAsync<LocalRecommendationPage>(HttpMethod.Get, ["recommendations"], Query(("limit", limit.ToString(System.Globalization.CultureInfo.InvariantCulture))), null, true, cancellationToken);
+
+    public Task<ProfileArchiveDocument> ExportProfileArchiveAsync(Guid profileId, CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<ProfileArchiveDocument>(HttpMethod.Get, ["profiles", profileId.ToString("D"), "archive"], null, null, true, cancellationToken);
+
+    public Task<ProfileArchiveImportReport> MergeProfileArchiveAsync(Guid profileId, ProfileArchiveDocument archive, CancellationToken cancellationToken = default)
+    {
+        ValidateProfileArchiveSize(archive);
+        return RequestJsonAsync<ProfileArchiveImportReport>(HttpMethod.Post, ["profiles", profileId.ToString("D"), "archive", "import"], null, archive, true, cancellationToken);
+    }
+
+    public Task<ProfileArchiveImportReport> CreateProfileFromArchiveAsync(Guid categoryId, ProfileArchiveDocument archive, CancellationToken cancellationToken = default)
+    {
+        ValidateProfileArchiveSize(archive);
+        return RequestJsonAsync<ProfileArchiveImportReport>(HttpMethod.Post, ["profiles", "archive"], null, new ProfileArchiveCreateInput { CategoryId = categoryId, Archive = archive }, true, cancellationToken);
+    }
+
+    public Task<LocalRecommendationPage> GetLocalRecommendationsAsync(int limit = 20, string? artworkShape = null, CancellationToken cancellationToken = default) =>
+        RequestJsonAsync<LocalRecommendationPage>(HttpMethod.Get, ["recommendations"], Query(("limit", limit.ToString(System.Globalization.CultureInfo.InvariantCulture)), ("artworkShape", artworkShape)), null, true, cancellationToken);
 
 
     public Task<PlaybackActivity> GetPlaybackActivityAsync(CancellationToken cancellationToken = default) =>
@@ -2043,6 +2098,17 @@ public sealed class RivuneApiClient : IDisposable
 
     private static byte[]? SerializeBody(object? body) =>
         body is null ? null : JsonSerializer.SerializeToUtf8Bytes(body, body.GetType(), JsonOptions);
+
+    private static void ValidateProfileArchiveSize(ProfileArchiveDocument archive)
+    {
+        ArgumentNullException.ThrowIfNull(archive);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(archive, JsonOptions);
+        try
+        {
+            if (bytes.Length > MaximumResponseBodyBytes) throw new ArgumentException("Profile archive exceeds the 16 MiB limit.", nameof(archive));
+        }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
+    }
 
     private static IReadOnlyList<KeyValuePair<string, string>> Query(
         params (string Name, string? Value)[] values) =>

@@ -10,6 +10,16 @@ using Rivune.Windows;
 
 namespace Rivune.App;
 
+[JsonConverter(typeof(JsonStringEnumConverter<OfflineMediaState>))]
+internal enum OfflineMediaState
+{
+    [JsonStringEnumMemberName("queued")] Queued,
+    [JsonStringEnumMemberName("downloading")] Downloading,
+    [JsonStringEnumMemberName("ready")] Ready,
+    [JsonStringEnumMemberName("expired")] Expired,
+    [JsonStringEnumMemberName("failed")] Failed,
+}
+
 internal sealed record OfflineMediaItem
 {
     public required Guid Id { get; init; }
@@ -23,6 +33,17 @@ internal sealed record OfflineMediaItem
     public long PositionMilliseconds { get; init; }
     public long DurationMilliseconds { get; init; }
     public bool Completed { get; init; }
+    public OfflineMediaState State { get; init; } = OfflineMediaState.Ready;
+    public DateTimeOffset? ExpiresAt { get; init; }
+}
+
+internal sealed record OfflineDownloadTransition
+{
+    public required Guid Id { get; init; }
+    public required string Scope { get; init; }
+    public required OfflineMediaState State { get; init; }
+    public required long ReservedBytes { get; init; }
+    public required DateTimeOffset UpdatedAt { get; init; }
 }
 
 internal sealed record OfflineProfileGate
@@ -72,6 +93,8 @@ internal sealed class OfflineMediaStore : IDisposable
     private const int MaximumGateBytes = 256 * 1024;
     private const int MaximumKeyBytes = 16 * 1024;
     private const int PinIterations = 120_000;
+    private const int MaximumTransitionBytes = 256 * 1024;
+    private const int MaximumTransitions = 256;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Skip,
@@ -80,8 +103,11 @@ internal sealed class OfflineMediaStore : IDisposable
     private readonly string _root;
     private readonly string _gatesPath;
     private readonly IOfflineKeyProtector _keyProtector;
+    private readonly string _transitionsPath;
     private readonly long _maximumStoredBytes;
     private readonly object _sync = new();
+    private readonly TimeProvider _timeProvider;
+    private readonly int _expirationDays;
     private readonly SemaphoreSlim _downloadSlot = new(1, 1);
     private readonly HashSet<string> _activePartialPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly FileStream _rootLease;
@@ -90,19 +116,26 @@ internal sealed class OfflineMediaStore : IDisposable
     public OfflineMediaStore(
         string? root = null,
         IOfflineKeyProtector? keyProtector = null,
-        long maximumStoredBytes = MaximumStoredBytes)
+        long maximumStoredBytes = MaximumStoredBytes,
+        int expirationDays = 30,
+        TimeProvider? timeProvider = null)
     {
         if (maximumStoredBytes <= EncryptedMediaFormat.HeaderBytes + EncryptedMediaFormat.TagBytes)
             throw new ArgumentOutOfRangeException(nameof(maximumStoredBytes));
+        if (expirationDays is < 0 or > 3_650) throw new ArgumentOutOfRangeException(nameof(expirationDays));
         _root = Path.GetFullPath(root ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "Rivune",
             "offline-media"));
+        _transitionsPath = Path.Combine(_root, "downloads.v1.json");
         _gatesPath = Path.Combine(_root, "profiles.v1.json");
         _keyProtector = keyProtector ?? new DpapiOfflineKeyProtector();
         _maximumStoredBytes = maximumStoredBytes;
+        _expirationDays = expirationDays;
+        _timeProvider = timeProvider ?? TimeProvider.System;
         Directory.CreateDirectory(_root);
         _rootLease = new FileStream(Path.Combine(_root, ".store.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        RecoverInterruptedTransitions();
     }
 
     public static string ScopeFor(Uri serverOrigin, Guid profileId)
@@ -249,6 +282,15 @@ internal sealed class OfflineMediaStore : IDisposable
         }
     }
 
+    public IReadOnlyList<OfflineDownloadTransition> DownloadTransitions()
+    {
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            return ReadTransitions();
+        }
+    }
+
     public async Task<OfflineMediaItem> DownloadAsync(
         string scope,
         Uri source,
@@ -277,11 +319,12 @@ internal sealed class OfflineMediaStore : IDisposable
                 if (!isAllowed(source)) throw new InvalidOperationException("The offline source is outside the Rivune origin.");
                 directory = ScopeDirectory(scope);
                 _ = ReconcileManifest(scope);
-                maximumDownloadBytes = MaximumPlaintextForStoredBudget(_maximumStoredBytes - StoredArchiveBytes(directory));
+                maximumDownloadBytes = MaximumPlaintextForStoredBudget(_maximumStoredBytes - StoredArchiveBytes() - ReservedOutstandingBytes());
                 if (maximumDownloadBytes <= 0) throw new InvalidOperationException("Offline storage quota reached.");
                 key = OfflineKey(scope);
             }
             var id = Guid.NewGuid();
+            RecordTransition(new OfflineDownloadTransition { Id = id, Scope = scope, State = OfflineMediaState.Queued, ReservedBytes = 0, UpdatedAt = _timeProvider.GetUtcNow() });
             var partial = Path.Combine(directory, $".{id:N}.partial");
             var destination = Path.Combine(directory, $"{id:N}.rvn");
             activePartial = partial;
@@ -301,6 +344,14 @@ internal sealed class OfflineMediaStore : IDisposable
                 var finalUri = response.RequestMessage?.RequestUri ?? source;
                 if (!isAllowed(finalUri) || (int)response.StatusCode is >= 300 and <= 399 || !response.IsSuccessStatusCode)
                     throw new InvalidOperationException("The offline source could not be downloaded without leaving the Rivune origin.");
+                RecordTransition(new OfflineDownloadTransition
+                {
+                    Id = id,
+                    Scope = scope,
+                    State = OfflineMediaState.Downloading,
+                    ReservedBytes = response.Content.Headers.ContentLength ?? 0,
+                    UpdatedAt = _timeProvider.GetUtcNow(),
+                });
                 if (response.Content.Headers.ContentLength is long announced && announced > maximumDownloadBytes)
                     throw new InvalidOperationException("Offline storage quota reached.");
                 await using var input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
@@ -332,8 +383,10 @@ internal sealed class OfflineMediaStore : IDisposable
                     FileName = Path.GetFileName(destination),
                     Container = NormalizeContainer(container),
                     SizeBytes = size,
-                    CreatedAt = DateTimeOffset.UtcNow,
+                    CreatedAt = _timeProvider.GetUtcNow(),
                     PosterUrl = posterUrl,
+                    State = OfflineMediaState.Ready,
+                    ExpiresAt = _expirationDays == 0 ? null : _timeProvider.GetUtcNow().AddDays(_expirationDays),
                 };
                 lock (_sync)
                 {
@@ -343,6 +396,7 @@ internal sealed class OfflineMediaStore : IDisposable
                     try { WriteJsonAtomic(ManifestPath(scope), items, MaximumManifestBytes); }
                     catch { TryDelete(destination); throw; }
                 }
+                RecordTransition(new OfflineDownloadTransition { Id = id, Scope = scope, State = OfflineMediaState.Ready, ReservedBytes = 0, UpdatedAt = _timeProvider.GetUtcNow() });
                 return item;
             }
             catch
@@ -350,6 +404,7 @@ internal sealed class OfflineMediaStore : IDisposable
                 await writer.CancelAsync().ConfigureAwait(false);
                 TryDelete(partial);
                 TryDelete(destination);
+                RecordTransition(new OfflineDownloadTransition { Id = id, Scope = scope, State = OfflineMediaState.Failed, ReservedBytes = 0, UpdatedAt = _timeProvider.GetUtcNow() });
                 throw;
             }
         }
@@ -408,9 +463,38 @@ internal sealed class OfflineMediaStore : IDisposable
             RequireOpen(scope);
             var stored = ReadManifest(scope).FirstOrDefault(value => value.Id == item.Id && StringComparer.Ordinal.Equals(value.FileName, item.FileName))
                 ?? throw new InvalidOperationException("Offline media belongs to another profile.");
+            if (stored.State != OfflineMediaState.Ready || stored.ExpiresAt is { } expiry && expiry <= _timeProvider.GetUtcNow())
+                throw new InvalidOperationException("Offline media has expired.");
             var key = OfflineKey(scope);
             try { return new OfflinePlaybackServer(ArchivePath(scope, stored), key, stored.Container); }
             finally { CryptographicOperations.ZeroMemory(key); }
+        }
+    }
+
+    public int CleanupExpired()
+    {
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            var now = _timeProvider.GetUtcNow();
+            var removed = 0;
+            foreach (var gate in ReadGates())
+            {
+                var manifest = ReconcileManifest(gate.Scope);
+                var keep = new List<OfflineMediaItem>(manifest.Count);
+                foreach (var item in manifest)
+                {
+                    if (item.ExpiresAt is not { } expiry || expiry > now)
+                    {
+                        keep.Add(item);
+                        continue;
+                    }
+                    TryDelete(ArchivePath(gate.Scope, item));
+                    removed++;
+                }
+                if (keep.Count != manifest.Count) WriteJsonAtomic(ManifestPath(gate.Scope), keep, MaximumManifestBytes);
+            }
+            return removed;
         }
     }
 
@@ -424,13 +508,17 @@ internal sealed class OfflineMediaStore : IDisposable
             manifest.Select(item => item.Id).Distinct().Count() != manifest.Count ||
             manifest.Select(item => item.FileName).Distinct(StringComparer.OrdinalIgnoreCase).Count() != manifest.Count)
             throw new InvalidDataException("Offline manifest contains invalid or duplicate entries.");
-        var reconciled = manifest.Where(item => ArchiveExists(item, directory)).ToArray();
+        var reconciled = manifest
+            .Where(item => ArchiveExists(item, directory))
+            .Select(item => item.ExpiresAt is { } expiry && expiry <= _timeProvider.GetUtcNow()
+                ? item with { State = OfflineMediaState.Expired }
+                : item with { State = OfflineMediaState.Ready })
+            .ToArray();
         if (!manifest.SequenceEqual(reconciled)) WriteJsonAtomic(ManifestPath(scope), reconciled, MaximumManifestBytes);
-        var referenced = reconciled.Select(item => item.FileName).ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var path in Directory.EnumerateFiles(directory))
         {
-            if (path.EndsWith(".rvn", StringComparison.OrdinalIgnoreCase) && !referenced.Contains(Path.GetFileName(path))) TryDelete(path);
-            else if (path.EndsWith(".partial", StringComparison.OrdinalIgnoreCase) && !_activePartialPaths.Contains(path)) TryDelete(path);
+            // Unknown complete archives are retained. A damaged manifest must never destroy the only media copy.
+            if (path.EndsWith(".partial", StringComparison.OrdinalIgnoreCase) && !_activePartialPaths.Contains(path)) TryDelete(path);
         }
         return reconciled;
     }
@@ -467,6 +555,24 @@ internal sealed class OfflineMediaStore : IDisposable
             gates.Select(gate => gate.Scope).Distinct(StringComparer.Ordinal).Count() != gates.Count)
             throw new InvalidDataException("Offline profile metadata is invalid or duplicated.");
         return gates;
+    }
+
+    private IReadOnlyList<OfflineDownloadTransition> ReadTransitions()
+    {
+        var transitions = ReadJsonRequired<IReadOnlyList<OfflineDownloadTransition>>(_transitionsPath, MaximumTransitionBytes, [], allowMissing: true);
+        if (transitions.Count > MaximumTransitions || transitions.Any(value => value.Id == Guid.Empty || !ValidScope(value.Scope) || value.ReservedBytes < 0))
+            throw new InvalidDataException("Offline download transitions are invalid.");
+        return transitions;
+    }
+
+    private void RecordTransition(OfflineDownloadTransition transition)
+    {
+        lock (_sync)
+        {
+            var transitions = ReadTransitions().Where(value => value.Id != transition.Id).Append(transition)
+                .OrderByDescending(value => value.UpdatedAt).Take(MaximumTransitions).ToArray();
+            WriteJsonAtomic(_transitionsPath, transitions, MaximumTransitionBytes);
+        }
     }
 
     private T ReadJsonRequired<T>(string path, int maximumBytes, T missingValue, bool allowMissing)
@@ -609,14 +715,39 @@ internal sealed class OfflineMediaStore : IDisposable
         return normalized is "mp4" or "m4v" or "mpegts" or "ts" ? normalized : "mp4";
     }
 
-    private static long StoredArchiveBytes(string directory)
+    private void RecoverInterruptedTransitions()
+    {
+        var now = _timeProvider.GetUtcNow();
+        var transitions = ReadTransitions().Select(value => value.State is OfflineMediaState.Queued or OfflineMediaState.Downloading
+            ? value with { State = OfflineMediaState.Failed, ReservedBytes = 0, UpdatedAt = now }
+            : value).ToArray();
+        if (transitions.Length > 0) WriteJsonAtomic(_transitionsPath, transitions, MaximumTransitionBytes);
+    }
+
+    private long ReservedOutstandingBytes()
     {
         long total = 0;
-        foreach (var path in Directory.EnumerateFiles(directory))
+        foreach (var transition in ReadTransitions().Where(value => value.State is OfflineMediaState.Queued or OfflineMediaState.Downloading))
         {
-            if (path.EndsWith(".rvn", StringComparison.OrdinalIgnoreCase) ||
-                path.EndsWith(".partial", StringComparison.OrdinalIgnoreCase))
-                total = checked(total + new FileInfo(path).Length);
+            var partial = Path.Combine(ScopeDirectory(transition.Scope), $".{transition.Id:N}.partial");
+            var written = File.Exists(partial) ? new FileInfo(partial).Length : 0;
+            total = checked(total + Math.Max(0, transition.ReservedBytes - written));
+        }
+        return total;
+    }
+
+    private long StoredArchiveBytes()
+    {
+        long total = 0;
+        foreach (var directory in Directory.EnumerateDirectories(_root))
+        {
+            if (!ValidScope(Path.GetFileName(directory))) continue;
+            foreach (var path in Directory.EnumerateFiles(directory))
+            {
+                if (path.EndsWith(".rvn", StringComparison.OrdinalIgnoreCase) ||
+                    path.EndsWith(".partial", StringComparison.OrdinalIgnoreCase))
+                    total = checked(total + new FileInfo(path).Length);
+            }
         }
         return total;
     }

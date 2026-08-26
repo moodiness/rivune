@@ -308,8 +308,8 @@
         <Setter Property="UseSystemFocusVisuals" Value="False" />
     </Style>
     <Style x:Key="RivuneZoomTextButton" TargetType="Button" BasedOn="{StaticResource RivuneLabeledActionButton}">
-        <Setter Property="Width" Value="168" />
-        <Setter Property="Height" Value="52" />
+        <Setter Property="MinWidth" Value="168" />
+        <Setter Property="MinHeight" Value="52" />
         <Setter Property="Padding" Value="12,0" />
         <Setter Property="Background" Value="Transparent" />
         <Setter Property="Foreground" Value="White" />
@@ -479,7 +479,7 @@
     </Style>
     <Style x:Key="RivuneSourceFilterToggle" TargetType="ToggleButton" BasedOn="{StaticResource DefaultToggleButtonStyle}">
         <Setter Property="MinWidth" Value="{StaticResource RivuneTouchTarget}" />
-        <Setter Property="Height" Value="{StaticResource RivuneTouchTarget}" />
+        <Setter Property="MinHeight" Value="{StaticResource RivuneTouchTarget}" />
         <Setter Property="Width" Value="Auto" />
         <Setter Property="Padding" Value="8,0" />
         <Setter Property="CornerRadius" Value="24" />
@@ -497,8 +497,8 @@
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="ToggleButton">
-                    <Grid Height="{TemplateBinding Height}" MinWidth="{TemplateBinding MinWidth}" Background="Transparent">
-                        <Border x:Name="SourceFilterPresenter" Height="28" MinWidth="40" Padding="8,0" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="14">
+                    <Grid MinHeight="{TemplateBinding MinHeight}" MinWidth="{TemplateBinding MinWidth}" Background="Transparent">
+                        <Border x:Name="SourceFilterPresenter" MinHeight="28" MinWidth="40" Padding="8,4" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="14">
                             <ContentPresenter HorizontalContentAlignment="Center" VerticalContentAlignment="Center" Content="{TemplateBinding Content}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" FontWeight="{TemplateBinding FontWeight}" Foreground="{TemplateBinding Foreground}" />
                         </Border>
                         <VisualStateManager.VisualStateGroups>
