@@ -12,6 +12,7 @@ server/internal/webui/dist/
 
 # Node and TypeScript
 web/node_modules/
+tools/**/node_modules/
 web/*.tsbuildinfo
 web/vite.config.js
 web/vite.config.d.ts
