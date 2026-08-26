@@ -25,10 +25,13 @@ var (
 	ErrProviderUnavailable   = errors.New("addon provider unavailable")
 	ErrInvalidResponse       = errors.New("invalid addon response")
 	ErrInvalidInput          = errors.New("invalid addon input")
+	ErrVerificationExpired   = errors.New("addon verification expired")
+	ErrVerificationConsumed  = errors.New("addon verification already consumed")
+	ErrVerificationFailed    = errors.New("addon verification did not pass")
 )
 
 const (
-	maxManifestBytes          = 4 << 20
+	maxManifestBytes          = 2 << 20
 	maxManifestTypes          = 128
 	maxManifestResources      = 128
 	maxManifestCatalogs       = 256
@@ -185,7 +188,7 @@ type InstalledAddon struct {
 // TransportURL is omitted unless the caller is a global administrator.
 type ManagedAddon struct {
 	InstalledAddon
-	TransportURL string `json:"transportUrl,omitempty"`
+	TransportURL string `json:"-"`
 }
 
 func managedAddon(installed InstalledAddon, revealTransport bool) ManagedAddon {
@@ -197,16 +200,31 @@ func managedAddon(installed InstalledAddon, revealTransport bool) ManagedAddon {
 }
 
 type InstallInput struct {
+	VerificationID string `json:"verificationId"`
+}
+
+type VerificationInput struct {
 	TransportURL string   `json:"transportUrl"`
 	ProfileIDs   []string `json:"profileIds,omitempty"`
 	CategoryIDs  []string `json:"categoryIds,omitempty"`
 }
 
-type AddonPreview struct {
-	Manifest     Manifest          `json:"manifest"`
-	Capabilities AddonCapabilities `json:"capabilities"`
-	ProfileIDs   []string          `json:"profileIds"`
-	CategoryIDs  []string          `json:"categoryIds"`
+type VerificationCheck struct {
+	Code   string `json:"code"`
+	Status string `json:"status"`
+}
+
+type AddonVerification struct {
+	ID           string              `json:"id"`
+	Status       string              `json:"status"`
+	Summary      string              `json:"summary"`
+	Checks       []VerificationCheck `json:"checks"`
+	Manifest     *Manifest           `json:"manifest,omitempty"`
+	Capabilities *AddonCapabilities  `json:"capabilities,omitempty"`
+	ProfileIDs   []string            `json:"profileIds"`
+	CategoryIDs  []string            `json:"categoryIds"`
+	CreatedAt    time.Time           `json:"createdAt"`
+	ExpiresAt    time.Time           `json:"expiresAt"`
 }
 
 type UpdateAddonInput struct {

@@ -255,7 +255,7 @@ func (service *Service) serveHLS(w http.ResponseWriter, r *http.Request, session
 		if codecs, ok := localHLSRFC6381Codecs(asset.Decision); ok {
 			streamInformation += `,CODECS="` + codecs + `"`
 		}
-		playlist := []byte(fmt.Sprintf("#EXTM3U\n#EXT-X-VERSION:%d\n#EXT-X-STREAM-INF:%s\n%s\n", version, streamInformation, childURL))
+		playlist := fmt.Appendf(nil, "#EXTM3U\n#EXT-X-VERSION:%d\n#EXT-X-STREAM-INF:%s\n%s\n", version, streamInformation, childURL)
 		return writeHLSPlaylist(w, r, playlist)
 	}
 
@@ -1661,10 +1661,6 @@ func localHLSURIAttributeIsMediaSegment(line string) bool {
 		attributes = remaining
 	}
 	return false
-}
-
-func hlsAssetURL(sessionID, assetID, token, file string) string {
-	return hlsAssetURLAt(sessionID, assetID, token, file, 0)
 }
 
 func hlsAssetURLAt(sessionID, assetID, token, file string, startSeconds float64) string {

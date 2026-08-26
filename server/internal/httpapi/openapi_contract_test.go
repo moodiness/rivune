@@ -248,30 +248,23 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		validateContractResponse(t, document, "/addons/diagnostics", nil, request, response)
 	})
 
-	t.Run("add-on preview", func(t *testing.T) {
+	t.Run("add-on verification", func(t *testing.T) {
 		api := testAPI(&fakeInstanceService{})
 		api.auth = &fakeAuthService{principal: contractPrincipal()}
-		api.addons = &fakeAddonService{previewValue: addon.AddonPreview{
-			Manifest: addon.Manifest{
-				ID: "org.rivune.contract-preview", Version: "1.0.0", Name: "Contract Preview", Description: "Validated manifest",
-				Types: []string{"movie"}, Resources: []addon.ManifestResource{{Name: "catalog", Short: true}}, Catalogs: []addon.ManifestCatalog{},
-				BehaviorHints: addon.ManifestBehaviorHints{Adult: true, P2P: true, ConfigurationRequired: true},
-			},
-			Capabilities: addon.AddonCapabilities{Resources: []string{"catalog"}, Search: true, Pagination: true, SearchPagination: true},
-			ProfileIDs:   []string{}, CategoryIDs: []string{contractCategoryID},
+		manifest := addon.Manifest{ID: "org.rivune.contract-verification", Version: "1.0.0", Name: "Contract Verification", Types: []string{"movie"}, Resources: []addon.ManifestResource{{Name: "catalog", Short: true}}, Catalogs: []addon.ManifestCatalog{}}
+		capabilities := addon.AddonCapabilities{Resources: []string{"catalog"}}
+		api.addons = &fakeAddonService{verificationValue: addon.AddonVerification{
+			ID: "66666666-6666-4666-8666-666666666666", Status: "passed", Summary: "ready",
+			Checks: []addon.VerificationCheck{{Code: "manifest_fetch", Status: "passed"}, {Code: "manifest_valid", Status: "passed"}, {Code: "catalog_probe", Status: "skipped"}},
+			Manifest: &manifest, Capabilities: &capabilities, ProfileIDs: []string{}, CategoryIDs: []string{contractCategoryID},
+			CreatedAt: time.Date(2026, time.August, 21, 20, 0, 0, 0, time.UTC), ExpiresAt: time.Date(2026, time.August, 21, 20, 10, 0, 0, time.UTC),
 		}}
 		body := `{"transportUrl":"stremio://contract-addon.example/config","profileIds":[],"categoryIds":["` + contractCategoryID + `"]}`
-		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons/preview", body, true)
-		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons/preview", `{"transportUrl":"https://contract-addon.example"}`, true)
-		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons/preview", `{"transportUrl":"https://contract-addon.example","profileIds":[],"categoryIds":["`+contractCategoryID+`"]}`, true)
-		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons/preview", `{"transportUrl":"https://contract-addon.example","profileIds":[],"categoryIds":[]}`, false)
-		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons/preview", `{"transportUrl":"https://contract-addon.example","categoryIds":["`+contractCategoryID+`","`+contractCategoryID+`"]}`, false)
-		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons/preview", `{"transportUrl":"https://contract-addon.example","categoryIds":["not-a-uuid"]}`, false)
-		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons/preview", `{"transportUrl":"https://contract-addon.example","categoryIds":`+contractUUIDArray(101)+`}`, false)
-		request := authenticatedContractRequest(http.MethodPost, "/api/v1/addons/preview", bytes.NewBufferString(body))
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons/verifications", body, true)
+		request := authenticatedContractRequest(http.MethodPost, "/api/v1/addons/verifications", bytes.NewBufferString(body))
 		request.Header.Set("Content-Type", "application/json")
-		response := serveContractRequest(t, api, request, http.StatusOK)
-		validateContractResponse(t, document, "/addons/preview", nil, request, response)
+		response := serveContractRequest(t, api, request, http.StatusCreated)
+		validateContractResponse(t, document, "/addons/verifications", nil, request, response)
 	})
 
 	t.Run("add-on availability", func(t *testing.T) {
@@ -291,7 +284,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		api := testAPI(&fakeInstanceService{})
 		api.auth = &fakeAuthService{principal: contractPrincipal()}
 		api.addons = service
-		installBody := `{"transportUrl":"https://contract-addon.example/manifest.json","profileIds":[],"categoryIds":["` + contractCategoryID + `"]}`
+		installBody := `{"verificationId":"66666666-6666-4666-8666-666666666666"}`
 		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/addons", installBody, true)
 		install := authenticatedContractRequest(http.MethodPost, "/api/v1/addons", bytes.NewBufferString(installBody))
 		install.Header.Set("Content-Type", "application/json")
@@ -345,10 +338,6 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 			path   string
 			body   string
 		}{
-			{name: "install null profileIds", method: http.MethodPost, path: "/api/v1/addons", body: `{"transportUrl":"https://contract-addon.example/manifest.json","profileIds":null}`},
-			{name: "install null categoryIds", method: http.MethodPost, path: "/api/v1/addons", body: `{"transportUrl":"https://contract-addon.example/manifest.json","categoryIds":null}`},
-			{name: "preview null profileIds", method: http.MethodPost, path: "/api/v1/addons/preview", body: `{"transportUrl":"https://contract-addon.example/manifest.json","profileIds":null}`},
-			{name: "preview null categoryIds", method: http.MethodPost, path: "/api/v1/addons/preview", body: `{"transportUrl":"https://contract-addon.example/manifest.json","categoryIds":null}`},
 			{name: "update null profileIds", method: http.MethodPut, path: updatePath, body: `{"profileIds":null}`},
 			{name: "update null categoryIds", method: http.MethodPut, path: updatePath, body: `{"categoryIds":null}`},
 			{name: "update unknown member", method: http.MethodPut, path: updatePath, body: `{"unexpectedAssignment":[]}`},
@@ -578,7 +567,7 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		expiresAt := time.Date(2026, time.July, 31, 13, 0, 0, 0, time.UTC)
 		selectedAudioTrack := 2
 		decision := &playback.PlaybackDecision{
-			Reason: "subtitle_burn_required", VideoAction: "transcode", AudioAction: "copy",
+			Reason: "subtitle_burn_required", Reasons: []string{"subtitle_burn_required"}, VideoAction: "transcode", AudioAction: "copy",
 			SubtitleAction: "burn", ToneMapping: true,
 			Source: &playback.PlaybackDecisionSource{
 				Container: "matroska", VideoCodec: "hevc", AudioCodec: "aac",
@@ -872,8 +861,8 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		now := time.Date(2026, time.August, 21, 20, 0, 0, 0, time.UTC)
 		item := coordination.PlaybackItem{TitleID: contractTitleID, MediaType: "movie", ResourceID: "opaque", Title: "Contract movie"}
 		service := &fakeCoordinationService{
-			device:  coordination.Device{SessionID: contractSessionID, DeviceID: contractDeviceID, Name: "TV", Platform: "tvos", Capabilities: []string{"remote-control"}, State: coordination.DeviceState{Status: "paused", Item: &item, PositionMilliseconds: 1000, DurationMilliseconds: 10000, UpdatedAt: now}, Current: true, LastSeenAt: now},
-			command: coordination.Command{ID: 10, Command: "play", SenderDeviceName: "Phone", CreatedAt: now, ExpiresAt: now.Add(2 * time.Minute)},
+			device:  coordination.Device{SessionID: contractSessionID, DeviceID: contractDeviceID, Name: "TV", Platform: "tvos", Capabilities: []string{"remote-control"}, State: coordination.DeviceState{Status: "paused", Item: &item, PositionMilliseconds: 1000, DurationMilliseconds: 10000, UpdatedAt: now}, Revision: 4, Current: true, LastSeenAt: now},
+			command: coordination.Command{OperationID: "77777777-7777-4777-8777-777777777777", Command: "play", SenderDeviceName: "Phone", Status: "pending", CreatedAt: now, ExpiresAt: now.Add(2 * time.Minute)},
 			room:    coordination.Room{ID: "88888888-8888-4888-8888-888888888888", JoinCode: "23456789AB", Item: item, State: "paused", PositionMilliseconds: 1000, DurationMilliseconds: 10000, Version: 1, UpdatedAt: now, ExpiresAt: now.Add(8 * time.Hour), Members: []coordination.RoomMember{{MemberID: "99999999-9999-4999-8999-999999999999", Profile: "Viewer", DeviceName: "Phone", Platform: "ios", Role: "host", Current: true, JoinedAt: now, LastSeenAt: now}}},
 		}
 		api := testAPI(&fakeInstanceService{})
@@ -886,9 +875,10 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		}{
 			{http.MethodPut, "/api/v1/playback/device", "/playback/device", `{"capabilities":["remote-control"],"state":{"status":"paused","item":{"titleId":"` + contractTitleID + `","mediaType":"movie","resourceId":"opaque","title":"Contract movie"},"positionMilliseconds":1000,"durationMilliseconds":10000}}`, http.StatusOK},
 			{http.MethodGet, "/api/v1/playback/devices", "/playback/devices", "", http.StatusOK},
-			{http.MethodPost, "/api/v1/playback/devices/" + contractSessionID + "/commands", "/playback/devices/{sessionId}/commands", `{"command":"play"}`, http.StatusCreated},
-			{http.MethodGet, "/api/v1/playback/commands?after=9", "/playback/commands", "", http.StatusOK},
-			{http.MethodPost, "/api/v1/playback/commands/10/ack", "/playback/commands/{commandId}/ack", "", http.StatusNoContent},
+			{http.MethodPost, "/api/v1/playback/devices/" + contractSessionID + "/commands", "/playback/devices/{sessionId}/commands", `{"operationId":"77777777-7777-4777-8777-777777777777","command":"play"}`, http.StatusCreated},
+			{http.MethodGet, "/api/v1/playback/commands?after=77777777-7777-4777-8777-777777777777", "/playback/commands", "", http.StatusOK},
+			{http.MethodPut, "/api/v1/playback/commands/incoming/77777777-7777-4777-8777-777777777777/result", "/playback/commands/incoming/{operationId}/result", `{"status":"applied","code":"applied"}`, http.StatusOK},
+			{http.MethodGet, "/api/v1/playback/commands/outgoing/77777777-7777-4777-8777-777777777777", "/playback/commands/outgoing/{operationId}", "", http.StatusOK},
 			{http.MethodPost, "/api/v1/playback/rooms", "/playback/rooms", `{"item":{"titleId":"` + contractTitleID + `","mediaType":"movie","resourceId":"opaque","title":"Contract movie"},"state":"paused","positionMilliseconds":1000,"durationMilliseconds":10000}`, http.StatusCreated},
 			{http.MethodPost, "/api/v1/playback/rooms/join", "/playback/rooms/join", `{"code":"23456789AB"}`, http.StatusOK},
 			{http.MethodGet, roomPath, "/playback/rooms/{roomId}", "", http.StatusOK},
@@ -905,8 +895,8 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 			if strings.Contains(test.contractPath, "{sessionId}") {
 				parameters = map[string]string{"sessionId": contractSessionID}
 			}
-			if strings.Contains(test.contractPath, "{commandId}") {
-				parameters = map[string]string{"commandId": "10"}
+			if strings.Contains(test.contractPath, "{operationId}") {
+				parameters = map[string]string{"operationId": "77777777-7777-4777-8777-777777777777"}
 			}
 			if strings.Contains(test.contractPath, "{roomId}") {
 				parameters = map[string]string{"roomId": service.room.ID}
@@ -936,9 +926,15 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 				PostgreSQLPool: operations.PostgreSQLPoolStatus{
 					Acquired: 2, Idle: 3, Total: 5, Max: 10, WaitCount: 7, WaitDurationMilliseconds: 145,
 				},
-				TrackingOutbox:              operations.TrackingOutboxStatus{Pending: 12, Due: 3, OldestAgeSeconds: 420},
-				Addons:                      operations.AddonStatus{Total: 8, Enabled: 7, LatestUpdatedAt: &lastCompleted},
-				Playback:                    operations.PlaybackStatus{Active: 4, Transcoding: 2},
+				TrackingOutbox: operations.TrackingOutboxStatus{Pending: 12, Due: 3, OldestAgeSeconds: 420},
+				Addons:         operations.AddonStatus{Total: 8, Enabled: 7, LatestUpdatedAt: &lastCompleted},
+				Playback:       operations.PlaybackStatus{Active: 4, Transcoding: 2},
+				SemanticExtension: operations.SemanticExtensionOperationsStatus{
+					Enabled: true, WarmupStatus: "ready", PersistentStatus: "ready",
+					MemoryEntries: 3, PersistentEntries: 2, Hits: 11, Misses: 5, CoalescedWaiters: 4,
+					Executions: 6, Successes: 3, Timeouts: 1, Failures: 1, Cancellations: 1, BusyFallbacks: 2,
+					Active: 1, Queued: 1, LatencyP50Milliseconds: 18, LatencyP95Milliseconds: 91,
+				},
 				HousekeepingIntervalMinutes: 5,
 			},
 			schedule: operations.MetadataRefreshSchedule{
@@ -988,6 +984,16 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 	})
 }
 
+func TestOpenAPISavedResourceUpdateBodies(t *testing.T) {
+	document := loadOpenAPIContract(t)
+	saved := `{"name":"Space","query":"space opera","sort":"relevance","expectedRevision":2}`
+	validateContractRequestBody(t, document, http.MethodPut, "/api/v1/saved-searches/11111111-1111-4111-8111-111111111111", saved, true)
+	validateContractRequestBody(t, document, http.MethodPut, "/api/v1/saved-searches/11111111-1111-4111-8111-111111111111", `{"name":"Space","query":"space opera","sort":"relevance","expectedRevision":2,"sql":"unsafe"}`, false)
+	smart := `{"name":"Drama","rules":{"type":"genre","operator":"equals","value":"drama"},"sort":"title","expectedRevision":3}`
+	validateContractRequestBody(t, document, http.MethodPut, "/api/v1/smart-collections/11111111-1111-4111-8111-111111111111", smart, true)
+	validateContractRequestBody(t, document, http.MethodPut, "/api/v1/smart-collections/11111111-1111-4111-8111-111111111111", `{"name":"Drama","rules":{"type":"genre","operator":"equals","value":"drama"},"sort":"title","expectedRevision":3,"expression":"unsafe"}`, false)
+}
+
 func TestAddonDiagnosticsOpenAPIRejectsPrivateDetails(t *testing.T) {
 	validator := loadOpenAPIContract(t)
 	request := authenticatedContractRequest(http.MethodGet, "/api/v1/addons/diagnostics", nil)
@@ -1002,24 +1008,64 @@ func TestAddonDiagnosticsOpenAPIRejectsPrivateDetails(t *testing.T) {
 	}
 }
 
-func TestAddonPreviewOpenAPIRejectsPrivateDetails(t *testing.T) {
+func TestOperationsOpenAPIRejectsPrivateSemanticExtensionDetails(t *testing.T) {
 	validator := loadOpenAPIContract(t)
-	request := authenticatedContractRequest(http.MethodPost, "/api/v1/addons/preview", bytes.NewBufferString(`{"transportUrl":"https://request.invalid/manifest.json"}`))
+	baseline := `{"metadataCache":{"entries":0,"freshEntries":0,"expiredEntries":0,"rootTitles":0,"missingTitles":0,"artworkSnapshots":0},"metadataRefresh":{"task":"metadata-refresh","enabled":false,"intervalHours":24,"language":"en-US","batchSize":25,"nextRunAt":null,"lastStartedAt":null,"lastCompletedAt":null,"lastStatus":null,"lastResult":null},"postgresqlPool":{"acquired":0,"idle":1,"total":1,"max":10,"waitCount":0,"waitDurationMilliseconds":0},"trackingOutbox":{"pending":0,"due":0,"oldestAgeSeconds":0},"addons":{"total":0,"enabled":0,"latestUpdatedAt":null},"playback":{"active":0,"transcoding":0},"semanticExtension":{"enabled":true,"warmupStatus":"failed","persistentStatus":"ready","memoryEntries":0,"persistentEntries":0,"hits":0,"misses":0,"coalescedWaiters":0,"executions":1,"successes":0,"timeouts":0,"failures":0,"cancellations":1,"busyFallbacks":0,"active":0,"queued":0,"latencyP50Milliseconds":0,"latencyP95Milliseconds":0},"housekeepingIntervalMinutes":5}`
+	validate := func(body string) (bool, []error) {
+		request := authenticatedContractRequest(http.MethodGet, "/api/v1/operations", nil)
+		response := httptest.NewRecorder()
+		response.Header().Set("Content-Type", "application/json")
+		response.Header().Set("X-Request-ID", "operations-semantic-contract")
+		response.WriteHeader(http.StatusOK)
+		_, _ = response.WriteString(body)
+		valid, validationErrors := validator.ValidateHttpResponse(request, response.Result())
+		joined := make([]error, len(validationErrors))
+		for index, validationError := range validationErrors {
+			joined[index] = validationError
+		}
+		return valid, joined
+	}
+	if valid, validationErrors := validate(baseline); !valid {
+		t.Fatalf("safe semantic extension operations response was invalid: %v", validationErrors)
+	}
+	private := strings.Replace(baseline, `"latencyP95Milliseconds":0`, `"latencyP95Milliseconds":0,"model":"private-model","rawError":"private upstream body","query":"private query","key":"private key"`, 1)
+	if valid, _ := validate(private); valid {
+		t.Fatal("operations OpenAPI response accepted private semantic extension details")
+	}
+}
+
+func TestSemanticSearchOpenAPIAcceptsUnavailableResponse(t *testing.T) {
+	validator := loadOpenAPIContract(t)
+	request := authenticatedContractRequest(http.MethodPost, "/api/v1/search/semantic", bytes.NewBufferString(`{"query":"recent science fiction"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	response.Header().Set("X-Request-ID", "contract-semantic-unavailable")
+	response.Header().Set("Content-Type", "application/json")
+	response.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = response.WriteString(`{"error":{"code":"semantic_search_unavailable","message":"Semantic search is temporarily unavailable"}}`)
+	valid, validationErrors := validator.ValidateHttpResponse(request, response.Result())
+	if !valid {
+		t.Fatalf("semantic search 503 response violates OpenAPI: %v", validationErrors)
+	}
+}
+
+func TestAddonVerificationOpenAPIRejectsPrivateDetails(t *testing.T) {
+	validator := loadOpenAPIContract(t)
+	request := authenticatedContractRequest(http.MethodPost, "/api/v1/addons/verifications", bytes.NewBufferString(`{"transportUrl":"https://request.invalid/manifest.json"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	response.Header().Set("Content-Type", "application/json")
-	response.WriteHeader(http.StatusOK)
-	_, _ = response.WriteString(`{"manifest":{"id":"org.rivune.preview","version":"1.0.0","name":"Preview","types":["movie"],"resources":["catalog"],"catalogs":[]},"capabilities":{"resources":["catalog"],"search":true,"pagination":true,"searchPagination":true},"profileIds":[],"categoryIds":["77777777-7777-4777-8777-777777777777"],"transportUrl":"https://private.invalid/manifest.json?token=secret","providerError":"private response body"}`)
-
+	response.WriteHeader(http.StatusCreated)
+	_, _ = response.WriteString(`{"id":"66666666-6666-4666-8666-666666666666","status":"failed","summary":"manifest_unavailable","checks":[{"code":"manifest_fetch","status":"failed"},{"code":"manifest_valid","status":"skipped"},{"code":"catalog_probe","status":"skipped"}],"profileIds":[],"categoryIds":[],"createdAt":"2026-08-21T20:00:00Z","expiresAt":"2026-08-21T20:10:00Z","transportUrl":"https://private.invalid/manifest.json?token=secret","providerError":"private response body"}`)
 	valid, _ := validator.ValidateHttpResponse(request, response.Result())
 	if valid {
-		t.Fatal("preview OpenAPI response accepted private transport and provider error fields")
+		t.Fatal("verification OpenAPI response accepted private transport and provider error fields")
 	}
 }
 
 func TestAssignmentOpenAPIResponsesRequireBoundedSeparateUUIDArrays(t *testing.T) {
 	validator := loadOpenAPIContract(t)
-	previewPrefix := `{"manifest":{"id":"org.rivune.preview","version":"1.0.0","name":"Preview","types":["movie"],"resources":["catalog"],"catalogs":[]},"capabilities":{"resources":["catalog"],"search":true,"pagination":true,"searchPagination":true},"profileIds":[]`
+	verificationPrefix := `{"id":"66666666-6666-4666-8666-666666666666","status":"passed","summary":"ready","checks":[{"code":"manifest_fetch","status":"passed"},{"code":"manifest_valid","status":"passed"},{"code":"catalog_probe","status":"skipped"}],"manifest":{"id":"org.rivune.verify","version":"1.0.0","name":"Verify","types":["movie"],"resources":["catalog"],"catalogs":[]},"capabilities":{"resources":["catalog"],"search":false,"pagination":false,"searchPagination":false},"profileIds":[]`
 	addonPrefix := `{"addons":[{"id":"` + contractAddonID + `","manifest":{"id":"org.rivune.contract","version":"1.0.0","name":"Contract","types":["movie"],"resources":["catalog"],"catalogs":[]},"position":0,"profileIds":[],"categoryIds":`
 	collectionWithInvalidProfile := `{"collections":[{"id":"88888888-8888-4888-8888-888888888888","title":"Contract","heroEnabled":false,"pinToTop":false,"focusGlowEnabled":false,"viewMode":"rows","folderCoverShape":"poster","folders":[],"profileIds":["not-a-uuid"],"categoryIds":[],"position":0,"version":1,"createdAt":"2026-08-06T12:00:00Z","updatedAt":"2026-08-06T12:00:00Z"}]}`
 	tests := []struct {
@@ -1028,8 +1074,8 @@ func TestAssignmentOpenAPIResponsesRequireBoundedSeparateUUIDArrays(t *testing.T
 		target string
 		body   string
 	}{
-		{name: "preview missing categoryIds", method: http.MethodPost, target: "/api/v1/addons/preview", body: previewPrefix + `}`},
-		{name: "preview duplicate categoryIds", method: http.MethodPost, target: "/api/v1/addons/preview", body: previewPrefix + `,"categoryIds":["` + contractCategoryID + `","` + contractCategoryID + `"]}`},
+		{name: "verification missing categoryIds", method: http.MethodPost, target: "/api/v1/addons/verifications", body: verificationPrefix + `,"createdAt":"2026-08-21T20:00:00Z","expiresAt":"2026-08-21T20:10:00Z"}`},
+		{name: "verification duplicate categoryIds", method: http.MethodPost, target: "/api/v1/addons/verifications", body: verificationPrefix + `,"categoryIds":["` + contractCategoryID + `","` + contractCategoryID + `"],"createdAt":"2026-08-21T20:00:00Z","expiresAt":"2026-08-21T20:10:00Z"}`},
 		{name: "addon list exceeds category maximum", method: http.MethodGet, target: "/api/v1/addons", body: addonPrefix + contractUUIDArray(101) + `,"enabled":true,"installedAt":"2026-08-06T12:00:00Z","updatedAt":"2026-08-06T12:00:00Z"}]}`},
 		{name: "collection list rejects non-UUID profile", method: http.MethodGet, target: "/api/v1/collections", body: collectionWithInvalidProfile},
 	}
@@ -1182,11 +1228,14 @@ func (f *fakeCoordinationService) Devices(context.Context, auth.Principal) (coor
 func (f *fakeCoordinationService) SendCommand(context.Context, auth.Principal, string, coordination.CommandInput) (coordination.Command, error) {
 	return f.command, nil
 }
-func (f *fakeCoordinationService) Commands(context.Context, auth.Principal, int64) (coordination.CommandList, error) {
+func (f *fakeCoordinationService) Commands(context.Context, auth.Principal, string) (coordination.CommandList, error) {
 	return coordination.CommandList{Commands: []coordination.Command{f.command}}, nil
 }
-func (f *fakeCoordinationService) AcknowledgeCommand(context.Context, auth.Principal, int64) error {
-	return nil
+func (f *fakeCoordinationService) CompleteCommand(context.Context, auth.Principal, string, coordination.CommandResultInput) (coordination.Command, error) {
+	return f.command, nil
+}
+func (f *fakeCoordinationService) OutgoingCommand(context.Context, auth.Principal, string) (coordination.Command, error) {
+	return f.command, nil
 }
 func (f *fakeCoordinationService) CreateRoom(context.Context, auth.Principal, coordination.CreateRoomInput) (coordination.Room, error) {
 	return f.room, nil

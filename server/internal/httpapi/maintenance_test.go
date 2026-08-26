@@ -72,10 +72,23 @@ func (worker *calendarRefreshWorkerStub) Run(ctx context.Context) {
 	close(worker.stopped)
 }
 
-func TestAPIMaintenanceOwnsCalendarRefreshWorkerLifecycle(t *testing.T) {
+type semanticCatalogWorkerStub struct {
+	started chan struct{}
+	stopped chan struct{}
+}
+
+func (worker *semanticCatalogWorkerStub) RunSemanticCatalog(ctx context.Context) {
+	close(worker.started)
+	<-ctx.Done()
+	close(worker.stopped)
+}
+
+func TestAPIMaintenanceOwnsBackgroundWorkerLifecycles(t *testing.T) {
 	worker := &calendarRefreshWorkerStub{started: make(chan struct{}), stopped: make(chan struct{})}
+	catalog := &semanticCatalogWorkerStub{started: make(chan struct{}), stopped: make(chan struct{})}
 	api := &API{
 		calendarRefresh: worker,
+		semanticCatalog: catalog,
 		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -89,11 +102,21 @@ func TestAPIMaintenanceOwnsCalendarRefreshWorkerLifecycle(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("maintenance did not start calendar refresh worker")
 	}
+	select {
+	case <-catalog.started:
+	case <-time.After(time.Second):
+		t.Fatal("maintenance did not start semantic catalogue worker")
+	}
 	cancel()
 	select {
 	case <-worker.stopped:
 	case <-time.After(time.Second):
 		t.Fatal("maintenance cancellation did not reach calendar refresh worker")
+	}
+	select {
+	case <-catalog.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("maintenance cancellation did not reach semantic catalogue worker")
 	}
 	select {
 	case <-done:

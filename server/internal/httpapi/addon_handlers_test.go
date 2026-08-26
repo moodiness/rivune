@@ -24,10 +24,10 @@ type fakeAddonService struct {
 	installValue        addon.InstalledAddon
 	installTransportURL string
 	installErr          error
-	previewCalls        int
-	previewInput        addon.InstallInput
-	previewValue        addon.AddonPreview
-	previewErr          error
+	verificationInput   addon.VerificationInput
+	verificationAddon   string
+	verificationValue   addon.AddonVerification
+	verificationErr     error
 	listValue           []addon.InstalledAddon
 	listErr             error
 	diagnosticsCalls    int
@@ -91,10 +91,14 @@ func (fake *fakeAddonService) Install(_ context.Context, _ auth.Principal, input
 	return addon.ManagedAddon{InstalledAddon: fake.installValue, TransportURL: fake.installTransportURL}, fake.installErr
 }
 
-func (fake *fakeAddonService) Preview(_ context.Context, _ auth.Principal, input addon.InstallInput) (addon.AddonPreview, error) {
-	fake.previewCalls++
-	fake.previewInput = input
-	return fake.previewValue, fake.previewErr
+func (fake *fakeAddonService) VerifyCandidate(_ context.Context, _ auth.Principal, input addon.VerificationInput) (addon.AddonVerification, error) {
+	fake.verificationInput = input
+	return fake.verificationValue, fake.verificationErr
+}
+
+func (fake *fakeAddonService) VerifyInstalled(_ context.Context, _ auth.Principal, addonID string) (addon.AddonVerification, error) {
+	fake.verificationAddon = addonID
+	return fake.verificationValue, fake.verificationErr
 }
 
 func (fake *fakeAddonService) List(context.Context, auth.Principal) ([]addon.InstalledAddon, error) {
@@ -161,223 +165,42 @@ func (fake *fakeAddonService) FetchCatalogs(_ context.Context, _ auth.Principal,
 	return fake.catalogValue, fake.catalogErr
 }
 
-func TestPreviewAddonForwardsInputAndReturnsValidatedShape(t *testing.T) {
+func TestAddonVerificationForwardsInputAndIsSafe(t *testing.T) {
 	profileID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	categoryID := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-	service := &fakeAddonService{previewValue: addon.AddonPreview{
-		Manifest: addon.Manifest{
-			ID: "org.example.preview", Version: "1.2.3", Name: "Preview Add-on", Description: "Validated manifest",
-			Types: []string{"movie", "series"}, Resources: []addon.ManifestResource{{Name: "catalog", Short: true}},
-		},
-		Capabilities: addon.AddonCapabilities{Resources: []string{"catalog"}, Search: true, Pagination: true, SearchPagination: true},
-		ProfileIDs:   []string{profileID}, CategoryIDs: []string{categoryID},
+	service := &fakeAddonService{verificationValue: addon.AddonVerification{
+		ID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", Status: "passed", Summary: "ready",
+		Checks:     []addon.VerificationCheck{{Code: "manifest_fetch", Status: "passed"}, {Code: "manifest_valid", Status: "passed"}, {Code: "catalog_probe", Status: "skipped"}},
+		ProfileIDs: []string{profileID}, CategoryIDs: []string{categoryID}, CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(10 * time.Minute),
 	}}
 	api := addonAPI(service)
 	api.auth = &fakeAuthService{principal: auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}}
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/addons/preview", bytes.NewBufferString(`{"transportUrl":"stremio://addon.example/config?token=private","profileIds":["`+profileID+`"],"categoryIds":["`+categoryID+`"]}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/addons/verifications", bytes.NewBufferString(`{"transportUrl":"stremio://addon.example/config?token=private","profileIds":["`+profileID+`"],"categoryIds":["`+categoryID+`"]}`))
 	request.Header.Set("Authorization", "Bearer access")
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
-
 	api.Handler().ServeHTTP(response, request)
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("preview status = %d, want 200: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusCreated || service.verificationInput.TransportURL == "" {
+		t.Fatalf("verification response=%d input=%+v body=%s", response.Code, service.verificationInput, response.Body.String())
 	}
-	wantInput := addon.InstallInput{TransportURL: "stremio://addon.example/config?token=private", ProfileIDs: []string{profileID}, CategoryIDs: []string{categoryID}}
-	if !reflect.DeepEqual(service.previewInput, wantInput) {
-		t.Fatalf("preview input = %+v, want %+v", service.previewInput, wantInput)
-	}
-	var preview addon.AddonPreview
-	decodeResponse(t, response, &preview)
-	if preview.Manifest.ID != "org.example.preview" || preview.Manifest.Description != "Validated manifest" || !reflect.DeepEqual(preview.Capabilities, service.previewValue.Capabilities) ||
-		!reflect.DeepEqual(preview.ProfileIDs, []string{profileID}) || !reflect.DeepEqual(preview.CategoryIDs, []string{categoryID}) {
-		t.Fatalf("preview response = %+v", preview)
-	}
-	serialized := response.Body.String()
 	for _, private := range []string{"transportUrl", "addon.example", "token=private"} {
-		if strings.Contains(serialized, private) {
-			t.Fatalf("preview response exposed private transport detail %q: %s", private, serialized)
+		if strings.Contains(response.Body.String(), private) {
+			t.Fatalf("verification response exposed %q: %s", private, response.Body.String())
 		}
 	}
 }
 
-func TestAddonAssignmentDimensionsForwardedExactly(t *testing.T) {
-	const (
-		profileID  = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-		categoryID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-		addonID    = "11111111-1111-4111-8111-111111111111"
-	)
-	tests := []struct {
-		name        string
-		assignments string
-		profileIDs  []string
-		categoryIDs []string
-	}{
-		{name: "omitted"},
-		{name: "explicit empty", assignments: `,"profileIds":[],"categoryIds":[]`, profileIDs: []string{}, categoryIDs: []string{}},
-		{name: "nonempty", assignments: `,"profileIds":["` + profileID + `"],"categoryIds":["` + categoryID + `"]`, profileIDs: []string{profileID}, categoryIDs: []string{categoryID}},
-	}
-	for _, endpoint := range []string{"preview", "install", "update"} {
-		for _, test := range tests {
-			t.Run(endpoint+"/"+test.name, func(t *testing.T) {
-				service := &fakeAddonService{
-					installValue: addon.InstalledAddon{ProfileIDs: []string{}, CategoryIDs: []string{}},
-					previewValue: addon.AddonPreview{ProfileIDs: []string{}, CategoryIDs: []string{}},
-					updateValue:  addon.InstalledAddon{ProfileIDs: []string{}, CategoryIDs: []string{}},
-				}
-				api := addonAPI(service)
-				api.auth = &fakeAuthService{principal: auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}}
-				method, path, body, wantStatus := http.MethodPost, "/api/v1/addons/"+endpoint, `{"transportUrl":"https://addon.example/manifest.json"`+test.assignments+`}`, http.StatusOK
-				if endpoint == "install" {
-					path, wantStatus = "/api/v1/addons", http.StatusCreated
-				} else if endpoint == "update" {
-					method, path, body = http.MethodPut, "/api/v1/addons/"+addonID, `{`+strings.TrimPrefix(test.assignments, ",")+`}`
-				}
-				request := httptest.NewRequest(method, path, strings.NewReader(body))
-				request.Header.Set("Authorization", "Bearer access")
-				request.Header.Set("Content-Type", "application/json")
-				response := httptest.NewRecorder()
-				api.Handler().ServeHTTP(response, request)
-				if response.Code != wantStatus {
-					t.Fatalf("status = %d, want %d: %s", response.Code, wantStatus, response.Body.String())
-				}
-				var gotProfileIDs, gotCategoryIDs []string
-				switch endpoint {
-				case "preview":
-					gotProfileIDs, gotCategoryIDs = service.previewInput.ProfileIDs, service.previewInput.CategoryIDs
-				case "install":
-					gotProfileIDs, gotCategoryIDs = service.installInput.ProfileIDs, service.installInput.CategoryIDs
-				case "update":
-					gotProfileIDs, gotCategoryIDs = service.updateInput.ProfileIDs, service.updateInput.CategoryIDs
-				}
-				if !reflect.DeepEqual(gotProfileIDs, test.profileIDs) || !reflect.DeepEqual(gotCategoryIDs, test.categoryIDs) {
-					t.Fatalf("assignments = profileIds:%#v categoryIds:%#v, want profileIds:%#v categoryIds:%#v", gotProfileIDs, gotCategoryIDs, test.profileIDs, test.categoryIDs)
-				}
-			})
-		}
-	}
-}
-
-func TestAddonAssignmentNullAndUnknownMembersAreRejected(t *testing.T) {
-	const addonID = "11111111-1111-4111-8111-111111111111"
-	invalidMembers := []struct {
-		name   string
-		member string
-	}{
-		{name: "null profileIds", member: `"profileIds":null`},
-		{name: "null categoryIds", member: `"categoryIds":null`},
-		{name: "unknown member", member: `"unexpectedAssignment":[]`},
-	}
-	for _, endpoint := range []string{"preview", "install", "update"} {
-		for _, invalid := range invalidMembers {
-			t.Run(endpoint+"/"+invalid.name, func(t *testing.T) {
-				service := &fakeAddonService{}
-				api := addonAPI(service)
-				api.auth = &fakeAuthService{principal: auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}}
-				method, path, body := http.MethodPost, "/api/v1/addons/"+endpoint, `{"transportUrl":"https://addon.example/manifest.json",`+invalid.member+`}`
-				if endpoint == "install" {
-					path = "/api/v1/addons"
-				} else if endpoint == "update" {
-					method, path, body = http.MethodPut, "/api/v1/addons/"+addonID, `{`+invalid.member+`}`
-				}
-				request := httptest.NewRequest(method, path, strings.NewReader(body))
-				request.Header.Set("Authorization", "Bearer access")
-				request.Header.Set("Content-Type", "application/json")
-				response := httptest.NewRecorder()
-				api.Handler().ServeHTTP(response, request)
-				if response.Code != http.StatusBadRequest {
-					t.Fatalf("status = %d, want 400: %s", response.Code, response.Body.String())
-				}
-			})
-		}
-	}
-}
-
-func TestPreviewAddonRequiresGlobalAdministratorBeforeService(t *testing.T) {
-	categoryID := "22222222-2222-4222-8222-222222222222"
-	for _, principal := range []auth.Principal{
-		{Role: "member", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID},
-		{Role: "admin", AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID},
-	} {
-		service := &fakeAddonService{}
-		api := addonAPI(service)
-		api.auth = &fakeAuthService{principal: principal}
-		request := httptest.NewRequest(http.MethodPost, "/api/v1/addons/preview", strings.NewReader(`{"transportUrl":"https://private.example/manifest.json"}`))
-		request.Header.Set("Authorization", "Bearer access")
-		response := httptest.NewRecorder()
-
-		api.Handler().ServeHTTP(response, request)
-
-		if response.Code != http.StatusForbidden {
-			t.Fatalf("non-global preview status = %d, want 403: %s", response.Code, response.Body.String())
-		}
-		if service.previewCalls != 0 {
-			t.Fatal("non-global preview request reached the service")
-		}
-	}
-}
-
-func TestPreviewAddonErrorsAreSafeAndPreservePublicStatus(t *testing.T) {
-	privateDetail := "https://provider.invalid/manifest.json?credential=secret returned private body"
-	tests := []struct {
-		name       string
-		err        error
-		wantStatus int
-		wantCode   string
-	}{
-		{name: "invalid transport", err: fmt.Errorf("%w: %s", addon.ErrInvalidTransportURL, privateDetail), wantStatus: http.StatusUnprocessableEntity, wantCode: "invalid_addon_transport"},
-		{name: "invalid manifest", err: fmt.Errorf("%w: %s", addon.ErrInvalidManifest, privateDetail), wantStatus: http.StatusUnprocessableEntity, wantCode: "invalid_addon_manifest"},
-		{name: "missing profile", err: addon.ErrActiveProfileRequired, wantStatus: http.StatusConflict, wantCode: "profile_selection_required"},
-		{name: "invalid profiles", err: fmt.Errorf("%w: %s", addon.ErrInvalidInput, privateDetail), wantStatus: http.StatusUnprocessableEntity, wantCode: "invalid_addon_request"},
-		{name: "provider", err: fmt.Errorf("%w: %s", addon.ErrProviderUnavailable, privateDetail), wantStatus: http.StatusBadGateway, wantCode: "addon_unavailable"},
-		{name: "persisted authorization", err: fmt.Errorf("%w: %s", addon.ErrForbidden, privateDetail), wantStatus: http.StatusForbidden, wantCode: "addon_forbidden"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			service := &fakeAddonService{previewErr: test.err}
-			api := addonAPI(service)
-			api.auth = &fakeAuthService{principal: auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}}
-			request := httptest.NewRequest(http.MethodPost, "/api/v1/addons/preview", strings.NewReader(`{"transportUrl":"https://request.invalid/manifest.json"}`))
-			request.Header.Set("Authorization", "Bearer access")
-			request.Header.Set("Content-Type", "application/json")
-			response := httptest.NewRecorder()
-			api.Handler().ServeHTTP(response, request)
-			if response.Code != test.wantStatus {
-				t.Fatalf("preview error status = %d, want %d: %s", response.Code, test.wantStatus, response.Body.String())
-			}
-			var body errorEnvelope
-			decodeResponse(t, response, &body)
-			if body.Error.Code != test.wantCode {
-				t.Fatalf("preview error code = %q, want %q", body.Error.Code, test.wantCode)
-			}
-			if strings.Contains(response.Body.String(), "provider.invalid") || strings.Contains(response.Body.String(), "credential=secret") || strings.Contains(response.Body.String(), "private body") {
-				t.Fatalf("preview error leaked provider detail: %s", response.Body.String())
-			}
-		})
-	}
-}
-
-func TestPreviewAddonRequiresAuthenticationAndJSON(t *testing.T) {
+func TestAddonVerificationRequiresGlobalAdministratorBeforeService(t *testing.T) {
 	service := &fakeAddonService{}
 	api := addonAPI(service)
-	api.auth = &fakeAuthService{authenticateErr: auth.ErrInvalidToken}
-	unauthenticated := httptest.NewRequest(http.MethodPost, "/api/v1/addons/preview", strings.NewReader(`{"transportUrl":"https://addon.example/manifest.json"}`))
-	unauthenticated.Header.Set("Content-Type", "application/json")
-	unauthenticatedResponse := httptest.NewRecorder()
-	api.Handler().ServeHTTP(unauthenticatedResponse, unauthenticated)
-	if unauthenticatedResponse.Code != http.StatusUnauthorized || service.previewCalls != 0 {
-		t.Fatalf("unauthenticated preview = %d with %d service calls", unauthenticatedResponse.Code, service.previewCalls)
-	}
-
-	api.auth = &fakeAuthService{principal: auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}}
-	unsupported := httptest.NewRequest(http.MethodPost, "/api/v1/addons/preview", strings.NewReader(`{"transportUrl":"https://addon.example/manifest.json"}`))
-	unsupported.Header.Set("Authorization", "Bearer access")
-	unsupported.Header.Set("Content-Type", "text/plain")
-	unsupportedResponse := httptest.NewRecorder()
-	api.Handler().ServeHTTP(unsupportedResponse, unsupported)
-	if unsupportedResponse.Code != http.StatusUnsupportedMediaType || service.previewCalls != 0 {
-		t.Fatalf("non-JSON preview = %d with %d service calls", unsupportedResponse.Code, service.previewCalls)
+	api.auth = &fakeAuthService{principal: auth.Principal{Role: "member", AuthorizationScope: auth.AuthorizationScopeCategory}}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/addons/verifications", strings.NewReader(`{"transportUrl":"https://addon.example/manifest.json"}`))
+	request.Header.Set("Authorization", "Bearer access")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	api.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden || service.verificationInput.TransportURL != "" {
+		t.Fatalf("verification authorization response=%d input=%+v", response.Code, service.verificationInput)
 	}
 }
 
@@ -389,7 +212,7 @@ func TestInstallAddonUsesProfileScopedRegistry(t *testing.T) {
 		InstalledAt: installedAt, UpdatedAt: installedAt,
 	}}
 	api := addonAPI(service)
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/addons", bytes.NewBufferString(`{"transportUrl":"stremio://addon.example/config","profileIds":["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/addons", bytes.NewBufferString(`{"verificationId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}`))
 	request.Header.Set("Authorization", "Bearer access")
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -399,11 +222,8 @@ func TestInstallAddonUsesProfileScopedRegistry(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("expected status 201, got %d: %s", response.Code, response.Body.String())
 	}
-	if service.installInput.TransportURL != "stremio://addon.example/config" {
+	if service.installInput.VerificationID != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
 		t.Fatalf("unexpected install input: %+v", service.installInput)
-	}
-	if len(service.installInput.ProfileIDs) != 1 || service.installInput.ProfileIDs[0] != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
-		t.Fatalf("unexpected install profiles: %+v", service.installInput.ProfileIDs)
 	}
 }
 
@@ -649,8 +469,8 @@ func TestAddonManagementReturnsExactTransportOnlyToGlobalAdministrator(t *testin
 	}
 	var body addon.ManagedAddon
 	decodeResponse(t, response, &body)
-	if body.TransportURL != transportURL {
-		t.Fatal("global management response did not preserve the stored transport URL")
+	if body.TransportURL != "" || strings.Contains(response.Body.String(), transportURL) {
+		t.Fatal("management response exposed the stored transport URL")
 	}
 	if !reflect.DeepEqual(body.ProfileIDs, []string{profileID}) || !reflect.DeepEqual(body.CategoryIDs, []string{categoryID}) {
 		t.Fatalf("management assignments = profileIds:%#v categoryIds:%#v", body.ProfileIDs, body.CategoryIDs)
@@ -702,7 +522,7 @@ func TestAddonManagementMutationsUseManagedAddonResponse(t *testing.T) {
 		body   string
 		setup  func(*fakeAddonService)
 	}{
-		{name: "install", method: http.MethodPost, path: "/api/v1/addons", body: `{"transportUrl":"https://request.example/manifest.json","profileIds":[]}`, setup: func(service *fakeAddonService) {
+		{name: "install", method: http.MethodPost, path: "/api/v1/addons", body: `{"verificationId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}`, setup: func(service *fakeAddonService) {
 			service.installValue = installed
 			service.installTransportURL = transportURL
 		}},
@@ -727,8 +547,8 @@ func TestAddonManagementMutationsUseManagedAddonResponse(t *testing.T) {
 			}
 			var body addon.ManagedAddon
 			decodeResponse(t, response, &body)
-			if body.TransportURL != transportURL {
-				t.Fatal("management mutation did not return the exact stored transport URL")
+			if body.TransportURL != "" || strings.Contains(response.Body.String(), transportURL) {
+				t.Fatal("management mutation exposed the stored transport URL")
 			}
 		})
 	}

@@ -59,6 +59,42 @@ func TestNormalizeAndValidateAcceptsEveryTMDBSourceType(t *testing.T) {
 	}
 }
 
+func TestNormalizeAndValidateTMDBRuntimeAndExcludedGenres(t *testing.T) {
+	minimum, maximum := 1, 600
+	input := SaveInput{
+		Title: "Curated",
+		Folders: []Folder{{
+			Title: "Featured",
+			Sources: []Source{{
+				Kind: SourceKindTMDB, Title: "Discover",
+				TMDB: &TMDBSource{
+					SourceType: "discover", MediaType: MediaTypeMovie, Sort: "popularity.desc",
+					Filters: TMDBFilters{ExcludedGenres: []int64{27, 35}, RuntimeMin: &minimum, RuntimeMax: &maximum},
+				},
+			}},
+		}},
+	}
+	if _, err := normalizeAndValidate(input, false); err != nil {
+		t.Fatalf("valid TMDB runtime and excluded genres: %v", err)
+	}
+
+	zero, tooLong, invertedMin, invertedMax := 0, 601, 120, 80
+	for _, filters := range []TMDBFilters{
+		{RuntimeMin: &zero},
+		{RuntimeMax: &zero},
+		{RuntimeMin: &tooLong},
+		{RuntimeMax: &tooLong},
+		{RuntimeMin: &invertedMin, RuntimeMax: &invertedMax},
+		{ExcludedGenres: []int64{0}},
+		{ExcludedGenres: []int64{27, 27}},
+	} {
+		input.Folders[0].Sources[0].TMDB.Filters = filters
+		if _, err := normalizeAndValidate(input, false); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("invalid TMDB filters %+v error = %v, want %v", filters, err, ErrInvalidInput)
+		}
+	}
+}
+
 func TestNormalizeAndValidatePreservesAddonManifestIdentity(t *testing.T) {
 	input := SaveInput{
 		Title: "Curated",

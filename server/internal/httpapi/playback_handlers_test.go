@@ -30,6 +30,10 @@ type fakePlaybackService struct {
 	markers          playback.MarkerList
 	preparation      playback.Preparation
 	session          playback.Session
+	failover         playback.FailoverState
+	createFailoverInput playback.CreateFailoverInput
+	advanceFailoverInput playback.AdvanceFailoverInput
+	failoverErr      error
 	activity         playback.Activity
 	sourcesErr       error
 	markersErr       error
@@ -61,6 +65,24 @@ func (fake *fakePlaybackService) Resolve(_ context.Context, _ auth.Principal, in
 	fake.resolveInput = input
 	return fake.session, fake.resolveErr
 }
+func (fake *fakePlaybackService) CreateFailover(_ context.Context, _ auth.Principal, input playback.CreateFailoverInput) (playback.FailoverState, error) {
+	fake.createFailoverInput = input
+	return fake.failover, fake.failoverErr
+}
+
+func (fake *fakePlaybackService) Failover(context.Context, auth.Principal, string) (playback.FailoverState, error) {
+	return fake.failover, fake.failoverErr
+}
+
+func (fake *fakePlaybackService) AdvanceFailover(_ context.Context, _ auth.Principal, _ string, input playback.AdvanceFailoverInput) (playback.FailoverState, error) {
+	fake.advanceFailoverInput = input
+	return fake.failover, fake.failoverErr
+}
+
+func (fake *fakePlaybackService) CancelFailover(context.Context, auth.Principal, string) error {
+	return fake.failoverErr
+}
+
 
 func (*fakePlaybackService) Stop(context.Context, auth.Principal, string) error {
 	return nil
@@ -190,6 +212,38 @@ func TestResolvePlaybackCreatesSessionFromOpaqueReference(t *testing.T) {
 	}
 	if service.resolveInput.SourceRef != "opaque-source-reference" || service.resolveInput.TitleID == "" || !service.resolveInput.ExternalPlayer {
 		t.Fatalf("unexpected playback input: %+v", service.resolveInput)
+	}
+}
+
+func TestPlaybackFailoverEndpointsKeepDiagnosticsOpaqueAndRejectIneligibleErrors(t *testing.T) {
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	service := &fakePlaybackService{failover: playback.FailoverState{
+		ID: "11111111-1111-4111-8111-111111111111", CurrentSourceRef: "backup-source-reference", CurrentPosition: 1,
+		AttemptCount: 1, MaximumAttempts: 2, Revision: 2, Status: "active", LastError: playback.FailoverSourceFailed,
+		Explanation: "Playback moved to the next available source.",
+		CandidateHealth: []playback.FailoverCandidateHealth{{Position: 0, Status: "cooling_down"}, {Position: 1, Status: "current"}}, ExpiresAt: expiresAt,
+	}}
+	api := testAPI(&fakeInstanceService{})
+	api.auth = &fakeAuthService{principal: auth.Principal{SessionID: "session-id", UserID: "user-id"}}
+	api.playback = service
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/failovers", stringsReader(`{"candidateSourceRefs":["primary-source-reference","backup-source-reference"],"selectedSourceRef":"primary-source-reference"}`))
+	request.Header.Set("Authorization", "Bearer access-token")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	api.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || service.createFailoverInput.SelectedSourceRef != "primary-source-reference" || strings.Contains(response.Body.String(), "https://") || strings.Contains(response.Body.String(), "token=") {
+		t.Fatalf("create failover response=%d body=%s input=%+v", response.Code, response.Body.String(), service.createFailoverInput)
+	}
+	validateContractResponse(t, loadOpenAPIContract(t), "/playback/failovers", nil, request, response)
+
+	service.failoverErr = playback.ErrFailoverIneligible
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/failovers/11111111-1111-4111-8111-111111111111/advance", stringsReader(`{"error":"access_denied","positionSeconds":12,"expectedRevision":2}`))
+	request.Header.Set("Authorization", "Bearer access-token")
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	api.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), `"code":"playback_failover_ineligible"`) {
+		t.Fatalf("ineligible failover response=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

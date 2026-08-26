@@ -426,6 +426,7 @@ func clonePlaybackDecision(decision *PlaybackDecision) *PlaybackDecision {
 		return nil
 	}
 	cloned := *decision
+	cloned.Reasons = append([]string(nil), decision.Reasons...)
 	if decision.Source != nil {
 		source := *decision.Source
 		cloned.Source = &source
@@ -433,6 +434,10 @@ func clonePlaybackDecision(decision *PlaybackDecision) *PlaybackDecision {
 	if decision.Target != nil {
 		target := *decision.Target
 		cloned.Target = &target
+	}
+	if decision.Pipeline != nil {
+		pipeline := *decision.Pipeline
+		cloned.Pipeline = &pipeline
 	}
 	return &cloned
 

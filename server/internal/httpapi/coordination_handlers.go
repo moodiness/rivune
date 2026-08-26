@@ -3,7 +3,6 @@ package httpapi
 import (
 	"errors"
 	"net/http"
-	"strconv"
 
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/coordination"
@@ -50,32 +49,36 @@ func (a *API) sendPlaybackCommand(w http.ResponseWriter, r *http.Request, princi
 }
 
 func (a *API) playbackCommands(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
-	afterID := int64(0)
-	if raw := r.URL.Query().Get("after"); raw != "" {
-		parsed, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil || parsed < 0 {
-			writeError(w, http.StatusUnprocessableEntity, "invalid_playback_coordination", "after must be a non-negative integer")
-			return
-		}
-		afterID = parsed
-	}
-	commands, err := a.coordination.Commands(r.Context(), principal, afterID)
+	after := r.URL.Query().Get("after")
+	commands, err := a.coordination.Commands(r.Context(), principal, after)
 	if writeCoordinationError(a, w, err, "list playback commands") {
 		return
 	}
 	writeJSON(w, http.StatusOK, commands)
 }
 
-func (a *API) acknowledgePlaybackCommand(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
-	commandID, err := strconv.ParseInt(r.PathValue("commandId"), 10, 64)
-	if err != nil || commandID <= 0 {
-		writeError(w, http.StatusNotFound, "playback_coordination_not_found", "The playback command does not exist")
+func (a *API) completePlaybackCommand(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	if !requireJSON(w, r) {
 		return
 	}
-	if err := a.coordination.AcknowledgeCommand(r.Context(), principal, commandID); writeCoordinationError(a, w, err, "acknowledge playback command") {
+	var input coordination.CommandResultInput
+	if err := decodeJSON(w, r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	command, err := a.coordination.CompleteCommand(r.Context(), principal, r.PathValue("operationId"), input)
+	if writeCoordinationError(a, w, err, "complete playback command") {
+		return
+	}
+	writeJSON(w, http.StatusOK, command)
+}
+
+func (a *API) outgoingPlaybackCommand(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	command, err := a.coordination.OutgoingCommand(r.Context(), principal, r.PathValue("operationId"))
+	if writeCoordinationError(a, w, err, "read outgoing playback command") {
+		return
+	}
+	writeJSON(w, http.StatusOK, command)
 }
 
 func (a *API) createPlaybackRoom(w http.ResponseWriter, r *http.Request, principal auth.Principal) {

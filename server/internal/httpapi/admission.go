@@ -19,7 +19,7 @@ const (
 	credentialUsernameTrackedSubjects    = 2_048
 	deviceCodeAdmissionGlobalConcurrency = 8
 	deviceCodeAdmissionSourceConcurrency = 2
-	deviceCodeAdmissionSourceAttempts    = 12
+	deviceCodeAdmissionSourceAttempts    = 60
 	deviceCodeAdmissionTrackedSources    = 4_096
 	calendarFeedGlobalConcurrency        = 8
 	calendarFeedSourceConcurrency        = 2
@@ -244,11 +244,15 @@ func (admission *requestAdmission) cleanupExpired(now time.Time, limit int) {
 	}
 }
 
-func writeAdmissionDenied(w http.ResponseWriter, retryAfter time.Duration) {
+func setRetryAfter(w http.ResponseWriter, retryAfter time.Duration) {
 	seconds := int64((retryAfter + time.Second - 1) / time.Second)
 	if seconds < 1 {
 		seconds = 1
 	}
 	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+}
+
+func writeAdmissionDenied(w http.ResponseWriter, retryAfter time.Duration) {
+	setRetryAfter(w, retryAfter)
 	writeError(w, http.StatusTooManyRequests, "rate_limited", "Too many requests; retry later")
 }

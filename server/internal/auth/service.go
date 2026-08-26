@@ -37,6 +37,13 @@ const (
 	AuthorizationScopeGlobalAdministrator AuthorizationScope = "global_admin"
 	AuthorizationScopeCategory            AuthorizationScope = "category"
 )
+type ClientKind string
+
+const (
+	ClientKindNative ClientKind = "native"
+	ClientKindWeb    ClientKind = "web"
+)
+
 
 const (
 	accessTokenPrefix                = "rivune_at_"
@@ -221,6 +228,17 @@ func (s *Service) runtimeTimezone(ctx context.Context) string {
 }
 
 func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error) {
+	if strings.EqualFold(strings.TrimSpace(input.Platform), "web") {
+		return TokenPair{}, fmt.Errorf("%w: web clients must use browser login", ErrInvalidInput)
+	}
+	return s.login(ctx, input, ClientKindNative)
+}
+
+func (s *Service) LoginWeb(ctx context.Context, input LoginInput) (TokenPair, error) {
+	input.Platform = "web"
+	return s.login(ctx, input, ClientKindWeb)
+}
+func (s *Service) login(ctx context.Context, input LoginInput, clientKind ClientKind) (TokenPair, error) {
 	input.Username = strings.TrimSpace(input.Username)
 	input.DeviceID = strings.TrimSpace(input.DeviceID)
 	input.DeviceName = strings.TrimSpace(input.DeviceName)
@@ -286,7 +304,7 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (TokenPair, error
 		scope = AuthorizationScopeGlobalAdministrator
 		sessionCategory = nil
 	}
-	tokens, err := s.createSession(ctx, tx, userID, deviceID, scope, sessionCategory, now, now.Add(s.refreshTTL))
+	tokens, err := s.createSessionForClient(ctx, tx, userID, deviceID, scope, sessionCategory, now, now.Add(s.refreshTTL), clientKind)
 	if err != nil {
 		return TokenPair{}, err
 	}
@@ -583,6 +601,14 @@ func (s *Service) createJellyfinProfileSession(
 }
 
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, error) {
+	return s.refresh(ctx, refreshToken, ClientKindNative)
+}
+
+func (s *Service) RefreshWeb(ctx context.Context, refreshToken string) (TokenPair, error) {
+	return s.refresh(ctx, refreshToken, ClientKindWeb)
+}
+
+func (s *Service) refresh(ctx context.Context, refreshToken string, clientKind ClientKind) (TokenPair, error) {
 	if !strings.HasPrefix(refreshToken, refreshTokenPrefix) || len(refreshToken) <= len(refreshTokenPrefix) {
 		return TokenPair{}, ErrInvalidToken
 	}
@@ -609,9 +635,9 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 		JOIN devices d ON d.id = s.device_id
 		LEFT JOIN access_categories c ON c.id = s.category_id
 		LEFT JOIN profiles p ON p.id = s.active_profile_id
-		WHERE rt.token_hash = $1
+		WHERE rt.token_hash = $1 AND s.client_kind = $2
 		FOR UPDATE OF rt, s
-	`, tokenDigest(refreshToken)).Scan(
+	`, tokenDigest(refreshToken), clientKind).Scan(
 		&sessionID, &deviceID, &role, &scope,
 		&sessionCategoryID, &categoryName, &categoryColor, &categoryIcon, &deviceCategoryID,
 		&activeProfileCategoryID, &refreshExpiresAt, &consumedAt, &revokedAt,
@@ -681,6 +707,14 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 	`, newRefreshHash, sessionID, refreshExpiresAt); err != nil {
 		return TokenPair{}, fmt.Errorf("store rotated refresh token: %w", err)
 	}
+	if clientKind == ClientKindWeb {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO auth_web_access_tokens (token_hash, session_id, expires_at)
+			VALUES ($1, $2, $3)
+		`, accessHash, sessionID, accessExpiresAt); err != nil {
+			return TokenPair{}, fmt.Errorf("store web access token: %w", err)
+		}
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE auth_sessions
 		SET access_token_hash = $2, access_expires_at = $3, last_seen_at = $4,
@@ -699,6 +733,25 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 		SessionID: sessionID, DeviceID: deviceID, AuthorizationScope: scope,
 		Category: newCategoryRef(sessionCategoryID, categoryName, categoryColor, categoryIcon),
 	}, nil
+}
+
+func (s *Service) LogoutWeb(ctx context.Context, refreshToken string) error {
+	if !strings.HasPrefix(refreshToken, refreshTokenPrefix) || len(refreshToken) <= len(refreshTokenPrefix) {
+		return ErrInvalidToken
+	}
+	command, err := s.pool.Exec(ctx, `
+		UPDATE auth_sessions s
+		SET revoked_at = COALESCE(s.revoked_at, now()), revoked_reason = COALESCE(s.revoked_reason, 'logout')
+		FROM auth_refresh_tokens rt
+		WHERE rt.session_id = s.id AND rt.token_hash = $1 AND s.client_kind = 'web'
+	`, tokenDigest(refreshToken))
+	if err != nil {
+		return fmt.Errorf("log out web session: %w", err)
+	}
+	if command.RowsAffected() != 1 {
+		return ErrInvalidToken
+	}
+	return nil
 }
 
 func (s *Service) Authenticate(ctx context.Context, accessToken string) (Principal, error) {
@@ -729,9 +782,15 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 		LEFT JOIN profiles p ON p.id = s.active_profile_id
 		LEFT JOIN user_profile_access upa
 		  ON upa.user_id = s.user_id AND upa.profile_id = s.active_profile_id
-		WHERE s.access_token_hash = $1
-		  AND s.access_expires_at > now()
-		  AND s.revoked_at IS NULL
+		WHERE s.revoked_at IS NULL
+		  AND (
+			(s.client_kind = 'native' AND s.access_token_hash = $1 AND s.access_expires_at > now())
+			OR (s.client_kind = 'web' AND EXISTS (
+				SELECT 1
+				FROM auth_web_access_tokens token
+				WHERE token.session_id = s.id AND token.token_hash = $1 AND token.expires_at > now()
+			))
+		  )
 	`, tokenDigest(accessToken)).Scan(
 		&principal.SessionID, &principal.UserID, &principal.DeviceID, &principal.Platform,
 		&principal.Username, &principal.Role, &principal.AuthorizationScope,
@@ -1521,6 +1580,18 @@ func (s *Service) createSession(
 	sessionCategory *category.CategoryRef,
 	now, refreshExpiresAt time.Time,
 ) (TokenPair, error) {
+	return s.createSessionForClient(ctx, tx, userID, deviceID, scope, sessionCategory, now, refreshExpiresAt, ClientKindNative)
+}
+
+func (s *Service) createSessionForClient(
+	ctx context.Context,
+	tx pgx.Tx,
+	userID, deviceID string,
+	scope AuthorizationScope,
+	sessionCategory *category.CategoryRef,
+	now, refreshExpiresAt time.Time,
+	clientKind ClientKind,
+) (TokenPair, error) {
 	var categoryID any
 	if sessionCategory != nil {
 		categoryID = sessionCategory.ID
@@ -1535,11 +1606,11 @@ func (s *Service) createSession(
 
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO auth_sessions (
-			user_id, device_id, authorization_scope, category_id,
+			user_id, device_id, authorization_scope, category_id, client_kind,
 			access_token_hash, access_expires_at, refresh_expires_at, last_seen_at, last_ip
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, '')::inet)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, '')::inet)
 		RETURNING id::text
-	`, userID, deviceID, scope, categoryID, accessHash, tokens.AccessExpiresAt,
+	`, userID, deviceID, scope, categoryID, clientKind, accessHash, tokens.AccessExpiresAt,
 		tokens.RefreshExpiresAt, now, ClientIP(ctx)).Scan(&tokens.SessionID); err != nil {
 		return TokenPair{}, fmt.Errorf("create session: %w", err)
 	}
@@ -1548,6 +1619,14 @@ func (s *Service) createSession(
 		VALUES ($1, $2, $3)
 	`, refreshHash, tokens.SessionID, tokens.RefreshExpiresAt); err != nil {
 		return TokenPair{}, fmt.Errorf("store refresh token: %w", err)
+	}
+	if clientKind == ClientKindWeb {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO auth_web_access_tokens (token_hash, session_id, expires_at)
+			VALUES ($1, $2, $3)
+		`, accessHash, tokens.SessionID, tokens.AccessExpiresAt); err != nil {
+			return TokenPair{}, fmt.Errorf("store web access token: %w", err)
+		}
 	}
 	return tokens, nil
 }

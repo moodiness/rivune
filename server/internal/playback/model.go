@@ -250,14 +250,14 @@ type Session struct {
 
 type PlaybackDecision struct {
 	Reason         string                  `json:"reason"`
-	Reasons        []string                `json:"reasons,omitempty"`
+	Reasons        []string                `json:"reasons"`
 	VideoAction    string                  `json:"videoAction"`
 	AudioAction    string                  `json:"audioAction"`
 	SubtitleAction string                  `json:"subtitleAction"`
 	ToneMapping    bool                    `json:"toneMapping"`
 	Source         *PlaybackDecisionSource `json:"source,omitempty"`
 	Target         *PlaybackDecisionTarget `json:"target,omitempty"`
-	Pipeline       *PlaybackPipeline       `json:"pipeline,omitempty"`
+	Pipeline       *PlaybackPipeline       `json:"-"`
 }
 
 type PlaybackDecisionSource struct {

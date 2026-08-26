@@ -43,6 +43,7 @@ type Device struct {
 	Platform     string      `json:"platform"`
 	Capabilities []string    `json:"capabilities"`
 	State        DeviceState `json:"state"`
+	Revision     int64       `json:"revision"`
 	Current      bool        `json:"current"`
 	LastSeenAt   time.Time   `json:"lastSeenAt"`
 }
@@ -52,17 +53,29 @@ type DeviceList struct {
 }
 
 type CommandInput struct {
+	OperationID          string        `json:"operationId"`
 	Command              string        `json:"command"`
+	Mode                 string        `json:"mode,omitempty"`
+	TargetRevision       *int64        `json:"targetRevision,omitempty"`
 	Item                 *PlaybackItem `json:"item,omitempty"`
 	PositionMilliseconds *int64        `json:"positionMilliseconds,omitempty"`
 }
 
+type CommandResultInput struct {
+	Status string `json:"status"`
+	Code   string `json:"code"`
+}
+
 type Command struct {
-	ID                   int64         `json:"id"`
+	OperationID          string        `json:"operationId"`
 	Command              string        `json:"command"`
+	Mode                 string        `json:"mode,omitempty"`
+	TargetRevision       *int64        `json:"targetRevision,omitempty"`
 	Item                 *PlaybackItem `json:"item,omitempty"`
 	PositionMilliseconds *int64        `json:"positionMilliseconds,omitempty"`
 	SenderDeviceName     string        `json:"senderDeviceName"`
+	Status               string        `json:"status"`
+	ResultCode           string        `json:"resultCode,omitempty"`
 	CreatedAt            time.Time     `json:"createdAt"`
 	ExpiresAt            time.Time     `json:"expiresAt"`
 }

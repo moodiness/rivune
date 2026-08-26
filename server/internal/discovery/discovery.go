@@ -19,7 +19,7 @@ const (
 	ServiceType       = "_rivune._tcp"
 	serviceDomain     = "local."
 	defaultInstance   = "Rivune"
-	protocolVersion   = 20
+	protocolVersion   = 22
 	maximumTXTLength  = 255
 	maximumNameLength = 63
 )

@@ -30,6 +30,10 @@ func (service *fakePortableService) Import(_ context.Context, _ auth.Principal, 
 	service.imports++
 	return service.report, service.err
 }
+func (service *fakePortableService) Create(_ context.Context, _ auth.Principal, _ portable.CreateInput) (portable.ImportReport, error) {
+	service.imports++
+	return service.report, service.err
+}
 
 func portableHandlerAPI(service *fakePortableService, principal auth.Principal) *API {
 	return &API{portable: service, auth: &fakeAuthService{principal: principal}, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
@@ -76,6 +80,31 @@ func TestProfileArchiveImportStrictBodyAndBudget(t *testing.T) {
 			service := &fakePortableService{}
 			api := portableHandlerAPI(service, principal)
 			request := httptest.NewRequest(http.MethodPost, "/api/v1/profiles/11111111-1111-4111-8111-111111111111/archive/import", strings.NewReader(test.body))
+			request.Header.Set("Authorization", "Bearer access")
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			api.Handler().ServeHTTP(response, request)
+			if response.Code != test.status || !strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) || service.imports != 0 {
+				t.Fatalf("response = %d calls=%d body=%s", response.Code, service.imports, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestProfileArchiveCreateAllowsEnvelopeOverhead(t *testing.T) {
+	principal := auth.Principal{UserID: "admin", Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator}
+	for _, test := range []struct {
+		name, body string
+		status     int
+		code       string
+	}{
+		{"document limit plus envelope overhead", strings.Repeat(" ", portable.MaximumDocumentBytes+1), http.StatusBadRequest, "invalid_profile_archive"},
+		{"oversize envelope", strings.Repeat(" ", int(portable.MaximumDocumentBytes+profileArchiveCreateEnvelopeOverheadBytes+1)), http.StatusRequestEntityTooLarge, "profile_archive_too_large"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakePortableService{}
+			api := portableHandlerAPI(service, principal)
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/profiles/archive", strings.NewReader(test.body))
 			request.Header.Set("Authorization", "Bearer access")
 			request.Header.Set("Content-Type", "application/json")
 			response := httptest.NewRecorder()

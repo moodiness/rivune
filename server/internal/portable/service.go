@@ -19,6 +19,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/addon"
 	"github.com/moodiness/rivune/server/internal/auth"
 	"github.com/moodiness/rivune/server/internal/collection"
+	"github.com/moodiness/rivune/server/internal/profile"
 	"github.com/moodiness/rivune/server/internal/runtimesettings"
 )
 
@@ -53,7 +54,10 @@ func (s *Service) Export(ctx context.Context, principal auth.Principal, profileI
 	if err != nil {
 		return Document{}, err
 	}
-	document := Document{Version: DocumentVersion, ExportedAt: time.Now().UTC(), Addons: []Addon{}, Collections: []PortableCollection{}, Titles: []Title{}, Library: []LibraryState{}, Progress: []ProgressState{}, Favorites: []FavoriteState{}, UserData: []UserDataState{}, TrackingPreferences: []TrackingPreference{}}
+	document := Document{Version: DocumentVersion, ExportedAt: time.Now().UTC(), Addons: []Addon{}, Collections: []PortableCollection{}, Titles: []Title{}, Library: []LibraryState{}, Progress: []ProgressState{}, Favorites: []FavoriteState{}, UserData: []UserDataState{}, ContinueDismissals: []ContinueDismissal{}, TrackingPreferences: []TrackingPreference{}}
+	if err := exportIdentity(ctx, tx, profileID, &document); err != nil {
+		return Document{}, err
+	}
 	if err := exportSettings(ctx, tx, profileID, &document); err != nil {
 		return Document{}, err
 	}
@@ -72,6 +76,9 @@ func (s *Service) Export(ctx context.Context, principal auth.Principal, profileI
 		s.afterExportTitlesRead()
 	}
 	if err := exportStates(ctx, tx, profileID, titleKeys, titleIDs, &document); err != nil {
+		return Document{}, err
+	}
+	if err := exportContinueDismissals(ctx, tx, profileID, titleKeys, &document); err != nil {
 		return Document{}, err
 	}
 	if err := exportTrackingPreferences(ctx, tx, profileID, &document); err != nil {
@@ -112,6 +119,46 @@ func (s *Service) authorize(ctx context.Context, tx pgx.Tx, captured auth.Princi
 func portableKey(kind, id string) string {
 	sum := sha256.Sum256([]byte("rivune-portable-v1\x00" + kind + "\x00" + id))
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func exportIdentity(ctx context.Context, tx pgx.Tx, profileID string, document *Document) error {
+	var preset string
+	var image []byte
+	if err := tx.QueryRow(ctx, `
+		SELECT profile.name,profile.description,profile.is_child,profile.avatar_preset,avatar.image_data
+		FROM profiles profile LEFT JOIN profile_avatar_images avatar ON avatar.profile_id=profile.id
+		WHERE profile.id=$1::uuid
+	`, profileID).Scan(&document.Identity.Name, &document.Identity.Description, &document.Identity.IsChild, &preset, &image); err != nil {
+		return fmt.Errorf("export profile identity: %w", err)
+	}
+	document.Identity.Avatar = Avatar{Kind: "preset", PresetID: preset}
+	if len(image) > 0 {
+		digest := sha256.Sum256(image)
+		document.Identity.Avatar = Avatar{Kind: "image", ContentType: "image/png", SHA256: hex.EncodeToString(digest[:]), Data: image}
+	}
+	return nil
+}
+
+func exportContinueDismissals(ctx context.Context, tx pgx.Tx, profileID string, titleKeys map[string]string, document *Document) error {
+	rows, err := tx.Query(ctx, `SELECT title_id::text,dismissed_at FROM profile_continue_dismissals WHERE profile_id=$1::uuid ORDER BY title_id`, profileID)
+	if err != nil {
+		return fmt.Errorf("export continue dismissals: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var titleID string
+		var value ContinueDismissal
+		if err := rows.Scan(&titleID, &value.DismissedAt); err != nil {
+			return fmt.Errorf("scan continue dismissal: %w", err)
+		}
+		key, exists := titleKeys[titleID]
+		if !exists {
+			continue
+		}
+		value.TitleKey = key
+		document.ContinueDismissals = append(document.ContinueDismissals, value)
+	}
+	return rows.Err()
 }
 
 func exportSettings(ctx context.Context, tx pgx.Tx, profileID string, document *Document) error {
@@ -381,6 +428,11 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, profileI
 		return ImportReport{}, fmt.Errorf("begin portable archive import: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	for _, seed := range []int{0, 1} {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`, profileID, seed); err != nil {
+			return ImportReport{}, fmt.Errorf("lock portable archive profile resources: %w", err)
+		}
+	}
 	principal, err = s.authorize(ctx, tx, principal, profileID)
 	if err != nil {
 		return ImportReport{}, err
@@ -391,10 +443,16 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, profileI
 	if err := lockImportResources(ctx, tx, profileID, document); err != nil {
 		return ImportReport{}, err
 	}
+
 	if err := validateTargetSettings(ctx, tx, document); err != nil {
 		return ImportReport{}, err
 	}
 	report := ImportReport{Mode: "merge", ProfileID: profileID}
+	identityChanged, avatarChanged, err := importIdentity(ctx, tx, profileID, document.Identity)
+	if err != nil {
+		return ImportReport{}, err
+	}
+	report.Sections = append(report.Sections, section("identity", 1, identityChanged), section("avatar", 1, avatarChanged))
 	if changed, err := importSettings(ctx, tx, profileID, document); err != nil {
 		return ImportReport{}, err
 	} else {
@@ -420,6 +478,11 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, profileI
 		return ImportReport{}, err
 	}
 	report.Sections = append(report.Sections, stateReports...)
+	dismissalReport, err := importContinueDismissals(ctx, tx, profileID, document, titleIDs)
+	if err != nil {
+		return ImportReport{}, err
+	}
+	report.Sections = append(report.Sections, dismissalReport)
 	if len(document.TrackingPreferences) > 0 {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(0x524956554e454f42)); err != nil {
 			return ImportReport{}, fmt.Errorf("lock tracking outbox preferences: %w", err)
@@ -436,13 +499,57 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, profileI
 	}
 	return report, nil
 }
+func importIdentity(ctx context.Context, tx pgx.Tx, profileID string, identity Identity) (bool, bool, error) {
+	result, err := tx.Exec(ctx, `UPDATE profiles SET name=$2,description=$3,is_child=$4,updated_at=now() WHERE id=$1::uuid AND (name,description,is_child) IS DISTINCT FROM ($2,$3,$4)`, profileID, identity.Name, identity.Description, identity.IsChild)
+	if err != nil {
+		return false, false, fmt.Errorf("import profile identity: %w", err)
+	}
+	identityChanged, avatarChanged := result.RowsAffected() == 1, false
+	if identity.Avatar.Kind == "preset" {
+		result, err = tx.Exec(ctx, `UPDATE profiles SET avatar_preset=$2,updated_at=now() WHERE id=$1::uuid AND avatar_preset IS DISTINCT FROM $2`, profileID, identity.Avatar.PresetID)
+		if err != nil {
+			return false, false, fmt.Errorf("import profile avatar preset: %w", err)
+		}
+		avatarChanged = result.RowsAffected() == 1
+		result, err = tx.Exec(ctx, `DELETE FROM profile_avatar_images WHERE profile_id=$1::uuid`, profileID)
+		if err != nil {
+			return false, false, fmt.Errorf("remove imported custom avatar: %w", err)
+		}
+		avatarChanged = avatarChanged || result.RowsAffected() == 1
+	} else {
+		normalized, normalizeErr := profile.NormalizeAvatarImage(identity.Avatar.Data)
+		if normalizeErr != nil {
+			return false, false, ErrInvalidDocument
+		}
+		result, err = tx.Exec(ctx, `INSERT INTO profile_avatar_images (profile_id,content_type,image_data,updated_at) VALUES ($1::uuid,'image/png',$2,now()) ON CONFLICT (profile_id) DO UPDATE SET content_type='image/png',image_data=EXCLUDED.image_data,updated_at=now() WHERE profile_avatar_images.image_data IS DISTINCT FROM EXCLUDED.image_data`, profileID, normalized)
+		if err != nil {
+			return false, false, fmt.Errorf("import profile avatar image: %w", err)
+		}
+		avatarChanged = result.RowsAffected() == 1
+	}
+	return identityChanged, avatarChanged, nil
+}
 
-func lockImportResources(ctx context.Context, tx pgx.Tx, profileID string, document Document) error {
-	for _, seed := range []int{0, 1} {
-		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`, profileID, seed); err != nil {
-			return fmt.Errorf("lock portable archive profile resources: %w", err)
+func importContinueDismissals(ctx context.Context, tx pgx.Tx, profileID string, document Document, titleIDs map[string]string) (SectionReport, error) {
+	created, changed := 0, 0
+	for _, value := range document.ContinueDismissals {
+		var prior *time.Time
+		if err := tx.QueryRow(ctx, `SELECT dismissed_at FROM profile_continue_dismissals WHERE profile_id=$1::uuid AND title_id=$2::uuid`, profileID, titleIDs[value.TitleKey]).Scan(&prior); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return SectionReport{}, fmt.Errorf("read continue dismissal: %w", err)
+		}
+		if prior == nil {
+			created++
+		} else if prior.Before(value.DismissedAt) {
+			changed++
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO profile_continue_dismissals (profile_id,title_id,dismissed_at) VALUES ($1::uuid,$2::uuid,$3) ON CONFLICT (profile_id,title_id) DO UPDATE SET dismissed_at=GREATEST(profile_continue_dismissals.dismissed_at,EXCLUDED.dismissed_at)`, profileID, titleIDs[value.TitleKey], value.DismissedAt); err != nil {
+			return SectionReport{}, fmt.Errorf("import continue dismissal: %w", err)
 		}
 	}
+	return counts("continueDismissals", len(document.ContinueDismissals), created, changed), nil
+}
+
+func lockImportResources(ctx context.Context, tx pgx.Tx, profileID string, document Document) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "profile-title-identities:"+profileID); err != nil {
 		return fmt.Errorf("lock portable archive profile identities: %w", err)
 	}

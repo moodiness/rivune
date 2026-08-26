@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,8 +15,8 @@ import (
 )
 
 func TestDeviceAuthorizationSourceHashUsesNetworkGranularity(t *testing.T) {
-	if maximumOutstandingDeviceAuthorizationsPerSource != 4 {
-		t.Fatalf("per-source capacity = %d, want 4", maximumOutstandingDeviceAuthorizationsPerSource)
+	if maximumOutstandingDeviceAuthorizationsPerSource != 16 {
+		t.Fatalf("per-source capacity = %d, want 16", maximumOutstandingDeviceAuthorizationsPerSource)
 	}
 	if deviceAuthorizationSourceHash("192.0.2.10") != deviceAuthorizationSourceHash("::ffff:192.0.2.10") {
 		t.Fatal("IPv4 and its IPv4-mapped representation did not share a /32 hash")
@@ -52,14 +53,14 @@ func TestDeviceAuthorizationAdmissionEnforcesSourceCapacity(t *testing.T) {
 	sourceB := WithClientIP(ctx, deviceAdmissionTestIPv6Source(seed, 2))
 
 	for index := range 2 {
-		if _, err := service.BeginDeviceAuthorization(sourceA, deviceName, "test"); err != nil {
+		if _, err := beginTestDeviceAuthorization(service, sourceA, deviceName, "test"); err != nil {
 			t.Fatalf("allocate source A slot %d: %v", index+1, err)
 		}
 	}
-	if _, err := service.BeginDeviceAuthorization(sourceA, deviceName, "test"); !errors.Is(err, ErrDeviceAuthorizationCapacity) {
+	if _, err := beginTestDeviceAuthorization(service, sourceA, deviceName, "test"); !errors.Is(err, ErrDeviceAuthorizationCapacity) {
 		t.Fatalf("source A N+1 error = %v, want capacity", err)
 	}
-	if _, err := service.BeginDeviceAuthorization(sourceB, deviceName, "test"); err != nil {
+	if _, err := beginTestDeviceAuthorization(service, sourceB, deviceName, "test"); err != nil {
 		t.Fatalf("distinct source was blocked by source A quota: %v", err)
 	}
 }
@@ -89,34 +90,34 @@ func TestDeviceAuthorizationAdmissionProtectsAdaptiveReserve(t *testing.T) {
 	seed := time.Now().UnixNano()
 	existingSource := WithClientIP(ctx, deviceAdmissionTestIPv6Source(seed, 1))
 
-	if _, err := service.BeginDeviceAuthorization(existingSource, deviceName, "test"); err != nil {
+	if _, err := beginTestDeviceAuthorization(service, existingSource, deviceName, "test"); err != nil {
 		t.Fatalf("allocate existing-source general slot: %v", err)
 	}
 	for index := 1; index < generalCapacity-baseline; index++ {
 		source := WithClientIP(ctx, deviceAdmissionTestIPv6Source(seed, index+1))
-		if _, err := service.BeginDeviceAuthorization(source, deviceName, "test"); err != nil {
+		if _, err := beginTestDeviceAuthorization(service, source, deviceName, "test"); err != nil {
 			t.Fatalf("fill general slot %d: %v", index+1, err)
 		}
 	}
-	if _, err := service.BeginDeviceAuthorization(existingSource, deviceName, "test"); !errors.Is(err, ErrDeviceAuthorizationCapacity) {
+	if _, err := beginTestDeviceAuthorization(service, existingSource, deviceName, "test"); !errors.Is(err, ErrDeviceAuthorizationCapacity) {
 		t.Fatalf("existing source reserve error = %v, want capacity", err)
 	}
 
 	reserveSource := WithClientIP(ctx, deviceAdmissionTestIPv6Source(seed, 30_000))
-	if _, err := service.BeginDeviceAuthorization(reserveSource, deviceName, "test"); err != nil {
+	if _, err := beginTestDeviceAuthorization(service, reserveSource, deviceName, "test"); err != nil {
 		t.Fatalf("allocate first slot from protected reserve: %v", err)
 	}
-	if _, err := service.BeginDeviceAuthorization(reserveSource, deviceName, "test"); !errors.Is(err, ErrDeviceAuthorizationCapacity) {
+	if _, err := beginTestDeviceAuthorization(service, reserveSource, deviceName, "test"); !errors.Is(err, ErrDeviceAuthorizationCapacity) {
 		t.Fatalf("second slot from protected reserve error = %v, want capacity", err)
 	}
 	for index := 1; index < hardCapacity-generalCapacity; index++ {
 		source := WithClientIP(ctx, deviceAdmissionTestIPv6Source(seed, 30_000+index))
-		if _, err := service.BeginDeviceAuthorization(source, deviceName, "test"); err != nil {
+		if _, err := beginTestDeviceAuthorization(service, source, deviceName, "test"); err != nil {
 			t.Fatalf("fill protected reserve slot %d: %v", index+1, err)
 		}
 	}
 	finalSource := WithClientIP(ctx, deviceAdmissionTestIPv6Source(seed, 60_000))
-	if _, err := service.BeginDeviceAuthorization(finalSource, deviceName, "test"); !errors.Is(err, ErrDeviceAuthorizationCapacity) {
+	if _, err := beginTestDeviceAuthorization(service, finalSource, deviceName, "test"); !errors.Is(err, ErrDeviceAuthorizationCapacity) {
 		t.Fatalf("hard-cap N+1 error = %v, want capacity", err)
 	}
 }
@@ -147,7 +148,7 @@ func TestDeviceAuthorizationAdmissionSerializesSourceCapacityAcrossInstances(t *
 		go func() {
 			ready.Done()
 			<-start
-			_, err := service.BeginDeviceAuthorization(sourceContext, deviceName, "test")
+			_, err := beginTestDeviceAuthorization(service, sourceContext, deviceName, "test")
 			results <- err
 		}()
 	}
@@ -194,13 +195,13 @@ func TestDeviceAuthorizationAdmissionGroupsIPv6By64(t *testing.T) {
 	if deviceAuthorizationSourceHash(first) == deviceAuthorizationSourceHash(different64) {
 		t.Fatal("addresses in distinct IPv6 /64s shared a source hash")
 	}
-	if _, err := service.BeginDeviceAuthorization(WithClientIP(ctx, first), deviceName, "test"); err != nil {
+	if _, err := beginTestDeviceAuthorization(service, WithClientIP(ctx, first), deviceName, "test"); err != nil {
 		t.Fatalf("allocate first IPv6 /64 slot: %v", err)
 	}
-	if _, err := service.BeginDeviceAuthorization(WithClientIP(ctx, same64), deviceName, "test"); !errors.Is(err, ErrDeviceAuthorizationCapacity) {
+	if _, err := beginTestDeviceAuthorization(service, WithClientIP(ctx, same64), deviceName, "test"); !errors.Is(err, ErrDeviceAuthorizationCapacity) {
 		t.Fatalf("same IPv6 /64 N+1 error = %v, want capacity", err)
 	}
-	if _, err := service.BeginDeviceAuthorization(WithClientIP(ctx, different64), deviceName, "test"); err != nil {
+	if _, err := beginTestDeviceAuthorization(service, WithClientIP(ctx, different64), deviceName, "test"); err != nil {
 		t.Fatalf("distinct IPv6 /64 was blocked: %v", err)
 	}
 }
@@ -228,10 +229,10 @@ func TestDeviceAuthorizationAdmissionFailsClosedWithoutSource(t *testing.T) {
 	deviceName := fmt.Sprintf("Missing source regression %d", time.Now().UnixNano())
 	cleanupDeviceAdmissionRows(t, pool, deviceName)
 
-	if _, err := service.BeginDeviceAuthorization(ctx, deviceName, "test"); err != nil {
+	if _, err := beginTestDeviceAuthorization(service, ctx, deviceName, "test"); err != nil {
 		t.Fatalf("allocate fail-closed sentinel slot: %v", err)
 	}
-	if _, err := service.BeginDeviceAuthorization(ctx, deviceName, "test"); !errors.Is(err, ErrDeviceAuthorizationCapacity) {
+	if _, err := beginTestDeviceAuthorization(service, ctx, deviceName, "test"); !errors.Is(err, ErrDeviceAuthorizationCapacity) {
 		t.Fatalf("missing-source N+1 error = %v, want capacity", err)
 	}
 }
@@ -251,7 +252,7 @@ func TestExpiredDeviceAuthorizationReleasesSourceCapacity(t *testing.T) {
 	cleanupDeviceAdmissionRows(t, pool, deviceName)
 	sourceContext := WithClientIP(ctx, deviceAdmissionTestIPv6Source(time.Now().UnixNano(), 1))
 
-	if _, err := service.BeginDeviceAuthorization(sourceContext, deviceName, "test"); err != nil {
+	if _, err := beginTestDeviceAuthorization(service, sourceContext, deviceName, "test"); err != nil {
 		t.Fatalf("allocate source slot before expiry: %v", err)
 	}
 	result, err := pool.Exec(ctx, `
@@ -265,9 +266,76 @@ func TestExpiredDeviceAuthorizationReleasesSourceCapacity(t *testing.T) {
 	if result.RowsAffected() != 1 {
 		t.Fatalf("expired rows = %d, want 1", result.RowsAffected())
 	}
-	if _, err := service.BeginDeviceAuthorization(sourceContext, deviceName, "test"); err != nil {
+	if _, err := beginTestDeviceAuthorization(service, sourceContext, deviceName, "test"); err != nil {
 		t.Fatalf("reallocate source slot after expiry: %v", err)
 	}
+}
+
+func TestNativeDeviceAuthorizationReplacesInstallationAndReturnsReleaseDelay(t *testing.T) {
+	pool := openDeviceAdmissionPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	baseline := countOutstandingDeviceAuthorizations(t, ctx, pool)
+	service := &Service{
+		pool:                              pool,
+		deviceAuthorizationCapacity:       deviceAdmissionHardCapacityForGeneralCount(baseline + 2),
+		deviceAuthorizationSourceCapacity: 1,
+	}
+	deviceName := fmt.Sprintf("Installation replacement regression %d", time.Now().UnixNano())
+	cleanupDeviceAdmissionRows(t, pool, deviceName)
+	sourceContext := WithClientIP(ctx, deviceAdmissionTestIPv6Source(time.Now().UnixNano(), 1))
+	installationID := fmt.Sprintf("installation-%d", time.Now().UnixNano())
+
+	first, err := service.BeginDeviceAuthorization(sourceContext, installationID, deviceName, "test")
+	if err != nil {
+		t.Fatalf("create first installation code: %v", err)
+	}
+	second, err := service.BeginDeviceAuthorization(sourceContext, installationID, deviceName, "test")
+	if err != nil {
+		t.Fatalf("replace installation code at source capacity: %v", err)
+	}
+	if first.DeviceCode == second.DeviceCode || first.UserCode == second.UserCode {
+		t.Fatal("replacement reused the previous one-time authorization")
+	}
+	if _, err := service.ExchangeDeviceAuthorization(sourceContext, first.DeviceCode); !errors.Is(err, ErrInvalidDeviceCode) {
+		t.Fatalf("replaced device code exchange error = %v, want invalid device code", err)
+	}
+
+	releaseAt := time.Now().UTC().Add(3*time.Minute + 17*time.Second)
+	if _, err := pool.Exec(ctx, `
+		UPDATE device_authorizations SET expires_at = $2
+		WHERE device_code_hash = $1
+	`, tokenDigest(second.DeviceCode), releaseAt); err != nil {
+		t.Fatalf("set deterministic release time: %v", err)
+	}
+	_, err = service.BeginDeviceAuthorization(sourceContext, installationID+"-other", deviceName, "test")
+	var capacityError *DeviceAuthorizationCapacityError
+	if !errors.As(err, &capacityError) {
+		t.Fatalf("distinct installation error = %v, want capacity error", err)
+	}
+	if capacityError.RetryAfter < 3*time.Minute+14*time.Second || capacityError.RetryAfter > 3*time.Minute+18*time.Second {
+		t.Fatalf("RetryAfter = %s, want remaining authorization lifetime", capacityError.RetryAfter)
+	}
+
+	hash := deviceAuthorizationInstallationHash(installationID)
+	var active int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM device_authorizations
+		WHERE purpose = 'native' AND native_installation_hash = $1 AND consumed_at IS NULL
+	`, hash[:]).Scan(&active); err != nil {
+		t.Fatalf("count active installation codes: %v", err)
+	}
+	if active != 1 {
+		t.Fatalf("active installation codes = %d, want 1", active)
+	}
+}
+
+var deviceAdmissionInstallationSequence atomic.Uint64
+
+func beginTestDeviceAuthorization(service *Service, ctx context.Context, deviceName, platform string) (DeviceAuthorization, error) {
+	installationID := fmt.Sprintf("device-admission-test-%d", deviceAdmissionInstallationSequence.Add(1))
+	return service.BeginDeviceAuthorization(ctx, installationID, deviceName, platform)
 }
 
 func countOutstandingDeviceAuthorizations(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int {
@@ -322,8 +390,10 @@ func TestDeviceAuthorizationCleanupIsExpiredAndBatchBounded(t *testing.T) {
 		}
 		var id string
 		if err := pool.QueryRow(ctx, `
-			INSERT INTO device_authorizations (device_code_hash, user_code, device_name, platform, source_hash, expires_at)
-			VALUES ($1, $2, 'Expired cleanup regression', 'test', $3, now() - interval '100 years')
+			INSERT INTO device_authorizations (
+				device_code_hash, user_code, device_name, platform, source_hash, expires_at, native_installation_hash
+			)
+			VALUES ($1, $2, 'Expired cleanup regression', 'test', $3, now() - interval '100 years', $1)
 			RETURNING id::text
 		`, deviceHash, userCode, sourceHash[:]).Scan(&id); err != nil {
 			t.Fatalf("insert expired device authorization: %v", err)

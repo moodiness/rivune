@@ -102,6 +102,7 @@ func validateImportDocumentBudget(document ExportDocument) error {
 					settings := source.TMDB
 					filters := &settings.Filters
 					if !addCount(&filterValues, len(filters.Genres), maximumImportFilterValues) ||
+						!addCount(&filterValues, len(filters.ExcludedGenres), maximumImportFilterValues) ||
 						!addCount(&filterValues, len(filters.Keywords), maximumImportFilterValues) ||
 						!addCount(&filterValues, len(filters.Companies), maximumImportFilterValues) ||
 						!addCount(&filterValues, len(filters.Networks), maximumImportFilterValues) ||
@@ -334,6 +335,12 @@ func normalizeTMDB(source *TMDBSource) error {
 	if filters.VoteCountMin != nil && *filters.VoteCountMin < 0 {
 		return errorsText("TMDB minimum vote count must not be negative")
 	}
+	if filters.RuntimeMin != nil && (*filters.RuntimeMin < 1 || *filters.RuntimeMin > 600) || filters.RuntimeMax != nil && (*filters.RuntimeMax < 1 || *filters.RuntimeMax > 600) {
+		return errorsText("TMDB runtimes must be between 1 and 600 minutes")
+	}
+	if filters.RuntimeMin != nil && filters.RuntimeMax != nil && *filters.RuntimeMin > *filters.RuntimeMax {
+		return errorsText("TMDB minimum runtime exceeds maximum")
+	}
 	if filters.Year != nil && (*filters.Year < 1870 || *filters.Year > 2200) {
 		return errorsText("TMDB year is outside the supported range")
 	}
@@ -343,7 +350,7 @@ func normalizeTMDB(source *TMDBSource) error {
 	if filters.OriginalLanguage != "" && !languagePattern.MatchString(filters.OriginalLanguage) || filters.OriginCountry != "" && !regionPattern.MatchString(filters.OriginCountry) || filters.WatchRegion != "" && !regionPattern.MatchString(filters.WatchRegion) {
 		return errorsText("TMDB language and regions are invalid")
 	}
-	for _, values := range [][]int64{filters.Genres, filters.Keywords, filters.Companies, filters.Networks, filters.WatchProviders} {
+	for _, values := range [][]int64{filters.Genres, filters.ExcludedGenres, filters.Keywords, filters.Companies, filters.Networks, filters.WatchProviders} {
 		if len(values) > 100 {
 			return errorsText("TMDB filter contains too many IDs")
 		}

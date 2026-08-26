@@ -24,7 +24,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/secretcrypto"
 )
+
+func setTestVerificationKeys(t *testing.T, service *Service) {
+	t.Helper()
+	keyring, err := secretcrypto.ParseKeyring("1:" + strings.Repeat("12", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetVerificationEncryptionKeys(keyring)
+}
 
 type catalogSearchTransport struct {
 	mu    sync.Mutex
@@ -274,47 +284,19 @@ func TestGenericResourceFetchRejectsPlaybackResourcesBeforeProviderAccess(t *tes
 	}
 }
 
-func TestInstallRequiresGlobalAdministratorBeforeManifestFetch(t *testing.T) {
+func TestInstallRequiresGlobalAdministratorBeforeDatabaseAccess(t *testing.T) {
 	activeProfileID := "2a000000-0000-4000-8000-000000000004"
 	categoryID := "2a000000-0000-4000-8000-000000000002"
 	expiresAt := time.Now().UTC().Add(time.Hour)
-	transport := &installManifestTransport{manifest: func(context.Context, string) (Manifest, json.RawMessage, error) {
-		return Manifest{}, nil, errors.New("unexpected manifest request")
-	}}
-	service := NewService(nil, transport, discardLogger())
+	service := NewService(nil, nil, discardLogger())
 
 	_, err := service.Install(context.Background(), auth.Principal{
 		UserID: "2a000000-0000-4000-8000-000000000001", Role: "admin",
 		AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID,
 		ActiveProfileID: &activeProfileID, ProfileGrantExpiresAt: &expiresAt,
-	}, InstallInput{TransportURL: "http://192.168.1.10/manifest.json"})
+	}, InstallInput{VerificationID: "11111111-1111-4111-8111-111111111111"})
 	if !errors.Is(err, ErrForbidden) {
 		t.Fatalf("delegated manager install error = %v, want %v", err, ErrForbidden)
-	}
-	if transport.calls != 0 {
-		t.Fatalf("manifest transport calls after delegated manager denial = %d, want 0", transport.calls)
-	}
-}
-
-func TestPreviewRequiresGlobalAdministratorBeforeDatabaseOrManifestFetch(t *testing.T) {
-	activeProfileID := "2a000000-0000-4000-8000-000000000004"
-	categoryID := "2a000000-0000-4000-8000-000000000002"
-	expiresAt := time.Now().UTC().Add(time.Hour)
-	transport := &installManifestTransport{manifest: func(context.Context, string) (Manifest, json.RawMessage, error) {
-		return Manifest{}, nil, errors.New("unexpected manifest request")
-	}}
-	service := NewService(nil, transport, discardLogger())
-
-	_, err := service.Preview(context.Background(), auth.Principal{
-		UserID: "2a000000-0000-4000-8000-000000000001", Role: "admin",
-		AuthorizationScope: auth.AuthorizationScopeCategory, CategoryID: &categoryID,
-		ActiveProfileID: &activeProfileID, ProfileGrantExpiresAt: &expiresAt,
-	}, InstallInput{TransportURL: "https://addon.example/manifest.json"})
-	if !errors.Is(err, ErrForbidden) {
-		t.Fatalf("delegated manager preview error = %v, want %v", err, ErrForbidden)
-	}
-	if transport.calls != 0 {
-		t.Fatalf("manifest transport calls after delegated preview denial = %d, want 0", transport.calls)
 	}
 }
 
@@ -408,19 +390,23 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 		CategoryID: &categoryA, ActiveProfileID: new(profileAID), ProfileGrantExpiresAt: &expiresAt,
 	}
 	principal = withAddonTestSession(t, ctx, pool, categoryAID, principal)
-	rawManifest := json.RawMessage(`{"id":"org.rivune.authorization-boundary","version":"1.0.0","name":"Authorization Boundary","description":"Validated preview","types":["movie","series"],"resources":["catalog","stream","catalog"],"catalogs":[{"type":"movie","id":"searchable","extra":[{"name":"search"},{"name":"skip"}]}],"behaviorHints":{"adult":true,"p2p":true,"configurationRequired":true}}`)
+	rawManifest := json.RawMessage(`{"id":"org.rivune.authorization-boundary","version":"1.0.0","name":"Authorization Boundary","description":"Validated verification","types":["movie","series"],"resources":["catalog","stream","catalog"],"catalogs":[{"type":"movie","id":"searchable","extra":[{"name":"search"},{"name":"skip"}]}],"behaviorHints":{"adult":true,"p2p":true,"configurationRequired":true}}`)
 	manifest, validatedRawManifest, err := ParseManifest(rawManifest)
 	if err != nil {
-		t.Fatalf("validate preview manifest fixture: %v", err)
+		t.Fatalf("validate verification manifest fixture: %v", err)
 	}
 	rawManifest = validatedRawManifest
-	transport := &installManifestTransport{manifest: func(context.Context, string) (Manifest, json.RawMessage, error) {
-		return manifest, rawManifest, nil
-	}}
+	transport := &installManifestTransport{
+		manifest: func(context.Context, string) (Manifest, json.RawMessage, error) { return manifest, rawManifest, nil },
+		resource: func(context.Context, string, ResourcePath) (json.RawMessage, CachePolicy, error) {
+			return json.RawMessage(`{"metas":[]}`), CachePolicy{}, nil
+		},
+	}
 	service := NewService(pool, transport, discardLogger())
-	input := InstallInput{TransportURL: transportURL, ProfileIDs: []string{profileAID, profileBID}}
+	setTestVerificationKeys(t, service)
+	verificationInput := VerificationInput{TransportURL: transportURL, ProfileIDs: []string{profileAID, profileBID}}
 
-	if _, err := service.Install(ctx, principal, input); !errors.Is(err, ErrForbidden) {
+	if _, err := service.Install(ctx, principal, InstallInput{VerificationID: "11111111-1111-4111-8111-111111111111"}); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("unauthorized install error = %v, want %v", err, ErrForbidden)
 	}
 	if transport.calls != 0 {
@@ -433,7 +419,7 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	`, userID, profileBID); err != nil {
 		t.Fatalf("grant second profile management: %v", err)
 	}
-	if _, err := service.Install(ctx, principal, input); !errors.Is(err, ErrForbidden) {
+	if _, err := service.Install(ctx, principal, InstallInput{VerificationID: "11111111-1111-4111-8111-111111111111"}); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("delegated manager install error = %v, want %v", err, ErrForbidden)
 	}
 	if transport.calls != 0 {
@@ -444,62 +430,62 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 		ActiveProfileID: new(profileAID), ProfileGrantExpiresAt: &expiresAt,
 	}
 	globalPrincipal = withAddonTestSession(t, ctx, pool, categoryAID, globalPrincipal)
-	if _, err := service.Preview(ctx, globalPrincipal, InstallInput{TransportURL: transportURL, ProfileIDs: []string{categoryBID}}); !errors.Is(err, ErrForbidden) {
-		t.Fatalf("preview with unauthorized profile assignment error = %v, want %v", err, ErrForbidden)
+	if _, err := service.VerifyCandidate(ctx, globalPrincipal, VerificationInput{TransportURL: transportURL, ProfileIDs: []string{categoryBID}}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("verification with unauthorized profile assignment error = %v, want %v", err, ErrForbidden)
 	}
 	if transport.calls != 0 {
-		t.Fatalf("profile-denied preview reached manifest transport %d times", transport.calls)
+		t.Fatalf("profile-denied verification reached manifest transport %d times", transport.calls)
 	}
-	previewInput := InstallInput{
+	candidateInput := VerificationInput{
 		TransportURL: "stremio://authorization-boundary.example/config/private",
 		ProfileIDs:   []string{profileAID, profileBID},
 	}
-	var previewWritesBefore int
+	var addonWritesBefore int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FROM profile_addons
 		WHERE profile_id = $1::uuid AND transport_url = $2
-	`, profileAID, "https://authorization-boundary.example/config/private/manifest.json").Scan(&previewWritesBefore); err != nil {
-		t.Fatalf("count baseline preview persistence: %v", err)
+	`, profileAID, "https://authorization-boundary.example/config/private/manifest.json").Scan(&addonWritesBefore); err != nil {
+		t.Fatalf("count baseline add-on persistence: %v", err)
 	}
-	preview, err := service.Preview(ctx, globalPrincipal, previewInput)
+	verification, err := service.VerifyCandidate(ctx, globalPrincipal, candidateInput)
 	if err != nil {
-		t.Fatalf("authorized preview: %v", err)
+		t.Fatalf("authorized verification: %v", err)
 	}
-	if preview.Manifest.ID != manifest.ID || preview.Manifest.Description != manifest.Description || !preview.Manifest.BehaviorHints.Adult || !preview.Manifest.BehaviorHints.P2P || !preview.Manifest.BehaviorHints.ConfigurationRequired {
-		t.Fatalf("preview manifest = %+v", preview.Manifest)
+	if verification.Manifest == nil || verification.Manifest.ID != manifest.ID || verification.Manifest.Description != manifest.Description || !verification.Manifest.BehaviorHints.Adult || !verification.Manifest.BehaviorHints.P2P || !verification.Manifest.BehaviorHints.ConfigurationRequired {
+		t.Fatalf("verification manifest = %+v", verification.Manifest)
 	}
 	wantCapabilities := AddonCapabilities{Resources: []string{"catalog", "stream"}, Search: true, Pagination: true, SearchPagination: true}
-	if !reflect.DeepEqual(preview.Capabilities, wantCapabilities) {
-		t.Fatalf("preview capabilities = %+v, want %+v", preview.Capabilities, wantCapabilities)
+	if verification.Capabilities == nil || !reflect.DeepEqual(*verification.Capabilities, wantCapabilities) {
+		t.Fatalf("verification capabilities = %+v, want %+v", verification.Capabilities, wantCapabilities)
 	}
 	if transport.calls != 1 || len(transport.transportURLs) != 1 || transport.transportURLs[0] != "https://authorization-boundary.example/config/private/manifest.json" {
-		t.Fatalf("preview manifest transports = %v with %d calls", transport.transportURLs, transport.calls)
+		t.Fatalf("verification manifest transports = %v with %d calls", transport.transportURLs, transport.calls)
 	}
-	var previewWritesAfter int
+	var addonWritesAfter int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FROM profile_addons
 		WHERE profile_id = $1::uuid AND transport_url = $2
-	`, profileAID, "https://authorization-boundary.example/config/private/manifest.json").Scan(&previewWritesAfter); err != nil {
-		t.Fatalf("count preview persistence: %v", err)
+	`, profileAID, "https://authorization-boundary.example/config/private/manifest.json").Scan(&addonWritesAfter); err != nil {
+		t.Fatalf("count add-on persistence after verification: %v", err)
 	}
-	if previewWritesAfter != previewWritesBefore {
-		t.Fatalf("preview changed persisted add-ons from %d to %d", previewWritesBefore, previewWritesAfter)
+	if addonWritesAfter != addonWritesBefore {
+		t.Fatalf("verification changed persisted add-ons from %d to %d", addonWritesBefore, addonWritesAfter)
 	}
-	_, previewObservations := service.diagnostics.snapshot()
-	if len(previewObservations) != 0 {
-		t.Fatalf("preview created health observations: %+v", previewObservations)
+	_, verificationObservations := service.diagnostics.snapshot()
+	if len(verificationObservations) != 0 {
+		t.Fatalf("verification created health observations: %+v", verificationObservations)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE users SET role = 'member' WHERE id = $1::uuid`, userID); err != nil {
-		t.Fatalf("revoke persisted global authority before preview: %v", err)
+		t.Fatalf("revoke persisted global authority before verification: %v", err)
 	}
-	if _, err := service.Preview(ctx, globalPrincipal, previewInput); !errors.Is(err, ErrForbidden) {
-		t.Fatalf("preview after persisted global authority revocation error = %v, want %v", err, ErrForbidden)
+	if _, err := service.VerifyCandidate(ctx, globalPrincipal, candidateInput); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("verification after persisted global authority revocation error = %v, want %v", err, ErrForbidden)
 	}
 	if transport.calls != 1 {
-		t.Fatalf("persisted-role-denied preview reached manifest transport %d times", transport.calls)
+		t.Fatalf("persisted-role-denied verification reached manifest transport %d times", transport.calls)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE users SET role = 'admin' WHERE id = $1::uuid`, userID); err != nil {
-		t.Fatalf("restore global authority after preview: %v", err)
+		t.Fatalf("restore global authority after verification: %v", err)
 	}
 	transport.manifest = func(ctx context.Context, _ string) (Manifest, json.RawMessage, error) {
 		if _, err := pool.Exec(ctx, `UPDATE users SET role = 'member' WHERE id = $1::uuid`, userID); err != nil {
@@ -507,8 +493,8 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 		}
 		return manifest, rawManifest, nil
 	}
-	if _, err := service.Install(ctx, globalPrincipal, input); !errors.Is(err, ErrForbidden) {
-		t.Fatalf("install after post-manifest global authority revocation error = %v, want %v", err, ErrForbidden)
+	if _, err := service.VerifyCandidate(ctx, globalPrincipal, verificationInput); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("verification after post-manifest global authority revocation error = %v, want %v", err, ErrForbidden)
 	}
 	if transport.calls != 2 {
 		t.Fatalf("manifest transport calls after post-network reauthorization = %d, want 2", transport.calls)
@@ -528,7 +514,11 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	transport.manifest = func(context.Context, string) (Manifest, json.RawMessage, error) {
 		return manifest, rawManifest, nil
 	}
-	installed, err := service.Install(ctx, globalPrincipal, input)
+	authorizedVerification, err := service.VerifyCandidate(ctx, globalPrincipal, verificationInput)
+	if err != nil {
+		t.Fatalf("authorized verification: %v", err)
+	}
+	installed, err := service.Install(ctx, globalPrincipal, InstallInput{VerificationID: authorizedVerification.ID})
 	if err != nil {
 		t.Fatalf("authorized install: %v", err)
 	}
@@ -551,11 +541,12 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	if !persistedEnabled {
 		t.Fatal("database default did not enable the new installation")
 	}
+	resourceCallsBeforeValidation := transport.resourceCalls
 	if err := service.ValidatePlaybackAccess(ctx, globalPrincipal, installed.ID); err != nil {
 		t.Fatalf("validate enabled playback access: %v", err)
 	}
-	if transport.resourceCalls != 0 {
-		t.Fatalf("playback access validation made %d provider calls", transport.resourceCalls)
+	if transport.resourceCalls != resourceCallsBeforeValidation {
+		t.Fatalf("playback access validation changed provider calls from %d to %d", resourceCallsBeforeValidation, transport.resourceCalls)
 	}
 	disabled := false
 	callsBeforeToggle := transport.calls
@@ -576,11 +567,12 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	if disabledAddon.Enabled || transport.calls != callsBeforeToggle {
 		t.Fatalf("disable result = enabled %t with %d manifest calls, want false and %d", disabledAddon.Enabled, transport.calls, callsBeforeToggle)
 	}
+	disabledResourceCalls := transport.resourceCalls
 	if err := service.ValidatePlaybackAccess(ctx, globalPrincipal, installed.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("disabled playback access validation error = %v, want %v", err, ErrNotFound)
 	}
-	if transport.resourceCalls != 0 {
-		t.Fatalf("disabled playback access validation made %d provider calls", transport.resourceCalls)
+	if transport.resourceCalls != disabledResourceCalls {
+		t.Fatalf("disabled playback access validation changed provider calls from %d to %d", disabledResourceCalls, transport.resourceCalls)
 	}
 	manageable, err := service.List(ctx, globalPrincipal)
 	if err != nil || len(manageable) != 1 || manageable[0].ID != installed.ID || manageable[0].Enabled {
@@ -601,6 +593,7 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	if catalogs, err := service.Catalogs(ctx, globalPrincipal); err != nil || len(catalogs) != 0 {
 		t.Fatalf("disabled catalog discovery = %+v, error %v", catalogs, err)
 	}
+	disabledRuntimeResourceCalls := transport.resourceCalls
 	if _, err := service.Fetch(ctx, globalPrincipal, installed.ID, ResourcePath{Resource: "catalog", Type: "movie", ID: "searchable"}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("disabled exact catalog fetch error = %v, want %v", err, ErrNotFound)
 	}
@@ -621,8 +614,8 @@ func TestInstallAuthorizesBeforeManifestAndReauthorizesBeforePersistence(t *test
 	if batch, err := service.SearchCatalogs(ctx, globalPrincipal, "movie", CatalogSearchInput{Search: "disabled", Limit: 10}); err != nil || len(batch.Results) != 0 || len(batch.Errors) != 0 {
 		t.Fatalf("disabled catalog search = %+v, error %v", batch, err)
 	}
-	if transport.resourceCalls != 0 {
-		t.Fatalf("disabled runtime paths made %d provider calls", transport.resourceCalls)
+	if transport.resourceCalls != disabledRuntimeResourceCalls {
+		t.Fatalf("disabled runtime paths changed provider calls from %d to %d", disabledRuntimeResourceCalls, transport.resourceCalls)
 	}
 	refreshedDisabled, err := service.Refresh(ctx, globalPrincipal, installed.ID)
 	if err != nil || refreshedDisabled.Enabled {
@@ -1048,16 +1041,18 @@ func TestRefreshAuthorizesEveryAssignmentBeforeFetchAndCommit(t *testing.T) {
 		return oldManifest, oldRawManifest, nil
 	}}
 	service := NewService(pool, transport, discardLogger())
+	setTestVerificationKeys(t, service)
 	expiresAt := time.Now().UTC().Add(time.Hour)
 	globalPrincipal := auth.Principal{
 		UserID: userID, Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
 		ActiveProfileID: new(profileAID), ProfileGrantExpiresAt: &expiresAt,
 	}
 	globalPrincipal = withAddonTestSession(t, ctx, pool, categoryID, globalPrincipal)
-	installed, err := service.Install(ctx, globalPrincipal, InstallInput{
-		TransportURL: transportURL,
-		ProfileIDs:   []string{profileAID, profileBID},
-	})
+	verification, err := service.VerifyCandidate(ctx, globalPrincipal, VerificationInput{TransportURL: transportURL, ProfileIDs: []string{profileAID, profileBID}})
+	if err != nil {
+		t.Fatalf("verify shared addon for refresh: %v", err)
+	}
+	installed, err := service.Install(ctx, globalPrincipal, InstallInput{VerificationID: verification.ID})
 	if err != nil {
 		t.Fatalf("install shared addon for refresh: %v", err)
 	}
@@ -2137,31 +2132,39 @@ func TestCategoryAssignmentsAreDurableEffectiveAndSeparate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse category assignment manifest: %v", err)
 	}
-	transport := &installManifestTransport{manifest: func(context.Context, string) (Manifest, json.RawMessage, error) {
-		return manifest, rawManifest, nil
-	}}
-	service := NewService(pool, transport, discardLogger())
-	categoryOnly := InstallInput{TransportURL: transportURL, ProfileIDs: []string{}, CategoryIDs: []string{categoryAID}}
-	preview, err := service.Preview(ctx, globalPrincipal, categoryOnly)
-	if err != nil || len(preview.ProfileIDs) != 0 || !reflect.DeepEqual(preview.CategoryIDs, []string{categoryAID}) {
-		t.Fatalf("category-only preview = %+v, error %v", preview, err)
+	transport := &installManifestTransport{
+		manifest: func(context.Context, string) (Manifest, json.RawMessage, error) { return manifest, rawManifest, nil },
+		resource: func(context.Context, string, ResourcePath) (json.RawMessage, CachePolicy, error) {
+			return json.RawMessage(`{"metas":[]}`), CachePolicy{}, nil
+		},
 	}
-	installed, err := service.Install(ctx, globalPrincipal, categoryOnly)
+	service := NewService(pool, transport, discardLogger())
+	setTestVerificationKeys(t, service)
+	categoryOnly := VerificationInput{TransportURL: transportURL, ProfileIDs: []string{}, CategoryIDs: []string{categoryAID}}
+	verification, err := service.VerifyCandidate(ctx, globalPrincipal, categoryOnly)
+	if err != nil || len(verification.ProfileIDs) != 0 || !reflect.DeepEqual(verification.CategoryIDs, []string{categoryAID}) {
+		t.Fatalf("category-only verification = %+v, error %v", verification, err)
+	}
+	installed, err := service.Install(ctx, globalPrincipal, InstallInput{VerificationID: verification.ID})
 	if err != nil {
 		t.Fatalf("install category-only addon: %v", err)
 	}
-	disjoint, err := service.Install(ctx, globalPrincipal, InstallInput{
-		TransportURL: transportURL, ProfileIDs: []string{}, CategoryIDs: []string{categoryBID},
-	})
+	disjointVerification, err := service.VerifyCandidate(ctx, globalPrincipal, VerificationInput{TransportURL: transportURL, ProfileIDs: []string{}, CategoryIDs: []string{categoryBID}})
+	if err != nil {
+		t.Fatalf("verify same-owner same-transport add-on for disjoint category: %v", err)
+	}
+	disjoint, err := service.Install(ctx, globalPrincipal, InstallInput{VerificationID: disjointVerification.ID})
 	if err != nil {
 		t.Fatalf("install same-owner same-transport add-on for disjoint category: %v", err)
 	}
 	if disjoint.ID == installed.ID {
 		t.Fatal("disjoint category install reused the existing add-on row")
 	}
-	if _, err := service.Install(ctx, globalPrincipal, InstallInput{
-		TransportURL: transportURL, ProfileIDs: []string{}, CategoryIDs: []string{categoryBID},
-	}); !errors.Is(err, ErrAlreadyInstalled) {
+	overlapVerification, err := service.VerifyCandidate(ctx, globalPrincipal, VerificationInput{TransportURL: transportURL, ProfileIDs: []string{}, CategoryIDs: []string{categoryBID}})
+	if err != nil {
+		t.Fatalf("verify overlapping disjoint-category add-on: %v", err)
+	}
+	if _, err := service.Install(ctx, globalPrincipal, InstallInput{VerificationID: overlapVerification.ID}); !errors.Is(err, ErrAlreadyInstalled) {
 		t.Fatalf("overlapping disjoint-category transport policy error = %v, want %v", err, ErrAlreadyInstalled)
 	}
 	var sameOwnerRows int
@@ -2349,9 +2352,11 @@ func TestCategoryAssignmentsAreDurableEffectiveAndSeparate(t *testing.T) {
 		t.Fatalf("effective reorder materialized access=%d order=%d", explicitAccessCount, profileOrderCount)
 	}
 
-	if _, err := service.Install(ctx, globalPrincipal, InstallInput{
-		TransportURL: transportURL, ProfileIDs: []string{profileAID}, CategoryIDs: []string{},
-	}); !errors.Is(err, ErrAlreadyInstalled) {
+	overlappingVerification, err := service.VerifyCandidate(ctx, globalPrincipal, VerificationInput{TransportURL: transportURL, ProfileIDs: []string{profileAID}, CategoryIDs: []string{}})
+	if err != nil {
+		t.Fatalf("verify overlapping transport: %v", err)
+	}
+	if _, err := service.Install(ctx, globalPrincipal, InstallInput{VerificationID: overlappingVerification.ID}); !errors.Is(err, ErrAlreadyInstalled) {
 		t.Fatalf("overlapping transport policy error = %v, want %v", err, ErrAlreadyInstalled)
 	}
 	disabled := false

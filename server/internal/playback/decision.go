@@ -29,6 +29,7 @@ const (
 	reasonResolutionLimit        = "resolution_limit"
 	reasonBitrateLimit           = "bitrate_limit"
 	reasonHDRNotSupported        = "hdr_not_supported"
+	reasonSubtitleBurnRequired   = "subtitle_burn_required"
 )
 
 type sourceCandidate struct {
@@ -220,7 +221,7 @@ func planVideoHeight(plan sourcePlan) int {
 
 func directDecision(inspection MediaInspection) *PlaybackDecision {
 	return &PlaybackDecision{
-		Reason: decisionDirectSupported, VideoAction: "copy", AudioAction: "copy", SubtitleAction: "none",
+		Reason: decisionDirectSupported, Reasons: []string{}, VideoAction: "copy", AudioAction: "copy", SubtitleAction: "none",
 		Source: decisionSource(inspection),
 	}
 }
@@ -341,7 +342,7 @@ func remuxSupported(inspection MediaInspection, capabilities Capabilities) bool 
 		return false
 	}
 	video := primaryTrack(inspection.VideoTracks)
-	if video == nil || !mp4RemuxableVideo(video.Codec) || !videoWithinClientLimits(video, inspection.HDRFormat, capabilities) {
+	if video == nil || !hlsSegmentVideoCopySupported(video.Codec, capabilities.HLSSegmentContainer) || !videoWithinClientLimits(video, inspection.HDRFormat, capabilities) {
 		return false
 	}
 	if len(inspection.AudioTracks) == 0 {
@@ -355,7 +356,7 @@ func audioTranscodeSupported(inspection MediaInspection, capabilities Capabiliti
 		return false
 	}
 	video := primaryTrack(inspection.VideoTracks)
-	if video == nil || !mp4RemuxableVideo(video.Codec) || !videoWithinClientLimits(video, inspection.HDRFormat, capabilities) {
+	if video == nil || !hlsSegmentVideoCopySupported(video.Codec, capabilities.HLSSegmentContainer) || !videoWithinClientLimits(video, inspection.HDRFormat, capabilities) {
 		return false
 	}
 	targetAudio := &MediaTrack{Codec: "aac", Channels: targetAudioChannels(capabilities)}
@@ -414,7 +415,7 @@ func processingDecisionWithReasons(reason string, reasons []string, videoAction,
 		target.AudioCodec = normalizedCodec(targetAudio.Codec)
 	}
 	decision := &PlaybackDecision{
-		Reason: reason, Reasons: append([]string(nil), reasons...), VideoAction: videoAction, AudioAction: audioAction,
+		Reason: reason, Reasons: append([]string{}, reasons...), VideoAction: videoAction, AudioAction: audioAction,
 		SubtitleAction: "none", ToneMapping: toneMap, Source: decisionSource(inspection), Target: target,
 	}
 	if videoAction == "transcode" {
@@ -1058,9 +1059,10 @@ func mediaProfileVideoConditionsSupported(profile MediaProfile, video *MediaTrac
 
 func mediaProfileContainerMatches(profile, candidate string) bool {
 	candidate = strings.ToLower(strings.TrimSpace(candidate))
-	if candidate == "m4v" || candidate == "mov" {
+	switch candidate {
+	case "m4v", "mov":
 		candidate = "mp4"
-	} else if candidate == "m3u8" {
+	case "m3u8":
 		candidate = "hls"
 	}
 	for _, value := range strings.Split(profile, ",") {
@@ -1083,7 +1085,7 @@ func mediaProfileCodecMatches(profile, candidate string) bool {
 
 func compatibleRemuxAudioTrack(video MediaTrack, tracks []MediaTrack, capabilities Capabilities) *MediaTrack {
 	for index := range tracks {
-		if mp4RemuxableAudio(tracks[index].Codec) && audioWithinClientLimits(&tracks[index], capabilities) &&
+		if hlsSegmentAudioCopySupported(tracks[index].Codec, capabilities.HLSSegmentContainer) && audioWithinClientLimits(&tracks[index], capabilities) &&
 			processingCopyMediaProfileSupported("mp4", &video, &tracks[index], capabilities) {
 			return &tracks[index]
 		}

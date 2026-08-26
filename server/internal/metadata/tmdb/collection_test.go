@@ -2,6 +2,8 @@ package tmdb
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -100,6 +102,56 @@ func TestCollectionEditorLookupsUseTMDBSearchEndpoints(t *testing.T) {
 	}
 	if len(values) != 1 || values[0].ID != 3 || values[0].ImageURL != "https://image.tmdb.org/t/p/w500/pixar.png" {
 		t.Fatalf("unexpected lookup values: %+v", values)
+	}
+}
+
+func TestSearchCollectionTitlesUsesTypedEndpointsAndAppliesSafeFilters(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		mediaType string
+		path      string
+		titleKey  string
+		dateKey   string
+	}{
+		{name: "movie", mediaType: collection.MediaTypeMovie, path: "/search/movie", titleKey: "title", dateKey: "release_date"},
+		{name: "series", mediaType: collection.MediaTypeSeries, path: "/search/tv", titleKey: "name", dateKey: "first_air_date"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				query := r.URL.Query()
+				if r.URL.Path != test.path || query.Get("query") != "Alien" || query.Get("language") != "fr-FR" || query.Get("page") != "2" || query.Get("include_adult") != "false" {
+					t.Fatalf("unexpected title search %s?%s", r.URL.Path, r.URL.RawQuery)
+				}
+				if test.mediaType == collection.MediaTypeMovie && query.Get("region") != "FR" || test.mediaType == collection.MediaTypeSeries && query.Has("region") {
+					t.Fatalf("unexpected title search region: %v", query)
+				}
+				_, _ = w.Write([]byte(`{"page":2,"total_pages":3,"results":[` +
+					`{"id":1,"` + test.titleKey + `":"Wrong genre","genre_ids":[35],"original_language":"en","origin_country":["US"],"overview":"Known"},` +
+					`{"id":2,"` + test.titleKey + `":"Alien","` + test.dateKey + `":"2022-04-01","vote_average":8.1,"vote_count":500,"genre_ids":[27],"original_language":"en","origin_country":["US"],"overview":"Known"},` +
+					`{"id":3,"` + test.titleKey + `":"Wrong language","genre_ids":[27],"original_language":"ja","origin_country":["JP"],"overview":"Known"},` +
+					`{"id":4,"` + test.titleKey + `":"Alien","` + test.dateKey + `":"2010-04-01","vote_average":8.1,"vote_count":500,"genre_ids":[27],"original_language":"en","origin_country":["US"],"overview":"Known"},` +
+					`{"id":5,"` + test.titleKey + `":"Alien","` + test.dateKey + `":"2022-04-01","vote_average":6.9,"vote_count":500,"genre_ids":[27],"original_language":"en","origin_country":["US"],"overview":"Known"},` +
+					`{"id":6,"` + test.titleKey + `":"Alien","` + test.dateKey + `":"2022-04-01","vote_average":8.1,"vote_count":50,"genre_ids":[27],"original_language":"en","origin_country":["US"],"overview":"Known"}]}`))
+			}))
+			defer server.Close()
+
+			minimumRating, maximumRating := 7.5, 9.5
+			minimumVotes := 100
+			client := newWithBaseURL("token", server.URL, server.Client())
+			page, err := client.SearchCollectionTitles(context.Background(), " Alien ", collection.TMDBSource{
+				MediaType: test.mediaType,
+				Filters: collection.TMDBFilters{
+					Genres: []int64{27}, ExcludedGenres: []int64{35}, OriginalLanguage: "en", OriginCountry: "US",
+					ReleaseDateFrom: "2020-01-01", ReleaseDateTo: "2024-12-31", VoteAverageMin: &minimumRating, VoteAverageMax: &maximumRating, VoteCountMin: &minimumVotes,
+				},
+			}, 2, "fr-FR", "FR")
+			if err != nil {
+				t.Fatalf("search collection titles: %v", err)
+			}
+			if len(page.Items) != 1 || page.Items[0].ID != "tmdb:2" || page.Items[0].Title != "Alien" || page.Items[0].MediaType != test.mediaType || !page.HasMore || !page.ExactTitleMatch {
+				t.Fatalf("unexpected title page: %+v", page)
+			}
+		})
 	}
 }
 
@@ -321,5 +373,232 @@ func TestResolveCollectionSourceAccountsTMDBPayloadBeforeNormalization(t *testin
 				t.Fatal("payload over the request budget did not cancel the source context")
 			}
 		})
+	}
+}
+
+func TestSearchCollectionTitlesMarksNormalizedLocalizedAndOriginalMatches(t *testing.T) {
+	tests := []struct {
+		name      string
+		mediaType string
+		path      string
+		query     string
+		response  string
+		wantIDs   []string
+	}{
+		{
+			name: "localized movie", mediaType: collection.MediaTypeMovie, path: "/search/movie",
+			query:    "AMELIE    Alien",
+			response: `{"page":1,"results":[{"id":1,"title":"Amélie: Alien!","original_title":"Different","overview":"Known"}]}`,
+			wantIDs:  []string{"tmdb:1"},
+		},
+		{
+			name: "original movie", mediaType: collection.MediaTypeMovie, path: "/search/movie",
+			query:    "Alien",
+			response: `{"page":1,"results":[{"id":1,"title":"First provider result","original_title":"Different","overview":"Known"},{"id":2,"title":"L'Étranger","original_title":"Alien","overview":"Known"}]}`,
+			wantIDs:  []string{"tmdb:1", "tmdb:2"},
+		},
+		{
+			name: "original series", mediaType: collection.MediaTypeSeries, path: "/search/tv",
+			query:    "Alien",
+			response: `{"page":1,"results":[{"id":1,"name":"L'Étranger","original_name":"Alien","overview":"Known"}]}`,
+			wantIDs:  []string{"tmdb:1"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != test.path || r.URL.Query().Get("query") != test.query {
+					t.Fatalf("unexpected title search %s?%s", r.URL.Path, r.URL.RawQuery)
+				}
+				_, _ = w.Write([]byte(test.response))
+			}))
+			defer server.Close()
+
+			page, err := newWithBaseURL("token", server.URL, server.Client()).SearchCollectionTitles(
+				context.Background(), test.query, collection.TMDBSource{MediaType: test.mediaType}, 1, "en-US", "US",
+			)
+			if err != nil {
+				t.Fatalf("search collection titles: %v", err)
+			}
+			if !page.ExactTitleMatch || len(page.Items) != len(test.wantIDs) {
+				t.Fatalf("unexpected exact title page: %+v", page)
+			}
+			for index, want := range test.wantIDs {
+				if page.Items[index].ID != want {
+					t.Fatalf("provider relevance changed at item %d: got %q, want %q", index, page.Items[index].ID, want)
+				}
+			}
+		})
+	}
+}
+
+func TestSearchCollectionTitlesDoesNotMarkPartialOrFilteredExactMatches(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"page":1,"results":[
+			{"id":1,"title":"Alien","genre_ids":[35],"original_language":"en","origin_country":["US"],"overview":"Known"},
+			{"id":2,"title":"Alien","genre_ids":[18,27],"original_language":"en","origin_country":["US"],"overview":"Known"},
+			{"id":3,"title":"Alien","genre_ids":[18],"original_language":"ja","origin_country":["US"],"overview":"Known"},
+			{"id":4,"title":"Alien","genre_ids":[18],"original_language":"en","origin_country":["JP"],"overview":"Known"},
+			{"id":5,"title":"Resident Alien","genre_ids":[18],"original_language":"en","origin_country":["US"],"overview":"Known"}
+		]}`))
+	}))
+	defer server.Close()
+
+	page, err := newWithBaseURL("token", server.URL, server.Client()).SearchCollectionTitles(
+		context.Background(), "Alien", collection.TMDBSource{
+			MediaType: collection.MediaTypeMovie,
+			Filters: collection.TMDBFilters{
+				Genres: []int64{18}, ExcludedGenres: []int64{27}, OriginalLanguage: "en", OriginCountry: "US",
+			},
+		}, 1, "en-US", "US",
+	)
+	if err != nil {
+		t.Fatalf("search collection titles: %v", err)
+	}
+	if page.ExactTitleMatch || len(page.Items) != 1 || page.Items[0].Title != "Resident Alien" {
+		t.Fatalf("partial or filtered match was marked exact: %+v", page)
+	}
+}
+
+func TestSearchCollectionTitlesRequiresSearchMetadataToProveExactMatch(t *testing.T) {
+	runtimeMax, ratingMax := 90, 5.0
+	tests := []struct {
+		name      string
+		response  string
+		filters   collection.TMDBFilters
+		wantExact bool
+		wantItems int
+	}{
+		{
+			name:      "unconstrained title",
+			response:  `{"page":1,"results":[{"id":1,"title":"Alien","overview":"Known"}]}`,
+			wantExact: true,
+			wantItems: 1,
+		},
+		{
+			name:      "runtime unavailable",
+			response:  `{"page":1,"results":[{"id":1,"title":"Alien","overview":"Known"}]}`,
+			filters:   collection.TMDBFilters{RuntimeMax: &runtimeMax},
+			wantItems: 1,
+		},
+		{
+			name:      "country unavailable",
+			response:  `{"page":1,"results":[{"id":1,"title":"Alien","overview":"Known"}]}`,
+			filters:   collection.TMDBFilters{OriginCountry: "US"},
+			wantItems: 1,
+		},
+		{
+			name:      "country matches",
+			response:  `{"page":1,"results":[{"id":1,"title":"Alien","origin_country":["US"],"overview":"Known"}]}`,
+			filters:   collection.TMDBFilters{OriginCountry: "US"},
+			wantExact: true,
+			wantItems: 1,
+		},
+		{
+			name:      "keywords unavailable",
+			response:  `{"page":1,"results":[{"id":1,"title":"Alien","overview":"Known"}]}`,
+			filters:   collection.TMDBFilters{Keywords: []int64{123}},
+			wantItems: 1,
+		},
+		{
+			name:      "excluded genres unavailable",
+			response:  `{"page":1,"results":[{"id":1,"title":"Alien","overview":"Known"}]}`,
+			filters:   collection.TMDBFilters{ExcludedGenres: []int64{27}},
+			wantItems: 1,
+		},
+		{
+			name:      "rating unavailable",
+			response:  `{"page":1,"results":[{"id":1,"title":"Alien","overview":"Known"}]}`,
+			filters:   collection.TMDBFilters{VoteAverageMax: &ratingMax},
+			wantItems: 1,
+		},
+		{
+			name:      "rating matches",
+			response:  `{"page":1,"results":[{"id":1,"title":"Alien","vote_average":4,"overview":"Known"}]}`,
+			filters:   collection.TMDBFilters{VoteAverageMax: &ratingMax},
+			wantExact: true,
+			wantItems: 1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(test.response))
+			}))
+			defer server.Close()
+
+			page, err := newWithBaseURL("token", server.URL, server.Client()).SearchCollectionTitles(
+				context.Background(), "Alien", collection.TMDBSource{MediaType: collection.MediaTypeMovie, Filters: test.filters}, 1, "en-US", "US",
+			)
+			if err != nil {
+				t.Fatalf("search collection titles: %v", err)
+			}
+			if page.ExactTitleMatch != test.wantExact || len(page.Items) != test.wantItems {
+				t.Fatalf("unexpected exact title page: %+v", page)
+			}
+		})
+	}
+}
+
+func TestTMDBRuntimeAndExcludedGenreFiltersUseDocumentedParameters(t *testing.T) {
+	minimum, maximum := 80, 140
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		for key, want := range map[string]string{
+			"without_genres": "27|35", "with_runtime.gte": "80", "with_runtime.lte": "140",
+		} {
+			if query.Get(key) != want {
+				t.Errorf("%s = %q, want %q", key, query.Get(key), want)
+			}
+		}
+		_, _ = w.Write([]byte(`{"page":1,"total_pages":1,"results":[]}`))
+	}))
+	defer server.Close()
+
+	client := newWithBaseURL("token", server.URL, server.Client())
+	for _, mediaType := range []string{collection.MediaTypeMovie, collection.MediaTypeSeries} {
+		_, err := client.ResolveCollectionSource(context.Background(), collection.TMDBSource{
+			SourceType: "discover", MediaType: mediaType, Sort: "popularity.desc",
+			Filters: collection.TMDBFilters{ExcludedGenres: []int64{27, 35}, RuntimeMin: &minimum, RuntimeMax: &maximum},
+		}, 1, "en-US", "US")
+		if err != nil {
+			t.Fatalf("resolve %s discover: %v", mediaType, err)
+		}
+	}
+
+	encoded, err := json.Marshal(collection.TMDBFilters{ExcludedGenres: []int64{27}, RuntimeMin: &minimum, RuntimeMax: &maximum})
+	if err != nil {
+		t.Fatalf("marshal TMDB filters: %v", err)
+	}
+	if got, want := string(encoded), `{"excludedGenres":[27],"runtimeMin":80,"runtimeMax":140}`; got != want {
+		t.Fatalf("TMDB filter JSON = %s, want %s", got, want)
+	}
+}
+
+func TestTMDBDiscoverRejectsInvalidRuntimeBoundsBeforeRequest(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requests++
+	}))
+	defer server.Close()
+	client := newWithBaseURL("token", server.URL, server.Client())
+
+	zero, tooLong, short, long := 0, 601, 120, 80
+	for _, filters := range []collection.TMDBFilters{
+		{RuntimeMin: &zero},
+		{RuntimeMax: &zero},
+		{RuntimeMin: &tooLong},
+		{RuntimeMax: &tooLong},
+		{RuntimeMin: &short, RuntimeMax: &long},
+	} {
+		_, err := client.ResolveCollectionSource(context.Background(), collection.TMDBSource{
+			SourceType: "discover", MediaType: collection.MediaTypeMovie, Sort: "popularity.desc", Filters: filters,
+		}, 1, "en-US", "US")
+		if !errors.Is(err, collection.ErrInvalidInput) {
+			t.Fatalf("invalid runtime bounds %+v error = %v, want %v", filters, err, collection.ErrInvalidInput)
+		}
+	}
+	if requests != 0 {
+		t.Fatalf("invalid runtime bounds issued %d TMDB requests", requests)
 	}
 }

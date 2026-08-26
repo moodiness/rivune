@@ -54,6 +54,19 @@ func TestAllowedAddressPreservesPrivateProvidersAndRejectsSensitiveDestinations(
 	}
 }
 
+func TestLocalServiceAddressAllowsOnlyLoopbackAndPrivateNetworks(t *testing.T) {
+	for _, value := range []string{"127.0.0.1", "::1", "10.0.0.10", "192.168.1.10", "fd12::10"} {
+		if !isLocalServiceAddress(netip.MustParseAddr(value)) {
+			t.Fatalf("local service address %s was rejected", value)
+		}
+	}
+	for _, value := range []string{"1.1.1.1", "169.254.169.254", "192.0.2.1", "64:ff9b::a00:1"} {
+		if isLocalServiceAddress(netip.MustParseAddr(value)) {
+			t.Fatalf("non-local service address %s was accepted", value)
+		}
+	}
+}
+
 func TestPublicAddressClassifiesNAT64WellKnownPrefixByEmbeddedIPv4(t *testing.T) {
 	for _, value := range []string{
 		"10.0.0.10",

@@ -19,7 +19,12 @@ func (a *API) recommendations(w http.ResponseWriter, r *http.Request, principal 
 		}
 		limit = parsed
 	}
-	result, err := a.watchstate.Recommendations(r.Context(), principal, limit)
+	artworkShape := watchstate.RecommendationArtworkShape(r.URL.Query().Get("artworkShape"))
+	if !artworkShape.Valid() {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_recommendation_request", "artworkShape must be poster or landscape")
+		return
+	}
+	result, err := a.watchstate.Recommendations(r.Context(), principal, limit, artworkShape)
 	switch {
 	case errors.Is(err, watchstate.ErrProfileRequired):
 		writeError(w, http.StatusConflict, "profile_selection_required", "Select a profile before loading recommendations")
@@ -28,6 +33,9 @@ func (a *API) recommendations(w http.ResponseWriter, r *http.Request, principal 
 	case err != nil:
 		a.internalError(w, "load local recommendations", err)
 	default:
+		if a.artwork != nil {
+			a.artwork.LocalizeRecommendationPage(r.Context(), &result)
+		}
 		writeJSON(w, http.StatusOK, result)
 	}
 }

@@ -54,25 +54,38 @@ func (a *API) addonManagement(w http.ResponseWriter, r *http.Request, principal 
 	writeJSON(w, http.StatusOK, managed)
 }
 
-func (a *API) previewAddon(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+func (a *API) verifyAddonCandidate(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
 	if !principal.IsGlobalAdministrator() {
-		a.writeAddonPreviewError(w, "preview addon", addon.ErrForbidden)
+		a.writeAddonVerificationError(w, "verify addon candidate", addon.ErrForbidden)
 		return
 	}
 	if !requireJSON(w, r) {
 		return
 	}
-	var input addon.InstallInput
+	var input addon.VerificationInput
 	if err := decodeAssignmentJSON(w, r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", "The add-on preview request is invalid")
+		writeError(w, http.StatusBadRequest, "invalid_request", "The add-on verification request is invalid")
 		return
 	}
-	preview, err := a.addons.Preview(r.Context(), principal, input)
+	verification, err := a.addons.VerifyCandidate(r.Context(), principal, input)
 	if err != nil {
-		a.writeAddonPreviewError(w, "preview addon", err)
+		a.writeAddonVerificationError(w, "verify addon candidate", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, preview)
+	writeJSON(w, http.StatusCreated, verification)
+}
+
+func (a *API) verifyInstalledAddon(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	if !principal.IsGlobalAdministrator() {
+		a.writeAddonVerificationError(w, "verify installed addon", addon.ErrForbidden)
+		return
+	}
+	verification, err := a.addons.VerifyInstalled(r.Context(), principal, r.PathValue("addonId"))
+	if err != nil {
+		a.writeAddonVerificationError(w, "verify installed addon", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, verification)
 }
 
 func (a *API) installAddon(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
@@ -348,20 +361,16 @@ func parseAddonExtras(rawQuery string, reserved map[string]bool) ([]addon.ExtraV
 	return extra, nil
 }
 
-func (a *API) writeAddonPreviewError(w http.ResponseWriter, operation string, err error) {
+func (a *API) writeAddonVerificationError(w http.ResponseWriter, operation string, err error) {
 	switch {
-	case errors.Is(err, addon.ErrInvalidTransportURL):
-		writeError(w, http.StatusUnprocessableEntity, "invalid_addon_transport", "The add-on transport URL is invalid")
-	case errors.Is(err, addon.ErrInvalidManifest):
-		writeError(w, http.StatusUnprocessableEntity, "invalid_addon_manifest", "The add-on manifest is invalid")
+	case errors.Is(err, addon.ErrInvalidTransportURL), errors.Is(err, addon.ErrInvalidInput):
+		writeError(w, http.StatusUnprocessableEntity, "invalid_addon_verification", "The add-on verification request is invalid")
 	case errors.Is(err, addon.ErrActiveProfileRequired):
-		writeError(w, http.StatusConflict, "profile_selection_required", "Select an active profile before reviewing add-ons")
-	case errors.Is(err, addon.ErrInvalidInput):
-		writeError(w, http.StatusUnprocessableEntity, "invalid_addon_request", "The add-on preview request is invalid")
-	case errors.Is(err, addon.ErrProviderUnavailable), errors.Is(err, addon.ErrInvalidResponse):
-		writeError(w, http.StatusBadGateway, "addon_unavailable", "The add-on could not be reviewed")
+		writeError(w, http.StatusConflict, "profile_selection_required", "Select an active profile before verifying add-ons")
+	case errors.Is(err, addon.ErrNotFound):
+		writeError(w, http.StatusNotFound, "addon_not_found", "The add-on is not installed for the active profile")
 	case errors.Is(err, addon.ErrForbidden):
-		writeError(w, http.StatusForbidden, "addon_forbidden", "Global administrator access is required to review add-ons")
+		writeError(w, http.StatusForbidden, "addon_forbidden", "Global administrator access is required to verify add-ons")
 	default:
 		a.internalError(w, operation, err)
 	}
@@ -379,6 +388,12 @@ func (a *API) writeAddonError(w http.ResponseWriter, operation string, err error
 		writeError(w, http.StatusConflict, "profile_selection_required", "Select an active profile before accessing addons")
 	case errors.Is(err, addon.ErrNotFound):
 		writeError(w, http.StatusNotFound, "addon_not_found", "The addon is not installed for the active profile")
+	case errors.Is(err, addon.ErrVerificationExpired):
+		writeError(w, http.StatusGone, "addon_verification_expired", "The add-on verification expired")
+	case errors.Is(err, addon.ErrVerificationConsumed):
+		writeError(w, http.StatusConflict, "addon_verification_consumed", "The add-on verification was already used")
+	case errors.Is(err, addon.ErrVerificationFailed):
+		writeError(w, http.StatusConflict, "addon_verification_failed", "The add-on verification did not pass")
 	case errors.Is(err, addon.ErrUnsupportedResource):
 		writeError(w, http.StatusUnprocessableEntity, "addon_resource_unsupported", "The addon manifest does not support this resource, type, ID, or extra combination")
 	case errors.Is(err, addon.ErrInvalidInput):

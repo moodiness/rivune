@@ -8,6 +8,8 @@ import (
 	"github.com/moodiness/rivune/server/internal/portable"
 )
 
+const profileArchiveCreateEnvelopeOverheadBytes int64 = 256
+
 func (a *API) exportProfileArchive(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
 	if !principal.IsGlobalAdministrator() {
 		writeError(w, http.StatusForbidden, "global_admin_required", "Global administrator access is required")
@@ -21,6 +23,32 @@ func (a *API) exportProfileArchive(w http.ResponseWriter, r *http.Request, princ
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Disposition", `attachment; filename="rivune-profile-archive.json"`)
 	writeJSON(w, http.StatusOK, document)
+}
+
+func (a *API) createProfileFromArchive(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	if !principal.IsGlobalAdministrator() {
+		writeError(w, http.StatusForbidden, "global_admin_required", "Global administrator access is required")
+		return
+	}
+	if !requireJSON(w, r) {
+		return
+	}
+	var input portable.CreateInput
+	if err := decodeJSONLimit(w, r, &input, portable.MaximumDocumentBytes+profileArchiveCreateEnvelopeOverheadBytes); err != nil {
+		var maximumBytesError *http.MaxBytesError
+		if errors.As(err, &maximumBytesError) {
+			writeError(w, http.StatusRequestEntityTooLarge, "profile_archive_too_large", "Profile archive exceeds the 16 MiB limit")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid_profile_archive", "The profile archive is invalid")
+		return
+	}
+	report, err := a.portable.Create(r.Context(), principal, input)
+	if err != nil {
+		a.writePortableError(w, "create profile from archive", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, report)
 }
 
 func (a *API) importProfileArchive(w http.ResponseWriter, r *http.Request, principal auth.Principal) {

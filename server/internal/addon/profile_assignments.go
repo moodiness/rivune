@@ -632,6 +632,7 @@ func (service *Service) update(ctx context.Context, principal auth.Principal, ad
 	manifest, rawManifest, err := service.transport.Manifest(ctx, transportURL)
 	if err != nil {
 		service.diagnostics.complete(addonID, diagnosticAttempt, err)
+		service.recordIncident(ctx, principal, addonID, current.parsedManifest.Name, err)
 		return InstalledAddon{}, err
 	}
 	tx, err := service.pool.Begin(ctx)
@@ -676,6 +677,7 @@ func (service *Service) update(ctx context.Context, principal auth.Principal, ad
 		return InstalledAddon{}, fmt.Errorf("commit addon update: %w", err)
 	}
 	service.diagnostics.complete(addonID, diagnosticAttempt, nil)
+	service.recordIncident(ctx, principal, addonID, installed.parsedManifest.Name, nil)
 	return installed, nil
 }
 

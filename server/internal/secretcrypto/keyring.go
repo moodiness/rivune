@@ -3,7 +3,10 @@ package secretcrypto
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -30,9 +33,15 @@ type Envelope struct {
 	KeyVersion    int
 }
 
+type BlindIndex struct {
+	Version int
+	Digest  [sha256.Size]byte
+}
+
 type Keyring struct {
-	active int
-	aeads  map[int]cipher.AEAD
+	active         int
+	aeads          map[int]cipher.AEAD
+	activeBlindKey [sha256.Size]byte
 }
 
 func (*Keyring) MarshalJSON() ([]byte, error) {
@@ -86,7 +95,7 @@ func NewKeyring(keys []Key) (*Keyring, error) {
 		return nil, errors.New("encryption keyring must not be empty")
 	}
 	keyring := &Keyring{active: keys[0].Version, aeads: make(map[int]cipher.AEAD, len(keys))}
-	keyMaterial := make(map[string]struct{}, len(keys))
+	keyMaterial := make(map[[sha256.Size]byte]struct{}, len(keys))
 	for _, key := range keys {
 		if key.Version <= 0 {
 			return nil, errors.New("encryption key version must be positive")
@@ -104,7 +113,7 @@ func NewKeyring(keys []Key) (*Keyring, error) {
 		if allZero {
 			return nil, fmt.Errorf("encryption key version %d must be independently generated and must not be all zero", key.Version)
 		}
-		material := string(key.Bytes)
+		material := sha256.Sum256(key.Bytes)
 		if _, duplicate := keyMaterial[material]; duplicate {
 			return nil, errors.New("RIVUNE_ENCRYPTION_KEYS must use different key material for each version")
 		}
@@ -118,6 +127,11 @@ func NewKeyring(keys []Key) (*Keyring, error) {
 			return nil, fmt.Errorf("initialize encryption key version %d AEAD: %w", key.Version, err)
 		}
 		keyring.aeads[key.Version] = aead
+		if key.Version == keyring.active {
+			derivation := hmac.New(sha256.New, key.Bytes)
+			_, _ = derivation.Write([]byte("rivune:blind-index:key:v1"))
+			_ = derivation.Sum(keyring.activeBlindKey[:0])
+		}
 	}
 	return keyring, nil
 }
@@ -127,6 +141,26 @@ func (k *Keyring) ActiveVersion() int {
 		return 0
 	}
 	return k.active
+}
+
+func (k *Keyring) BlindIndex(domain string, value []byte) (BlindIndex, error) {
+	if k == nil {
+		return BlindIndex{}, errors.New("encryption keyring is not configured")
+	}
+	if domain == "" || strings.TrimSpace(domain) != domain {
+		return BlindIndex{}, errors.New("blind index domain must be non-empty and contain no surrounding whitespace")
+	}
+	digest := hmac.New(sha256.New, k.activeBlindKey[:])
+	var size [8]byte
+	binary.BigEndian.PutUint64(size[:], uint64(len(domain)))
+	_, _ = digest.Write(size[:])
+	_, _ = digest.Write([]byte(domain))
+	binary.BigEndian.PutUint64(size[:], uint64(len(value)))
+	_, _ = digest.Write(size[:])
+	_, _ = digest.Write(value)
+	result := BlindIndex{Version: k.active}
+	_ = digest.Sum(result.Digest[:0])
+	return result, nil
 }
 
 func (k *Keyring) Encrypt(plaintext, associatedData []byte) (Envelope, error) {

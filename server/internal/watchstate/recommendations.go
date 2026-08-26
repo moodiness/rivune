@@ -24,6 +24,18 @@ type RecommendationTitle struct {
 
 const MaximumRecommendationCount = 50
 
+type RecommendationArtworkShape string
+
+const (
+	RecommendationArtworkAny       RecommendationArtworkShape = ""
+	RecommendationArtworkPoster    RecommendationArtworkShape = "poster"
+	RecommendationArtworkLandscape RecommendationArtworkShape = "landscape"
+)
+
+func (shape RecommendationArtworkShape) Valid() bool {
+	return shape == RecommendationArtworkAny || shape == RecommendationArtworkPoster || shape == RecommendationArtworkLandscape
+}
+
 type Recommendation struct {
 	Item   RecommendationTitle `json:"item"`
 	Reason string              `json:"reason"`
@@ -41,12 +53,16 @@ type recommendationRank struct {
 }
 
 // Recommendations ranks only metadata already stored by this Rivune instance.
+// A requested artwork shape excludes titles that cannot supply that shape.
 // No profile signal or candidate title is sent to a recommendation service.
-func (s *Service) Recommendations(ctx context.Context, principal auth.Principal, limit int) (RecommendationPage, error) {
+func (s *Service) Recommendations(ctx context.Context, principal auth.Principal, limit int, artworkShape RecommendationArtworkShape) (RecommendationPage, error) {
 	if limit == 0 {
 		limit = 20
 	}
 	if limit < 1 || limit > MaximumRecommendationCount {
+		return RecommendationPage{}, ErrInvalidInput
+	}
+	if !artworkShape.Valid() {
 		return RecommendationPage{}, ErrInvalidInput
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -112,6 +128,8 @@ func (s *Service) Recommendations(ctx context.Context, principal auth.Principal,
 			  AND title.parent_id IS NULL
 			  AND COALESCE(progress.completed, false) = false
 			  AND NOT EXISTS (SELECT 1 FROM signal_titles signal WHERE signal.id = title.id)
+			  AND ($3 = '' OR ($3 = 'poster' AND NULLIF(title.poster_url, '') IS NOT NULL)
+			       OR ($3 = 'landscape' AND NULLIF(title.background_url, '') IS NOT NULL))
 		), scored AS (
 			SELECT candidate.id, candidate.updated_at,
 			       COALESCE(sum(affinity.weight), 0.0)
@@ -134,7 +152,7 @@ func (s *Service) Recommendations(ctx context.Context, principal auth.Principal,
 		FROM scored
 		ORDER BY score DESC, updated_at DESC, id
 		LIMIT $2
-	`, profileID, limit)
+	`, profileID, limit, artworkShape)
 	if err != nil {
 		return RecommendationPage{}, fmt.Errorf("query local recommendations: %w", err)
 	}
@@ -172,11 +190,22 @@ func (s *Service) Recommendations(ctx context.Context, principal auth.Principal,
 	}
 	items := make([]Recommendation, 0, len(ranks))
 	for _, rank := range ranks {
-		if title, exists := byID[rank.titleID]; exists {
+		if title, exists := byID[rank.titleID]; exists && recommendationHasArtwork(title, artworkShape) {
 			items = append(items, Recommendation{Item: recommendationTitle(title), Reason: rank.reason, Score: rank.score})
 		}
 	}
 	return RecommendationPage{Items: items}, nil
+}
+
+func recommendationHasArtwork(title CatalogTitle, shape RecommendationArtworkShape) bool {
+	switch shape {
+	case RecommendationArtworkPoster:
+		return strings.TrimSpace(title.PosterURL) != ""
+	case RecommendationArtworkLandscape:
+		return strings.TrimSpace(title.BackgroundURL) != ""
+	default:
+		return true
+	}
 }
 
 func recommendationTitle(title CatalogTitle) RecommendationTitle {
