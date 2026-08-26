@@ -319,6 +319,94 @@ public sealed class ViewerPresentationTests
         Assert.Equal(expected, ViewerDatePresentation.ReleaseDate(value));
     }
 
+    [Fact]
+    public async Task ProgressiveCollectionReportsFastTypeBeforeSlowTypeAndReturnsPlanOrder()
+    {
+        var movie = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var series = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstReport = new TaskCompletionSource<string?[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reports = 0;
+
+        var collection = ProgressiveSearchPolicy.CollectOrderedAsync<string>(
+            [_ => movie.Task, _ => series.Task],
+            TestContext.Current.CancellationToken,
+            new InlineProgress<string?[]>(values =>
+            {
+                if (Interlocked.Increment(ref reports) == 1) firstReport.TrySetResult(values);
+            }));
+
+        series.TrySetResult("series");
+        var progressive = await firstReport.Task.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.Null(progressive[0]);
+        Assert.Equal("series", progressive[1]);
+        Assert.False(collection.IsCompleted);
+
+        movie.TrySetResult("movie");
+        var ordered = await collection;
+        Assert.Equal("movie", ordered[0]);
+        Assert.Equal("series", ordered[1]);
+    }
+
+    [Theory]
+    [InlineData(true, false, false, true)]
+    [InlineData(true, true, false, false)]
+    [InlineData(false, false, true, true)]
+    public void PartialStateAccumulatesAcrossDisplayedPages(
+        bool previous,
+        bool reset,
+        bool current,
+        bool expected)
+    {
+        Assert.Equal(expected, SemanticSearchPolicy.AccumulatePartial(previous, reset, current));
+    }
+
+    [Fact]
+    public void SemanticFirstDuplicateKeepsPublishedRepresentative()
+    {
+        var semantic = Target("semantic:1", "Semantic", "1");
+        var direct = Target("tmdb:1", "Direct", "1");
+
+        var merged = SemanticSearchPolicy.Merge([semantic], [direct], []);
+
+        Assert.Same(semantic, Assert.Single(merged));
+    }
+
+    [Fact]
+    public void IncrementalPresentationKeepsExistingObjectAndAppendsOnlyNewIdentity()
+    {
+        var published = Target("tmdb:1", "Published", "1");
+        var existingControl = new object();
+        var controls = new Dictionary<object, MediaTarget> { [existingControl] = published };
+        var duplicate = Target("semantic:1", "Semantic duplicate", "1");
+        var newTarget = Target("tmdb:2", "New", "2");
+        var selectedControl = existingControl;
+        var focusedControl = existingControl;
+
+        var additions = IncrementalViewerPresentation.Additions(
+            controls.Keys,
+            item => controls[item],
+            [duplicate, newTarget]);
+
+        Assert.Same(existingControl, Assert.Single(controls.Keys));
+        Assert.Same(newTarget, Assert.Single(additions));
+        Assert.Same(existingControl, selectedControl);
+        Assert.Same(existingControl, focusedControl);
+    }
+
+    private static MediaTarget Target(string id, string title, string tmdb) => new()
+    {
+        Id = id,
+        ResourceId = id,
+        MediaType = "movie",
+        Title = title,
+        ExternalIds = new Dictionary<string, string> { ["tmdb"] = tmdb },
+    };
+
+    private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
+    {
+        public void Report(T value) => report(value);
+    }
+
     private static AddonResourceResult Result(JsonElement payload) => new()
     {
         AddonId = AddonId,
@@ -329,4 +417,50 @@ public sealed class ViewerPresentationTests
         Payload = payload,
         Cache = new AddonCachePolicy(),
     };
+
+    [Fact]
+    public void SearchTypesAreStableDedupedAndBounded()
+    {
+        var types = Enumerable.Range(0, 20).Select(index => $"type-{index}").Prepend("TYPE-0");
+        var normalized = ProgressiveSearchPolicy.NormalizeTypes(types, out var truncated);
+
+        Assert.True(truncated);
+        Assert.Equal(16, normalized.Count);
+        Assert.Equal("TYPE-0", normalized[0]);
+        Assert.Equal(16, normalized.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+    }
+
+    [Fact]
+    public async Task SearchFanoutNeverExceedsFourConcurrentFetches()
+    {
+        var active = 0;
+        var maximum = 0;
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fetches = Enumerable.Range(0, 16).Select(index => new Func<CancellationToken, Task<string?>>(async token =>
+        {
+            var current = Interlocked.Increment(ref active);
+            InterlockedExtensions.Max(ref maximum, current);
+            try { await release.Task.WaitAsync(token); return index.ToString(); }
+            finally { Interlocked.Decrement(ref active); }
+        })).ToArray();
+
+        var collection = ProgressiveSearchPolicy.CollectOrderedAsync(fetches, TestContext.Current.CancellationToken);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        Assert.Equal(4, Volatile.Read(ref maximum));
+        release.SetResult();
+        Assert.Equal(16, (await collection).Length);
+    }
+
+    private static class InterlockedExtensions
+    {
+        internal static void Max(ref int location, int value)
+        {
+            int observed;
+            do
+            {
+                observed = Volatile.Read(ref location);
+                if (observed >= value) return;
+            } while (Interlocked.CompareExchange(ref location, value, observed) != observed);
+        }
+    }
 }

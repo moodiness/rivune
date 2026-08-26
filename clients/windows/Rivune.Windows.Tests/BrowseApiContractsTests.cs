@@ -236,7 +236,7 @@ public sealed class BrowseApiContractsTests
         request.Headers.TryGetValues(name, out var values) ? Assert.Single(values) : null;
 
     private static HttpResponseMessage DiscoveryResponse() => JsonResponse(
-        """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1/","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""");
+        """{"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1/","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""");
 
     private static HttpResponseMessage JsonResponse(string json) => new(HttpStatusCode.OK)
     {

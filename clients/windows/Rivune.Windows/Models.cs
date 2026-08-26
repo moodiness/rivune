@@ -5,25 +5,29 @@ namespace Rivune.Windows;
 
 public static class RivuneProtocol
 {
-    public const int Version = 20;
+    public const int Version = 22;
 }
 
 public static class DiscoveryCapabilityIdentifiers
 {
     public const string BoundedAggregateResources = "bounded-aggregate-resources";
-    public const string ProfileArchivesV1 = "profile-archives-v1";
+    public const string ProfileArchivesV2 = "profile-archives-v2";
     public const string RequestCorrelation = "request-correlation";
     public const string LocalRecommendations = "local-recommendations";
+    public const string SemanticSearch = "semantic-search";
     public const string PlaybackCoordination = "playback-coordination";
+    public const string PlaybackCommandResults = "playback-command-results";
 }
 
 public enum DiscoveryCapability
 {
     BoundedAggregateResources,
-    ProfileArchivesV1,
+    ProfileArchivesV2,
     RequestCorrelation,
     LocalRecommendations,
+    SemanticSearch,
     PlaybackCoordination,
+    PlaybackCommandResults,
 }
 
 internal sealed class DiscoveryCapabilitiesJsonConverter : JsonConverter<IReadOnlyList<string>>
@@ -141,10 +145,12 @@ public sealed record Discovery
         var identifier = capability switch
         {
             DiscoveryCapability.BoundedAggregateResources => DiscoveryCapabilityIdentifiers.BoundedAggregateResources,
-            DiscoveryCapability.ProfileArchivesV1 => DiscoveryCapabilityIdentifiers.ProfileArchivesV1,
+            DiscoveryCapability.ProfileArchivesV2 => DiscoveryCapabilityIdentifiers.ProfileArchivesV2,
             DiscoveryCapability.RequestCorrelation => DiscoveryCapabilityIdentifiers.RequestCorrelation,
             DiscoveryCapability.LocalRecommendations => DiscoveryCapabilityIdentifiers.LocalRecommendations,
+            DiscoveryCapability.SemanticSearch => DiscoveryCapabilityIdentifiers.SemanticSearch,
             DiscoveryCapability.PlaybackCoordination => DiscoveryCapabilityIdentifiers.PlaybackCoordination,
+            DiscoveryCapability.PlaybackCommandResults => DiscoveryCapabilityIdentifiers.PlaybackCommandResults,
             _ => null,
         };
         if (identifier is null || Capabilities is null)
@@ -162,7 +168,7 @@ public sealed record Discovery
         return false;
     }
 
-    public bool SupportsProfileArchivesV1 => Supports(DiscoveryCapability.ProfileArchivesV1);
+    public bool SupportsProfileArchivesV2 => Supports(DiscoveryCapability.ProfileArchivesV2);
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<AuthorizationScope>))]
@@ -454,6 +460,7 @@ public sealed record DeviceCategoryMoveRequest
 
 public sealed record DeviceAuthorizationRequest
 {
+    public required string InstallationId { get; init; }
     public required string DeviceName { get; init; }
     public required string Platform { get; init; }
 }
@@ -898,6 +905,36 @@ public sealed record CollectionItem
     public required IReadOnlyDictionary<string, string> ExternalIds { get; init; }
     public required IReadOnlyList<CollectionSourceReference> Sources { get; init; }
     public JsonElement? Raw { get; init; }
+}
+
+public sealed record SemanticSearchRequest
+{
+    public required string Query { get; init; }
+    public string? MediaType { get; init; }
+    public string? Language { get; init; }
+    public string? Region { get; init; }
+    public int Page { get; init; } = 1;
+    public int Limit { get; init; } = 24;
+    public IReadOnlyList<string> ExcludedIntentIds { get; init; } = [];
+}
+
+public sealed record SemanticSearchIntent
+{
+    public required string Id { get; init; }
+    public required string Kind { get; init; }
+    public required string Value { get; init; }
+    public required string Label { get; init; }
+}
+
+public sealed record SemanticSearchPage
+{
+    public required IReadOnlyList<SemanticSearchIntent> Intents { get; init; }
+    public required string TitleQuery { get; init; }
+    public required IReadOnlyList<string> MediaTypes { get; init; }
+    public required IReadOnlyList<CollectionItem> Items { get; init; }
+    public required int Page { get; init; }
+    public required bool HasMore { get; init; }
+    public required bool Partial { get; init; }
 }
 
 public sealed record CollectionSourceReference
@@ -1377,6 +1414,17 @@ public enum PlaybackDecisionReason
     [JsonStringEnumMemberName("subtitle_burn_required")] SubtitleBurnRequired,
 }
 
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackDecisionDetailReason>))]
+public enum PlaybackDecisionDetailReason
+{
+    [JsonStringEnumMemberName("container_not_supported")] ContainerNotSupported,
+    [JsonStringEnumMemberName("video_codec_not_supported")] VideoCodecNotSupported,
+    [JsonStringEnumMemberName("audio_codec_not_supported")] AudioCodecNotSupported,
+    [JsonStringEnumMemberName("resolution_limit")] ResolutionLimit,
+    [JsonStringEnumMemberName("bitrate_limit")] BitrateLimit,
+    [JsonStringEnumMemberName("hdr_not_supported")] HdrNotSupported,
+}
+
 [JsonConverter(typeof(JsonStringEnumConverter<PlaybackTrackAction>))]
 public enum PlaybackTrackAction
 {
@@ -1482,31 +1530,90 @@ public sealed record PlaybackDevice
     public required string Platform { get; init; }
     public required IReadOnlyList<string> Capabilities { get; init; }
     public required PlaybackDeviceState State { get; init; }
+    public required long Revision { get; init; }
     public required bool Current { get; init; }
     public required string LastSeenAt { get; init; }
 }
 
 public sealed record PlaybackDeviceList { public required IReadOnlyList<PlaybackDevice> Devices { get; init; } }
 
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackLoadMode>))]
+public enum PlaybackLoadMode
+{
+    [JsonStringEnumMemberName("handoff")] Handoff,
+    [JsonStringEnumMemberName("play-copy")] PlayCopy,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackCommandStatus>))]
+public enum PlaybackCommandStatus
+{
+    [JsonStringEnumMemberName("pending")] Pending,
+    [JsonStringEnumMemberName("applied")] Applied,
+    [JsonStringEnumMemberName("failed")] Failed,
+    [JsonStringEnumMemberName("expired")] Expired,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackOperationStatus>))]
+public enum PlaybackOperationStatus
+{
+    [JsonStringEnumMemberName("applied")] Applied,
+    [JsonStringEnumMemberName("failed")] Failed,
+    [JsonStringEnumMemberName("expired")] Expired,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackOperationCode>))]
+public enum PlaybackOperationCode
+{
+    [JsonStringEnumMemberName("applied")] Applied,
+    [JsonStringEnumMemberName("unsupported")] Unsupported,
+    [JsonStringEnumMemberName("invalid_state")] InvalidState,
+    [JsonStringEnumMemberName("stale_target")] StaleTarget,
+    [JsonStringEnumMemberName("expired")] Expired,
+    [JsonStringEnumMemberName("execution_failed")] ExecutionFailed,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<PlaybackCommandKind>))]
+public enum PlaybackCommandKind
+{
+    [JsonStringEnumMemberName("load")] Load,
+    [JsonStringEnumMemberName("play")] Play,
+    [JsonStringEnumMemberName("pause")] Pause,
+    [JsonStringEnumMemberName("seek")] Seek,
+    [JsonStringEnumMemberName("stop")] Stop,
+}
+
 public sealed record PlaybackCommandInput
 {
-    public required string Command { get; init; }
+    public required Guid OperationId { get; init; }
+    public required PlaybackCommandKind Command { get; init; }
     public CoordinatedPlaybackItem? Item { get; init; }
     public long? PositionMilliseconds { get; init; }
+    public PlaybackLoadMode? Mode { get; init; }
+    public long? TargetRevision { get; init; }
 }
 
 public sealed record PlaybackCommand
 {
-    public required long Id { get; init; }
-    public required string Command { get; init; }
+    public required Guid OperationId { get; init; }
+    public required PlaybackCommandKind Command { get; init; }
     public CoordinatedPlaybackItem? Item { get; init; }
     public long? PositionMilliseconds { get; init; }
+    public PlaybackLoadMode? Mode { get; init; }
+    public required PlaybackCommandStatus Status { get; init; }
+    public PlaybackOperationCode? ResultCode { get; init; }
     public required string SenderDeviceName { get; init; }
     public required string CreatedAt { get; init; }
     public required string ExpiresAt { get; init; }
 }
 
 public sealed record PlaybackCommandList { public required IReadOnlyList<PlaybackCommand> Commands { get; init; } }
+
+public sealed record PlaybackOperationResultInput
+{
+    public required PlaybackOperationStatus Status { get; init; }
+    public required PlaybackOperationCode Code { get; init; }
+}
+
 
 public sealed record PlaybackRoomCreateInput
 {
@@ -1623,15 +1730,24 @@ public sealed record PlaybackMediaInspection
     public required IReadOnlyList<PlaybackMediaTrack> SubtitleTracks { get; init; }
 }
 
-public sealed record PlaybackDecision
+public sealed record PlaybackDecision : IJsonOnDeserialized
 {
     public required PlaybackDecisionReason Reason { get; init; }
+    public required IReadOnlyList<PlaybackDecisionDetailReason> Reasons { get; init; }
     public required PlaybackTrackAction VideoAction { get; init; }
     public required PlaybackTrackAction AudioAction { get; init; }
     public required PlaybackSubtitleAction SubtitleAction { get; init; }
     public required bool ToneMapping { get; init; }
     public PlaybackDecisionSource? Source { get; init; }
     public PlaybackDecisionTarget? Target { get; init; }
+
+    void IJsonOnDeserialized.OnDeserialized()
+    {
+        if (Reasons is null || Reasons.Count > 7 || Reasons.Distinct().Count() != Reasons.Count)
+            throw new JsonException("Playback decision reasons are invalid.");
+        if (Reason == PlaybackDecisionReason.DirectSupported && Reasons.Count != 0)
+            throw new JsonException("Direct playback cannot contain incompatibility reasons.");
+    }
 }
 
 public sealed record PlaybackDecisionSource
@@ -1951,6 +2067,63 @@ public sealed record SetWatchedBatchResultItem
 {
     public required Guid TitleId { get; init; }
     public required PlaybackProgress Progress { get; init; }
+}
+
+public sealed record ProfileArchiveDocument : IJsonOnDeserialized
+{
+    public required int Version { get; init; }
+    public required string ExportedAt { get; init; }
+    public required ProfileArchiveIdentity Identity { get; init; }
+    public required JsonElement Settings { get; init; }
+    public required IReadOnlyList<JsonElement> Addons { get; init; }
+    public required IReadOnlyList<JsonElement> Collections { get; init; }
+    public required IReadOnlyList<JsonElement> Titles { get; init; }
+    public required IReadOnlyList<JsonElement> Library { get; init; }
+    public required IReadOnlyList<JsonElement> Progress { get; init; }
+    public required IReadOnlyList<JsonElement> Favorites { get; init; }
+    public required IReadOnlyList<JsonElement> UserData { get; init; }
+    public required IReadOnlyList<JsonElement> ContinueDismissals { get; init; }
+    public required IReadOnlyList<JsonElement> TrackingPreferences { get; init; }
+    [JsonExtensionData] public IDictionary<string, JsonElement>? AdditionalProperties { get; init; }
+
+    void IJsonOnDeserialized.OnDeserialized()
+    {
+        if (Version != 2 || Identity is null || Settings.ValueKind != JsonValueKind.Object ||
+            Addons is null || Collections is null || Titles is null || Library is null || Progress is null ||
+            Favorites is null || UserData is null || ContinueDismissals is null || TrackingPreferences is null ||
+            AdditionalProperties is { Count: > 0 })
+            throw new JsonException("The profile archive is not a strict version 2 document.");
+    }
+}
+
+public sealed record ProfileArchiveIdentity
+{
+    public required string Name { get; init; }
+    public string? Description { get; init; }
+    public required bool IsChild { get; init; }
+    public required JsonElement Avatar { get; init; }
+}
+
+public sealed record ProfileArchiveCreateInput
+{
+    public required Guid CategoryId { get; init; }
+    public required ProfileArchiveDocument Archive { get; init; }
+}
+
+public sealed record ProfileArchiveSectionReport
+{
+    public required string Section { get; init; }
+    public required int Created { get; init; }
+    public required int Updated { get; init; }
+    public required int Unchanged { get; init; }
+}
+
+public sealed record ProfileArchiveImportReport
+{
+    public required string Mode { get; init; }
+    public required Guid ProfileId { get; init; }
+    public required IReadOnlyList<ProfileArchiveSectionReport> Sections { get; init; }
+    public required int TrackingAccountsUpdated { get; init; }
 }
 
 public sealed record SetWatchedBatchResult

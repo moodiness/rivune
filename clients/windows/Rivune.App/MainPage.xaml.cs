@@ -16,6 +16,7 @@ using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Xaml.Media.Animation;
 using Rivune.App.ViewModels;
 using Rivune.Windows;
+using Windows.Networking.Connectivity;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Media.Core;
 using Windows.Media.Playback;
@@ -34,9 +35,12 @@ public sealed partial class MainPage : Page
     private long _diagnosticClipboardGeneration;
     private string? _diagnosticClipboardReport;
     private readonly ServerAddressStore _serverAddressStore = new();
+    private readonly InstallationIdStore _installationIdStore = new();
+    private string? _installationId;
     private readonly LanServerDiscovery _lanDiscovery = new();
     private WindowsDevicePreferencesStore? _devicePreferencesStore;
     private WindowsDevicePreferences _devicePreferences = new();
+    private readonly WindowsUpdateNotifier _updateNotifier;
     private string? _devicePreferencesFailure;
     private OfflineMediaStore? _offlineMediaStore;
     private string? _offlineScope;
@@ -81,16 +85,21 @@ public sealed partial class MainPage : Page
     private Task? _shutdownTask;
     private CancellationTokenSource? _coordinationCancellation;
     private Task? _coordinationTask;
-    private long _lastPlaybackCommandId;
-    private readonly HashSet<long> _appliedPlaybackCommandIds = [];
+    private Guid? _lastPlaybackOperationId;
+    private readonly PlaybackOperationJournal _playbackOperationJournal = new();
+    private readonly CoordinationPollingPolicy _coordinationPollingPolicy = new();
+    private bool _coordinationOperationExecuting;
+    private bool _windowActive = true;
     private string _coordinationStatus = "idle";
     private long _coordinationPositionMilliseconds;
     private long _coordinationDurationMilliseconds;
-    private Guid? _coordinationEndedSessionId;
-    private bool PlaybackCoordinationAvailable => _state.Discovery?.Supports(DiscoveryCapability.PlaybackCoordination) == true;
+    private bool PlaybackCoordinationAvailable =>
+        _state.Discovery?.Supports(DiscoveryCapability.PlaybackCoordination) == true &&
+        _state.Discovery.Supports(DiscoveryCapability.PlaybackCommandResults);
     private bool LocalRecommendationsAvailable => _state.Discovery?.Supports(DiscoveryCapability.LocalRecommendations) == true;
     private SourceRequest? _sourceRequest;
     private Control? _sourceInvoker;
+    private readonly ModalFocusRestore<Control> _sourceModalFocus = new();
     private UIElement? _sourceReturnView;
     private UIElement? _playerReturnView;
     private Task<PlaybackCapabilities>? _playbackCapabilitiesTask;
@@ -109,6 +118,7 @@ public sealed partial class MainPage : Page
     public MainPage()
     {
         InitializeComponent();
+        SourceOverlay.CloseRequested += async (_, _) => await CloseSourcesAsync();
         LocalizeVisualTree(this);
         _diagnostics.Record(DiagnosticEventCode.AppStarted);
         Root.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler(Root_PointerMoved), handledEventsToo: true);
@@ -130,14 +140,21 @@ public sealed partial class MainPage : Page
         {
             _devicePreferencesStore = new WindowsDevicePreferencesStore();
             _devicePreferences = _devicePreferencesStore.Snapshot;
+            _updateNotifier = new WindowsUpdateNotifier(() =>
+                DispatcherQueue.TryEnqueue(async () => await CheckForUpdatesAsync()));
         }
         catch (Exception exception)
         {
             _devicePreferencesFailure = FriendlyError(exception);
+            _updateNotifier = new WindowsUpdateNotifier(() =>
+                DispatcherQueue.TryEnqueue(async () => await CheckForUpdatesAsync()));
         }
         try
         {
-            _offlineMediaStore = new OfflineMediaStore();
+            _offlineMediaStore = new OfflineMediaStore(
+                maximumStoredBytes: _devicePreferences.OfflineQuotaBytes,
+                expirationDays: _devicePreferences.OfflineExpirationDays);
+            _offlineMediaStore.CleanupExpired();
             RefreshOfflineProfiles();
         }
         catch (Exception exception)
@@ -156,6 +173,7 @@ public sealed partial class MainPage : Page
         _chromeTimer.Tick += (_, _) => TryHidePlayerChrome();
         Loaded += MainPage_Loaded;
         _lanDiscovery.ServersChanged += LanDiscovery_ServersChanged;
+        NetworkInformation.NetworkStatusChanged += NetworkStatusChanged;
         Unloaded += MainPage_Unloaded;
     }
 
@@ -289,7 +307,14 @@ public sealed partial class MainPage : Page
 
     private void MainPage_Unloaded(object sender, RoutedEventArgs e)
     {
+        NetworkInformation.NetworkStatusChanged -= NetworkStatusChanged;
         if (!_closed) _ = CloseForWindowShutdownAsync();
+    }
+
+    private void NetworkStatusChanged(object sender)
+    {
+        if (!_devicePreferences.DownloadOnMobile && CurrentNetworkClass() == NetworkClass.Mobile)
+            _offlineDownloadCancellation?.Cancel();
     }
 
     private async Task RestoreAsync()
@@ -553,7 +578,11 @@ public sealed partial class MainPage : Page
         UserCodeText.Text = string.Empty;
         try
         {
-            _deviceAuthorization = await client.BeginDeviceAuthorizationAsync(Environment.MachineName, "windows", _state.Token);
+            _deviceAuthorization = await client.BeginDeviceAuthorizationAsync(
+                _installationId ??= _installationIdStore.LoadOrCreate(),
+                Environment.MachineName,
+                "windows",
+                _state.Token);
             if (!_state.IsCurrent(generation)) return;
             UserCodeText.Text = _deviceAuthorization.UserCode;
             CopyCodeButton.IsEnabled = true;
@@ -612,7 +641,7 @@ public sealed partial class MainPage : Page
             }
             catch (RivuneServerException exception) when (exception.Code == "slow_down")
             {
-                interval += exception.RetryAfter ?? TimeSpan.FromSeconds(5);
+                interval = exception.RetryAfter ?? interval + TimeSpan.FromSeconds(5);
                 PairingStatus.Text = "The server asked us to check less often. Still waiting…";
             }
             catch (RivuneServerException exception) when (exception.Code == "expired_device_code")
@@ -989,11 +1018,13 @@ public sealed partial class MainPage : Page
         var request = new SourceRequest(mediaType, resourceId, titleId, addonId, tracksProgress);
         _sourceRequest = request;
         var client = _state.Client ?? throw new InvalidOperationException("No server connection is active.");
+        PlaybackDecisionReasons.Text = string.Empty;
+        PlaybackDecisionReasons.Visibility = Visibility.Collapsed;
         SourceStatus.Text = "Loading compatible sources…";
         _externalPlayersTask ??= Task.Run(DetectExternalPlayers);
         _playbackCapabilitiesTask ??= DetectPlaybackCapabilitiesAsync(_externalPlayersTask);
-        var capabilities = await _playbackCapabilitiesTask;
-        if (!_state.IsCurrent(generation)) return;
+        var detectedCapabilities = await _playbackCapabilitiesTask;
+        var capabilities = ApplyNetworkQuality(detectedCapabilities);
         var sources = await client.GetPlaybackSourcesAsync(mediaType, resourceId, capabilities, addonId, _state.Token);
         if (!_state.IsCurrent(generation)) return;
         _progressTitleId = titleId;
@@ -1065,7 +1096,13 @@ public sealed partial class MainPage : Page
             var preparation = await client.PreparePlaybackAsync(source.SourceRef, startSeconds, _state.Token);
             if (!_state.IsCurrent(generation) || !ReferenceEquals(_state.SelectedSource, source)) return;
             _state.Preparation = preparation;
-            SourceStatus.Text = UiFormat("Ready · {0} · {1} · {2}", preparation.Mode, preparation.Protocol, preparation.Container ?? UiText("Automatic"));
+            SourceStatus.Text = string.Join(" · ", new[]
+            {
+                UiFormat("Ready · {0} · {1} · {2}", preparation.Mode, preparation.Protocol, preparation.Container ?? UiText("Automatic")),
+                PlaybackDecisionPresentation.Summary(preparation.Decision),
+            }.Where(value => !string.IsNullOrWhiteSpace(value)));
+            PlaybackDecisionReasons.Text = PlaybackDecisionPresentation.Summary(preparation.Decision);
+            PlaybackDecisionReasons.Visibility = string.IsNullOrEmpty(PlaybackDecisionReasons.Text) ? Visibility.Collapsed : Visibility.Visible;
             PlaySourceButton.IsEnabled = true;
             PlaySourceButton.Visibility = Visibility.Visible;
             ExternalSourceButton.IsEnabled = SupportsExternalPlayer(source);
@@ -1166,6 +1203,13 @@ public sealed partial class MainPage : Page
             return;
         }
         if (_offlineMediaStore is null || _offlineScope is null || _state.SelectedSource is null) return;
+        if (!_devicePreferences.DownloadOnMobile && CurrentNetworkClass() == NetworkClass.Mobile)
+        {
+            SourceBanner.Severity = InfoBarSeverity.Warning;
+            SourceBanner.Message = "Offline downloads use Wi-Fi by default. Enable Download on mobile in Video settings to continue.";
+            SourceBanner.IsOpen = true;
+            return;
+        }
         var store = _offlineMediaStore;
         var scope = _offlineScope;
         var selected = _state.SelectedSource;
@@ -1313,6 +1357,7 @@ public sealed partial class MainPage : Page
             var startSeconds = startOverrideSeconds ?? (current is null
                 ? (int?)null
                 : PlaybackProgressPolicy.StartSeconds(current.PositionSeconds, current.Completed));
+            await StartPlaybackFailoverAsync(_state.SelectedSource, _state.Token);
             var session = await client.ResolvePlaybackAsync(
                 _state.SelectedSource.SourceRef,
                 _progressTitleId.ToString("D"),
@@ -1341,6 +1386,7 @@ public sealed partial class MainPage : Page
             _playbackCompleted = false;
             _preferredAudioTrack = session.SelectedAudioTrack;
             _preferredSubtitleId = session.SelectedSubtitleId;
+            await ApplyPlaybackAccessibilityAsync(client, session, selected, _state.Token);
             try
             {
                 await ShowPlayerAsync(selected, startSeconds ?? 0);
@@ -1401,6 +1447,8 @@ public sealed partial class MainPage : Page
         ApplyPlayerAspect();
         AutomationProperties.SetName(PlayPauseButton, "Play");
         SourceOverlay.Visibility = Visibility.Collapsed;
+        if (_sourceReturnView is not null) _sourceReturnView.IsHitTestVisible = true;
+        _sourceModalFocus.Close();
         DetailBackButton.Visibility = Visibility.Visible;
         ShowOnly(PlayerView);
         SetPlayerControlsLocked(false);
@@ -1496,7 +1544,8 @@ public sealed partial class MainPage : Page
             {
                 if (!_state.IsCurrent(generation) || _state.PlaybackSession is null && _activeOfflineItem is null) return;
                 _diagnostics.Record(DiagnosticEventCode.PlaybackFailed);
-                SetPlayerStatus("Playback did not start within 45 seconds.", liveSetting: AutomationLiveSetting.Assertive);
+                SetPlayerStatus("Playback did not start within 45 seconds. Trying another source…", busy: true, liveSetting: AutomationLiveSetting.Assertive);
+                if (_activeOfflineItem is null && await TryAutomaticPlaybackFailoverAsync(PlaybackFailoverError.SourceTimeout, failedPosition)) return;
                 await EndPlaybackAsync(completed: false, returnToDashboard: false);
                 await ShowPlaybackRecoveryAsync("Playback did not start within 45 seconds.", failedPosition);
             });
@@ -1554,14 +1603,10 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private async void CloseSources_Click(object sender, RoutedEventArgs e)
-    {
-        var returnFromDetail = _sourceReturnView == DetailView;
-        await CloseSourcesAsync();
-        if (returnFromDetail) await NavigateBackFromDetailAsync();
-    }
+    private async void CloseSources_Click(object sender, RoutedEventArgs e) => await CloseSourcesAsync();
     private Task CloseSourcesAsync()
     {
+        if (!_sourceModalFocus.IsOpen) return Task.CompletedTask;
         _autoStartNextEpisode = false;
         _state.Transition(_sourceReturnView == DetailView ? AppPhase.Detail : AppPhase.Catalogue);
         CloseSourcePicker();
@@ -1570,24 +1615,31 @@ public sealed partial class MainPage : Page
     private void OpenSourcePicker()
     {
         ExitPlayerPresenterMode();
+        var invoker = _sourceInvoker ?? FocusManager.GetFocusedElement(XamlRoot) as Control;
+        _sourceModalFocus.Open(invoker);
         if (DetailView.Visibility == Visibility.Visible) _sourceReturnView = DetailView;
         else if (DashboardView.Visibility == Visibility.Visible) _sourceReturnView = DashboardView;
         else _sourceReturnView ??= DashboardView;
         _sourceReturnView.Visibility = Visibility.Visible;
+        _sourceReturnView.IsHitTestVisible = false;
         SourceOverlay.Visibility = Visibility.Visible;
         DetailBackButton.Visibility = Visibility.Collapsed;
         PlayerView.Visibility = Visibility.Collapsed;
-        RefreshSourcesButton.Focus(FocusState.Programmatic);
+        if (_sourceInvoker is not null) _sourceInvoker.IsEnabled = true;
+        CloseSourcesButton.Focus(FocusState.Programmatic);
     }
 
     private void CloseSourcePicker()
     {
         if (_offlineDownloadTask is { IsCompleted: false }) _offlineDownloadCancellation?.Cancel();
+        var returnView = _sourceReturnView ?? DashboardView;
+        var focusTarget = _sourceModalFocus.Close();
         SourceOverlay.Visibility = Visibility.Collapsed;
+        returnView.IsHitTestVisible = true;
         DetailBackButton.Visibility = Visibility.Visible;
-        ShowOnly(_sourceReturnView ?? DashboardView);
-        _sourceInvoker?.Focus(FocusState.Programmatic);
+        ShowOnly(returnView);
         _sourceInvoker = null;
+        DispatcherQueue.TryEnqueue(() => (focusTarget ?? (returnView == DetailView ? DetailBackButton : null))?.Focus(FocusState.Programmatic));
     }
 
     private async void ClosePlayer_Click(object sender, RoutedEventArgs e)
@@ -1597,6 +1649,7 @@ public sealed partial class MainPage : Page
             SetPlayerControlsLocked(false);
             return;
         }
+        await CancelPlaybackFailoverAsync();
         await EndPlaybackAsync(completed: false, returnToDashboard: true);
     }
     private async Task EndPlaybackAsync(bool completed, bool returnToDashboard)
@@ -1714,12 +1767,23 @@ public sealed partial class MainPage : Page
         await DispatcherQueue.EnqueueAsync(async () =>
         {
             if (!ReferenceEquals(sender, _mediaPlayer)) return;
+            var position = Math.Max(0, AbsolutePlaybackPosition(sender.PlaybackSession.Position));
+            var duration = LogicalDurationSeconds(sender.PlaybackSession.NaturalDuration);
+            if (_activeOfflineItem is null && _state.PlaybackSession is not null && _nextEpisodeTarget is null && duration - position > 30)
+            {
+                SetPlayerStatus("The source ended early. Trying another source…", busy: true, liveSetting: AutomationLiveSetting.Assertive);
+                if (await TryAutomaticPlaybackFailoverAsync(PlaybackFailoverError.EndedEarly, position)) return;
+                await EndPlaybackAsync(completed: false, returnToDashboard: false);
+                await ShowPlaybackRecoveryAsync("The source ended before the title finished.", (int)position);
+                return;
+            }
             SetPlayerStatus("Playback finished.");
             if (_nextEpisodeTarget is not null && _effectiveSettings?.Settings.AutoplayNextEpisode != false)
             {
                 await AdvanceToNextEpisodeAsync();
                 return;
             }
+            await CancelPlaybackFailoverAsync();
             await EndPlaybackAsync(completed: true, returnToDashboard: false);
             if (!ReferenceEquals(sender, _mediaPlayer)) return;
             SetPlayerStatus(_nextEpisodeTarget is null
@@ -1741,10 +1805,11 @@ public sealed partial class MainPage : Page
             if (!ReferenceEquals(sender, _mediaPlayer) || PlayerView.Visibility != Visibility.Visible ||
                 _state.PlaybackSession is null && _activeOfflineItem is null) return;
             _diagnostics.Record(DiagnosticEventCode.PlaybackFailed);
-            SetPlayerStatus($"Playback failed: {args.ErrorMessage}", liveSetting: AutomationLiveSetting.Assertive);
+            SetPlayerStatus("Playback failed. Trying another source…", busy: true, liveSetting: AutomationLiveSetting.Assertive);
+            if (_activeOfflineItem is null && await TryAutomaticPlaybackFailoverAsync(PlaybackFailoverError.SourceFailed, failedPosition)) return;
             await EndPlaybackAsync(completed: false, returnToDashboard: false);
             if (!ReferenceEquals(sender, _mediaPlayer)) return;
-            await ShowPlaybackRecoveryAsync(args.ErrorMessage, failedPosition);
+            await ShowPlaybackRecoveryAsync("Windows could not continue this source.", failedPosition);
         });
     }
 
@@ -2223,6 +2288,9 @@ public sealed partial class MainPage : Page
 
     public async Task HandleWindowActivationAsync(bool active)
     {
+        _windowActive = active;
+        if (!active) StopPlaybackCoordinationPolling();
+        else if (!_closed && PlaybackCoordinationAvailable && _state.Client is not null) StartPlaybackCoordination();
         if (!active && _offlineScope is not null && _offlineMediaStore?.Profile(_offlineScope)?.RequiresPin == true)
         {
             var offlineOnly = _offlineOnlySession;
@@ -2241,7 +2309,7 @@ public sealed partial class MainPage : Page
     private void StartPlaybackCoordination()
     {
         StopPlaybackCoordinationPolling();
-        if (!PlaybackCoordinationAvailable || _state.Client is null) return;
+        if (!CoordinationPollingPolicy.ShouldRun(_windowActive, _closed, PlaybackCoordinationAvailable, _state.Profile is not null) || _state.Client is null) return;
         _coordinationCancellation = new CancellationTokenSource();
         _coordinationTask = RunPlaybackCoordinationAsync(_state.Client, _coordinationCancellation.Token);
     }
@@ -2258,8 +2326,7 @@ public sealed partial class MainPage : Page
     {
         var room = preserveActiveRoom ? _state.ActivePlaybackRoom : null;
         StopPlaybackCoordinationPolling();
-        _lastPlaybackCommandId = 0;
-        _appliedPlaybackCommandIds.Clear();
+        _lastPlaybackOperationId = null;
         _coordinationStatus = "idle";
         _coordinationPositionMilliseconds = 0;
         _coordinationDurationMilliseconds = 0;
@@ -2294,37 +2361,59 @@ public sealed partial class MainPage : Page
 
     private async Task RunPlaybackCoordinationAsync(RivuneApiClient client, CancellationToken cancellationToken)
     {
+        var nextPresence = DateTimeOffset.MinValue;
         while (!cancellationToken.IsCancellationRequested && ReferenceEquals(client, _state.Client))
         {
             try
             {
-                var item = _state.PlaybackSession is null ? null : _state.CoordinatedItem;
-                var status = item is null ? "idle" : _coordinationStatus;
-                await client.UpdatePlaybackDeviceAsync(new PlaybackDeviceHeartbeatInput
+                if (DateTimeOffset.UtcNow >= nextPresence)
                 {
-                    Capabilities = ["remote-control", "watch-room"],
-                    State = new PlaybackDeviceState
+                    var item = _state.PlaybackSession is null ? null : _state.CoordinatedItem;
+                    var status = item is null ? "idle" : _coordinationStatus;
+                    await client.UpdatePlaybackDeviceAsync(new PlaybackDeviceHeartbeatInput
                     {
-                        Status = status,
-                        Item = item,
-                        PositionMilliseconds = item is null ? 0 : _coordinationPositionMilliseconds,
-                        DurationMilliseconds = item is null ? 0 : _coordinationDurationMilliseconds,
-                    },
-                }, cancellationToken);
-                var devices = await client.GetPlaybackDevicesAsync(cancellationToken);
-                _state.PlaybackDevices = devices.Devices.Where(device => !device.Current).ToArray();
+                        Capabilities = ["remote-control", "watch-room"],
+                        State = new PlaybackDeviceState
+                        {
+                            Status = status,
+                            Item = item,
+                            PositionMilliseconds = item is null ? 0 : _coordinationPositionMilliseconds,
+                            DurationMilliseconds = item is null ? 0 : _coordinationDurationMilliseconds,
+                        },
+                    }, cancellationToken);
+                    var devices = await client.GetPlaybackDevicesAsync(cancellationToken);
+                    _state.PlaybackDevices = devices.Devices.Where(device => !device.Current).ToArray();
+                    nextPresence = DateTimeOffset.UtcNow + CoordinationPollingPolicy.PresenceInterval;
+                }
 
-                var commands = await client.GetPlaybackCommandsAsync(_lastPlaybackCommandId, cancellationToken);
+                var commands = await client.GetPlaybackCommandsAsync(_lastPlaybackOperationId, cancellationToken);
+                if (commands.Commands.Count > 0) _coordinationPollingPolicy.MarkCommandActivity();
                 foreach (var command in commands.Commands)
                 {
-                    if (!_appliedPlaybackCommandIds.Contains(command.Id))
+                    var persisted = _playbackOperationJournal.Find(command.OperationId);
+                    PlaybackOperationStatus status;
+                    PlaybackOperationCode code;
+                    if (persisted is not null)
                     {
-                        await ApplyPlaybackCommandAsync(command, client, cancellationToken);
-                        _appliedPlaybackCommandIds.Add(command.Id);
+                        status = persisted.Status;
+                        code = persisted.Code;
                     }
-                    await client.AcknowledgePlaybackCommandAsync(command.Id, cancellationToken);
-                    _appliedPlaybackCommandIds.Remove(command.Id);
-                    _lastPlaybackCommandId = Math.Max(_lastPlaybackCommandId, command.Id);
+                    else
+                    {
+                        _coordinationOperationExecuting = true;
+                        try
+                        {
+                            (status, code) = await ApplyPlaybackCommandAsync(command, client, cancellationToken);
+                            _playbackOperationJournal.Record(command.OperationId, status, code);
+                        }
+                        finally { _coordinationOperationExecuting = false; }
+                    }
+                    await client.PutPlaybackCommandResultAsync(command.OperationId, new PlaybackOperationResultInput
+                    {
+                        Status = status,
+                        Code = code,
+                    }, cancellationToken);
+                    _lastPlaybackOperationId = command.OperationId;
                 }
                 var currentItem = _state.PlaybackSession is null ? null : _state.CoordinatedItem;
                 await RefreshPlaybackRoomAsync(client, currentItem, cancellationToken);
@@ -2333,20 +2422,30 @@ public sealed partial class MainPage : Page
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
             catch { }
 
-            try { await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken); }
+            var interval = _coordinationPollingPolicy.CommandInterval(
+                _state.PlaybackSession is not null,
+                _state.ActivePlaybackRoom is not null,
+                _coordinationOperationExecuting);
+            try { await Task.Delay(interval, cancellationToken); }
             catch (OperationCanceledException) { return; }
         }
     }
 
-    private async Task ApplyPlaybackCommandAsync(PlaybackCommand command, RivuneApiClient client, CancellationToken cancellationToken)
+    private async Task<(PlaybackOperationStatus Status, PlaybackOperationCode Code)> ApplyPlaybackCommandAsync(
+        PlaybackCommand command,
+        RivuneApiClient client,
+        CancellationToken cancellationToken)
     {
-        if (command.Command == "load" && command.Item is not null)
+        if (command.Command == PlaybackCommandKind.Load)
         {
+            if (command.Item is null || command.Mode is null)
+                return (PlaybackOperationStatus.Failed, PlaybackOperationCode.InvalidState);
             try
             {
                 await StartCoordinatedPlaybackAsync(command.Item, command.PositionMilliseconds ?? 0, client, cancellationToken, endCurrentPlayback: true);
                 if (_state.PlaybackSession is null)
                     throw new InvalidOperationException("Remote playback could not find a compatible source.");
+                return (PlaybackOperationStatus.Applied, PlaybackOperationCode.Applied);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception exception) when (PlaybackCoordinationPolicy.IsTerminalRemoteLoadFailure(exception))
@@ -2356,29 +2455,37 @@ public sealed partial class MainPage : Page
                     ShowPlaybackCoordinationError(exception);
                     return Task.CompletedTask;
                 });
+                return (PlaybackOperationStatus.Failed, PlaybackOperationCode.ExecutionFailed);
             }
-            return;
         }
 
-        if (_state.PlaybackSession is null) return;
-        if (command.PositionMilliseconds is long position)
-            _mediaPlayer.PlaybackSession.Position = MediaPlaybackPosition(position / 1_000d);
-        switch (command.Command)
+        if (_state.PlaybackSession is null)
+            return (PlaybackOperationStatus.Failed, PlaybackOperationCode.InvalidState);
+        try
         {
-            case "play" when _playbackCompleted || _mediaPlayer.Source is null:
+            if (command.PositionMilliseconds is long position)
+                _mediaPlayer.PlaybackSession.Position = MediaPlaybackPosition(position / 1_000d);
+            switch (command.Command)
             {
-                var restartFailure = await RestartPlaybackWithTracksAsync(0, showRecovery: false);
-                if (restartFailure is null) break;
-                if (PlaybackCoordinationPolicy.IsTerminalRemoteLoadFailure(restartFailure))
+                case PlaybackCommandKind.Play when _playbackCompleted || _mediaPlayer.Source is null:
                 {
-                    ShowPlaybackCoordinationError(restartFailure);
+                    var restartFailure = await RestartPlaybackWithTracksAsync(0, showRecovery: false);
+                    if (restartFailure is not null) throw restartFailure;
                     break;
                 }
-                throw restartFailure;
+                case PlaybackCommandKind.Play: _mediaPlayer.Play(); break;
+                case PlaybackCommandKind.Pause: _mediaPlayer.Pause(); break;
+                case PlaybackCommandKind.Stop: await EndPlaybackAsync(completed: false, returnToDashboard: true); break;
+                case PlaybackCommandKind.Seek: break;
+                default: return (PlaybackOperationStatus.Failed, PlaybackOperationCode.Unsupported);
             }
-            case "play": _mediaPlayer.Play(); break;
-            case "pause": _mediaPlayer.Pause(); break;
-            case "stop": await EndPlaybackAsync(completed: false, returnToDashboard: true); break;
+            return (PlaybackOperationStatus.Applied, PlaybackOperationCode.Applied);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception exception)
+        {
+            ShowPlaybackCoordinationError(exception);
+            return (PlaybackOperationStatus.Failed, PlaybackOperationCode.ExecutionFailed);
         }
     }
 
@@ -2588,6 +2695,7 @@ public sealed partial class MainPage : Page
             StopPlaybackCoordinationPolling();
             _heroTimer.Stop();
             _updateOperationCancellation?.Cancel();
+            _updateNotifier.Dispose();
             _offlineDownloadCancellation?.Cancel();
             DismissDialogForShutdown();
             _heroSlideCancellation?.Cancel();
@@ -2726,6 +2834,38 @@ public sealed partial class MainPage : Page
             SubtitleModes = [PlaybackSubtitleDelivery.External, PlaybackSubtitleDelivery.Burn],
             MediaProfiles = profiles,
         };
+    }
+
+    private PlaybackCapabilities ApplyNetworkQuality(PlaybackCapabilities detected)
+    {
+        var networkClass = CurrentNetworkClass();
+        var preset = networkClass switch
+        {
+            NetworkClass.Local => _devicePreferences.LocalQuality,
+            NetworkClass.RemoteWifi => _devicePreferences.RemoteWifiQuality,
+            _ => _devicePreferences.MobileQuality,
+        };
+        var limit = PlaybackQualityPolicy.Limit(preset, networkClass);
+        return detected with
+        {
+            MaximumHeight = PlaybackQualityPolicy.Cap(detected.MaximumHeight, limit.MaximumHeight),
+            MaximumVideoBitrateKbps = PlaybackQualityPolicy.Cap(detected.MaximumVideoBitrateKbps, limit.MaximumVideoBitrateKbps),
+        };
+    }
+
+    private NetworkClass CurrentNetworkClass()
+    {
+        if (_state.Client is { } client && TrustedLocalTransport.IsTrustedLocalHost(client.ServerOrigin.Host))
+            return NetworkClass.Local;
+        try
+        {
+            var profile = NetworkInformation.GetInternetConnectionProfile();
+            var cost = profile?.GetConnectionCost();
+            if (profile is null || cost?.NetworkCostType is NetworkCostType.Variable or NetworkCostType.Fixed || cost?.Roaming == true)
+                return NetworkClass.Mobile;
+            return profile.IsWlanConnectionProfile ? NetworkClass.RemoteWifi : NetworkClass.Local;
+        }
+        catch { return NetworkClass.Mobile; }
     }
 
     private static string FriendlyError(Exception exception) => exception switch
