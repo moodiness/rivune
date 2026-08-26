@@ -48,6 +48,8 @@ database_password="$(openssl rand -hex 32)"
 setup_token="$(openssl rand -hex 32)"
 encryption_key="$(openssl rand -hex 32)"
 admin_password="$(openssl rand -hex 32)"
+release_port="$(node -e 'const net = require("node:net"); const server = net.createServer(); server.listen(0, "127.0.0.1", () => { const address = server.address(); if (typeof address === "object" && address !== null) process.stdout.write(String(address.port)); server.close(); });')"
+[[ "${release_port}" =~ ^[0-9]+$ ]] && (( release_port > 0 && release_port <= 65535 )) || { echo 'Could not reserve a valid loopback port for the release journey' >&2; exit 1; }
 for secret in "${database_password}" "${setup_token}" "${encryption_key}" "${admin_password}"; do
   if [[ -n "${GITHUB_ACTIONS:-}" ]]; then printf '::add-mask::%s\n' "${secret}"; fi
 done
@@ -57,6 +59,7 @@ RIVUNE_DATABASE_PASSWORD=${database_password}
 RIVUNE_SETUP_TOKEN=${setup_token}
 RIVUNE_ENCRYPTION_KEYS=1:${encryption_key}
 RIVUNE_SOURCE_ROOT=${ROOT_DIR}
+RIVUNE_RELEASE_PORT=${release_port}
 EOF
 chmod 600 "${WORK_DIR}/secrets.env"
 permissions="$(stat -c '%a' "${WORK_DIR}/secrets.env" 2>/dev/null || stat -f '%Lp' "${WORK_DIR}/secrets.env")"
@@ -67,9 +70,7 @@ docker pull postgres:18-trixie@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fe
 docker pull python:3.13-alpine@sha256:540c7d91f98ff6880174c40e99067bf5941eb54d818a7a5e094d188b196a934d
 COMPOSE_STARTED=1
 docker compose --project-name "${PROJECT}" --env-file "${WORK_DIR}/secrets.env" -f "${COMPOSE_FILE}" up --detach --wait --wait-timeout 120
-published_address="$(docker compose --project-name "${PROJECT}" --env-file "${WORK_DIR}/secrets.env" -f "${COMPOSE_FILE}" port rivune 8080)"
-rivune_port="${published_address##*:}"
-[[ "${rivune_port}" =~ ^[0-9]+$ ]] || { echo 'Docker did not publish a valid Rivune host port' >&2; exit 1; }
+rivune_port="${release_port}"
 docker compose --project-name "${PROJECT}" --env-file "${WORK_DIR}/secrets.env" -f "${COMPOSE_FILE}" exec -T fixture python3 -c '
 import http.client
 connection = http.client.HTTPConnection("127.0.0.1", 8081, timeout=2)
