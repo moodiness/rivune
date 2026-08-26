@@ -6,7 +6,7 @@
         "type": "Direct",
         "requested": "[10.0.11, )",
         "resolved": "10.0.11",
-        "contentHash": "B7ClIZRv1IyPQV3XQO8UbGg9iGm1hggC/WR7kXV8dRu3KAfphANlMoYqZRciLiDpPmwUZac7orR9EKOMvVCYgg=="
+        "contentHash": "IBf7lbovvjGWVWXZX5cJ/cO0WXbId0Zq4BuSeT94mGZuOAP66oMeH9PTBZ9Jpp3Jb6jtK0qm/NyUbPRo1gC/wQ=="
       },
       "System.Security.Cryptography.ProtectedData": {
         "type": "Direct",
