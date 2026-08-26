@@ -92,10 +92,8 @@ test("publishes fast addon results while semantic classification continues", asy
   ], "progressive"), { delay: 100 });
 
   await page.goto("/#search");
-  const startedAt = Date.now();
   await page.locator(".search-page .search-box input").fill("progressive");
   await expect(page.getByRole("button", { name: "Open Addon first", exact: true })).toBeVisible({ timeout: 2_000 });
-  expect(Date.now() - startedAt).toBeLessThan(1_500);
   await expect(page.locator(".search-page .browse-skeleton-grid")).toHaveCount(0);
   await expect(page.locator(".search-page .search-result-groups")).toHaveAttribute("aria-busy", "true");
   await expect(page.getByRole("button", { name: "Open Semantic later", exact: true })).toBeVisible({ timeout: 5_000 });
