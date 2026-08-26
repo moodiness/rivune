@@ -28,6 +28,10 @@ func run(arguments []string) error {
 		return runGenerate(arguments[1:])
 	case "validate":
 		return runValidate(arguments[1:])
+	case "sign":
+		return runSign(arguments[1:])
+	case "verify-signature":
+		return runVerifySignature(arguments[1:])
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 		return nil
@@ -219,10 +223,56 @@ func addValidateFlags(flags *flag.FlagSet, options *validateOptions) {
 	flags.StringVar(&options.windowsExecutableURL, "windows-executable-url", "", "expected universal Windows executable URL")
 }
 
+func runSign(arguments []string) error {
+	flags := flag.NewFlagSet("sign", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	privateKey := flags.String("private-key", "", "path to an ECDSA P-256 private key PEM")
+	output := flags.String("output", "", "path for the signature sidecar")
+	if err := flags.Parse(arguments); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if flags.NArg() != 1 {
+		return fmt.Errorf("sign requires exactly one manifest path")
+	}
+	if *privateKey == "" {
+		return fmt.Errorf("--private-key is required")
+	}
+	if *output == "" {
+		return fmt.Errorf("--output is required")
+	}
+	return signManifest(flags.Arg(0), *privateKey, *output)
+}
+
+func runVerifySignature(arguments []string) error {
+	flags := flag.NewFlagSet("verify-signature", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	publicKey := flags.String("public-key", "", "path to an ECDSA P-256 public key in SPKI DER or PEM")
+	publicKeyBase64 := flags.String("public-key-base64", "", "canonical base64 SPKI DER public key")
+	signature := flags.String("signature", "", "path to the manifest signature sidecar")
+	if err := flags.Parse(arguments); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if flags.NArg() != 1 {
+		return fmt.Errorf("verify-signature requires exactly one manifest path")
+	}
+	if *signature == "" {
+		return fmt.Errorf("--signature is required")
+	}
+	return verifyManifestSignature(flags.Arg(0), *signature, *publicKey, *publicKeyBase64)
+}
+
 func printUsage(output *os.File) {
 	fmt.Fprintln(output, "Usage:")
 	fmt.Fprintln(output, "  go run . generate [options]")
 	fmt.Fprintln(output, "  go run . validate [options] <global-manifest>")
+	fmt.Fprintln(output, "  go run . sign --private-key <path> --output <sidecar> <global-manifest>")
+	fmt.Fprintln(output, "  go run . verify-signature (--public-key <path> | --public-key-base64 <SPKI>) --signature <sidecar> <global-manifest>")
 }
 
 func printGenerateUsage(output anyWriter) {
