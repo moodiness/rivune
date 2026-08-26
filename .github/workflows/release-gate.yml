@@ -578,10 +578,10 @@ jobs:
             -p:IncludeAllContentForSelfExtract=true `
             -p:SelfContained=true `
             -p:WindowsAppSDKSelfContained=true `
-            -p:Version=1.13.0 `
-            -p:AssemblyVersion=1.13.0.0 `
-            -p:FileVersion=1.13.0.0 `
-            -p:InformationalVersion=1.13.0 `
+            -p:Version=1.13.1 `
+            -p:AssemblyVersion=1.13.1.0 `
+            -p:FileVersion=1.13.1.0 `
+            -p:InformationalVersion=1.13.1 `
             -p:IncludeSourceRevisionInInformationalVersion=false
           if ($LASTEXITCODE -ne 0) { throw "Windows $env:PLATFORM portable publish failed." }
 
@@ -613,7 +613,7 @@ jobs:
             if ($null -ne $reader) { $reader.Dispose() } else { $stream.Dispose() }
           }
           $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($executable)
-          if ($version.FileVersion -ne '1.13.0.0' -or $version.ProductVersion -ne '1.13.0') {
+          if ($version.FileVersion -ne '1.13.1.0' -or $version.ProductVersion -ne '1.13.1') {
             throw "Portable executable version metadata is invalid: FileVersion=$($version.FileVersion), ProductVersion=$($version.ProductVersion)."
           }
           if ((Get-AuthenticodeSignature -FilePath $executable).Status -ne 'NotSigned') {
@@ -648,10 +648,10 @@ jobs:
             -p:IncludeAllContentForSelfExtract=true `
             -p:SelfContained=true `
             -p:WindowsAppSDKSelfContained=true `
-            -p:Version=1.13.0 `
-            -p:AssemblyVersion=1.13.0.0 `
-            -p:FileVersion=1.13.0.0 `
-            -p:InformationalVersion=1.13.0 `
+            -p:Version=1.13.1 `
+            -p:AssemblyVersion=1.13.1.0 `
+            -p:FileVersion=1.13.1.0 `
+            -p:InformationalVersion=1.13.1 `
             -p:IncludeSourceRevisionInInformationalVersion=false
           if ($LASTEXITCODE -ne 0) { throw 'ARM64 setup payload publish failed.' }
           $arm64Files = @(Get-ChildItem -LiteralPath $arm64Publish -File -Recurse | Where-Object { $_.Extension -ne '.pdb' })
@@ -678,10 +678,10 @@ jobs:
           & dotnet publish $bootstrapperProject --configuration Release --runtime win-x86 --output $bootstrapperPublish --nologo `
             -p:NuGetLockFilePath=packages.win-x86.lock.json `
             -p:RestoreLockedMode=true `
-            -p:Version=1.13.0 `
-            -p:AssemblyVersion=1.13.0.0 `
-            -p:FileVersion=1.13.0.0 `
-            -p:InformationalVersion=1.13.0 `
+            -p:Version=1.13.1 `
+            -p:AssemblyVersion=1.13.1.0 `
+            -p:FileVersion=1.13.1.0 `
+            -p:InformationalVersion=1.13.1 `
             -p:IncludeSourceRevisionInInformationalVersion=false
           if ($LASTEXITCODE -ne 0) { throw 'Windows setup bootstrapper publish failed.' }
           $bootstrapperFiles = @(Get-ChildItem -LiteralPath $bootstrapperPublish -File -Recurse | Where-Object { $_.Extension -ne '.pdb' })

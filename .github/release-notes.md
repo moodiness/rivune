@@ -1,4 +1,4 @@
-# Rivune v1.13.0
+# Rivune v1.13.1
 
 ## Highlights
 
@@ -22,18 +22,18 @@
 ## Upgrade notes
 
 - Before upgrading, create and verify an authenticated backup, record its backup ID separately, and preserve the complete encryption keyring.
-- Set `RIVUNE_VERSION=1.13.0`, pull, and recreate only Rivune. Startup applies embedded migrations `000082` through `000094` transactionally before readiness.
+- Set `RIVUNE_VERSION=1.13.1`, pull, and recreate only Rivune. Startup applies embedded migrations `000082` through `000094` transactionally before readiness.
 - Protocol 21 clients are incompatible with protocol 22. Upgrade the server and every first-party client together, wait for `/ready`, and then rediscover `/.well-known/rivune` instead of retrying cached v21 requests.
 - Migration `000092` deliberately removes pending short-lived add-on verification snapshots while replacing plaintext transport storage with encrypted envelopes; verify affected add-ons again after upgrade.
 - The release contains exactly thirteen assets: eight application packages, `rivune-update.json`, its detached `rivune-update.json.sig` signature, the shared TV runtime, and two universal TV-installer companions.
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.13.0`
+- `ghcr.io/moodiness/rivune:1.13.1`
 - `ghcr.io/moodiness/rivune:1.13`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 - Provenance and SBOM attestations are published for both runnable platforms.
 
-**Full changelog:** https://github.com/moodiness/rivune/compare/v1.12.4...v1.13.0
+**Full changelog:** https://github.com/moodiness/rivune/compare/v1.12.4...v1.13.1

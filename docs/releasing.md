@@ -44,7 +44,7 @@ The protected signing job receives only the unsigned APK. Apple, Windows, webOS,
 ## Create the release
 
 ```sh
-tag=v1.13.0
+tag=v1.13.1
 git switch main
 git pull --ff-only
 git tag -a "${tag}" -m "Rivune ${tag}"

@@ -656,6 +656,7 @@ jobs:
       - candidate-update-tool
     permissions:
       contents: read
+      actions: read
       packages: read
     uses: ./.github/workflows/release-gate.yml
     with:
