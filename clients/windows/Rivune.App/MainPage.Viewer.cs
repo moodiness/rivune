@@ -1942,7 +1942,7 @@ public sealed partial class MainPage
             _searchProgressQueued = false;
             var inferredTypes = semantic.Page?.MediaTypes ?? [];
             var selectedTypes = SemanticSearchPolicy.SelectTypes(configuredTypes, inferredTypes);
-            var inferredTypeSet = inferredTypes.Count > 0 && selectedTypes.Count < configuredTypes.Length
+            var inferredTypeSet = inferredTypes.Count > 0 && selectedTypes.Count < configuredTypes.Count
                 ? selectedTypes.ToHashSet(StringComparer.OrdinalIgnoreCase)
                 : null;
             var semanticItems = semantic.Page?.Items.Select(value => value.ToMediaTarget()).ToArray() ?? [];
