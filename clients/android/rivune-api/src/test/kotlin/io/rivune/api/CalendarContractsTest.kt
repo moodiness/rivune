@@ -81,7 +81,7 @@ class CalendarContractsTest {
     }
 
     private fun discoveryResponse() = jsonResponse(
-        """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""",
+        """{"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""",
     )
 
     private fun calendarFixture() =

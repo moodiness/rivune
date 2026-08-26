@@ -172,13 +172,13 @@ class RivunePlayerTest {
     fun networkQualityPresetsClampDeviceCapabilities() {
         val device = DevicePlaybackCapabilities.value
         val economy = device.withQualityLimit(
-            playbackQualityLimit(NetworkQualityPreference.ECONOMY, PlaybackNetwork.WIFI_OR_ETHERNET),
+            playbackQualityLimit(NetworkQualityPreference.ECONOMY, NetworkClass.REMOTE_WIFI),
         )
         val balanced = device.withQualityLimit(
-            playbackQualityLimit(NetworkQualityPreference.BALANCED, PlaybackNetwork.WIFI_OR_ETHERNET),
+            playbackQualityLimit(NetworkQualityPreference.BALANCED, NetworkClass.REMOTE_WIFI),
         )
         val automaticMobile = device.withQualityLimit(
-            playbackQualityLimit(NetworkQualityPreference.AUTOMATIC, PlaybackNetwork.MOBILE_OR_METERED),
+            playbackQualityLimit(NetworkQualityPreference.AUTOMATIC, NetworkClass.MOBILE),
         )
 
         assertTrue(assertNotNull(economy.maximumHeight) <= 480)
@@ -187,31 +187,35 @@ class RivunePlayerTest {
         assertTrue(assertNotNull(balanced.maximumVideoBitrateKbps) <= 8_000)
         assertTrue(assertNotNull(automaticMobile.maximumHeight) <= 720)
         assertTrue(assertNotNull(automaticMobile.maximumVideoBitrateKbps) <= 5_000)
-        assertEquals(device, device.withQualityLimit(playbackQualityLimit(NetworkQualityPreference.MAXIMUM, PlaybackNetwork.MOBILE_OR_METERED)))
-        assertEquals(device, device.withQualityLimit(playbackQualityLimit(NetworkQualityPreference.AUTOMATIC, PlaybackNetwork.WIFI_OR_ETHERNET)))
+        assertEquals(device, device.withQualityLimit(playbackQualityLimit(NetworkQualityPreference.MAXIMUM, NetworkClass.MOBILE)))
+        assertEquals(device, device.withQualityLimit(playbackQualityLimit(NetworkQualityPreference.AUTOMATIC, NetworkClass.REMOTE_WIFI)))
     }
 
     @Test
     fun networkTransportTakesPrecedenceOverMetering() {
         assertEquals(
-            PlaybackNetwork.WIFI_OR_ETHERNET,
+            NetworkClass.REMOTE_WIFI,
             classifyPlaybackNetwork(hasWifi = true, hasEthernet = false, hasCellular = false, isMetered = true),
         )
         assertEquals(
-            PlaybackNetwork.WIFI_OR_ETHERNET,
+            NetworkClass.REMOTE_WIFI,
             classifyPlaybackNetwork(hasWifi = false, hasEthernet = true, hasCellular = false, isMetered = true),
         )
         assertEquals(
-            PlaybackNetwork.MOBILE_OR_METERED,
+            NetworkClass.MOBILE,
             classifyPlaybackNetwork(hasWifi = false, hasEthernet = false, hasCellular = true, isMetered = false),
         )
         assertEquals(
-            PlaybackNetwork.WIFI_OR_ETHERNET,
+            NetworkClass.MOBILE,
             classifyPlaybackNetwork(hasWifi = false, hasEthernet = false, hasCellular = false, isMetered = false),
         )
         assertEquals(
-            PlaybackNetwork.MOBILE_OR_METERED,
+            NetworkClass.MOBILE,
             classifyPlaybackNetwork(hasWifi = false, hasEthernet = false, hasCellular = false, isMetered = true),
+        )
+        assertEquals(
+            NetworkClass.LOCAL,
+            classifyPlaybackNetwork(hasWifi = true, hasEthernet = false, hasCellular = false, isMetered = false, serverIsLocal = true),
         )
     }
 
@@ -547,6 +551,24 @@ class RivunePlayerTest {
             resolveMpvSubtitleSelection("native:sub:3", embedded, emptyList(), emptySet()),
         )
     }
+    @Test
+    fun failoverOverlayReportsAdvancingSuccessAndExhaustion() {
+        val base = playerPresentationForPolicy(EmbeddedPlayerEngine.MEDIA3, fallbackAllowed = false)
+        val active = io.rivune.api.PlaybackFailoverState(
+            id = java.util.UUID.randomUUID(), currentSourceRef = "opaque-source-reference-02",
+            currentPosition = 1, positionSeconds = 42.0, attemptCount = 1, maximumAttempts = 2,
+            revision = 2, status = io.rivune.api.PlaybackFailoverStatus.ACTIVE,
+            candidateHealth = listOf(
+                io.rivune.api.PlaybackFailoverCandidateHealth(0, io.rivune.api.PlaybackFailoverCandidateStatus.AVAILABLE),
+                io.rivune.api.PlaybackFailoverCandidateHealth(1, io.rivune.api.PlaybackFailoverCandidateStatus.CURRENT),
+            ), expiresAt = "2099-01-01T00:00:00Z",
+        )
+        assertEquals(PlaybackFailoverUiState.ADVANCING, playbackFailoverUiState(base.copy(failover = active, failoverAdvancing = true)))
+        assertEquals(PlaybackFailoverUiState.SUCCEEDED, playbackFailoverUiState(base.copy(failover = active)))
+        assertEquals(PlaybackFailoverUiState.EXHAUSTED, playbackFailoverUiState(base.copy(failover = active.copy(status = io.rivune.api.PlaybackFailoverStatus.EXHAUSTED, attemptCount = 2))))
+        assertNull(playbackFailoverUiState(base))
+    }
+
 
     private fun playerPresentationForPolicy(
         engine: EmbeddedPlayerEngine,

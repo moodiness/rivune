@@ -1,16 +1,24 @@
 package io.rivune.app
 
 import android.app.Activity
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.ActivityNotFoundException
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
+import android.app.UiModeManager
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.res.Configuration
 import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import android.provider.Settings
 import java.io.File
 import java.io.FileOutputStream
@@ -23,6 +31,12 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -35,10 +49,15 @@ internal sealed interface AppUpdateState {
     data object Unavailable : AppUpdateState
     data class Checking(val manual: Boolean) : AppUpdateState
     data class UpToDate(val currentVersion: String) : AppUpdateState
-    data class Available(val manifest: AppUpdateManifest, val packageInfo: AndroidUpdatePackage) : AppUpdateState
+    data class Available(
+        val manifest: AppUpdateManifest,
+        val packageInfo: AndroidUpdatePackage,
+        val showNotice: Boolean = true,
+    ) : AppUpdateState
     data class Downloading(val manifest: AppUpdateManifest, val packageInfo: AndroidUpdatePackage) : AppUpdateState
     data class ReadyToInstall(val manifest: AppUpdateManifest, val packageInfo: AndroidUpdatePackage, val file: File) : AppUpdateState
     data class NeedsPermission(val manifest: AppUpdateManifest, val packageInfo: AndroidUpdatePackage, val file: File) : AppUpdateState
+    data class PreparingInstallation(val file: File) : AppUpdateState
     data object Installing : AppUpdateState
     data class Error(val message: String) : AppUpdateState
 }
@@ -54,6 +73,87 @@ private class SharedPreferencesUpdateCache(private val preferences: SharedPrefer
         get() = preferences.getLong("last_successful_check_at", 0L)
         set(value) { preferences.edit().putLong("last_successful_check_at", value).apply() }
 }
+
+internal interface UpdateNoticeStore {
+    var lastPresentedVersion: String?
+    fun recordPresented(version: String): Boolean
+}
+
+private class SharedPreferencesUpdateNoticeStore(private val preferences: SharedPreferences) : UpdateNoticeStore {
+    override var lastPresentedVersion: String?
+        get() = preferences.getString("last_presented_version", null)
+        set(value) { preferences.edit().putString("last_presented_version", value).apply() }
+
+    override fun recordPresented(version: String): Boolean =
+        preferences.edit().putString("last_presented_version", version).commit()
+}
+
+internal interface AppUpdateNotifier {
+    fun deliver(manifest: AppUpdateManifest): Boolean
+    fun permissionRequired(): Boolean
+    fun requestPermission(activity: Activity)
+}
+
+private class AndroidAppUpdateNotifier(private val context: Context) : AppUpdateNotifier {
+    private val notificationManager = NotificationManagerCompat.from(context)
+    private val isTelevision: Boolean
+        get() = (context.getSystemService(Context.UI_MODE_SERVICE) as UiModeManager)
+            .currentModeType == Configuration.UI_MODE_TYPE_TELEVISION
+
+    override fun permissionRequired(): Boolean = !isTelevision &&
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+
+    override fun requestPermission(activity: Activity) {
+        if (permissionRequired()) activity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), UPDATE_NOTIFICATION_PERMISSION_REQUEST)
+    }
+
+    override fun deliver(manifest: AppUpdateManifest): Boolean {
+        if (isTelevision || permissionRequired()) return false
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(
+                    NotificationChannel(
+                        UPDATE_NOTIFICATION_CHANNEL,
+                        context.getString(R.string.update_notification_channel),
+                        NotificationManager.IMPORTANCE_DEFAULT,
+                    ),
+                )
+            }
+            val openUpdate = Intent(context, MainActivity::class.java)
+                .setAction(SHOW_APP_UPDATE_ACTION)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                0,
+                openUpdate,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val notification = NotificationCompat.Builder(context, UPDATE_NOTIFICATION_CHANNEL)
+                .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setContentTitle(context.getString(R.string.update_available_title))
+                .setContentText(context.getString(R.string.update_notification_body, manifest.version))
+                .setContentIntent(pendingIntent)
+                .setAutoCancel(true)
+                .setOnlyAlertOnce(true)
+                .build()
+            notificationManager.notify(UPDATE_NOTIFICATION_ID, notification)
+            true
+        } catch (_: SecurityException) {
+            false
+        }
+    }
+}
+
+internal fun shouldPresentUpdateNotice(lastPresentedVersion: String?, candidateVersion: String): Boolean =
+    lastPresentedVersion == null || runCatching {
+        compareSemanticVersions(candidateVersion, lastPresentedVersion) > 0
+    }.getOrDefault(false)
+
+internal const val SHOW_APP_UPDATE_ACTION = "io.rivune.app.action.SHOW_APP_UPDATE"
+private const val UPDATE_NOTIFICATION_CHANNEL = "app_updates"
+private const val UPDATE_NOTIFICATION_ID = 0x525650
+private const val UPDATE_NOTIFICATION_PERMISSION_REQUEST = 0x5256
 
 private const val NO_INSTALL_SESSION = -1
 
@@ -149,6 +249,10 @@ internal class AppUpdateCoordinator(
     private val inspector: UpdateApkInspector = AndroidUpdateApkInspector(context),
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
     private val diagnostics: DiagnosticsBuffer = DiagnosticsBuffer(),
+    private val noticeStore: UpdateNoticeStore = SharedPreferencesUpdateNoticeStore(
+        context.getSharedPreferences("app_update_notifications", Context.MODE_PRIVATE),
+    ),
+    private val notifier: AppUpdateNotifier = AndroidAppUpdateNotifier(context),
 ) {
     private val manifestClient = AppUpdateManifestClient(manifestUrl, cache, httpClient)
     private val downloadHttpClient = httpClient.newBuilder()
@@ -156,9 +260,16 @@ internal class AppUpdateCoordinator(
         .build()
     private val installState = UpdateInstallState(context)
     private var resumedActivity = WeakReference<Activity>(null)
+    private var forceNextNotice = false
     private val operation = Mutex()
     private val _state = MutableStateFlow<AppUpdateState>(restingUpdateState(enabled))
     val state: StateFlow<AppUpdateState> = _state.asStateFlow()
+    private var downloadJob: Job? = null
+    private var activeDownloadCancel: (() -> Unit)? = null
+    private var activeDownloadPartial: File? = null
+    private var activeDownloadComplete: File? = null
+    private var installPreparationJob: Job? = null
+    private var activeInstallCancel: (() -> Unit)? = null
 
     init {
         val sessionId = installState.activeSessionId
@@ -196,7 +307,7 @@ internal class AppUpdateCoordinator(
 
     fun checkManually() {
         if (_state.value is AppUpdateState.Checking || _state.value is AppUpdateState.Downloading ||
-            _state.value is AppUpdateState.Installing
+            _state.value is AppUpdateState.PreparingInstallation || _state.value is AppUpdateState.Installing
         ) return
         if (!enabled) {
             _state.value = AppUpdateState.Unavailable
@@ -205,7 +316,13 @@ internal class AppUpdateCoordinator(
         scope.launch { check(manual = true) }
     }
 
+    fun checkFromNotification() {
+        forceNextNotice = true
+        checkManually()
+    }
+
     private suspend fun check(manual: Boolean) = operation.withLock {
+        val forcedNotice = forceNextNotice.also { forceNextNotice = false }
         _state.value = AppUpdateState.Checking(manual)
         diagnostics.record(DiagnosticEventCode.UPDATE_CHECK_STARTED)
         try {
@@ -222,7 +339,17 @@ internal class AppUpdateCoordinator(
                         currentVersionName = BuildConfig.VERSION_NAME,
                         manual = manual,
                     )
-                    _state.value = resolved
+                    _state.value = if (resolved is AppUpdateState.Available) {
+                        val isNewNotice = shouldPresentUpdateNotice(
+                            noticeStore.lastPresentedVersion,
+                            resolved.manifest.version,
+                        )
+                        val deliveredByOs = if (isNewNotice && !manual) notifier.deliver(resolved.manifest) else false
+                        if (isNewNotice) noticeStore.recordPresented(resolved.manifest.version)
+                        resolved.copy(showNotice = manual || forcedNotice || isNewNotice && !deliveredByOs)
+                    } else {
+                        resolved
+                    }
                     diagnostics.record(
                         if (resolved is AppUpdateState.Available) {
                             DiagnosticEventCode.UPDATE_AVAILABLE
@@ -238,28 +365,76 @@ internal class AppUpdateCoordinator(
         }
     }
 
+    fun notificationPermissionRequired(): Boolean = notifier.permissionRequired()
+
+    /** The platform permission prompt is reached only from an explicit UI action. */
+    fun requestNotificationPermission(activity: Activity) = notifier.requestPermission(activity)
+
     /** Called only after the user accepts the download in the update dialog. */
     fun download() {
         val available = _state.value as? AppUpdateState.Available ?: return
         _state.value = AppUpdateState.Downloading(available.manifest, available.packageInfo)
-        scope.launch {
+        val job = scope.launch(start = CoroutineStart.LAZY) {
             operation.withLock {
                 val partial = updateDirectory().resolve("${available.packageInfo.fileName}.part")
                 val complete = updateDirectory().resolve(available.packageInfo.fileName)
+                synchronized(this@AppUpdateCoordinator) {
+                    activeDownloadPartial = partial
+                    activeDownloadComplete = complete
+                }
                 try {
                     partial.delete()
                     complete.delete()
                     downloadVerified(available.packageInfo, partial)
+                    currentCoroutineContext().ensureActive()
                     if (!partial.renameTo(complete)) throw InvalidUpdateManifest("The downloaded update could not be saved")
                     inspector.inspect(complete, available.packageInfo, available.manifest.version)
+                    currentCoroutineContext().ensureActive()
                     _state.value = AppUpdateState.ReadyToInstall(available.manifest, available.packageInfo, complete)
+                } catch (cancelled: CancellationException) {
+                    partial.delete()
+                    complete.delete()
+                    throw cancelled
                 } catch (error: Exception) {
                     partial.delete()
                     complete.delete()
-                    _state.value = AppUpdateState.Error(error.safeUpdateMessage())
+                    updateDownloadFailureCode(error).takeIf {
+                        shouldRecordUpdateDownloadFailure(_state.value, currentCoroutineContext().isActive)
+                    }?.let { terminal ->
+                        diagnostics.record(terminal)
+                        _state.value = AppUpdateState.Error(error.safeUpdateMessage())
+                    }
+                } finally {
+                    synchronized(this@AppUpdateCoordinator) {
+                        activeDownloadCancel = null
+                        activeDownloadPartial = null
+                        activeDownloadComplete = null
+                        downloadJob = null
+                    }
                 }
             }
         }
+        synchronized(this) { downloadJob = job }
+        job.start()
+    }
+
+    fun cancelDownload() {
+        val diagnostic = updateCancellationCode(_state.value) ?: return
+        diagnostics.record(diagnostic)
+        _state.value = restingUpdateState(enabled)
+        val cancellation = synchronized(this) {
+            val captured = ActiveUpdateDownload(
+                job = downloadJob,
+                cancelTransport = activeDownloadCancel,
+                files = listOfNotNull(activeDownloadPartial, activeDownloadComplete),
+            )
+            downloadJob = null
+            activeDownloadCancel = null
+            activeDownloadPartial = null
+            activeDownloadComplete = null
+            captured
+        }
+        cancellation.cancel()
     }
 
     /** Starts PackageInstaller only after a second explicit user action. */
@@ -282,24 +457,52 @@ internal class AppUpdateCoordinator(
                 activity.startActivity(permissionIntent)
             } catch (error: ActivityNotFoundException) {
                 ready.file.delete()
+                diagnostics.record(DiagnosticEventCode.UPDATE_INSTALL_FAILED)
                 _state.value = AppUpdateState.Error(error.safeUpdateMessage())
             } catch (error: SecurityException) {
                 ready.file.delete()
+                diagnostics.record(DiagnosticEventCode.UPDATE_INSTALL_FAILED)
                 _state.value = AppUpdateState.Error(error.safeUpdateMessage())
             }
             return
         }
-        _state.value = AppUpdateState.Installing
-        scope.launch {
+        _state.value = AppUpdateState.PreparingInstallation(ready.file)
+        val job = scope.launch(start = CoroutineStart.LAZY) {
             operation.withLock {
                 try {
-                    commitPackage(ready.file)
+                    commitPackage(ready.file) { _state.value = AppUpdateState.Installing }
+                } catch (cancelled: CancellationException) {
+                    ready.file.delete()
+                    throw cancelled
                 } catch (error: Exception) {
                     ready.file.delete()
-                    _state.value = AppUpdateState.Error(error.safeUpdateMessage())
+                    if (shouldRecordUpdateInstallFailure(_state.value, currentCoroutineContext().isActive)) {
+                        diagnostics.record(DiagnosticEventCode.UPDATE_INSTALL_FAILED)
+                        _state.value = AppUpdateState.Error(error.safeUpdateMessage())
+                    }
+                } finally {
+                    synchronized(this@AppUpdateCoordinator) {
+                        installPreparationJob = null
+                        activeInstallCancel = null
+                    }
                 }
             }
         }
+        synchronized(this) { installPreparationJob = job }
+        job.start()
+    }
+
+    fun cancelInstallPreparation() {
+        val cancellation = synchronized(this) {
+            val current = _state.value as? AppUpdateState.PreparingInstallation ?: return
+            _state.value = restingUpdateState(enabled)
+            ActiveInstallPreparation(installPreparationJob, activeInstallCancel, current.file).also {
+                installPreparationJob = null
+                activeInstallCancel = null
+            }
+        }
+        diagnostics.record(DiagnosticEventCode.UPDATE_INSTALL_CANCELED)
+        cancellation.cancel()
     }
 
     fun resumeAfterPermission(activity: Activity) {
@@ -308,15 +511,18 @@ internal class AppUpdateCoordinator(
 
     fun dismiss() {
         when (val current = _state.value) {
-            is AppUpdateState.Downloading, AppUpdateState.Installing -> Unit
+            is AppUpdateState.Downloading -> cancelDownload()
+            is AppUpdateState.PreparingInstallation -> cancelInstallPreparation()
+            AppUpdateState.Installing -> Unit
             is AppUpdateState.ReadyToInstall -> { current.file.delete(); _state.value = restingUpdateState(enabled) }
             is AppUpdateState.NeedsPermission -> { current.file.delete(); _state.value = restingUpdateState(enabled) }
             else -> _state.value = restingUpdateState(enabled)
-        }
+    }
     }
 
     internal fun installationResult(sessionId: Int, status: Int, message: String?) {
         if (!installState.clear(sessionId)) return
+        installationFailureCode(status)?.let(diagnostics::record)
         _state.value = when (status) {
             PackageInstaller.STATUS_SUCCESS -> restingUpdateState(enabled)
             else -> AppUpdateState.Error(message?.takeIf { it.isNotBlank() } ?: "Android could not install the update")
@@ -351,18 +557,24 @@ internal class AppUpdateCoordinator(
     private suspend fun downloadVerified(expected: AndroidUpdatePackage, destination: File) = withContext(Dispatchers.IO) {
         requireGithubReleaseAssetUrl(expected.url)
         val request = Request.Builder().url(expected.url).header("Accept", "application/vnd.android.package-archive").build()
-        downloadHttpClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw InvalidUpdateManifest("Update download returned HTTP ${response.code}")
-            requireAllowedFinalDownloadUrl(response.request.url)
-            val body = response.body
-            if (body.contentLength() > MAX_UPDATE_APK_BYTES ||
-                (body.contentLength() >= 0L && body.contentLength() != expected.size)
-            ) throw InvalidUpdateManifest("The update download size does not match")
-            body.byteStream().use { input ->
-                FileOutputStream(destination).buffered().use { output ->
-                    copyAndVerifyUpdate(input, output, expected.size, expected.sha256)
+        val call = downloadHttpClient.newCall(request)
+        synchronized(this@AppUpdateCoordinator) { activeDownloadCancel = call::cancel }
+        try {
+            call.execute().use { response ->
+                if (!response.isSuccessful) throw InvalidUpdateManifest("Update download returned HTTP ${response.code}")
+                requireAllowedFinalDownloadUrl(response.request.url)
+                val body = response.body
+                if (body.contentLength() > MAX_UPDATE_APK_BYTES ||
+                    (body.contentLength() >= 0L && body.contentLength() != expected.size)
+                ) throw InvalidUpdateManifest("The update download size does not match")
+                body.byteStream().use { input ->
+                    FileOutputStream(destination).buffered().use { output ->
+                        copyAndVerifyUpdate(input, output, expected.size, expected.sha256)
+                    }
                 }
             }
+        } finally {
+            synchronized(this@AppUpdateCoordinator) { activeDownloadCancel = null }
         }
     }
 
@@ -372,7 +584,7 @@ internal class AppUpdateCoordinator(
         if (!url.isHttps || !allowed) throw InvalidUpdateManifest("The update download redirected outside GitHub")
     }
 
-    private suspend fun commitPackage(file: File) = withContext(Dispatchers.IO) {
+    private suspend fun commitPackage(file: File, onCommitted: () -> Unit) = withContext(Dispatchers.IO) {
         val installer = context.packageManager.packageInstaller
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
             setAppPackageName(context.packageName)
@@ -384,35 +596,79 @@ internal class AppUpdateCoordinator(
             installer.abandonSession(sessionId)
             throw InvalidUpdateManifest("The Android installation session could not be recorded")
         }
+        synchronized(this@AppUpdateCoordinator) {
+            activeInstallCancel = {
+                runCatching { installer.abandonSession(sessionId) }
+                installState.clear(sessionId)
+            }
+        }
         try {
             installer.openSession(sessionId).use { session ->
                 file.inputStream().use { input ->
                     session.openWrite("rivune-update.apk", 0L, file.length()).use { output ->
-                        input.copyTo(output)
+                        val buffer = ByteArray(256 * 1024)
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            output.write(buffer, 0, count)
+                        }
                         session.fsync(output)
                     }
                 }
-                val callback = Intent(context, AppUpdateInstallReceiver::class.java).apply {
-                    action = AppUpdateInstallReceiver.ACTION_INSTALL_RESULT
-                    putExtra(PackageInstaller.EXTRA_SESSION_ID, sessionId)
-                }
+                currentCoroutineContext().ensureActive()
+                val resultIntent = Intent(context, AppUpdateInstallReceiver::class.java)
+                    .setAction(AppUpdateInstallReceiver.ACTION_INSTALL_RESULT)
+                    .setPackage(context.packageName)
+                    .putExtra(PackageInstaller.EXTRA_SESSION_ID, sessionId)
                 val pending = PendingIntent.getBroadcast(
-                    context,
-                    sessionId,
-                    callback,
+                    context, sessionId, resultIntent,
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
                 )
+                currentCoroutineContext().ensureActive()
+                val handingOff = synchronized(this@AppUpdateCoordinator) {
+                    if (_state.value !is AppUpdateState.PreparingInstallation) false else {
+                        activeInstallCancel = null
+                        onCommitted()
+                        true
+                    }
+                }
+                if (!handingOff) throw CancellationException("Installation preparation was cancelled")
                 session.commit(pending.intentSender)
             }
         } catch (error: Exception) {
+            runCatching { installer.abandonSession(sessionId) }
             installState.clear(sessionId)
-            installer.abandonSession(sessionId)
             throw error
         }
         file.delete()
     }
 
     private fun updateDirectory(): File = context.cacheDir.resolve("app_updates").also(File::mkdirs)
+}
+
+internal data class ActiveUpdateDownload(
+    val job: Job?,
+    val cancelTransport: (() -> Unit)?,
+    val files: List<File>,
+) {
+    fun cancel() {
+        cancelTransport?.invoke()
+        job?.cancel()
+        files.forEach(File::delete)
+    }
+}
+
+internal data class ActiveInstallPreparation(
+    val job: Job?,
+    val cancelSession: (() -> Unit)?,
+    val file: File,
+) {
+    fun cancel() {
+        cancelSession?.invoke()
+        job?.cancel()
+        file.delete()
+    }
 }
 
 internal fun restingUpdateState(enabled: Boolean): AppUpdateState =
@@ -452,6 +708,7 @@ class AppUpdateInstallReceiver : BroadcastReceiver() {
         if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
             @Suppress("DEPRECATION")
             val confirmation = intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
+
             updates.requestInstallationConfirmation(sessionId, confirmation, context)
             return
         }
@@ -466,6 +723,11 @@ class AppUpdateInstallReceiver : BroadcastReceiver() {
         const val ACTION_INSTALL_RESULT = "io.rivune.app.APP_UPDATE_INSTALL_RESULT"
     }
 }
+internal fun shouldRecordUpdateDownloadFailure(state: AppUpdateState, coroutineActive: Boolean): Boolean =
+    coroutineActive && state is AppUpdateState.Downloading
+
+internal fun shouldRecordUpdateInstallFailure(state: AppUpdateState, coroutineActive: Boolean): Boolean =
+    coroutineActive && (state is AppUpdateState.PreparingInstallation || state is AppUpdateState.Installing)
 
 private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
@@ -491,3 +753,13 @@ internal fun copyAndVerifyUpdate(
     if (digest.digest().toHex() != expectedSha256) throw InvalidUpdateManifest("The update download checksum does not match")
 }
 private fun Throwable.safeUpdateMessage(): String = message?.takeIf { it.isNotBlank() } ?: "The update operation failed"
+
+internal fun updateDownloadFailureCode(error: Exception): DiagnosticEventCode =
+    if (error is InvalidUpdateManifest) DiagnosticEventCode.UPDATE_PACKAGE_REJECTED
+    else DiagnosticEventCode.UPDATE_DOWNLOAD_FAILED
+
+internal fun installationFailureCode(status: Int): DiagnosticEventCode? =
+    DiagnosticEventCode.UPDATE_INSTALL_FAILED.takeIf { status != PackageInstaller.STATUS_SUCCESS }
+
+internal fun updateCancellationCode(state: AppUpdateState): DiagnosticEventCode? =
+    DiagnosticEventCode.UPDATE_DOWNLOAD_CANCELED.takeIf { state is AppUpdateState.Downloading }

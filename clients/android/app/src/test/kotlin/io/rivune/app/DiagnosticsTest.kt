@@ -79,14 +79,15 @@ class DiagnosticsTest {
             Server origin: https://media.example:8443
             Server name: Living Room
             Server version: 10.2.0
-            Server protocol: 20
+            Server protocol: 22
             Startup tab: library
             Preferred player: external
             Animations: reduced
             Accent color: #FF336699
             Frame-rate matching: on
             Video aspect: zoom
-            Wi-Fi quality: balanced
+            Local quality: automatic
+            Remote Wi-Fi quality: balanced
             Mobile quality: economy
             Events:
             1970-01-01T00:00:01Z APP_STARTED
@@ -135,6 +136,33 @@ class DiagnosticsTest {
     }
 
     @Test
+    fun rapidSearchSupersessionKeepsOpaqueStartedTerminalPairs() {
+        val buffer = DiagnosticsBuffer()
+        val firstId = "11111111-1111-4111-8111-111111111111"
+        val secondId = "22222222-2222-4222-8222-222222222222"
+        val first = SearchDiagnosticOperation(buffer, firstId)
+        val second = SearchDiagnosticOperation(buffer, secondId)
+
+        second.finish(DiagnosticEventCode.SEARCH_SUCCEEDED)
+        first.finish(DiagnosticEventCode.SEARCH_CANCELED)
+        first.finish(DiagnosticEventCode.SEARCH_FAILED)
+
+        val events = buffer.snapshot()
+        assertEquals(
+            listOf(
+                DiagnosticEventCode.SEARCH_STARTED to firstId,
+                DiagnosticEventCode.SEARCH_STARTED to secondId,
+                DiagnosticEventCode.SEARCH_SUCCEEDED to secondId,
+                DiagnosticEventCode.SEARCH_CANCELED to firstId,
+            ),
+            events.map { it.code to it.operationId },
+        )
+        val report = buildDiagnosticReport(reportInput(events = events))
+        assertFalse("private movie query" in report)
+        assertFalse("https://secret.example/token" in report)
+    }
+
+    @Test
     fun exportPayloadIsExactlyTheStableReport() {
         val input = reportInput()
 
@@ -154,7 +182,7 @@ class DiagnosticsTest {
         serverUrl = serverUrl,
         serverDisplayName = "Living Room",
         serverVersion = "10.2.0",
-        serverProtocolVersion = 20,
+        serverProtocolVersion = 22,
         sdkInt = 35,
         deviceModel = deviceModel,
         isTelevision = false,
@@ -164,7 +192,8 @@ class DiagnosticsTest {
         accentColor = 0xFF336699.toInt(),
         frameRateMatching = "on",
         videoAspect = "zoom",
-        wifiQuality = "balanced",
+        localQuality = "automatic",
+        remoteWifiQuality = "balanced",
         mobileQuality = "economy",
         events = events,
     )

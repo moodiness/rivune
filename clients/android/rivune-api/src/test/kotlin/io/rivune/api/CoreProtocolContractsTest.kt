@@ -1,0 +1,616 @@
+package io.rivune.api
+
+import java.util.UUID
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNull
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+
+class CoreProtocolContractsTest {
+    private val json = Json { ignoreUnknownKeys = true }
+    private val titleId = UUID.fromString("11111111-1111-4111-8111-111111111111")
+    private val seriesId = UUID.fromString("22222222-2222-4222-8222-222222222222")
+    private val addonId = UUID.fromString("33333333-3333-4333-8333-333333333333")
+
+    @Test
+    fun discoveryMetadataAndMarkersExposeCurrentFields() = runBlocking {
+        val movie = json.decodeFromString<Movie>(
+            """{"id":"11111111-1111-4111-8111-111111111111","mediaType":"movie","title":"Movie","originalTitle":"Movie","originalLanguage":"en","overview":"Overview","genres":[],"cast":[{"id":"42","name":"Actor","character":"Lead","profileUrl":"/artwork/cast"}],"voteAverage":8.5,"voteCount":10,"externalIds":{"imdb":"tt1234567"}}""",
+        )
+        assertEquals("Actor", movie.cast.single().name)
+        assertEquals("Lead", movie.cast.single().character)
+
+        val series = json.decodeFromString<Series>(seriesFixture())
+        assertEquals("84", series.selectedEpisodeOrderId)
+        assertEquals("Actor", series.cast.single().name)
+
+        val server = MockWebServer()
+        server.enqueue(discoveryResponse(setupCompleted = true, demoAvailable = false))
+        server.enqueue(jsonResponse(seriesFixture()))
+        server.enqueue(jsonResponse("""{"markers":[{"type":"intro","startSeconds":12.25,"endSeconds":91.75,"confidence":0.9,"submissionCount":8}]}"""))
+        server.enqueue(jsonResponse("""{"sources":[{"id":"stream-1","sourceRef":"opaque-source-reference","stableIdentity":"stable-external","addonId":"33333333-3333-4333-8333-333333333333","manifestId":"manifest","streamIndex":0,"name":"External","protocol":"external","mode":"external","expiresAt":"2099-01-01T00:00:00Z"}],"providerErrors":[]}"""))
+        server.start()
+        try {
+            val serverUrl = server.loopbackUrl("/").toString()
+            val client =
+                RivuneApiClient(serverUrl, CoreContractCredentialStore(serverUrl, tokenPair()))
+            val discovery = client.discover()
+            assertEquals(true, discovery.setupCompleted)
+            assertEquals(false, discovery.demoAvailable)
+
+            client.series(
+                seriesId,
+                language = "fr-FR",
+                mappingProvider = SeriesMappingProvider.TVDB,
+                episodeOrder = "84"
+            )
+            val markers = client.playbackMarkers("tt1234567", season = 2, episode = 3)
+            val sources = client.playbackSources(
+                mediaType = "episode",
+                resourceId = "resource:episode",
+                capabilities = PlaybackCapabilities(listOf("hls"), listOf("mp4")),
+                addonId = addonId,
+            )
+            assertEquals(PlaybackMode.EXTERNAL, sources.sources.single().mode)
+            assertEquals("stable-external", sources.sources.single().stableIdentity)
+
+            val discoveryRequest = server.takeRequest()
+            assertEquals("/.well-known/rivune", discoveryRequest.path)
+            val seriesRequest = server.takeRequest()
+            assertEquals(
+                "/api/v1/metadata/series/$seriesId?language=fr-FR&mappingProvider=tvdb&episodeOrder=84",
+                seriesRequest.path
+            )
+            val markerRequest = server.takeRequest()
+            assertEquals(
+                "/api/v1/playback/markers?imdbId=tt1234567&season=2&episode=3",
+                markerRequest.path
+            )
+            assertEquals(12.25, markers.markers.single().startSeconds)
+            assertEquals(PlaybackMarkerType.INTRO, markers.markers.single().type)
+            val sourcesRequest = server.takeRequest()
+            assertEquals("POST", sourcesRequest.method)
+            assertEquals("/api/v1/playback/sources", sourcesRequest.path)
+            val sourceBody = json.parseToJsonElement(sourcesRequest.body.readUtf8()).jsonObject
+            assertEquals(addonId.toString(), sourceBody.getValue("addonId").jsonPrimitive.content)
+            assertEquals(
+                "resource:episode",
+                sourceBody.getValue("resourceId").jsonPrimitive.content
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun discoveryCapabilitiesAreNormalizedAndQueryable() = runBlocking {
+        assertEquals(
+            "bounded-aggregate-resources",
+            DiscoveryCapability.BOUNDED_AGGREGATE_RESOURCES.identifier
+        )
+        assertEquals("profile-archives-v2", DiscoveryCapability.PROFILE_ARCHIVES_V2.identifier)
+        assertEquals("request-correlation", DiscoveryCapability.REQUEST_CORRELATION.identifier)
+        assertEquals("local-recommendations", DiscoveryCapability.LOCAL_RECOMMENDATIONS.identifier)
+        assertEquals("playback-coordination", DiscoveryCapability.PLAYBACK_COORDINATION.identifier)
+        assertEquals("semantic-search", DiscoveryCapability.SEMANTIC_SEARCH.identifier)
+        val server = MockWebServer()
+        server.enqueue(discoveryResponse())
+        server.enqueue(
+            discoveryResponse(
+                capabilities = """["profile-archives-v2","future-capability","profile-archives-v2","","Uppercase","-leading","trailing-",42,null,{},"${
+                    "a".repeat(
+                        65
+                    )
+                }"]""",
+            ),
+        )
+        server.start()
+        try {
+            val serverUrl = server.loopbackUrl("/").toString()
+            val client =
+                RivuneApiClient(serverUrl, CoreContractCredentialStore(serverUrl, tokenPair()))
+
+            val omitted = client.discover()
+            assertEquals(emptyList(), omitted.capabilities)
+            assertEquals(false, omitted.supportsProfileArchives)
+
+            val normalized = client.discover()
+            assertEquals(
+                listOf("profile-archives-v2", "future-capability"),
+                normalized.capabilities
+            )
+            assertEquals(true, normalized.supportsProfileArchives)
+            assertEquals(
+                true,
+                normalized.supportsCapability(DiscoveryCapability.PROFILE_ARCHIVES_V2)
+            )
+            assertEquals(
+                false,
+                normalized.supportsCapability(DiscoveryCapability.REQUEST_CORRELATION)
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun semanticSearchRequestAndResponseMatchContract() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(discoveryResponse(capabilities = """["semantic-search"]"""))
+        server.enqueue(
+            jsonResponse(
+                """{"intents":[{"id":"genre:war","kind":"genre","value":"war","label":"War"}],"titleQuery":"Dune","mediaTypes":["movie"],"items":[{"id":"tmdb:42","mediaType":"movie","title":"Dune","externalIds":{"tmdb":"42"},"sources":[]}],"page":2,"hasMore":true,"partial":false}""",
+            ),
+        )
+        server.start()
+        try {
+            val serverUrl = server.loopbackUrl("/").toString()
+            val client =
+                RivuneApiClient(serverUrl, CoreContractCredentialStore(serverUrl, tokenPair()))
+            val discovery = client.discover()
+
+            val page = client.semanticSearch(
+                SemanticSearchRequest(
+                    query = "film Dune de guerre",
+                    mediaType = "movie",
+                    language = "fr-FR",
+                    region = "FR",
+                    page = 2,
+                    limit = 40,
+                    excludedIntentIds = listOf("theme:space"),
+                ),
+            )
+
+            assertEquals(true, discovery.supportsCapability(DiscoveryCapability.SEMANTIC_SEARCH))
+            assertEquals(listOf("genre:war"), page.intents.map(SemanticSearchIntent::id))
+            assertEquals("Dune", page.titleQuery)
+            assertEquals("42", page.items.single().externalIds["tmdb"])
+            assertEquals(2, page.page)
+            assertEquals(true, page.hasMore)
+            assertEquals(false, page.partial)
+            assertEquals("/.well-known/rivune", server.takeRequest().path)
+            val request = server.takeRequest()
+            assertEquals("POST", request.method)
+            assertEquals("/api/v1/search/semantic", request.path)
+            val body = json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            assertEquals("film Dune de guerre", body.getValue("query").jsonPrimitive.content)
+            assertEquals("movie", body.getValue("mediaType").jsonPrimitive.content)
+            assertEquals("fr-FR", body.getValue("language").jsonPrimitive.content)
+            assertEquals("FR", body.getValue("region").jsonPrimitive.content)
+            assertEquals(2, body.getValue("page").jsonPrimitive.content.toInt())
+            assertEquals(40, body.getValue("limit").jsonPrimitive.content.toInt())
+            assertEquals(
+                "theme:space",
+                body.getValue("excludedIntentIds").jsonArray.single().jsonPrimitive.content
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun discoveryModelDecoderUsesTheSameDefensiveCapabilityNormalization() {
+        val normalized = json.decodeFromString<Discovery>(
+            discoveryJson(
+                capabilities = """["profile-archives-v2","future-capability","profile-archives-v2","bad--identifier",false,null,{}]""",
+            ),
+        )
+        assertEquals(listOf("profile-archives-v2", "future-capability"), normalized.capabilities)
+        assertEquals(true, normalized.supportsProfileArchives)
+
+        assertEquals(emptyList(), json.decodeFromString<Discovery>(discoveryJson()).capabilities)
+        assertEquals(
+            emptyList(),
+            json.decodeFromString<Discovery>(discoveryJson(capabilities = "null")).capabilities
+        )
+        assertEquals(
+            emptyList(),
+            json.decodeFromString<Discovery>(discoveryJson(capabilities = """{"unexpected":true}""")).capabilities,
+        )
+    }
+
+    @Test
+    fun discoveryCapabilitiesRetainOnlyTheFirst64SafeUniqueIdentifiers() = runBlocking {
+        val identifiers = (0..69).map { "capability-$it" }
+        val capabilities = identifiers.joinToString(prefix = "[", postfix = "]") { "\"$it\"" }
+        val server = MockWebServer()
+        server.enqueue(discoveryResponse(capabilities = capabilities))
+        server.start()
+        try {
+            val serverUrl = server.loopbackUrl("/").toString()
+            val discovery = RivuneApiClient(
+                serverUrl,
+                CoreContractCredentialStore(serverUrl, tokenPair())
+            ).discover()
+
+            assertEquals(identifiers.take(64), discovery.capabilities)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun playbackMediaInspectionTreatsLegacyNullTrackArraysAsEmpty() {
+        val inspection = json.decodeFromString<PlaybackMediaInspection>(
+            """{"container":"mp4","videoTracks":[{"index":0,"type":"video","codec":"h264"}],"audioTracks":[{"index":1,"type":"audio","codec":"aac"}],"subtitleTracks":null}""",
+        )
+
+        assertEquals(1, inspection.videoTracks.size)
+        assertEquals(1, inspection.audioTracks.size)
+        assertEquals(emptyList(), inspection.subtitleTracks)
+
+        val session = json.decodeFromString<PlaybackSession>(
+            """{"id":"44444444-4444-4444-8444-444444444444","selectedSourceId":"source","sources":[{"id":"source","addonId":"33333333-3333-4333-8333-333333333333","manifestId":"addon","mode":"direct","url":"https://media.example/movie.mp4","protocol":"http","compatible":true}],"subtitles":null,"providerErrors":null,"expiresAt":"2099-01-01T00:00:00Z"}""",
+        )
+        assertEquals(emptyList(), session.subtitles)
+        assertEquals(emptyList(), session.providerErrors)
+    }
+
+    @Test
+    fun progressionRoutesSerializeVersionsAndNoContentReturnsNull() = runBlocking {
+        val progress = progressFixture(version = 9)
+        val server = MockWebServer()
+        server.enqueue(discoveryResponse())
+        server.enqueue(MockResponse().setResponseCode(204))
+        server.enqueue(jsonResponse("""{"items":[{"titleId":"$titleId","progress":null}]}"""))
+        server.enqueue(jsonResponse(progress))
+        server.enqueue(MockResponse().setResponseCode(204))
+        server.enqueue(jsonResponse("""{"items":[{"titleId":"$titleId","progress":$progress}]}"""))
+        server.enqueue(jsonResponse(progress))
+        server.enqueue(jsonResponse(progress))
+        server.enqueue(jsonResponse("""{"items":[{"titleId":"$titleId","mediaType":"episode","seriesId":"$seriesId","seasonId":"44444444-4444-4444-8444-444444444444","seasonNumber":2,"episodeNumber":3,"title":"Signal Horizon","posterUrl":"/series-poster","backgroundUrl":"/series-background","releaseInfo":"2026","resourceId":"tt9000:2:3","resourceProvider":"imdb","episodeTitle":"Moonrise","episodeStillUrl":"/episode-still","episodeAirDate":"2026-08-15","positionSeconds":120,"durationSeconds":1800,"version":9,"reason":"resume","lastWatchedAt":"2026-08-12T10:00:00Z"}]}"""))
+        server.enqueue(MockResponse().setResponseCode(204))
+        server.start()
+        try {
+            val serverUrl = server.loopbackUrl("/").toString()
+            val client =
+                RivuneApiClient(serverUrl, CoreContractCredentialStore(serverUrl, tokenPair()))
+
+            assertNull(client.playbackProgress(titleId))
+            val batch = client.playbackProgressBatch(listOf(titleId))
+            assertNull(batch.items.single().progress)
+            val updated = client.updatePlaybackProgress(
+                titleId,
+                UpdatePlaybackProgressRequest(
+                    positionSeconds = 120,
+                    durationSeconds = 7200,
+                    completed = false,
+                    expectedVersion = 8L
+                ),
+            )
+            assertEquals(9L, updated.version)
+            client.clearPlaybackProgress(titleId, expectedVersion = 9L)
+            val watchedBatch = client.setTitlesWatchedBatch(
+                listOf(
+                    SetWatchedBatchItem(
+                        titleId,
+                        completed = true,
+                        expectedVersion = 9L
+                    )
+                )
+            )
+            assertEquals(9L, watchedBatch.items.single().progress.version)
+            client.markTitleWatched(titleId, expectedVersion = 9L)
+            client.markTitleUnwatched(titleId, expectedVersion = 10L)
+            val page = client.continueWatching(limit = 25)
+            val continueItem = page.items.single()
+            assertEquals(ContinueWatchingReason.RESUME, continueItem.reason)
+            assertEquals("Signal Horizon", continueItem.title)
+            assertEquals("/series-poster", continueItem.posterUrl)
+            assertEquals("/series-background", continueItem.backgroundUrl)
+            assertEquals("2026", continueItem.releaseInfo)
+            assertEquals("tt9000:2:3", continueItem.resourceId)
+            assertEquals("imdb", continueItem.resourceProvider)
+            assertEquals("Moonrise", continueItem.episodeTitle)
+            assertEquals("/episode-still", continueItem.episodeStillUrl)
+            assertEquals("2026-08-15", continueItem.episodeAirDate)
+            client.dismissContinueWatchingTitle(titleId)
+
+            server.takeRequest()
+            assertEquals(
+                "GET" to "/api/v1/progress/$titleId",
+                server.takeRequest().let { it.method to it.path })
+
+            val batchRequest = server.takeRequest()
+            assertEquals(
+                "POST" to "/api/v1/progress/batch",
+                batchRequest.method to batchRequest.path
+            )
+            val batchBody = json.parseToJsonElement(batchRequest.body.readUtf8()).jsonObject
+            assertEquals(
+                titleId.toString(),
+                batchBody.getValue("titleIds").jsonArray.single().jsonPrimitive.content
+            )
+
+            val updateRequest = server.takeRequest()
+            assertEquals(
+                "PUT" to "/api/v1/progress/$titleId",
+                updateRequest.method to updateRequest.path
+            )
+            val updateBody = json.parseToJsonElement(updateRequest.body.readUtf8()).jsonObject
+            assertEquals("8", updateBody.getValue("expectedVersion").jsonPrimitive.content)
+            assertEquals("120", updateBody.getValue("positionSeconds").jsonPrimitive.content)
+
+            assertEquals(
+                "DELETE" to "/api/v1/progress/$titleId?expectedVersion=9",
+                server.takeRequest().let { it.method to it.path })
+            val watchedBatchRequest = server.takeRequest()
+            assertEquals(
+                "PUT" to "/api/v1/titles/watched/batch",
+                watchedBatchRequest.method to watchedBatchRequest.path
+            )
+            val watchedItem =
+                json.parseToJsonElement(watchedBatchRequest.body.readUtf8()).jsonObject
+                    .getValue("items").jsonArray.single().jsonObject
+            assertEquals("9", watchedItem.getValue("expectedVersion").jsonPrimitive.content)
+            assertEquals(true, watchedItem.getValue("completed").jsonPrimitive.content.toBoolean())
+
+            val watchedRequest = server.takeRequest()
+            assertEquals(
+                "POST" to "/api/v1/titles/$titleId/watched",
+                watchedRequest.method to watchedRequest.path
+            )
+            assertEquals(
+                "9",
+                json.parseToJsonElement(watchedRequest.body.readUtf8()).jsonObject.getValue("expectedVersion").jsonPrimitive.content
+            )
+            assertEquals(
+                "DELETE" to "/api/v1/titles/$titleId/watched?expectedVersion=10",
+                server.takeRequest().let { it.method to it.path })
+            assertEquals(
+                "GET" to "/api/v1/continue-watching?limit=25",
+                server.takeRequest().let { it.method to it.path })
+            assertEquals(
+                "DELETE" to "/api/v1/continue-watching/$titleId",
+                server.takeRequest().let { it.method to it.path })
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun externalPlaybackTargetIsOptionalAndEncodesOnlyWhenTrue() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(discoveryResponse())
+        repeat(2) {
+            server.enqueue(jsonResponse("""{"sourceRef":"opaque-source-reference","mode":"direct","protocol":"http","subtitleCount":0,"expiresAt":"2099-01-01T00:00:00Z"}"""))
+        }
+        server.enqueue(jsonResponse("""{"id":"44444444-4444-4444-8444-444444444444","selectedSourceId":"stream-1","sources":[],"subtitles":[],"providerErrors":[],"expiresAt":"2099-01-01T00:00:00Z"}"""))
+        server.start()
+        try {
+            val serverUrl = server.loopbackUrl("/").toString()
+            val client =
+                RivuneApiClient(serverUrl, CoreContractCredentialStore(serverUrl, tokenPair()))
+            client.discover()
+            client.preparePlayback("opaque-source-reference")
+            client.preparePlayback("opaque-source-reference", externalPlayer = true)
+            client.resolvePlayback("opaque-source-reference", externalPlayer = true)
+
+            server.takeRequest()
+            val defaultBody =
+                json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+            val externalPrepareBody =
+                json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+            val externalResolveBody =
+                json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+            assertEquals(false, defaultBody.containsKey("externalPlayer"))
+            assertEquals(
+                true,
+                externalPrepareBody.getValue("externalPlayer").jsonPrimitive.content.toBoolean()
+            )
+            assertEquals(
+                true,
+                externalResolveBody.getValue("externalPlayer").jsonPrimitive.content.toBoolean()
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun coordinationAndRecommendationRoutesMatchV22Contract() = runBlocking {
+        val targetSession = UUID.fromString("77777777-7777-4777-8777-777777777777")
+        val operationId = UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        val roomId = UUID.fromString("88888888-8888-4888-8888-888888888888")
+        val memberId = UUID.fromString("99999999-9999-4999-8999-999999999999")
+        val item = CoordinatedPlaybackItem(titleId, "movie", "opaque", title = "Movie")
+        val device =
+            """{"sessionId":"55555555-5555-4555-8555-555555555555","deviceId":"66666666-6666-4666-8666-666666666666","name":"Device","platform":"android","capabilities":["remote-control"],"state":{"status":"idle","positionMilliseconds":0,"durationMilliseconds":0},"revision":7,"current":true,"lastSeenAt":"2099-01-01T00:00:00Z"}"""
+        val command =
+            """{"operationId":"$operationId","command":"load","mode":"handoff","targetRevision":7,"item":{"titleId":"$titleId","mediaType":"movie","resourceId":"opaque","title":"Movie"},"positionMilliseconds":1000,"senderDeviceName":"Sender","status":"pending","createdAt":"2099-01-01T00:00:00Z","expiresAt":"2099-01-01T00:02:00Z"}"""
+        val applied = command.replace(
+            "\"status\":\"pending\"",
+            "\"status\":\"applied\",\"resultCode\":\"applied\""
+        )
+        val room =
+            """{"id":"$roomId","joinCode":"23456789AB","item":{"titleId":"$titleId","mediaType":"movie","resourceId":"opaque","title":"Movie"},"state":"paused","positionMilliseconds":1000,"durationMilliseconds":10000,"version":1,"updatedAt":"2099-01-01T00:00:00Z","expiresAt":"2099-01-01T08:00:00Z","members":[{"memberId":"$memberId","profile":"Viewer","deviceName":"Phone","platform":"android","role":"host","current":true,"joinedAt":"2099-01-01T00:00:00Z","lastSeenAt":"2099-01-01T00:00:01Z"}]}"""
+        val server = MockWebServer()
+        listOf(
+            discoveryResponse(),
+            jsonResponse(device),
+            jsonResponse("{\"devices\":[]}"),
+            jsonResponse(command).setResponseCode(201),
+            jsonResponse("{\"commands\":[$command]}"),
+            jsonResponse(applied),
+            jsonResponse(applied),
+            jsonResponse(room).setResponseCode(201),
+            jsonResponse(room),
+            jsonResponse(room),
+            jsonResponse(room),
+            MockResponse().setResponseCode(204),
+            jsonResponse("""{"items":[{"item":{"id":"$titleId","mediaType":"movie","title":"Movie","providerIds":{}},"reason":"Because you like Drama","score":4.5}]}"""),
+        ).forEach(server::enqueue)
+        server.start()
+        try {
+            val serverUrl = server.loopbackUrl("/").toString()
+            val client =
+                RivuneApiClient(serverUrl, CoreContractCredentialStore(serverUrl, tokenPair()))
+            client.discover()
+            client.updatePlaybackDevice(
+                PlaybackDeviceHeartbeatInput(
+                    listOf("remote-control"),
+                    PlaybackDeviceState("paused", item, 1_000, 10_000)
+                )
+            )
+            client.playbackDevices()
+            client.sendPlaybackCommand(
+                targetSession,
+                PlaybackCommandInput(
+                    operationId,
+                    PlaybackCommandType.LOAD,
+                    item,
+                    1_000,
+                    PlaybackCommandMode.HANDOFF,
+                    7
+                )
+            )
+            client.playbackCommands(operationId)
+            client.reportPlaybackCommandResult(
+                operationId,
+                PlaybackCommandResultInput(
+                    PlaybackCommandStatus.APPLIED,
+                    PlaybackCommandResultCode.APPLIED
+                )
+            )
+            client.outgoingPlaybackCommand(operationId)
+            client.createPlaybackRoom(PlaybackRoomCreateInput(item, "paused", 1_000, 10_000))
+            client.joinPlaybackRoom("23456789AB")
+            client.playbackRoom(roomId)
+            client.updatePlaybackRoom(roomId, PlaybackRoomUpdateInput("playing", 2_000, 10_000, 1))
+            client.leavePlaybackRoom(roomId)
+            assertEquals(
+                "Because you like Drama",
+                client.localRecommendations(
+                    12,
+                    RecommendationArtworkShape.LANDSCAPE
+                ).items.single().reason
+            )
+
+            val requests = (0 until 13).map { server.takeRequest() }
+            assertEquals(
+                listOf(
+                    "/.well-known/rivune",
+                    "/api/v1/playback/device",
+                    "/api/v1/playback/devices",
+                    "/api/v1/playback/devices/$targetSession/commands",
+                    "/api/v1/playback/commands?after=$operationId",
+                    "/api/v1/playback/commands/incoming/$operationId/result",
+                    "/api/v1/playback/commands/outgoing/$operationId",
+                    "/api/v1/playback/rooms",
+                    "/api/v1/playback/rooms/join",
+                    "/api/v1/playback/rooms/$roomId",
+                    "/api/v1/playback/rooms/$roomId",
+                    "/api/v1/playback/rooms/$roomId",
+                    "/api/v1/recommendations?limit=12&artworkShape=landscape",
+                ), requests.map { it.path })
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun profileArchiveV2ExportsMergesAndCreatesWithoutLosingUnknownSections() = runBlocking {
+        val profileId = UUID.fromString("44444444-4444-4444-8444-444444444444")
+        val categoryId = UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        val archive =
+            """{"version":2,"identity":{"name":"Imported","isChild":false,"avatar":{"kind":"preset","presetId":"one"}},"continueDismissals":[],"addons":[{"transportUrl":"https://secret.example/token"}]}"""
+        val mergeReport =
+            """{"mode":"merge","profileId":"$profileId","sections":[{"section":"addons","created":1,"updated":0,"unchanged":0}],"trackingAccountsUpdated":0}"""
+        val createReport = mergeReport.replace("\"merge\"", "\"create\"")
+        val server = MockWebServer()
+        listOf(
+            discoveryResponse(),
+            jsonResponse(archive),
+            jsonResponse(mergeReport),
+            jsonResponse(createReport).setResponseCode(201)
+        ).forEach(server::enqueue)
+        server.start()
+        try {
+            val serverUrl = server.loopbackUrl("/").toString()
+            val client =
+                RivuneApiClient(serverUrl, CoreContractCredentialStore(serverUrl, tokenPair()))
+            client.discover()
+            val exported = client.exportProfileArchive(profileId)
+            assertEquals(
+                "https://secret.example/token",
+                exported.getValue("addons").jsonArray.first().jsonObject.getValue("transportUrl").jsonPrimitive.content
+            )
+            assertEquals(
+                ProfileArchiveImportMode.MERGE,
+                client.importProfileArchive(profileId, exported).mode
+            )
+            assertEquals(
+                ProfileArchiveImportMode.CREATE,
+                client.createProfileFromArchive(categoryId, exported).mode
+            )
+
+            server.takeRequest()
+            assertEquals("/api/v1/profiles/$profileId/archive", server.takeRequest().path)
+            assertEquals("/api/v1/profiles/$profileId/archive/import", server.takeRequest().path)
+            val create = server.takeRequest()
+            assertEquals("/api/v1/profiles/archive", create.path)
+            assertEquals(
+                categoryId.toString(),
+                json.parseToJsonElement(create.body.readUtf8()).jsonObject.getValue("categoryId").jsonPrimitive.content
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    private fun discoveryResponse(
+        setupCompleted: Boolean = true,
+        demoAvailable: Boolean = true,
+        capabilities: String? = null,
+    ) = jsonResponse(discoveryJson(setupCompleted, demoAvailable, capabilities))
+
+    private fun discoveryJson(
+        setupCompleted: Boolean = true,
+        demoAvailable: Boolean = true,
+        capabilities: String? = null,
+    ) =
+        """{"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1","setupRequired":false,"setupCompleted":$setupCompleted,"demoAvailable":$demoAvailable${
+            capabilities?.let { ",\"capabilities\":$it" }.orEmpty()
+        },"timezone":"UTC","interfaceLanguage":"en"}"""
+
+    private fun seriesFixture() =
+        """{"id":"$seriesId","mediaType":"series","name":"Series","originalName":"Series","originalLanguage":"en","overview":"Overview","genres":[],"cast":[{"id":"42","name":"Actor"}],"voteAverage":8.0,"voteCount":10,"seasons":[],"aliases":[],"episodeOrders":[{"id":"84","name":"Aired","type":"official","isDefault":true}],"selectedEpisodeOrderId":"84","mappingProvider":"tvdb","externalIds":{"tvdb":"123"}}"""
+
+    private fun progressFixture(version: Long) =
+        """{"titleId":"$titleId","mediaType":"movie","positionSeconds":120,"durationSeconds":7200,"completed":false,"version":$version,"lastWatchedAt":"2026-08-12T10:00:00Z","updatedAt":"2026-08-12T10:01:00Z"}"""
+
+    private fun jsonResponse(body: String) = MockResponse()
+        .setHeader("Content-Type", "application/json")
+        .setBody(body)
+
+    private fun tokenPair() = TokenPair(
+        tokenType = "Bearer",
+        accessToken = "access",
+        accessTokenExpiresAt = "2026-08-12T12:00:00Z",
+        refreshToken = "refresh",
+        refreshTokenExpiresAt = "2026-09-12T12:00:00Z",
+        sessionId = UUID.fromString("44444444-4444-4444-8444-444444444444"),
+        deviceId = UUID.fromString("55555555-5555-4555-8555-555555555555"),
+        authorizationScope = AuthorizationScope.GLOBAL_ADMIN,
+        category = null,
+    )
+}
+
+private class CoreContractCredentialStore(
+    private val issuer: String,
+    private val tokens: TokenPair,
+) : CredentialStore {
+    override suspend fun load(issuer: String): StoredCredentials? =
+        if (issuer == this.issuer) StoredCredentials(issuer, tokens) else null
+
+    override suspend fun save(credentials: StoredCredentials) = Unit
+
+    override suspend fun clear(issuer: String) = Unit
+}

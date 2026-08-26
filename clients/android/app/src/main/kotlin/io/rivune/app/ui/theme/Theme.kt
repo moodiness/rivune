@@ -16,8 +16,13 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalContext
 import io.rivune.app.AnimationPreference
 import io.rivune.app.DEFAULT_ACCENT_COLOR
+import io.rivune.api.AccessibilityPreferencesDocument
+import io.rivune.api.FocusIndicatorsPreference
+import io.rivune.api.HighContrastPreference
+import io.rivune.api.ReducedMotionPreference
 
 private val DefaultAccentColors = rivuneAccentColors(DEFAULT_ACCENT_COLOR)
 
@@ -85,6 +90,20 @@ internal fun <T> RivuneMotionPolicy.finiteAnimationSpec(durationMillis: Int): Fi
 internal val LocalRivuneMotionPolicy = staticCompositionLocalOf {
     motionPolicy(AnimationPreference.SYSTEM, systemEnabled = true)
 }
+internal val LocalRivuneEnhancedFocusIndicators = staticCompositionLocalOf { false }
+
+private fun Typography.scaled(percent: Int): Typography {
+    if (percent == 100) return this
+    val factor = percent / 100f
+    fun TextStyle.scale() = copy(fontSize = fontSize * factor, lineHeight = lineHeight * factor)
+    return copy(
+        displayLarge = displayLarge.scale(), displayMedium = displayMedium.scale(), displaySmall = displaySmall.scale(),
+        headlineLarge = headlineLarge.scale(), headlineMedium = headlineMedium.scale(), headlineSmall = headlineSmall.scale(),
+        titleLarge = titleLarge.scale(), titleMedium = titleMedium.scale(), titleSmall = titleSmall.scale(),
+        bodyLarge = bodyLarge.scale(), bodyMedium = bodyMedium.scale(), bodySmall = bodySmall.scale(),
+        labelLarge = labelLarge.scale(), labelMedium = labelMedium.scale(), labelSmall = labelSmall.scale(),
+    )
+}
 
 private val RivuneTypography = Typography(
     displayLarge = TextStyle(
@@ -146,9 +165,18 @@ internal fun RivuneTheme(
     accentColor: Int = DEFAULT_ACCENT_COLOR,
     animationPreference: AnimationPreference = AnimationPreference.SYSTEM,
     systemAnimationsEnabled: Boolean = true,
+    accessibility: AccessibilityPreferencesDocument? = null,
     content: @Composable () -> Unit,
 ) {
-    val colors = remember(accentColor) {
+    val context = LocalContext.current
+    val systemHighContrast = runCatching {
+        android.provider.Settings.Secure.getInt(
+            context.contentResolver,
+            "high_text_contrast_enabled",
+            0,
+        ) == 1
+    }.getOrDefault(false)
+    val colors = remember(accentColor, accessibility?.highContrast, systemHighContrast) {
         val accent = rivuneAccentColors(accentColor)
         RivuneDarkColors.copy(
             primary = accent.primary,
@@ -157,15 +185,36 @@ internal fun RivuneTheme(
             onPrimaryContainer = accent.onPrimaryContainer,
             inversePrimary = accent.pressed,
             surfaceTint = accent.primary,
-        )
+        ).let { scheme ->
+            if (accessibility?.highContrast == HighContrastPreference.MORE ||
+                accessibility?.highContrast == HighContrastPreference.SYSTEM && systemHighContrast
+            ) scheme.copy(
+                background = androidx.compose.ui.graphics.Color.Black,
+                surface = androidx.compose.ui.graphics.Color.Black,
+                onBackground = androidx.compose.ui.graphics.Color.White,
+                onSurface = androidx.compose.ui.graphics.Color.White,
+                onSurfaceVariant = androidx.compose.ui.graphics.Color.White,
+                outline = androidx.compose.ui.graphics.Color.White,
+                outlineVariant = androidx.compose.ui.graphics.Color.White,
+            ) else scheme
+        }
     }
-    val policy = remember(animationPreference, systemAnimationsEnabled) {
-        motionPolicy(animationPreference, systemAnimationsEnabled)
+    val effectiveAnimationPreference = when (accessibility?.reducedMotion) {
+        ReducedMotionPreference.REDUCE -> AnimationPreference.REDUCED
+        ReducedMotionPreference.NO_PREFERENCE -> AnimationPreference.FULL
+        else -> animationPreference
     }
-    CompositionLocalProvider(LocalRivuneMotionPolicy provides policy) {
+    val policy = remember(effectiveAnimationPreference, systemAnimationsEnabled) {
+        motionPolicy(effectiveAnimationPreference, systemAnimationsEnabled)
+    }
+    val typography = remember(accessibility?.textScale) { RivuneTypography.scaled(accessibility?.textScale ?: 100) }
+    CompositionLocalProvider(
+        LocalRivuneMotionPolicy provides policy,
+        LocalRivuneEnhancedFocusIndicators provides (accessibility?.focusIndicators == FocusIndicatorsPreference.ENHANCED),
+    ) {
         MaterialTheme(
             colorScheme = colors,
-            typography = RivuneTypography,
+            typography = typography,
             shapes = MaterialShapes,
             content = content,
         )

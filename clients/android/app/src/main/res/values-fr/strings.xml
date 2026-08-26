@@ -222,8 +222,6 @@
     <string name="preferences_aspect_fit">Ajuster</string>
     <string name="preferences_aspect_fill">Remplir</string>
     <string name="preferences_aspect_zoom">Zoom</string>
-    <string name="preferences_wifi_quality">Qualité Wi-Fi</string>
-    <string name="preferences_wifi_quality_body">Limite les flux en Wi-Fi et Ethernet. Sans source directe adaptée ni accès au transcodage, la lecture peut être indisponible.</string>
     <string name="preferences_mobile_quality">Qualité des données mobiles</string>
     <string name="preferences_mobile_quality_body">Limite les flux sur les réseaux cellulaires et autres réseaux non locaux. Sans source directe adaptée ni accès au transcodage, la lecture peut être indisponible.</string>
     <string name="preferences_quality_automatic">Automatique</string>
@@ -411,4 +409,19 @@
     <string name="error_session_expired">Votre session a expiré. Appairez de nouveau cet appareil.</string>
     <string name="error_no_profiles">Aucun profil n’est disponible pour cet appareil.</string>
     <string name="error_logout_failed">Rivune n’a pas pu dissocier complètement la session de cet appareil.</string>
+    <string name="viewer_coordination_devices_title">Lire sur un autre appareil</string>
+    <string name="viewer_coordination_play">Lire</string>
+    <string name="viewer_coordination_pause">Mettre en pause</string>
+    <string name="viewer_coordination_match_position">Synchroniser la position</string>
+    <string name="viewer_coordination_stop">Arrêter</string>
+    <string name="viewer_coordination_room_start">Créer un salon de visionnage</string>
+    <string name="viewer_coordination_room_join">Rejoindre un salon</string>
+    <string name="viewer_coordination_room_label">Salon %1$s</string>
+    <string name="viewer_coordination_room_default">Salon de visionnage</string>
+    <plurals name="viewer_coordination_watching_count"><item quantity="one">%1$d personne regarde</item><item quantity="other">%1$d personnes regardent</item></plurals>
+    <string name="viewer_coordination_room_leave">Quitter</string>
+    <string name="viewer_coordination_join_title">Rejoindre le salon de visionnage</string>
+    <string name="viewer_coordination_room_code">Code du salon</string>
+    <string name="viewer_coordination_join_confirm">Rejoindre</string>
+    <string name="viewer_coordination_cancel">Annuler</string>
 </resources>

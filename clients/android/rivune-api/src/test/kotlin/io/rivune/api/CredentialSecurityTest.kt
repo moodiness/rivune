@@ -301,6 +301,39 @@ class CredentialSecurityTest {
         }
     }
 
+    @Test
+    fun deviceAuthorizationSendsInstallationIdentityAndExposesRetryDelay() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(discoveryResponse())
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(429)
+                .setHeader("Content-Type", "application/json")
+                .setHeader("Retry-After", "197")
+                .setBody("""{"error":{"code":"device_code_capacity","message":"busy"}}"""),
+        )
+        server.start()
+        try {
+            val client = RivuneApiClient(server.loopbackUrl("/").toString(), LeakyCredentialStore(null))
+
+            val error = assertFailsWith<RivuneApiException.Server> {
+                client.beginDeviceAuthorization("installation-1", "Living room", "android_tv")
+            }
+
+            assertEquals("device_code_capacity", error.code)
+            assertEquals(197L, error.retryAfterSeconds)
+            assertEquals("/.well-known/rivune", server.takeRequest().path)
+            val request = server.takeRequest()
+            assertEquals("/api/v1/auth/device-code", request.path)
+            assertEquals(
+                """{"installationId":"installation-1","deviceName":"Living room","platform":"android_tv"}""",
+                request.body.readUtf8(),
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
     private fun redirectResponse(status: Int, location: String) = MockResponse()
         .setResponseCode(status)
         .setHeader("Location", location)
@@ -314,13 +347,13 @@ class CredentialSecurityTest {
     private fun discoveryResponse(apiBaseUrl: String = "/api/v1") = MockResponse()
         .setHeader("Content-Type", "application/json")
         .setBody(
-            """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"$apiBaseUrl","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""",
+            """{"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"$apiBaseUrl","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}""",
         )
 
     private companion object {
         val JSON_MEDIA_TYPE = "application/json".toMediaType()
         const val DISCOVERY_RESPONSE =
-            """{"name":"Rivune","serverVersion":"test","protocolVersion":20,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}"""
+            """{"name":"Rivune","serverVersion":"test","protocolVersion":22,"apiBaseUrl":"/api/v1","setupRequired":false,"timezone":"UTC","interfaceLanguage":"en"}"""
         const val LOGIN_RESPONSE =
             """{"tokenType":"Bearer","accessToken":"lan-access","accessTokenExpiresAt":"2026-08-04T12:15:00Z","refreshToken":"lan-refresh","refreshTokenExpiresAt":"2026-09-04T12:00:00Z","sessionId":"22222222-2222-4222-8222-222222222222","deviceId":"33333333-3333-4333-8333-333333333333","authorizationScope":"global_admin","category":null}"""
         val REDIRECT_STATUSES = listOf(302, 307, 308)
