@@ -86,6 +86,7 @@ public sealed partial class MainPage : Page
     private CancellationTokenSource? _coordinationCancellation;
     private Task? _coordinationTask;
     private Guid? _lastPlaybackOperationId;
+    private Guid? _coordinationEndedSessionId;
     private readonly PlaybackOperationJournal _playbackOperationJournal = new();
     private readonly CoordinationPollingPolicy _coordinationPollingPolicy = new();
     private bool _coordinationOperationExecuting;
