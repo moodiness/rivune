@@ -3,6 +3,10 @@ import Foundation
 import Network
 import Security
 
+public enum RivuneOfflineMediaState: String, Codable, Sendable, Equatable {
+    case queued, downloading, ready, expired, failed
+}
+
 public struct RivuneOfflineMediaItem: Codable, Identifiable, Equatable, Sendable {
     public let id: UUID
     public let titleId: UUID
@@ -11,7 +15,49 @@ public struct RivuneOfflineMediaItem: Codable, Identifiable, Equatable, Sendable
     public let container: String
     public let sizeBytes: Int64
     public let createdAt: Date
+    public let expiresAt: Date?
+    public let expirationPolicyDays: Int?
+    public let state: RivuneOfflineMediaState
     public let posterURL: String?
+
+    public init(
+        id: UUID, titleId: UUID, title: String, fileName: String, container: String,
+        sizeBytes: Int64, createdAt: Date, expiresAt: Date? = nil,
+        expirationPolicyDays: Int? = nil,
+        state: RivuneOfflineMediaState = .ready, posterURL: String?
+    ) {
+        self.id = id
+        self.titleId = titleId
+        self.title = title
+        self.fileName = fileName
+        self.container = container
+        self.sizeBytes = sizeBytes
+        self.createdAt = createdAt
+        self.expiresAt = expiresAt
+        self.state = state
+        self.posterURL = posterURL
+        self.expirationPolicyDays = expirationPolicyDays
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, titleId, title, fileName, container, sizeBytes, createdAt, expiresAt
+        case expirationPolicyDays, state, posterURL
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        titleId = try values.decode(UUID.self, forKey: .titleId)
+        title = try values.decode(String.self, forKey: .title)
+        fileName = try values.decode(String.self, forKey: .fileName)
+        container = try values.decode(String.self, forKey: .container)
+        sizeBytes = try values.decode(Int64.self, forKey: .sizeBytes)
+        createdAt = try values.decode(Date.self, forKey: .createdAt)
+        expiresAt = try values.decodeIfPresent(Date.self, forKey: .expiresAt)
+        state = try values.decodeIfPresent(RivuneOfflineMediaState.self, forKey: .state) ?? .ready
+        expirationPolicyDays = try values.decodeIfPresent(Int.self, forKey: .expirationPolicyDays)
+        posterURL = try values.decodeIfPresent(String.self, forKey: .posterURL)
+    }
 }
 
 public struct RivuneOfflineMediaScope: Equatable, Sendable {
@@ -120,17 +166,23 @@ enum RivuneOfflinePINVerifier {
 
 public enum RivuneOfflineMediaError: LocalizedError {
     case unavailable
+    case quotaExceeded
+    case mobileNetworkBlocked
     case unsupportedSource
     case downloadFailed(statusCode: Int)
     case invalidArchive
+    case expired
     case serverFailure
 
     public var errorDescription: String? {
         switch self {
         case .unavailable: return "Offline media storage is unavailable."
+        case .quotaExceeded: return "This device's offline storage quota is full."
+        case .mobileNetworkBlocked: return "Offline downloads require Wi-Fi."
         case .unsupportedSource: return "This stream cannot be downloaded as one offline file."
         case .downloadFailed(let statusCode): return "The offline source returned HTTP \(statusCode)."
         case .invalidArchive: return "The encrypted offline file is invalid or incomplete."
+        case .expired: return "This offline download has expired."
         case .serverFailure: return "The encrypted offline file could not be played."
         }
     }
@@ -139,10 +191,29 @@ public enum RivuneOfflineMediaError: LocalizedError {
 public actor RivuneOfflineMediaStore {
     public static let shared = RivuneOfflineMediaStore()
 
-    private let fileManager = FileManager.default
+    private let fileManager: FileManager
+    private let maximumStoredBytes: Int64
+    private let configuredRootDirectory: URL?
+    private let expirationDays: Int
+    private let now: @Sendable () -> Date
     private var playbackServer: RivuneOfflinePlaybackServer?
     private var activePartialPaths = Set<String>()
-    private let maximumStoredBytes: Int64 = 20 * 1024 * 1024 * 1024
+    private var reservations: [String: Int64] = [:]
+    private var globalUsageBytesCache: Int64?
+
+    init(
+        fileManager: FileManager = .default,
+        rootDirectory: URL? = nil,
+        maximumStoredBytes: Int64 = 20 * 1024 * 1024 * 1024,
+        expirationDays: Int = 30,
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) {
+        self.fileManager = fileManager
+        self.configuredRootDirectory = rootDirectory
+        self.maximumStoredBytes = maximumStoredBytes
+        self.expirationDays = max(expirationDays, 0)
+        self.now = now
+    }
 
     public func items(in scope: RivuneOfflineMediaScope) -> [RivuneOfflineMediaItem] {
         (try? reconcileManifest(in: scope))?.sorted { $0.createdAt > $1.createdAt } ?? []
@@ -155,26 +226,45 @@ public actor RivuneOfflineMediaStore {
         container: String?,
         posterURL: String?,
         in scope: RivuneOfflineMediaScope,
+        expirationDays: Int? = nil,
         configuration: URLSessionConfiguration = .ephemeral,
         progress: @escaping @Sendable (Int64) -> Void
     ) async throws -> RivuneOfflineMediaItem {
         let directory = try storageDirectory(for: scope)
-        let currentBytes = try reconcileManifest(in: scope).reduce(Int64(0)) { $0 + $1.sizeBytes }
-        guard currentBytes < maximumStoredBytes else { throw RivuneOfflineMediaError.unavailable }
+        _ = try reconcileManifest(in: scope)
+        let usage = try ensureGlobalUsageBytes()
+        let reservation = max(maximumStoredBytes - usage - reservations.values.reduce(0, +), 0)
+        guard reservation > 0 else { throw RivuneOfflineMediaError.quotaExceeded }
         let identifier = UUID()
         let partial = directory.appendingPathComponent(".\(identifier.uuidString.lowercased()).partial", isDirectory: false)
         let destination = directory.appendingPathComponent("\(identifier.uuidString.lowercased()).rvn", isDirectory: false)
         let key = try offlineKey(for: scope)
         activePartialPaths.insert(partial.path)
-        defer { activePartialPaths.remove(partial.path) }
-        let writer = try RivuneEncryptedMediaWriter(url: partial, key: key, maximumBytes: maximumStoredBytes - currentBytes)
+        reservations[partial.path] = reservation
+        defer {
+            activePartialPaths.remove(partial.path)
+            reservations.removeValue(forKey: partial.path)
+        }
+        let writer = try RivuneEncryptedMediaWriter(url: partial, key: key, maximumBytes: reservation)
         do {
             try await RivuneStreamingDownloader.download(url: url, writer: writer, configuration: configuration, progress: progress)
-            let bytes = try writer.finish()
-            guard currentBytes <= maximumStoredBytes - bytes else {
-                try? fileManager.removeItem(at: partial)
+            _ = try writer.finish()
+            let archiveBytes = try fileManager.attributesOfItem(atPath: partial.path)[.size]
+            guard let archiveSize = archiveBytes as? NSNumber else {
                 throw RivuneOfflineMediaError.unavailable
             }
+            let bytes = archiveSize.int64Value
+            let currentUsage = try ensureGlobalUsageBytes()
+            guard bytes > 0, currentUsage <= maximumStoredBytes - bytes else {
+                try? fileManager.removeItem(at: partial)
+                throw RivuneOfflineMediaError.quotaExceeded
+            }
+            let createdAt = now()
+            let effectiveExpirationDays = max(expirationDays ?? self.expirationDays, 0)
+            let expiresAt = effectiveExpirationDays == 0
+                ? nil
+                : Calendar(identifier: .gregorian).date(
+                    byAdding: .day, value: effectiveExpirationDays, to: createdAt)
             try fileManager.moveItem(at: partial, to: destination)
             var manifest = try loadManifest(in: scope)
             let item = RivuneOfflineMediaItem(
@@ -184,12 +274,16 @@ public actor RivuneOfflineMediaStore {
                 fileName: destination.lastPathComponent,
                 container: container?.lowercased() ?? "mp4",
                 sizeBytes: bytes,
-                createdAt: Date(),
+                createdAt: createdAt,
+                expiresAt: expiresAt,
+                expirationPolicyDays: effectiveExpirationDays,
+                state: .ready,
                 posterURL: posterURL
             )
             manifest.removeAll { $0.id == item.id }
             manifest.append(item)
             try saveManifest(manifest, in: scope)
+            globalUsageBytesCache = currentUsage + bytes
             return item
         } catch {
             try? writer.cancel()
@@ -198,7 +292,6 @@ public actor RivuneOfflineMediaStore {
             throw error
         }
     }
-
     public func remove(_ item: RivuneOfflineMediaItem, in scope: RivuneOfflineMediaScope) throws {
         stopPlayback()
         var manifest = try loadManifest(in: scope)
@@ -206,20 +299,31 @@ public actor RivuneOfflineMediaStore {
             throw RivuneOfflineMediaError.invalidArchive
         }
         let directory = try storageDirectory(for: scope)
-        try? fileManager.removeItem(at: directory.appendingPathComponent(item.fileName))
+        let archive = directory.appendingPathComponent(item.fileName)
+        var removedBytes: Int64 = 0
+        if fileManager.fileExists(atPath: archive.path) {
+            let attributes = try fileManager.attributesOfItem(atPath: archive.path)
+            removedBytes = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+            try fileManager.removeItem(at: archive)
+        }
         manifest.removeAll { $0.id == item.id }
         try saveManifest(manifest, in: scope)
+        if let cached = globalUsageBytesCache {
+            globalUsageBytesCache = max(cached - removedBytes, 0)
+        }
     }
 
     public func playbackURL(for item: RivuneOfflineMediaItem, in scope: RivuneOfflineMediaScope) async throws -> URL {
         stopPlayback()
-        let manifest = try loadManifest(in: scope)
-        guard manifest.contains(item), item.fileName == URL(fileURLWithPath: item.fileName).lastPathComponent else {
+        let manifest = try reconcileManifest(in: scope)
+        guard let stored = manifest.first(where: { $0.id == item.id }),
+              stored.fileName == URL(fileURLWithPath: stored.fileName).lastPathComponent else {
             throw RivuneOfflineMediaError.invalidArchive
         }
-        let archive = try storageDirectory(for: scope).appendingPathComponent(item.fileName)
+        if let expiresAt = stored.expiresAt, expiresAt <= now() { throw RivuneOfflineMediaError.expired }
+        let archive = try storageDirectory(for: scope).appendingPathComponent(stored.fileName)
         guard fileManager.isReadableFile(atPath: archive.path) else { throw RivuneOfflineMediaError.invalidArchive }
-        let server = try await RivuneOfflinePlaybackServer.start(archive: archive, key: offlineKey(for: scope), container: item.container)
+        let server = try await RivuneOfflinePlaybackServer.start(archive: archive, key: offlineKey(for: scope), container: stored.container)
         playbackServer = server
         return server.url
     }
@@ -228,13 +332,8 @@ public actor RivuneOfflineMediaStore {
         playbackServer?.stop()
         playbackServer = nil
     }
-
     func storageDirectory(for scope: RivuneOfflineMediaScope) throws -> URL {
-        guard let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            throw RivuneOfflineMediaError.unavailable
-        }
-        let directory = base
-            .appendingPathComponent("Rivune/OfflineMedia", isDirectory: true)
+        let directory = try rootStorageDirectory()
             .appendingPathComponent(scope.identifier, isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [
             .posixPermissions: 0o700,
@@ -260,13 +359,34 @@ public actor RivuneOfflineMediaStore {
     func reconcileManifest(in scope: RivuneOfflineMediaScope) throws -> [RivuneOfflineMediaItem] {
         let directory = try storageDirectory(for: scope)
         let manifest = try loadManifest(in: scope)
-        let reconciled = manifest.filter { item in
-            guard item.fileName == URL(fileURLWithPath: item.fileName).lastPathComponent,
+        _ = try ensureGlobalUsageBytes()
+        let normalized = manifest.map { item -> RivuneOfflineMediaItem in
+            guard item.expirationPolicyDays == nil else { return item }
+            let migratedDays = expirationDays
+            return RivuneOfflineMediaItem(
+                id: item.id, titleId: item.titleId, title: item.title,
+                fileName: item.fileName, container: item.container, sizeBytes: item.sizeBytes,
+                createdAt: item.createdAt,
+                expiresAt: item.expiresAt ?? (migratedDays == 0 ? nil : Calendar(identifier: .gregorian).date(
+                    byAdding: .day, value: migratedDays, to: item.createdAt)),
+                expirationPolicyDays: migratedDays,
+                state: item.state, posterURL: item.posterURL)
+        }
+        var expiredNames = Set<String>()
+        let reconciled = normalized.filter { item in
+            guard item.state == .ready,
+                  item.fileName == URL(fileURLWithPath: item.fileName).lastPathComponent,
                   item.fileName.lowercased().hasSuffix(".rvn") else { return false }
             let archive = directory.appendingPathComponent(item.fileName, isDirectory: false)
             guard let attributes = try? fileManager.attributesOfItem(atPath: archive.path),
                   attributes[.type] as? FileAttributeType == .typeRegular,
-                  fileManager.isReadableFile(atPath: archive.path) else { return false }
+                  fileManager.isReadableFile(atPath: archive.path),
+                  let actualSize = attributes[.size] as? NSNumber,
+                  actualSize.int64Value > 0 else { return false }
+            if let expiresAt = item.expiresAt, expiresAt <= now() {
+                expiredNames.insert(item.fileName)
+                return false
+            }
             return true
         }
         if reconciled != manifest { try saveManifest(reconciled, in: scope) }
@@ -274,18 +394,69 @@ public actor RivuneOfflineMediaStore {
         let referenced = Set(reconciled.map(\.fileName))
         let contents = try fileManager.contentsOfDirectory(
             at: directory,
-            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey],
             options: []
         )
         for candidate in contents {
+            let isExpired = expiredNames.contains(candidate.lastPathComponent)
             let isOrphanFinal = candidate.pathExtension.lowercased() == "rvn" && !referenced.contains(candidate.lastPathComponent)
             let isInactivePartial = candidate.pathExtension.lowercased() == "partial" && !activePartialPaths.contains(candidate.path)
-            guard isOrphanFinal || isInactivePartial else { continue }
-            let values = try? candidate.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard isExpired || isOrphanFinal || isInactivePartial else { continue }
+            let values = try? candidate.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
             guard values?.isRegularFile == true, values?.isSymbolicLink != true else { continue }
             try? fileManager.removeItem(at: candidate)
+            if let cached = globalUsageBytesCache {
+                globalUsageBytesCache = max(cached - Int64(values?.fileSize ?? 0), 0)
+            }
         }
         return reconciled
+    }
+
+    func repairGlobalUsage() throws -> Int64 {
+        let repaired = try rescanGlobalUsageBytes()
+        globalUsageBytesCache = repaired
+        return repaired
+    }
+
+    private func ensureGlobalUsageBytes() throws -> Int64 {
+        if let cached = globalUsageBytesCache { return cached }
+        let scanned = try rescanGlobalUsageBytes()
+        globalUsageBytesCache = scanned
+        return scanned
+    }
+
+    private func rescanGlobalUsageBytes() throws -> Int64 {
+        let root = try rootStorageDirectory()
+        guard let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey],
+            options: []
+        ) else { throw RivuneOfflineMediaError.unavailable }
+        var total: Int64 = 0
+        for case let file as URL in enumerator {
+            guard ["rvn", "partial"].contains(file.pathExtension.lowercased()) else { continue }
+            let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+            guard values.isRegularFile == true, values.isSymbolicLink != true else { continue }
+            let size = Int64(values.fileSize ?? 0)
+            guard size >= 0, total <= Int64.max - size else { throw RivuneOfflineMediaError.unavailable }
+            total += size
+        }
+        return total
+    }
+
+    private func rootStorageDirectory() throws -> URL {
+        if let configuredRootDirectory {
+            try fileManager.createDirectory(
+                at: configuredRootDirectory, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            return configuredRootDirectory
+        }
+        guard let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            throw RivuneOfflineMediaError.unavailable
+        }
+        let root = base.appendingPathComponent("Rivune/OfflineMedia", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        return root
     }
 
     private func offlineKey(for scope: RivuneOfflineMediaScope) throws -> SymmetricKey {
@@ -623,17 +794,20 @@ private final class RivuneOfflinePlaybackServer: @unchecked Sendable {
         let mime = mimeType(for: container)
         return try await withCheckedThrowingContinuation { continuation in
             let gate = RivuneContinuationGate()
+            let relay = ConnectionRelay()
+            listener.newConnectionHandler = { [weak relay] connection in relay?.accept(connection) }
             listener.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
                     guard gate.claim() else { return }
                     guard let port = listener.port,
                           let url = URL(string: "http://127.0.0.1:\(port.rawValue)/\(token)") else {
+                        listener.cancel()
                         continuation.resume(throwing: RivuneOfflineMediaError.serverFailure)
                         return
                     }
                     let server = RivuneOfflinePlaybackServer(url: url, listener: listener, archive: archive, key: key, token: token, mimeType: mime)
-                    listener.newConnectionHandler = { [weak server] connection in server?.accept(connection) }
+                    relay.server = server
                     continuation.resume(returning: server)
                 case .failed(let error):
                     guard gate.claim() else { return }
@@ -648,7 +822,20 @@ private final class RivuneOfflinePlaybackServer: @unchecked Sendable {
         }
     }
 
-    func stop() { listener.cancel() }
+    private final class ConnectionRelay: @unchecked Sendable {
+        weak var server: RivuneOfflinePlaybackServer?
+
+        func accept(_ connection: NWConnection) {
+            guard let server else { connection.cancel(); return }
+            server.accept(connection)
+        }
+    }
+
+    func stop() {
+        listener.newConnectionHandler = nil
+        listener.stateUpdateHandler = nil
+        listener.cancel()
+    }
 
     private func accept(_ connection: NWConnection) {
         connection.start(queue: queue)

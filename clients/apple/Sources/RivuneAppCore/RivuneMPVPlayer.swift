@@ -22,8 +22,14 @@ final class RivuneMPVPlaybackController: ObservableObject {
     private struct LoadRequest {
         let url: URL
         let startSeconds: Int
+        let timelineOffsetSeconds: Double
+        let durationSeconds: Int?
         let selectedAudioTrack: Int?
         let selectedSubtitleURL: URL?
+
+        var mediaStartSeconds: Int {
+            max(Int(Double(startSeconds) - timelineOffsetSeconds), 0)
+        }
     }
 
     private final class WakeupContext {
@@ -67,15 +73,25 @@ final class RivuneMPVPlaybackController: ObservableObject {
         }
     }
 
-    func load(url: URL, startSeconds: Int, selectedAudioTrack: Int?, selectedSubtitleURL: URL?) {
+    func load(
+        url: URL,
+        startSeconds: Int,
+        timelineOffsetSeconds: Double,
+        durationSeconds: Int?,
+        selectedAudioTrack: Int?,
+        selectedSubtitleURL: URL?
+    ) {
         let request = LoadRequest(
             url: url,
             startSeconds: max(startSeconds, 0),
+            timelineOffsetSeconds: max(timelineOffsetSeconds, 0),
+            durationSeconds: durationSeconds,
             selectedAudioTrack: selectedAudioTrack,
             selectedSubtitleURL: selectedSubtitleURL
         )
         publish {
             $0.position = Double(request.startSeconds)
+            $0.duration = Double(max(request.durationSeconds ?? 0, 0))
             $0.ended = false
             $0.failureMessage = nil
         }
@@ -102,7 +118,12 @@ final class RivuneMPVPlaybackController: ObservableObject {
 
     func seek(to seconds: Double) {
         guard seconds.isFinite else { return }
-        setDouble("time-pos", max(seconds, 0))
+        queue.async { [weak self] in
+            guard let self, let handle = self.handle else { return }
+            var mediaSeconds = max(seconds - (self.currentLoad?.timelineOffsetSeconds ?? 0), 0)
+            let status = mpv_set_property(handle, "time-pos", MPV_FORMAT_DOUBLE, &mediaSeconds)
+            if status < 0 { self.publishFailure(self.errorMessage(status, key: "MPV could not set %@: %@.", parameter: "time-pos")) }
+        }
     }
 
     func setSpeed(_ speed: Double) {
@@ -205,7 +226,7 @@ final class RivuneMPVPlaybackController: ObservableObject {
         guard let handle else { return }
         currentLoad = request
         var arguments = ["loadfile", request.url.absoluteString, "replace"]
-        if request.startSeconds > 0 { arguments += ["-1", "start=\(request.startSeconds)"] }
+        if request.mediaStartSeconds > 0 { arguments += ["-1", "start=\(request.mediaStartSeconds)"] }
         let status = commandLocked(arguments, handle: handle)
         if status < 0 { publishFailure(errorMessage(status, key: "MPV could not open the media URL: %@.")) }
     }
@@ -250,10 +271,14 @@ final class RivuneMPVPlaybackController: ObservableObject {
         switch String(cString: rawName) {
         case "time-pos":
             let value = data.assumingMemoryBound(to: Double.self).pointee
-            if value.isFinite { publish { $0.position = max(value, 0) } }
+            let offset = currentLoad?.timelineOffsetSeconds ?? 0
+            if value.isFinite { publish { $0.position = max(value, 0) + offset } }
         case "duration":
             let value = data.assumingMemoryBound(to: Double.self).pointee
-            if value.isFinite, value > 0 { publish { $0.duration = value } }
+            let expected = Double(max(currentLoad?.durationSeconds ?? 0, 0))
+            let offset = currentLoad?.timelineOffsetSeconds ?? 0
+            if expected > 0 { publish { $0.duration = expected } }
+            else if value.isFinite, value > 0 { publish { $0.duration = value + offset } }
         case "pause":
             let paused = data.assumingMemoryBound(to: Int32.self).pointee != 0
             publish { $0.playing = !paused }
