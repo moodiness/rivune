@@ -5,7 +5,7 @@ The supported deployment is [`compose.yaml`](../compose.yaml) with PostgreSQL 18
 ## Install and diagnose
 
 ```sh
-./rivune setup --public-url https://media.example.com --version 1.13.3
+./rivune setup --public-url https://media.example.com --version 1.13.4
 ./rivune up
 ./rivune status
 ./rivune logs rivune
@@ -84,7 +84,7 @@ Unraid should use the same dedicated edge network and an existing PostgreSQL 18 
 Before upgrading a protocol-21 deployment to a release that serves protocol 22, create and verify an authenticated backup, record its printed backup ID outside the backup repository, and preserve the complete encryption keyring. Then set an exact released `RIVUNE_VERSION` and recreate only Rivune. Startup applies embedded migrations transactionally before readiness; migrations `000082` through `000094` add add-on verification, playback command operations, web session separation, the reading queue, playback failover and bounded cleanup indexes, saved searches and smart collections, extension incidents, media notifications and its durable worker cursor, profile accessibility preferences, 24-hour queue-operation replay retention, and encrypted add-on verification transport URLs. Migration `000092` removes pending short-lived verification snapshots during the storage cutover; re-run verification after upgrade instead of reusing a pre-upgrade snapshot.
 
 ```sh
-target_version=1.13.3
+target_version=1.13.4
 backup="backups/rivune-before-${target_version}.dump"
 COMPOSE_FILE=compose.yaml ./scripts/postgres-backup.sh "${backup}"
 ./scripts/postgres-verify-backup.sh --expect-backup-id '<recorded ID>' "${backup}"
