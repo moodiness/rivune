@@ -3,15 +3,84 @@ package requestwork
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
+	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const RequestIDHeader = "X-Request-ID"
 
 type requestIDContextKey struct{}
+
+type boundedTransport struct {
+	base http.RoundTripper
+}
+
+func (transport boundedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	var mu sync.Mutex
+	var connection net.Conn
+	var transportRequest *http.Request
+	trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+		mu.Lock()
+		connection = info.Conn
+		// HTTP/1 must opt out before its response arrives; HTTP/2 remains reusable.
+		if tlsConnection, ok := info.Conn.(interface{ ConnectionState() tls.ConnectionState }); !ok || tlsConnection.ConnectionState().NegotiatedProtocol != "h2" {
+			transportRequest.Close = true
+		}
+		mu.Unlock()
+	}}
+	transportRequest = request.Clone(httptrace.WithClientTrace(request.Context(), trace))
+	response, err := transport.base.RoundTrip(transportRequest)
+	if response != nil && response.Body != nil && response.Body != http.NoBody && response.ContentLength != 0 && response.ProtoMajor == 1 {
+		mu.Lock()
+		response.Body = &boundedBody{ReadCloser: response.Body, connection: connection}
+		mu.Unlock()
+	}
+	return response, err
+}
+
+type boundedBody struct {
+	io.ReadCloser
+	connection net.Conn
+	reachedEOF atomic.Bool
+}
+
+func (body *boundedBody) Read(buffer []byte) (int, error) {
+	read, err := body.ReadCloser.Read(buffer)
+	if err == io.EOF {
+		body.reachedEOF.Store(true)
+	}
+	return read, err
+}
+
+func (body *boundedBody) Close() error {
+	if !body.reachedEOF.Load() && body.connection != nil {
+		// The expired deadline prevents Go's Close drain from reaching the wire.
+		_ = body.connection.SetReadDeadline(time.Now())
+	}
+	return body.ReadCloser.Close()
+}
+
+// BoundedHTTPClient clones client. Each HTTP/1 request uses a single-use
+// connection, and closing an unread body can drain only bytes already buffered.
+func BoundedHTTPClient(client *http.Client) *http.Client {
+	if client == nil {
+		client = &http.Client{}
+	}
+	clone := *client
+	base := clone.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	clone.Transport = boundedTransport{base: base}
+	return &clone
+}
 
 // WithRequestID attaches a safe caller-supplied request ID or a fresh 128-bit
 // random ID when the supplied value is absent or invalid.

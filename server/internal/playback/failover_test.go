@@ -182,7 +182,10 @@ func TestFailoverAdmissionNeverCreatesSeventeenthActiveRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture := seedPlaybackAdmissionFixture(t, pool)
-	now := time.Date(2026, time.August, 26, 10, 0, 0, 0, time.UTC)
+	var now time.Time
+	if err := pool.QueryRow(ctx, `SELECT now()`).Scan(&now); err != nil {
+		t.Fatal(err)
+	}
 	grantExpiresAt := now.Add(8 * time.Hour)
 	profileID := fixture.profileIDs[0]
 	principal := auth.Principal{

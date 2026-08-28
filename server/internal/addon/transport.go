@@ -382,11 +382,12 @@ type HTTPTransport struct {
 
 func NewHTTPTransport(client *http.Client) *HTTPTransport {
 	if client != nil {
+		client = requestwork.BoundedHTTPClient(client)
 		return &HTTPTransport{publicClient: client, privateLiteralClient: client}
 	}
 	return &HTTPTransport{
-		publicClient:         guardedHTTPClient(netguard.DialContextPublic, true),
-		privateLiteralClient: guardedHTTPClient(netguard.DialContext, false),
+		publicClient:         requestwork.BoundedHTTPClient(guardedHTTPClient(netguard.DialContextPublic, true)),
+		privateLiteralClient: requestwork.BoundedHTTPClient(guardedHTTPClient(netguard.DialContext, false)),
 	}
 }
 
