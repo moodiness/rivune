@@ -23,15 +23,23 @@ type boundedTransport struct {
 func (transport boundedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	var mu sync.Mutex
 	var connection net.Conn
-	trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
-		mu.Lock()
-		connection = info.Conn
-		mu.Unlock()
-	}}
+	var returnedToPool atomic.Bool
+	trace := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			mu.Lock()
+			connection = info.Conn
+			mu.Unlock()
+		},
+		PutIdleConn: func(err error) {
+			if err == nil {
+				returnedToPool.Store(true)
+			}
+		},
+	}
 	response, err := transport.base.RoundTrip(request.WithContext(httptrace.WithClientTrace(request.Context(), trace)))
 	if response != nil && response.Body != nil && response.Body != http.NoBody && response.ContentLength != 0 && response.ProtoMajor == 1 {
 		mu.Lock()
-		response.Body = &boundedBody{ReadCloser: response.Body, connection: connection}
+		response.Body = &boundedBody{ReadCloser: response.Body, connection: connection, returnedToPool: &returnedToPool}
 		mu.Unlock()
 	}
 	return response, err
@@ -39,8 +47,9 @@ func (transport boundedTransport) RoundTrip(request *http.Request) (*http.Respon
 
 type boundedBody struct {
 	io.ReadCloser
-	connection net.Conn
-	reachedEOF atomic.Bool
+	connection     net.Conn
+	reachedEOF     atomic.Bool
+	returnedToPool *atomic.Bool
 }
 
 func (body *boundedBody) Read(buffer []byte) (int, error) {
@@ -52,7 +61,7 @@ func (body *boundedBody) Read(buffer []byte) (int, error) {
 }
 
 func (body *boundedBody) Close() error {
-	if !body.reachedEOF.Load() && body.connection != nil {
+	if !body.reachedEOF.Load() && !body.returnedToPool.Load() && body.connection != nil {
 		_ = body.connection.Close()
 	}
 	return body.ReadCloser.Close()

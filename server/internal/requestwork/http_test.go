@@ -1,6 +1,8 @@
 package requestwork
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -8,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/http/httptrace"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -146,6 +149,107 @@ func TestBoundedHTTPClientKeepsBodylessConnectionForConcurrentReuse(t *testing.T
 	close(releaseSecond)
 	if err := <-secondResult; err != nil {
 		t.Fatalf("concurrent request on reused connection: %v", err)
+	}
+	if got := secondAttempts.Load(); got != 1 {
+		t.Fatalf("concurrent request attempts = %d, want 1", got)
+	}
+}
+
+func TestBoundedHTTPClientDoesNotCloseReusedConnectionAfterDecodedGzipRead(t *testing.T) {
+	payload := strings.Repeat("x", 32<<10)
+	var compressed bytes.Buffer
+	gzipWriter := gzip.NewWriter(&compressed)
+	if _, err := io.WriteString(gzipWriter, payload); err != nil {
+		t.Fatalf("compress response: %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+
+	secondStarted := make(chan struct{}, 1)
+	releaseSecond := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseSecond) }) }
+	var secondAttempts atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/gzip":
+			writer.Header().Set("Content-Encoding", "gzip")
+			writer.Header().Set("Content-Length", fmt.Sprint(compressed.Len()))
+			_, _ = writer.Write(compressed.Bytes())
+		case "/second":
+			secondAttempts.Add(1)
+			writer.Header().Set("Content-Length", "2")
+			writer.WriteHeader(http.StatusOK)
+			writer.(http.Flusher).Flush()
+			secondStarted <- struct{}{}
+			<-releaseSecond
+			_, _ = io.WriteString(writer, "ok")
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Cleanup(release)
+
+	client := BoundedHTTPClient(server.Client())
+	first, err := client.Get(server.URL + "/gzip")
+	if err != nil {
+		t.Fatalf("gzip request: %v", err)
+	}
+	if !first.Uncompressed {
+		release()
+		_ = first.Body.Close()
+		t.Fatal("gzip response was not transparently decoded")
+	}
+	decoded := make([]byte, len(payload))
+	read, err := first.Body.Read(decoded)
+	if read != len(payload) || err != nil || string(decoded) != payload {
+		release()
+		_ = first.Body.Close()
+		t.Fatalf("decoded gzip read = (%d, %v), want (%d, nil)", read, err, len(payload))
+	}
+
+	gotConnection := make(chan httptrace.GotConnInfo, 1)
+	secondRequest, err := http.NewRequestWithContext(
+		httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+			gotConnection <- info
+		}}),
+		http.MethodGet,
+		server.URL+"/second",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondResult := make(chan error, 1)
+	go func() {
+		response, requestErr := client.Do(secondRequest)
+		if requestErr == nil {
+			var responsePayload []byte
+			responsePayload, requestErr = io.ReadAll(response.Body)
+			_ = response.Body.Close()
+			if requestErr == nil && string(responsePayload) != "ok" {
+				requestErr = fmt.Errorf("second response = %q, want ok", responsePayload)
+			}
+		}
+		secondResult <- requestErr
+	}()
+
+	connection := <-gotConnection
+	<-secondStarted
+	if !connection.Reused {
+		release()
+		<-secondResult
+		_ = first.Body.Close()
+		t.Fatal("gzip response connection was not reused")
+	}
+	if err := first.Body.Close(); err != nil {
+		release()
+		<-secondResult
+		t.Fatalf("close decoded gzip response: %v", err)
+	}
+	release()
+	if err := <-secondResult; err != nil {
+		t.Fatalf("concurrent request on reused gzip connection: %v", err)
 	}
 	if got := secondAttempts.Load(); got != 1 {
 		t.Fatalf("concurrent request attempts = %d, want 1", got)
