@@ -144,7 +144,7 @@ const assetSpecs: AssetSpec[] = [
 ];
 
 const releaseManifestName = "rivune-update.json";
-const auxiliaryReleaseAssetNames = [releaseManifestName, "Rivune-TV-runtime.json", ...installerAssetNames] as const;
+const auxiliaryReleaseAssetNames = [releaseManifestName, "rivune-update.json.sig", "Rivune-TV-runtime.json", ...installerAssetNames] as const;
 const expectedReleaseAssetNames: readonly string[] = [...assetSpecs.map((asset) => asset.name), ...auxiliaryReleaseAssetNames];
 
 
