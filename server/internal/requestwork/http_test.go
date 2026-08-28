@@ -2,9 +2,13 @@ package requestwork
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httptrace"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -72,5 +76,78 @@ func TestObservedBodyCountsBytesOnceAtEOForClose(t *testing.T) {
 	snapshot := counters.Snapshot()
 	if snapshot.OutboundCalls != 1 || snapshot.UpstreamBytes != int64(len(payload)) || snapshot.OutboundDuration < 0 {
 		t.Fatalf("observed body snapshot = %+v", snapshot)
+	}
+}
+
+func TestBoundedHTTPClientKeepsBodylessConnectionForConcurrentReuse(t *testing.T) {
+	secondStarted := make(chan struct{}, 1)
+	var secondAttempts atomic.Int64
+	releaseSecond := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/empty":
+			writer.WriteHeader(http.StatusNoContent)
+		case "/second":
+			secondAttempts.Add(1)
+			select {
+			case secondStarted <- struct{}{}:
+			default:
+			}
+			<-releaseSecond
+			_, _ = io.WriteString(writer, "ok")
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	client := BoundedHTTPClient(server.Client())
+	first, err := client.Get(server.URL + "/empty")
+	if err != nil {
+		t.Fatalf("bodyless request: %v", err)
+	}
+
+	gotConnection := make(chan httptrace.GotConnInfo, 1)
+	secondRequest, err := http.NewRequestWithContext(
+		httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+			gotConnection <- info
+		}}),
+		http.MethodGet,
+		server.URL+"/second",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondResult := make(chan error, 1)
+	go func() {
+		response, requestErr := client.Do(secondRequest)
+		if requestErr == nil {
+			var payload []byte
+			payload, requestErr = io.ReadAll(response.Body)
+			_ = response.Body.Close()
+			if requestErr == nil && string(payload) != "ok" {
+				requestErr = fmt.Errorf("second response = %q, want ok", payload)
+			}
+		}
+		secondResult <- requestErr
+	}()
+
+	connection := <-gotConnection
+	<-secondStarted
+	if !connection.Reused {
+		close(releaseSecond)
+		<-secondResult
+		t.Fatal("bodyless response connection was not reused")
+	}
+	if err := first.Body.Close(); err != nil {
+		close(releaseSecond)
+		<-secondResult
+		t.Fatalf("close bodyless response: %v", err)
+	}
+	close(releaseSecond)
+	if err := <-secondResult; err != nil {
+		t.Fatalf("concurrent request on reused connection: %v", err)
+	}
+	if got := secondAttempts.Load(); got != 1 {
+		t.Fatalf("concurrent request attempts = %d, want 1", got)
 	}
 }

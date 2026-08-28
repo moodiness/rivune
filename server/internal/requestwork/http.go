@@ -29,7 +29,7 @@ func (transport boundedTransport) RoundTrip(request *http.Request) (*http.Respon
 		mu.Unlock()
 	}}
 	response, err := transport.base.RoundTrip(request.WithContext(httptrace.WithClientTrace(request.Context(), trace)))
-	if response != nil && response.Body != nil && response.ProtoMajor == 1 {
+	if response != nil && response.Body != nil && response.Body != http.NoBody && response.ContentLength != 0 && response.ProtoMajor == 1 {
 		mu.Lock()
 		response.Body = &boundedBody{ReadCloser: response.Body, connection: connection}
 		mu.Unlock()
