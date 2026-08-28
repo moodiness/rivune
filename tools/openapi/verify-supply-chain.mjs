@@ -36,6 +36,7 @@ for (const workflow of workflows) {
 const candidate = read('.github/workflows/release-candidate.yml');
 const gate = read('.github/workflows/release-gate.yml');
 const release = read('.github/workflows/release.yml');
+const pages = read('.github/workflows/pages.yml');
 const candidateGateJob = candidate.match(/\n  ci:[\s\S]*?\n  apple-assets:/)?.[0] ?? '';
 const releaseJourneyCompose = read('scripts/ci/release-journey.compose.yaml');
 const releaseJourneyScript = read('scripts/ci/release-journey.sh');
@@ -81,7 +82,10 @@ if (/secrets\.|actions\/checkout|candidate-update-tool\/rivune-update-tool/.test
 requireMatch(release, /expected=.*rivune-update\.json rivune-update\.json\.sig/, 'The signed manifest sidecar is absent from the exact release asset set.');
 requireMatch(release, /exact 13-asset set/, 'The release workflow does not enforce the 13-asset contract.');
 requireMatch(release, /subject-checksums: release-asset-subjects\.sha256/, 'Release provenance does not cover the sidecar subject list.');
-requireMatch(read('.github/workflows/pages.yml'), /for asset_name in rivune-update\.json rivune-update\.json\.sig Rivune-TV-runtime\.json/, 'The TV mirror does not publish the manifest signature sidecar.');
+requireMatch(pages, /workflow_run:\n    workflows:\n      - Publish release\n    types:\n      - completed/, 'Pages workflow must relay completed Publish release workflow runs.');
+requireMatch(pages, /build:\n    name: Build public applications page\n    if: >-\n      github\.event_name != 'workflow_run' \|\|\n      \(github\.event\.workflow_run\.conclusion == 'success' &&\n      github\.event\.workflow_run\.event == 'workflow_run' &&\n      github\.event\.workflow_run\.head_repository\.full_name == github\.repository &&\n      github\.event\.workflow_run\.path == '\.github\/workflows\/release\.yml'\)/, 'Pages build must accept existing events and strictly guard relayed release workflow runs.');
+requireMatch(pages, /concurrency:\n  group: >-\n    \$\{\{ \(github\.event_name != 'workflow_run' \|\|\n        \(github\.event\.workflow_run\.conclusion == 'success' &&\n        github\.event\.workflow_run\.event == 'workflow_run' &&\n        github\.event\.workflow_run\.head_repository\.full_name == github\.repository &&\n        github\.event\.workflow_run\.path == '\.github\/workflows\/release\.yml'\)\) &&\n      'pages' \|\| format\('pages-rejected-\{0\}', github\.run_id\) \}\}\n  cancel-in-progress: true/, 'Pages concurrency must isolate rejected workflow runs without weakening valid event serialization.');
+requireMatch(pages, /for asset_name in rivune-update\.json rivune-update\.json\.sig Rivune-TV-runtime\.json/, 'The TV mirror does not publish the manifest signature sidecar.');
 requireMatch(gate, /postgres:18-trixie@sha256:1957b2ff3137e4ef7f3bc813e74fff50b1e1ffddc85c8b9d6f14ade972be8687/, 'PostgreSQL gate service is not pinned by digest.');
 if (/brew install/.test(gate)) throw new Error('Release gate still installs mutable Homebrew formulas.');
 for (const digest of ['4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806', 'afec26de54fd93084cdf8bae83f8cc436293f0c229064f17601d5f5945aee178', 'a9fe3ea2f86dfc72f6728417521ec9067b343277152b114f4e98d8cb0e263603', 'e80dbe0d2a2597e3c11c404f03337b981d74b4a8504b70586c354b7697a7c27f']) requireMatch(gate, new RegExp(digest), `Checksummed Apple tool digest missing: ${digest}`);
