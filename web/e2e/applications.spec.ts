@@ -53,6 +53,13 @@ const release = {
       digest: `sha256:${"f".repeat(64)}`,
       browser_download_url: `https://github.com/moodiness/rivune/releases/download/${tag}/rivune-update.json`,
     },
+    {
+      name: "rivune-update.json.sig",
+      state: "uploaded",
+      size: 256,
+      digest: `sha256:${"d".repeat(64)}`,
+      browser_download_url: `https://github.com/moodiness/rivune/releases/download/${tag}/rivune-update.json.sig`,
+    },
   ],
 };
 
