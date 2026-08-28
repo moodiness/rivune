@@ -3,6 +3,7 @@ package requestwork
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptrace"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const RequestIDHeader = "X-Request-ID"
@@ -23,23 +25,21 @@ type boundedTransport struct {
 func (transport boundedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	var mu sync.Mutex
 	var connection net.Conn
-	var returnedToPool atomic.Bool
-	trace := &httptrace.ClientTrace{
-		GotConn: func(info httptrace.GotConnInfo) {
-			mu.Lock()
-			connection = info.Conn
-			mu.Unlock()
-		},
-		PutIdleConn: func(err error) {
-			if err == nil {
-				returnedToPool.Store(true)
-			}
-		},
-	}
-	response, err := transport.base.RoundTrip(request.WithContext(httptrace.WithClientTrace(request.Context(), trace)))
+	var transportRequest *http.Request
+	trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+		mu.Lock()
+		connection = info.Conn
+		// HTTP/1 must opt out before its response arrives; HTTP/2 remains reusable.
+		if tlsConnection, ok := info.Conn.(interface{ ConnectionState() tls.ConnectionState }); !ok || tlsConnection.ConnectionState().NegotiatedProtocol != "h2" {
+			transportRequest.Close = true
+		}
+		mu.Unlock()
+	}}
+	transportRequest = request.Clone(httptrace.WithClientTrace(request.Context(), trace))
+	response, err := transport.base.RoundTrip(transportRequest)
 	if response != nil && response.Body != nil && response.Body != http.NoBody && response.ContentLength != 0 && response.ProtoMajor == 1 {
 		mu.Lock()
-		response.Body = &boundedBody{ReadCloser: response.Body, connection: connection, returnedToPool: &returnedToPool}
+		response.Body = &boundedBody{ReadCloser: response.Body, connection: connection}
 		mu.Unlock()
 	}
 	return response, err
@@ -47,9 +47,8 @@ func (transport boundedTransport) RoundTrip(request *http.Request) (*http.Respon
 
 type boundedBody struct {
 	io.ReadCloser
-	connection     net.Conn
-	reachedEOF     atomic.Bool
-	returnedToPool *atomic.Bool
+	connection net.Conn
+	reachedEOF atomic.Bool
 }
 
 func (body *boundedBody) Read(buffer []byte) (int, error) {
@@ -61,14 +60,15 @@ func (body *boundedBody) Read(buffer []byte) (int, error) {
 }
 
 func (body *boundedBody) Close() error {
-	if !body.reachedEOF.Load() && !body.returnedToPool.Load() && body.connection != nil {
-		_ = body.connection.Close()
+	if !body.reachedEOF.Load() && body.connection != nil {
+		// The expired deadline prevents Go's Close drain from reaching the wire.
+		_ = body.connection.SetReadDeadline(time.Now())
 	}
 	return body.ReadCloser.Close()
 }
 
-// BoundedHTTPClient clones client so closing an unread HTTP/1 response closes
-// its connection before net/http can implicitly drain bytes outside counters.
+// BoundedHTTPClient clones client. Each HTTP/1 request uses a single-use
+// connection, and closing an unread body can drain only bytes already buffered.
 func BoundedHTTPClient(client *http.Client) *http.Client {
 	if client == nil {
 		client = &http.Client{}
