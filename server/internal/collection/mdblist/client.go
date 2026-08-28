@@ -64,7 +64,7 @@ func newWithBaseURL(apiKey, baseURL string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), apiKey: strings.TrimSpace(apiKey), httpClient: httpClient}
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), apiKey: strings.TrimSpace(apiKey), httpClient: requestwork.BoundedHTTPClient(httpClient)}
 }
 
 func (client *Client) ResolveCollectionSource(ctx context.Context, source collection.MDBListSource, page int) (collection.SourcePage, error) {

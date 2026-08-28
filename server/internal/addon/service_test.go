@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -91,6 +92,30 @@ func (reader *countingReadCloser) Read(destination []byte) (int, error) {
 	read, err := reader.ReadCloser.Read(destination)
 	reader.bytes.Add(int64(read))
 	return read, err
+}
+
+type countingConn struct {
+	net.Conn
+	bytes *atomic.Int64
+}
+
+func (conn *countingConn) Read(destination []byte) (int, error) {
+	read, err := conn.Conn.Read(destination)
+	conn.bytes.Add(int64(read))
+	return read, err
+}
+
+func wireCountingHTTPClient(address string, bytes *atomic.Int64) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		conn, err := (&net.Dialer{}).DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		return &countingConn{Conn: conn, bytes: bytes}, nil
+	}
+	return &http.Client{Transport: transport}
 }
 
 func writeChunkedResponse(writer http.ResponseWriter, request *http.Request, size int64) {
@@ -1678,6 +1703,64 @@ func TestAggregateResourceBudgetAcceptsExactLimitAndRejectsNextByte(t *testing.T
 	}
 	if got := downloaded.Load(); got != int64(maxAggregateResponseBytes)+1 {
 		t.Fatalf("aggregate N+1 downloaded bytes = %d, want %d", got, int64(maxAggregateResponseBytes)+1)
+	}
+}
+
+func TestHTTPTransportDirectResponseDoesNotDrainOutsideLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writeChunkedResponse(writer, request, 1<<20)
+	}))
+	t.Cleanup(server.Close)
+
+	var wireBytes atomic.Int64
+	transport := NewHTTPTransport(wireCountingHTTPClient(server.Listener.Addr().String(), &wireBytes))
+	_, _, err := transport.get(context.Background(), server.URL, 4)
+	if !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("oversized response error = %v, want %v", err, ErrInvalidResponse)
+	}
+	if got := wireBytes.Load(); got > 16<<10 {
+		t.Fatalf("oversized response read %d wire bytes after the five-byte limit", got)
+	}
+}
+
+func TestHTTPTransportRedirectResponsesDoNotDrainOutsideLimit(t *testing.T) {
+	for _, rejectRedirect := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reject=%t", rejectRedirect), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/start":
+					writer.Header().Set("Location", "/second")
+					writer.WriteHeader(http.StatusFound)
+					writeChunkedResponse(writer, request, 1<<20)
+				case "/second":
+					writer.Header().Set("Location", "/final")
+					writer.WriteHeader(http.StatusFound)
+					writeChunkedResponse(writer, request, 1<<20)
+				default:
+					_, _ = io.WriteString(writer, `{}`)
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			var wireBytes atomic.Int64
+			client := wireCountingHTTPClient(server.Listener.Addr().String(), &wireBytes)
+			if rejectRedirect {
+				client.CheckRedirect = func(*http.Request, []*http.Request) error {
+					return errors.New("redirect refused")
+				}
+			}
+			transport := NewHTTPTransport(client)
+			_, _, err := transport.get(context.Background(), server.URL+"/start", 4)
+			if rejectRedirect && !errors.Is(err, ErrProviderUnavailable) {
+				t.Fatalf("refused redirect error = %v, want %v", err, ErrProviderUnavailable)
+			}
+			if !rejectRedirect && err != nil {
+				t.Fatalf("follow redirects: %v", err)
+			}
+			if got := wireBytes.Load(); got > 16<<10 {
+				t.Fatalf("redirect responses read %d wire bytes outside the final response limit", got)
+			}
+		})
 	}
 }
 

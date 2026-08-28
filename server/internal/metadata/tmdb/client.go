@@ -173,7 +173,7 @@ func newWithBaseURL(accessToken, baseURL string, httpClient *http.Client) *Clien
 	return &Client{
 		baseURL:     strings.TrimRight(baseURL, "/"),
 		accessToken: accessToken,
-		httpClient:  httpClient,
+		httpClient:  requestwork.BoundedHTTPClient(httpClient),
 	}
 }
 

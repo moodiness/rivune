@@ -5,13 +5,73 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
+	"sync"
 	"sync/atomic"
 )
 
 const RequestIDHeader = "X-Request-ID"
 
 type requestIDContextKey struct{}
+
+type boundedTransport struct {
+	base http.RoundTripper
+}
+
+func (transport boundedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	var mu sync.Mutex
+	var connection net.Conn
+	trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+		mu.Lock()
+		connection = info.Conn
+		mu.Unlock()
+	}}
+	response, err := transport.base.RoundTrip(request.WithContext(httptrace.WithClientTrace(request.Context(), trace)))
+	if response != nil && response.Body != nil && response.ProtoMajor == 1 {
+		mu.Lock()
+		response.Body = &boundedBody{ReadCloser: response.Body, connection: connection}
+		mu.Unlock()
+	}
+	return response, err
+}
+
+type boundedBody struct {
+	io.ReadCloser
+	connection net.Conn
+	reachedEOF atomic.Bool
+}
+
+func (body *boundedBody) Read(buffer []byte) (int, error) {
+	read, err := body.ReadCloser.Read(buffer)
+	if err == io.EOF {
+		body.reachedEOF.Store(true)
+	}
+	return read, err
+}
+
+func (body *boundedBody) Close() error {
+	if !body.reachedEOF.Load() && body.connection != nil {
+		_ = body.connection.Close()
+	}
+	return body.ReadCloser.Close()
+}
+
+// BoundedHTTPClient clones client so closing an unread HTTP/1 response closes
+// its connection before net/http can implicitly drain bytes outside counters.
+func BoundedHTTPClient(client *http.Client) *http.Client {
+	if client == nil {
+		client = &http.Client{}
+	}
+	clone := *client
+	base := clone.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	clone.Transport = boundedTransport{base: base}
+	return &clone
+}
 
 // WithRequestID attaches a safe caller-supplied request ID or a fresh 128-bit
 // random ID when the supplied value is absent or invalid.
