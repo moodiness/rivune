@@ -41,9 +41,10 @@ func (a *API) webLogin(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 		Device   struct {
-			ID       string `json:"id,omitempty"`
-			Name     string `json:"name"`
-			Platform string `json:"platform"`
+			ID       string   `json:"id,omitempty"`
+			IDs      []string `json:"ids,omitempty"`
+			Name     string   `json:"name"`
+			Platform string   `json:"platform"`
 		} `json:"device"`
 	}
 	if err := decodeJSON(w, r, &request); err != nil {
@@ -52,7 +53,8 @@ func (a *API) webLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tokens, err := a.loginCredentialsWeb(r, auth.LoginInput{
-		Username: request.Username, Password: request.Password, DeviceID: request.Device.ID,
+		Username: request.Username, Password: request.Password,
+		DeviceID: request.Device.ID, DeviceIDs: request.Device.IDs,
 		DeviceName: request.Device.Name, Platform: request.Device.Platform,
 	})
 	var admissionErr *credentialLoginAdmissionError

@@ -31,7 +31,7 @@ func TestWebLoginSetsHostOnlyStrictCookieWithoutRefreshInBody(t *testing.T) {
 	}}
 	api := testAPI(&fakeInstanceService{})
 	api.auth = service
-	request := webAuthRequest(http.MethodPost, "https://media.example/api/v1/auth/web/login", []byte(`{"username":"admin","password":"secret","device":{"name":"Browser","platform":"web"}}`))
+	request := webAuthRequest(http.MethodPost, "https://media.example/api/v1/auth/web/login", []byte(`{"username":"admin","password":"secret","device":{"id":"current-device","ids":["current-device","remembered-device"],"name":"Browser","platform":"web"}}`))
 	response := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(response, request)
@@ -53,6 +53,10 @@ func TestWebLoginSetsHostOnlyStrictCookieWithoutRefreshInBody(t *testing.T) {
 	}
 	if service.loginInput.Platform != "web" {
 		t.Fatalf("web platform = %q", service.loginInput.Platform)
+	}
+	if service.loginInput.DeviceID != "current-device" || len(service.loginInput.DeviceIDs) != 2 ||
+		service.loginInput.DeviceIDs[0] != "current-device" || service.loginInput.DeviceIDs[1] != "remembered-device" {
+		t.Fatalf("web remembered device ids = primary %q candidates %v", service.loginInput.DeviceID, service.loginInput.DeviceIDs)
 	}
 }
 

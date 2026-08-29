@@ -475,7 +475,7 @@ paths:
   /auth/web/login:
     post:
       summary: Log in from the browser
-      description: Creates a web-bound session, returns only an access token, and sets the rotating refresh token in a host-only HttpOnly SameSite=Strict cookie scoped to /api/v1/auth/web/refresh.
+      description: Creates a web-bound session, returns only an access token, and sets the rotating refresh token in a host-only HttpOnly SameSite=Strict cookie scoped to /api/v1/auth/web/refresh. A bounded list of remembered opaque device IDs lets the server reuse the first identity owned by the authenticated user; unowned or stale IDs are never reassigned and fall back to quota-checked creation.
       operationId: webLogin
       security: []
       parameters:
@@ -487,7 +487,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/LoginRequest'
+              $ref: '#/components/schemas/WebLoginRequest'
       responses:
         '200':
           description: A browser session was created and its refresh cookie was set.
@@ -7939,6 +7939,48 @@ components:
               type: string
               minLength: 1
               maxLength: 32
+    WebLoginRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - username
+        - password
+        - device
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 64
+        password:
+          type: string
+          minLength: 1
+          maxLength: 256
+        device:
+          type: object
+          additionalProperties: false
+          required:
+            - name
+            - platform
+          properties:
+            id:
+              type: string
+              format: uuid
+              description: Most recently used browser device ID, retained for compatibility with existing web clients.
+            ids:
+              type: array
+              maxItems: 64
+              uniqueItems: true
+              description: Most-recent-first browser device IDs. After password authentication, the server may reuse only an ID already owned by that user.
+              items:
+                type: string
+                format: uuid
+            name:
+              type: string
+              minLength: 1
+              maxLength: 120
+            platform:
+              type: string
+              const: web
     RefreshRequest:
       type: object
       additionalProperties: false
