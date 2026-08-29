@@ -5906,7 +5906,7 @@ components:
         maxLength: 128
         pattern: "^[A-Za-z0-9._:-]+$"
     WebRefreshCookie:
-      description: Host-only rivune_web_refresh cookie; HttpOnly, SameSite=Strict, Path=/api/v1/auth/web/refresh, and Secure except on strict HTTP loopback origins.
+      description: Host-only rivune_web_refresh cookie; HttpOnly, SameSite=Strict, Path=/api/v1/auth/web/refresh, and Secure except on an accepted local HTTP origin.
       required: true
       schema:
         type: string
@@ -5971,14 +5971,15 @@ components:
       name: Origin
       in: header
       required: true
-      description: Exact effective request origin; forwarded scheme and host are honored only from configured trusted proxies.
+      description: Exact configured public origin. With a configured public HTTPS origin, a direct request may instead use an allowed private IP literal exactly matching its Host; DNS aliases and public IPs are rejected for this fallback. Without a configured public URL, the exact effective direct or trusted-forwarded origin is required.
       schema:
         type: string
         format: uri
     WebFetchSite:
       name: Sec-Fetch-Site
       in: header
-      required: true
+      required: false
+      description: Optional browser Fetch Metadata. When supplied, it must identify a same-origin request; browsers can omit it on non-trustworthy HTTP origins.
       schema:
         type: string
         const: same-origin

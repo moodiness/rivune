@@ -123,6 +123,15 @@ docker run --rm --network "${EDGE_NETWORK}" curlimages/curl:8.12.1 \
 HOST_BINDING="$(docker port "${RIVUNE}" 8080/tcp)"
 HOST_PORT="${HOST_BINDING##*:}"
 curl --fail --silent --show-error "http://127.0.0.1:${HOST_PORT}/health" >/dev/null
+curl --silent --show-error \
+  --request POST \
+  --header 'Host: 192.168.1.20:18080' \
+  --header 'Origin: http://192.168.1.20:18080' \
+  --header 'X-Rivune-CSRF: 1' \
+  --write-out '\n%{http_code}' \
+  "http://127.0.0.1:${HOST_PORT}/api/v1/auth/web/refresh" \
+  | docker run --rm -i "${PYTHON_IMAGE}" python -c 'import json,sys; body,status=sys.stdin.read().rsplit("\n",1); value=json.loads(body); assert status == "401", (status, value); assert value["error"]["code"] == "invalid_refresh_token", value'
+
 
 test "$(docker inspect "${RIVUNE}" --format '{{len .HostConfig.Devices}}')" = 0
 docker exec -e PGPASSWORD="${PASSWORD}" "${POSTGRES}" \
@@ -154,4 +163,4 @@ TLS_CONNECTIONS="$(docker exec -e PGPASSWORD="${PASSWORD}" -e PGSSLMODE=disable 
 docker restart "${RIVUNE}" >/dev/null
 wait_for_rivune
 
-echo "Unraid-style clean install, isolated plaintext and verify-full PostgreSQL modes, CPU-only startup, edge target, optional host port, and restart passed."
+echo "Unraid-style clean install, direct private-IP browser auth without Fetch Metadata, isolated plaintext and verify-full PostgreSQL modes, CPU-only startup, edge target, optional host port, and restart passed."

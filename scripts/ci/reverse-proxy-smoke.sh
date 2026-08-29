@@ -137,6 +137,14 @@ https_request --fail --silent --show-error "https://localhost/ready" \
   | docker run --rm -i "${PYTHON_IMAGE}" python -c 'import json,sys; value=json.load(sys.stdin); assert value["status"] == "ok"; assert value["database"] == "ok"'
 https_request --fail --silent --show-error "https://localhost/live" \
   | docker run --rm -i "${PYTHON_IMAGE}" python -c 'import json,sys; value=json.load(sys.stdin); assert value["status"] == "ok"; assert "database" not in value'
+https_request --silent --show-error \
+  --request POST \
+  --header 'Origin: https://localhost' \
+  --header 'X-Rivune-CSRF: 1' \
+  --write-out '\n%{http_code}' \
+  "https://localhost/api/v1/auth/web/refresh" \
+  | docker run --rm -i "${PYTHON_IMAGE}" python -c 'import json,sys; body,status=sys.stdin.read().rsplit("\n",1); value=json.loads(body); assert status == "401", (status, value); assert value["error"]["code"] == "invalid_refresh_token", value'
+
 
 docker rm -f "${NGINX}" "${RIVUNE}" >/dev/null
 docker run -d --name "${PROBE}" --network "${NETWORK}" --network-alias rivune \
@@ -152,4 +160,4 @@ https_request --fail --silent --show-error \
   "https://localhost/proxy-probe" \
   | docker run --rm -i "${PYTHON_IMAGE}" python -c 'import json,sys; value=json.load(sys.stdin); assert value["forwardedProto"] == "https"; assert value["forwardedHost"] == "localhost"; assert value["forwardedFor"] and "198.51.100.99" not in value["forwardedFor"]; assert value["realIP"] == value["forwardedFor"]'
 
-echo "Nginx TLS, Rivune discovery, health probes, and sanitized forwarded headers passed."
+echo "Nginx TLS, browser auth without Fetch Metadata, Rivune discovery, health probes, and sanitized forwarded headers passed."
