@@ -1,6 +1,6 @@
 services:
   rivune:
-    image: ghcr.io/moodiness/rivune:${RIVUNE_VERSION:-1.13.5}
+    image: ghcr.io/moodiness/rivune:${RIVUNE_VERSION:-1.13.6}
     restart: unless-stopped
     init: true
     security_opt:
@@ -84,7 +84,7 @@ services:
     stop_grace_period: 15s
 
   discovery:
-    image: ghcr.io/moodiness/rivune:${RIVUNE_VERSION:-1.13.5}
+    image: ghcr.io/moodiness/rivune:${RIVUNE_VERSION:-1.13.6}
     profiles:
       - discovery
     restart: unless-stopped
