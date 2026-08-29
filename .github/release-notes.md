@@ -1,11 +1,12 @@
-# Rivune v1.13.5
+# Rivune v1.13.6
 
 ## Highlights
 
-- Browser authentication now treats the validated `RIVUNE_PUBLIC_URL` as the authoritative externally visible origin. Login, device-code exchange, refresh, and logout work behind reverse proxies that rewrite the upstream host while rejecting mismatched or spoofed browser origins.
-- Deployments without `RIVUNE_PUBLIC_URL` retain direct-request and trusted-forwarding origin detection. Public deployments must configure the exact HTTPS origin shown in the browser address bar.
-- Outbound provider requests now bound unread HTTP/1 response shutdown without pooling abandoned connections, while preserving HTTP/2 reuse and correct handling of bodyless responses.
-- This patch does not change the protocol version or database schema from v1.13.3.
+- Direct Unraid and Compose host-port access now accepts the exact literal RFC1918 or ULA address and mapped port when browsers omit `Sec-Fetch-Site`; a configured HTTPS `RIVUNE_PUBLIC_URL` remains authoritative.
+- Browser authentication still requires an exact `Origin` and `X-Rivune-CSRF: 1`, and rejects proxy markers, DNS aliases, public or CGNAT addresses, mapped or NAT64 forms, and port mismatches on the direct fallback.
+- The public applications page recognizes the detached update-manifest signature in the exact thirteen-asset release while continuing to expose only the eight application packages.
+- Published releases now relay automatically to the Pages applications mirror after the protected publish workflow succeeds.
+- This patch does not change the protocol version or database schema from v1.13.5.
 
 ## Installation
 
@@ -19,17 +20,18 @@
 ## Upgrade notes
 
 - Before upgrading, create and verify an authenticated backup, record its backup ID separately, and preserve the complete encryption keyring.
-- Set `RIVUNE_VERSION=1.13.5`, pull, and recreate only Rivune. No database migration or protocol-version change is required from v1.13.3.
+- Set `RIVUNE_VERSION=1.13.6`, pull, and recreate only Rivune. No database migration or protocol-version change is required from v1.13.5.
 - Reverse-proxy deployments must set `RIVUNE_PUBLIC_URL` to the exact externally visible HTTPS origin. Keep `RIVUNE_TRUSTED_PROXIES` limited to the proxy's exact address or dedicated edge CIDR.
+- Direct private-LAN HTTP uses a literal private IP and the exact mapped port. HTTP cookies are host-scoped, so trust every HTTP service on that host IP or keep Rivune loopback-only and use HTTPS.
 - The release contains exactly thirteen assets: eight application packages, `rivune-update.json`, its detached `rivune-update.json.sig` signature, the shared TV runtime, and two universal TV-installer companions.
 
 ## Container image
 
-- `ghcr.io/moodiness/rivune:1.13.5`
+- `ghcr.io/moodiness/rivune:1.13.6`
 - `ghcr.io/moodiness/rivune:1.13`
 - `ghcr.io/moodiness/rivune:1`
 - `ghcr.io/moodiness/rivune:latest`
 - Platforms: `linux/amd64`, `linux/arm64`
 - Provenance and SBOM attestations are published for both runnable platforms.
 
-**Full changelog:** [v1.13.3...v1.13.5](https://github.com/moodiness/rivune/compare/v1.13.3...v1.13.5)
+**Full changelog:** [v1.13.5...v1.13.6](https://github.com/moodiness/rivune/compare/v1.13.5...v1.13.6)
