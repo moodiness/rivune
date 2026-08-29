@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/moodiness/rivune/server/internal/auth"
+	"github.com/moodiness/rivune/server/internal/netguard"
 )
 
 const (
@@ -161,23 +162,35 @@ func (a *API) loginCredentialsWeb(r *http.Request, input auth.LoginInput) (auth.
 }
 
 func (a *API) requireWebAuthRequest(w http.ResponseWriter, r *http.Request) (bool, bool) {
-	if r.Header.Get("Sec-Fetch-Site") != "same-origin" || r.Header.Get(webCSRFHeader) != "1" {
+	fetchSite, fetchSiteOK := optionalSingleHeaderValue(r.Header.Values("Sec-Fetch-Site"))
+	csrf, csrfOK := singleHeaderValue(r.Header.Values(webCSRFHeader))
+	if !fetchSiteOK || (fetchSite != "" && fetchSite != "same-origin") || !csrfOK || csrf != "1" {
 		writeError(w, http.StatusForbidden, "invalid_csrf", "The browser authentication request is not same-origin")
 		return false, false
 	}
+	requestOrigin, originOK := singleHeaderValue(r.Header.Values("Origin"))
 	expectedOrigin := a.config.PublicURL
+	configuredOrigin := expectedOrigin != ""
 	scheme, host, ok := strings.Cut(expectedOrigin, "://")
+	_, remoteOK := parseIPAddress(r.RemoteAddr)
+	directRequest := remoteOK && !hasForwardingHeaders(r.Header)
+	directPrivateOrigin := false
 	if expectedOrigin == "" {
 		scheme, host, ok = effectiveWebOrigin(r, a.config.TrustedProxies)
 		expectedOrigin = scheme + "://" + host
+	} else if requestOrigin != expectedOrigin && scheme == "https" && directRequest {
+		scheme, host, ok = effectiveWebOrigin(r, nil)
+		expectedOrigin = scheme + "://" + host
+		directPrivateOrigin = ok && privateNetworkHost(host)
+		ok = directPrivateOrigin
 	}
-	if !ok || r.Header.Get("Origin") != expectedOrigin {
+	if !originOK || !ok || requestOrigin != expectedOrigin {
 		writeError(w, http.StatusForbidden, "invalid_origin", "The browser authentication origin is invalid")
 		return false, false
 	}
 	secure := scheme == "https"
-	if !secure && !strictLoopbackHost(host) {
-		writeError(w, http.StatusForbidden, "insecure_origin", "Browser authentication requires HTTPS outside loopback")
+	if !secure && !directPrivateOrigin && !localHTTPHost(host, configuredOrigin) {
+		writeError(w, http.StatusForbidden, "insecure_origin", "Browser authentication requires HTTPS outside loopback or a configured private-network IP address")
 		return false, false
 	}
 	return secure, true
@@ -192,14 +205,14 @@ func effectiveWebOrigin(r *http.Request, trustedProxies []netip.Prefix) (string,
 	remote, remoteOK := parseIPAddress(r.RemoteAddr)
 	if remoteOK && isTrustedProxy(remote, trustedProxies) {
 		if forwarded := r.Header.Values("X-Forwarded-Proto"); len(forwarded) != 0 {
-			value, ok := singleForwardedValue(forwarded)
+			value, ok := singleHeaderValue(forwarded)
 			if !ok {
 				return "", "", false
 			}
 			scheme = strings.ToLower(value)
 		}
 		if forwarded := r.Header.Values("X-Forwarded-Host"); len(forwarded) != 0 {
-			value, ok := singleForwardedValue(forwarded)
+			value, ok := singleHeaderValue(forwarded)
 			if !ok {
 				return "", "", false
 			}
@@ -216,7 +229,21 @@ func effectiveWebOrigin(r *http.Request, trustedProxies []netip.Prefix) (string,
 	return scheme, host, true
 }
 
-func singleForwardedValue(values []string) (string, bool) {
+func hasForwardingHeaders(header http.Header) bool {
+	const forwardedPrefix = "X-Forwarded-"
+	for name, values := range header {
+		if len(values) == 0 {
+			continue
+		}
+		if strings.EqualFold(name, "Forwarded") || strings.EqualFold(name, "X-Real-IP") ||
+			len(name) >= len(forwardedPrefix) && strings.EqualFold(name[:len(forwardedPrefix)], forwardedPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func singleHeaderValue(values []string) (string, bool) {
 	if len(values) != 1 || strings.Contains(values[0], ",") {
 		return "", false
 	}
@@ -224,17 +251,38 @@ func singleForwardedValue(values []string) (string, bool) {
 	return value, value != ""
 }
 
-func strictLoopbackHost(host string) bool {
-	hostname := host
-	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
-		hostname = parsedHost
+func optionalSingleHeaderValue(values []string) (string, bool) {
+	if len(values) == 0 {
+		return "", true
 	}
-	hostname = strings.Trim(hostname, "[]")
+	return singleHeaderValue(values)
+}
+
+func webHostname(host string) string {
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	return strings.Trim(host, "[]")
+}
+
+func webHostAddress(host string) (netip.Addr, bool) {
+	address, err := netip.ParseAddr(webHostname(host))
+	return address, err == nil
+}
+
+func privateNetworkHost(host string) bool {
+	address, ok := webHostAddress(host)
+	return ok && !address.Is4In6() && address.IsPrivate() &&
+		netguard.IsAllowedAddress(address) && netguard.IsPrivateNetworkAddress(address)
+}
+
+func localHTTPHost(host string, explicitlyConfigured bool) bool {
+	hostname := webHostname(host)
 	if strings.EqualFold(hostname, "localhost") {
 		return true
 	}
-	address, err := netip.ParseAddr(hostname)
-	return err == nil && address.IsLoopback()
+	address, ok := webHostAddress(hostname)
+	return ok && (address.Unmap().IsLoopback() || explicitlyConfigured && privateNetworkHost(hostname))
 }
 
 func uniqueWebRefreshCookie(r *http.Request) (string, bool) {

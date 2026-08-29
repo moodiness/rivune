@@ -369,6 +369,8 @@ func TestLoadRejectsPublicURLsThatAreNotOrigins(t *testing.T) {
 		"https://rivune.example.com?token=secret",
 		"https://rivune.example.com?",
 		"https://rivune.example.com#fragment",
+		"https://[fd00::10%25en0]:8443",
+		"http://[fd00::10%25en0]:8080",
 	} {
 		t.Run(publicURL, func(t *testing.T) {
 			setRequiredEnvironment(t)
@@ -391,6 +393,7 @@ func TestLoadRejectsNonLocalHTTPPublicURLs(t *testing.T) {
 		"http://198.51.100.10:8080",
 		"http://169.254.1.10:8080",
 		"http://100.100.100.100:8080",
+		"http://[::ffff:192.168.1.20]:8080",
 	} {
 		t.Run(publicURL, func(t *testing.T) {
 			setRequiredEnvironment(t)
@@ -401,6 +404,17 @@ func TestLoadRejectsNonLocalHTTPPublicURLs(t *testing.T) {
 				t.Fatalf("non-local HTTP public URL error = %v", err)
 			}
 		})
+	}
+}
+
+func TestLoadRejectsPrivateHTTPPublicURLInsideConfiguredNAT64Prefix(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("RIVUNE_NAT64_PREFIXES", "fd12:3456:789a::/96")
+	t.Setenv("RIVUNE_PUBLIC_URL", "http://[fd12:3456:789a::c0a8:114]:8080")
+
+	_, err := Load()
+	if err == nil || err.Error() != "RIVUNE_PUBLIC_URL must use https unless its host is loopback or a private-network IP address" {
+		t.Fatalf("translated local HTTP public URL error = %v", err)
 	}
 }
 

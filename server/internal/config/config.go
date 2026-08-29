@@ -146,13 +146,13 @@ func Load() (Config, error) {
 
 	if cfg.PublicURL != "" {
 		parsed, parseErr := url.Parse(cfg.PublicURL)
-		if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawPath != "" || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" {
+		if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" || strings.Contains(parsed.Hostname(), "%") || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawPath != "" || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" {
 			return Config{}, errors.New("RIVUNE_PUBLIC_URL must be an absolute HTTP(S) origin without credentials, path, query, or fragment")
 		}
 		if parsed.Scheme != "http" && parsed.Scheme != "https" {
 			return Config{}, errors.New("RIVUNE_PUBLIC_URL must use http or https")
 		}
-		if parsed.Scheme == "http" && !isLocalHTTPHost(parsed.Hostname()) {
+		if parsed.Scheme == "http" && !isLocalHTTPHost(parsed.Hostname(), cfg.NAT64Prefixes) {
 			return Config{}, errors.New("RIVUNE_PUBLIC_URL must use https unless its host is loopback or a private-network IP address")
 		}
 		parsed.Path = ""
@@ -232,7 +232,7 @@ func LoadLegacyEnvironment() (LegacyEnvironment, error) {
 	return legacy, nil
 }
 
-func isLocalHTTPHost(host string) bool {
+func isLocalHTTPHost(host string, nat64Prefixes []netip.Prefix) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
@@ -240,8 +240,21 @@ func isLocalHTTPHost(host string) bool {
 	if err != nil {
 		return false
 	}
-	address = address.Unmap()
-	return address.IsLoopback() || (address.IsPrivate() && netguard.IsAllowedAddress(address))
+	if address.Is4In6() {
+		return address.Unmap().IsLoopback()
+	}
+	if address.IsLoopback() {
+		return true
+	}
+	if !address.IsPrivate() || !netguard.IsAllowedAddress(address) {
+		return false
+	}
+	for _, prefix := range nat64Prefixes {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
+	return true
 }
 
 func loadDatabaseURL() (string, error) {
