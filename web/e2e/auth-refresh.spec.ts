@@ -101,3 +101,45 @@ test("legacy browser auth secrets are deleted at module load", async ({ page }) 
     context: localStorage.getItem("rivune.profile.shared-context"),
   }))).toEqual({ access: null, refresh: null, session: null, context: null });
 });
+
+test("password login offers remembered device identities across account switches", async ({ page }) => {
+  const legacyDevice = "10000000-0000-4000-8000-000000000001";
+  const aliceDevice = "20000000-0000-4000-8000-000000000002";
+  const bobDevice = "30000000-0000-4000-8000-000000000003";
+  await page.goto("/");
+  await page.evaluate(({ legacyDevice, aliceDevice }) => {
+    localStorage.setItem("rivune.device", legacyDevice);
+    localStorage.setItem("rivune.devices.v1", JSON.stringify([aliceDevice, "not-a-device-id", 7, aliceDevice]));
+  }, { legacyDevice, aliceDevice });
+
+  let loginDevice: unknown = null;
+  await page.route("**/api/v1/auth/web/login", async (route) => {
+    loginDevice = route.request().postDataJSON().device;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "set-cookie": "rivune_web_refresh=opaque; HttpOnly; SameSite=Strict; Path=/api/v1/auth/web/refresh" },
+      body: JSON.stringify({
+        tokenType: "Bearer",
+        accessToken: "account-switch-access",
+        accessTokenExpiresAt: "2099-01-01T00:05:00Z",
+        sessionId: "account-switch-session",
+        deviceId: bobDevice,
+        authorizationScope: "global_admin",
+        category: null,
+      }),
+    });
+  });
+
+  await page.evaluate(() => import("/src/api.ts").then(({ api }) => api.login("bob", "password")));
+
+  expect(loginDevice).toMatchObject({
+    id: legacyDevice,
+    ids: [legacyDevice, aliceDevice],
+    platform: "web",
+  });
+  expect(await page.evaluate(() => ({
+    current: localStorage.getItem("rivune.device"),
+    remembered: JSON.parse(localStorage.getItem("rivune.devices.v1") ?? "[]"),
+  }))).toEqual({ current: bobDevice, remembered: [bobDevice, legacyDevice, aliceDevice] });
+});

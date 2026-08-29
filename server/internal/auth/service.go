@@ -37,6 +37,7 @@ const (
 	AuthorizationScopeGlobalAdministrator AuthorizationScope = "global_admin"
 	AuthorizationScopeCategory            AuthorizationScope = "category"
 )
+
 type ClientKind string
 
 const (
@@ -44,11 +45,11 @@ const (
 	ClientKindWeb    ClientKind = "web"
 )
 
-
 const (
 	accessTokenPrefix                = "rivune_at_"
 	refreshTokenPrefix               = "rivune_rt_"
 	maximumSessionNotificationLength = 500
+	maximumRememberedWebDeviceIDs    = 64
 	// Concurrent clients may still have the just-consumed token in flight; it remains invalid but does not revoke the session immediately.
 	refreshTokenReuseGracePeriod = 10 * time.Second
 	// maximumDevicesPerUser bounds persistent device identities. Existing identities
@@ -73,6 +74,7 @@ type LoginInput struct {
 	Username   string
 	Password   string
 	DeviceID   string
+	DeviceIDs  []string
 	DeviceName string
 	Platform   string
 }
@@ -243,6 +245,9 @@ func (s *Service) login(ctx context.Context, input LoginInput, clientKind Client
 	input.DeviceID = strings.TrimSpace(input.DeviceID)
 	input.DeviceName = strings.TrimSpace(input.DeviceName)
 	input.Platform = strings.TrimSpace(input.Platform)
+	if clientKind == ClientKindWeb {
+		input.DeviceIDs = rememberedWebDeviceIDs(input.DeviceID, input.DeviceIDs)
+	}
 	if err := validateLoginInput(input); err != nil {
 		return TokenPair{}, err
 	}
@@ -294,7 +299,7 @@ func (s *Service) login(ctx context.Context, input LoginInput, clientKind Client
 	}
 
 	now := time.Now().UTC()
-	deviceID, deviceCategory, err := upsertDevice(ctx, tx, userID, role, input)
+	deviceID, deviceCategory, err := upsertDevice(ctx, tx, userID, role, input, clientKind)
 	if err != nil {
 		return TokenPair{}, err
 	}
@@ -1457,13 +1462,47 @@ func pairedDeviceSessionExpiry() time.Time {
 	return time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
 }
 
-func upsertDevice(ctx context.Context, tx pgx.Tx, userID, role string, input LoginInput) (string, *category.CategoryRef, error) {
+func upsertDevice(ctx context.Context, tx pgx.Tx, userID, role string, input LoginInput, clientKind ClientKind) (string, *category.CategoryRef, error) {
 	preferredCategoryID, err := passwordLoginCategoryID(ctx, tx, userID, role)
 	if err != nil {
 		return "", nil, err
 	}
+	candidateIDs := input.DeviceIDs
+	if clientKind != ClientKindWeb {
+		candidateIDs = nil
+		if input.DeviceID != "" {
+			candidateIDs = []string{input.DeviceID}
+		}
+	}
+
 	var deviceID, categoryID string
-	if input.DeviceID == "" {
+	if len(candidateIDs) > 0 {
+		err = tx.QueryRow(ctx, `
+			WITH selected AS (
+				SELECT device.id
+				FROM unnest($1::text[]) WITH ORDINALITY AS candidate(id, priority)
+				JOIN devices device ON device.id::text = candidate.id
+				WHERE device.user_id = $2::uuid
+				ORDER BY candidate.priority
+				LIMIT 1
+			)
+			UPDATE devices
+			SET name = $3,
+			    platform = $4,
+			    category_id = COALESCE($5::uuid, category_id),
+			    last_seen_at = now(),
+			    updated_at = now()
+			WHERE id = (SELECT id FROM selected)
+			RETURNING id::text, category_id::text
+		`, candidateIDs, userID, input.DeviceName, input.Platform, preferredCategoryID).Scan(&deviceID, &categoryID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return "", nil, fmt.Errorf("update device: %w", err)
+		}
+		if errors.Is(err, pgx.ErrNoRows) && clientKind != ClientKindWeb {
+			return "", nil, fmt.Errorf("%w: deviceId does not belong to this user", ErrInvalidInput)
+		}
+	}
+	if deviceID == "" {
 		if err := reserveDeviceSlot(ctx, tx, userID); err != nil {
 			return "", nil, err
 		}
@@ -1478,29 +1517,40 @@ func upsertDevice(ctx context.Context, tx pgx.Tx, userID, role string, input Log
 		`, userID, input.DeviceName, input.Platform, preferredCategoryID).Scan(&deviceID, &categoryID); err != nil {
 			return "", nil, fmt.Errorf("create device: %w", err)
 		}
-	} else {
-		err := tx.QueryRow(ctx, `
-			UPDATE devices
-			SET name = $3,
-			    platform = $4,
-			    category_id = COALESCE($5::uuid, category_id),
-			    last_seen_at = now(),
-			    updated_at = now()
-			WHERE id::text = $1 AND user_id = $2
-			RETURNING id::text, category_id::text
-		`, input.DeviceID, userID, input.DeviceName, input.Platform, preferredCategoryID).Scan(&deviceID, &categoryID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return "", nil, fmt.Errorf("%w: deviceId does not belong to this user", ErrInvalidInput)
-		}
-		if err != nil {
-			return "", nil, fmt.Errorf("update device: %w", err)
-		}
 	}
 	deviceCategory, err := loadCategoryRef(ctx, tx, categoryID)
 	if err != nil {
 		return "", nil, err
 	}
 	return deviceID, deviceCategory, nil
+}
+
+func rememberedWebDeviceIDs(primary string, remembered []string) []string {
+	if primary == "" && len(remembered) == 0 {
+		return nil
+	}
+	candidates := make([]string, 0, min(len(remembered)+1, maximumRememberedWebDeviceIDs))
+	seen := make(map[string]struct{}, cap(candidates))
+	appendCandidate := func(value string) {
+		var deviceID pgtype.UUID
+		if err := deviceID.Scan(strings.TrimSpace(value)); err != nil || !deviceID.Valid || len(candidates) == maximumRememberedWebDeviceIDs {
+			return
+		}
+		canonical := deviceID.String()
+		if _, duplicate := seen[canonical]; duplicate {
+			return
+		}
+		seen[canonical] = struct{}{}
+		candidates = append(candidates, canonical)
+	}
+	appendCandidate(primary)
+	for _, value := range remembered {
+		if len(candidates) == maximumRememberedWebDeviceIDs {
+			break
+		}
+		appendCandidate(value)
+	}
+	return candidates
 }
 
 func lockDeviceOwner(ctx context.Context, tx pgx.Tx, userID string) error {

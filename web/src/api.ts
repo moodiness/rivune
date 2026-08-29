@@ -104,6 +104,9 @@ import type {
 const API_BASE = "/api/v1";
 const ACCESS_KEY = "rivune.access";
 const DEVICE_KEY = "rivune.device";
+const DEVICE_IDS_KEY = "rivune.devices.v1";
+const MAX_REMEMBERED_DEVICE_IDS = 64;
+const DEVICE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const INSTALLATION_ID_KEY = "rivune.installation-id.v1";
 const REFRESH_LOCK = "rivune.auth.refresh";
 const PROFILE_KEY = "rivune.profile";
@@ -226,12 +229,38 @@ export function broadcastProfileSelectionChange(): void {
   broadcastAuthCoordination("profile-invalidated");
 }
 
+function rememberedDeviceIDs(): string[] {
+  let stored: unknown = [];
+  try {
+    stored = JSON.parse(safeLocalStorage.getItem(DEVICE_IDS_KEY) ?? "[]");
+  } catch {
+    // A malformed non-secret hint is discarded below.
+  }
+  const values = [safeLocalStorage.getItem(DEVICE_KEY), ...(Array.isArray(stored) ? stored : [])];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const normalized = value.trim().toLowerCase();
+    if (!DEVICE_ID_PATTERN.test(normalized) || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+    if (result.length === MAX_REMEMBERED_DEVICE_IDS) break;
+  }
+  return result;
+}
 
+function rememberDeviceID(deviceID: string): void {
+  const normalized = deviceID.trim().toLowerCase();
+  const previous = rememberedDeviceIDs();
+  safeLocalStorage.setItem(DEVICE_KEY, normalized);
+  safeLocalStorage.setItem(DEVICE_IDS_KEY, JSON.stringify([normalized, ...previous.filter((candidate) => candidate !== normalized)].slice(0, MAX_REMEMBERED_DEVICE_IDS)));
+}
 
 function saveTokens(tokens: WebSessionTokens) {
   safeSessionStorage.setItem(ACCESS_KEY, tokens.accessToken);
   safeSessionStorage.setItem(TAB_SESSION_KEY, tokens.sessionId);
-  safeLocalStorage.setItem(DEVICE_KEY, tokens.deviceId);
+  rememberDeviceID(tokens.deviceId);
   clearLegacySharedAuth();
 }
 
@@ -348,10 +377,11 @@ export const api = {
   resetDemo: () => request<{ account: Account }>("/demo/session/reset", { method: "POST" }, false, false),
   exitDemo: () => request<void>("/demo/session", { method: "DELETE" }, false, false),
   login: async (username: string, password: string) => {
+    const deviceIDs = rememberedDeviceIDs();
     const tokens = await request<WebSessionTokens>("/auth/web/login", {
       method: "POST",
       headers: { "X-Rivune-CSRF": "1" },
-      body: JSON.stringify({ username, password, device: { id: safeLocalStorage.getItem(DEVICE_KEY) || undefined, name: browserName(), platform: "web" } }),
+      body: JSON.stringify({ username, password, device: { id: deviceIDs[0], ids: deviceIDs, name: browserName(), platform: "web" } }),
     }, false, false);
     saveTokens(tokens);
     broadcastAuthCoordination("auth-invalidated");

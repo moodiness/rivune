@@ -214,6 +214,15 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		login.Header.Set("Content-Type", "application/json")
 		loginResponse := serveContractRequest(t, api, login, http.StatusOK)
 		validateContractResponse(t, document, "/auth/login", nil, login, loginResponse)
+		webLoginBody := `{"username":"admin","password":"contract-password","device":{"id":"33333333-3333-4333-8333-333333333333","ids":["33333333-3333-4333-8333-333333333333","88888888-8888-4888-8888-888888888888"],"name":"Contract browser","platform":"web"}}`
+		webLogin := httptest.NewRequest(http.MethodPost, "https://media.example/api/v1/auth/web/login", bytes.NewBufferString(webLoginBody))
+		webLogin.Header.Set("Content-Type", "application/json")
+		webLogin.Header.Set("Origin", "https://media.example")
+		webLogin.Header.Set(webCSRFHeader, "1")
+		if valid, validationErrors := document.ValidateHttpRequest(webLogin); !valid {
+			t.Fatalf("web login request violates OpenAPI contract: %v", validationErrors)
+		}
+		validateContractRequestBody(t, document, http.MethodPost, "/api/v1/auth/login", webLoginBody, false)
 
 		account := authenticatedContractRequest(http.MethodGet, "/api/v1/auth/me", nil)
 		accountResponse := serveContractRequest(t, api, account, http.StatusOK)

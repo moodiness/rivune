@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,6 +56,25 @@ func TestDeviceQuotaExactLimitOwnershipAndDeviceCodeExchange(t *testing.T) {
 	}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("reuse foreign device error = %v, want %v", err, ErrInvalidInput)
 	}
+	webTokens, err := service.LoginWeb(context.Background(), LoginInput{
+		Username: fixture.username, Password: fixture.password, DeviceID: foreign.deviceIDs[0],
+		DeviceIDs: []string{foreign.deviceIDs[0], created.DeviceID}, DeviceName: "Remembered owned browser",
+	})
+	if err != nil {
+		t.Fatalf("reuse remembered owned web device at quota: %v", err)
+	}
+	if webTokens.DeviceID != created.DeviceID {
+		t.Fatalf("reused web device = %s, want owned candidate %s", webTokens.DeviceID, created.DeviceID)
+	}
+	assertDeviceCount(t, pool, fixture.userID, maximumDevicesPerUser)
+
+	if _, err := service.LoginWeb(context.Background(), LoginInput{
+		Username: fixture.username, Password: fixture.password, DeviceID: foreign.deviceIDs[0],
+		DeviceName: "Foreign remembered browser",
+	}); !errors.Is(err, ErrDeviceQuotaReached) {
+		t.Fatalf("replace foreign web device at quota error = %v, want %v", err, ErrDeviceQuotaReached)
+	}
+	assertDeviceCount(t, pool, fixture.userID, maximumDevicesPerUser)
 
 	deviceCode := insertApprovedQuotaDeviceAuthorization(t, pool, fixture.userID)
 	if _, err := service.ExchangeDeviceAuthorization(context.Background(), deviceCode); !errors.Is(err, ErrDeviceQuotaReached) {
@@ -87,6 +107,76 @@ func TestDeviceQuotaExactLimitOwnershipAndDeviceCodeExchange(t *testing.T) {
 	}
 	if _, err := service.ExchangeDeviceAuthorization(context.Background(), deviceCode); !errors.Is(err, ErrDeviceAuthorizationExpired) {
 		t.Fatalf("expired exchange at quota error = %v, want %v", err, ErrDeviceAuthorizationExpired)
+	}
+}
+
+func TestWebLoginTreatsUnownedRememberedDeviceAsNew(t *testing.T) {
+	pool := openDeviceQuotaTestPool(t, "rivune-auth-web-remembered-device")
+	foreign := seedDeviceQuotaFixture(t, pool, 1)
+	cleanupDeviceQuotaFixtures(t, pool, foreign)
+	service := &Service{pool: pool, accessTTL: time.Minute, refreshTTL: time.Hour, timezone: "UTC"}
+
+	for _, test := range []struct {
+		name             string
+		rememberedDevice string
+	}{
+		{name: "foreign", rememberedDevice: foreign.deviceIDs[0]},
+		{name: "stale", rememberedDevice: "00000000-0000-0000-0000-000000000000"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := seedDeviceQuotaFixture(t, pool, 0)
+			cleanupDeviceQuotaFixtures(t, pool, fixture)
+			deviceName := "Remembered browser " + test.name
+			if _, err := service.LoginWeb(context.Background(), LoginInput{
+				Username: fixture.username, Password: "wrong-password",
+				DeviceID: test.rememberedDevice, DeviceName: deviceName,
+			}); !errors.Is(err, ErrInvalidCredentials) {
+				t.Fatalf("wrong password with %s remembered device error = %v, want %v", test.name, err, ErrInvalidCredentials)
+			}
+			assertDeviceCount(t, pool, fixture.userID, 0)
+
+			tokens, err := service.LoginWeb(context.Background(), LoginInput{
+				Username: fixture.username, Password: fixture.password,
+				DeviceID: test.rememberedDevice, DeviceName: deviceName,
+			})
+			if err != nil {
+				t.Fatalf("login with %s remembered device: %v", test.name, err)
+			}
+			if tokens.DeviceID == test.rememberedDevice {
+				t.Fatalf("new web device reused unowned id %s", tokens.DeviceID)
+			}
+			assertDeviceCount(t, pool, fixture.userID, 1)
+
+			var ownerID, storedName, platform string
+			if err := pool.QueryRow(context.Background(), `
+				SELECT user_id::text, name, platform FROM devices WHERE id = $1::uuid
+			`, tokens.DeviceID).Scan(&ownerID, &storedName, &platform); err != nil {
+				t.Fatalf("read replacement web device: %v", err)
+			}
+			if ownerID != fixture.userID || storedName != deviceName || platform != "web" {
+				t.Fatalf("replacement web device = owner %s name %q platform %q", ownerID, storedName, platform)
+			}
+		})
+	}
+	assertDeviceCount(t, pool, foreign.userID, 1)
+}
+
+func TestRememberedWebDeviceIDsAreNormalizedAndBounded(t *testing.T) {
+	remembered := make([]string, maximumRememberedWebDeviceIDs+10)
+	for index := range remembered {
+		remembered[index] = fmt.Sprintf("00000000-0000-4000-8000-%012x", index)
+	}
+	const primary = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"
+	remembered[0] = primary
+	remembered[1] = strings.ToLower(primary)
+	remembered[2] = strings.Repeat("a", 129)
+
+	candidates := rememberedWebDeviceIDs(" "+primary+" ", remembered)
+	if len(candidates) != maximumRememberedWebDeviceIDs {
+		t.Fatalf("remembered candidate count = %d, want %d", len(candidates), maximumRememberedWebDeviceIDs)
+	}
+	if candidates[0] != strings.ToLower(primary) || candidates[1] != "00000000-0000-4000-8000-000000000003" {
+		t.Fatalf("normalized remembered candidates begin %v", candidates[:2])
 	}
 }
 
