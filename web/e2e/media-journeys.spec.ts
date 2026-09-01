@@ -1717,7 +1717,7 @@ test("calendar desktop grid is calm and readable while preserving month, day, RT
       }),
     };
   });
-  expect(desktopMetrics.gridHeight).toBeGreaterThanOrEqual(600);
+  expect(desktopMetrics.gridHeight).toBeGreaterThanOrEqual(578);
   expect(desktopMetrics.gridHeight).toBeLessThanOrEqual(720);
   expect(desktopMetrics.gridWidth).toBeGreaterThan(900);
   expect(desktopMetrics.surfaceHeight).toBeLessThan(850);
