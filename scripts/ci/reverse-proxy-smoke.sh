@@ -65,8 +65,14 @@ EOF
 
 wait_for_postgres() {
   for _ in $(seq 1 60); do
-    if docker exec "${POSTGRES}" pg_isready -U rivune -d rivune >/dev/null 2>&1; then
+    if docker run --rm --network "${NETWORK}" "${POSTGRES_IMAGE}" \
+      pg_isready -h postgres -U rivune -d rivune >/dev/null 2>&1; then
       return
+    fi
+    if ! docker inspect --format '{{.State.Running}}' "${POSTGRES}" 2>/dev/null | grep -qx true; then
+      docker logs "${POSTGRES}"
+      echo "PostgreSQL exited before becoming reachable" >&2
+      return 1
     fi
     sleep 1
   done
@@ -79,6 +85,12 @@ wait_for_internal_ready() {
     if docker run --rm --network "${NETWORK}" curlimages/curl:8.12.1 \
       --fail --silent "http://rivune:8080/ready" >/dev/null 2>&1; then
       return
+    fi
+    if ! docker inspect --format '{{.State.Running}}' "${RIVUNE}" 2>/dev/null | grep -qx true; then
+      docker logs "${POSTGRES}"
+      docker logs "${RIVUNE}"
+      echo "Rivune exited before becoming ready" >&2
+      return 1
     fi
     sleep 1
   done
