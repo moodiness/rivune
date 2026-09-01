@@ -1283,6 +1283,7 @@ test("resolved artwork remains visible while revisiting metadata is revalidated"
   await page.goto("/");
   await page.getByRole("button", { name: "Open Signal Horizon" }).click();
   await expect(page.locator(".details-artwork img")).toHaveAttribute("src", "https://fixtures.rivune.test/season-1-poster.svg");
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("rivune.metadata-cache.v1") ?? "")).toContain("https://fixtures.rivune.test/season-1-poster.svg");
   await page.goBack();
   await expect(page.getByRole("heading", { name: "Continue Watching" })).toBeVisible();
 
