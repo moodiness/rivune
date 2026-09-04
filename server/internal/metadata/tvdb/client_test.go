@@ -3,8 +3,10 @@ package tvdb
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 
@@ -101,11 +103,15 @@ func TestEnrichSeasonMatchesOfficialEpisodesByNumberAndAirDate(t *testing.T) {
 			}
 			writeJSON(t, w, map[string]any{
 				"status": "success",
-				"data": map[string]any{"episodes": []map[string]any{
-					{"id": 9301101, "name": "Fixture Episode", "overview": "Fixture episode overview.", "aired": "2024-01-07", "image": "https://artworks.thetvdb.com/still.jpg", "runtime": 59, "seasonNumber": 1, "number": 1},
-					{"id": 9301102, "name": "Fixture Episode 2", "aired": "2024-01-14", "seasonNumber": 1, "number": 2},
-					{"id": 999, "name": "Other season", "seasonNumber": 2, "number": 1},
-				}},
+				"data": map[string]any{
+					"series": map[string]any{"id": 93001},
+					"episodes": []map[string]any{
+						{"id": 9301101, "seriesId": 93001, "name": "Fixture Episode", "overview": "Fixture episode overview.", "aired": "2024-01-07", "image": "https://artworks.thetvdb.com/still.jpg", "runtime": 59, "seasonNumber": 1, "number": 1},
+						{"id": 9301102, "seriesId": 93001, "name": "Fixture Episode 2", "aired": "2024-01-14", "seasonNumber": 1, "number": 2},
+						{"id": 999, "seriesId": 93001, "name": "Other season", "seasonNumber": 2, "number": 1},
+					},
+				},
+				"links": map[string]any{"next": nil},
 			})
 		default:
 			http.NotFound(w, r)
@@ -158,6 +164,112 @@ func TestEnrichSeriesRefreshesRejectedTokenOnce(t *testing.T) {
 	}
 	if loginCalls.Load() != 2 {
 		t.Fatalf("expected two logins, got %d", loginCalls.Load())
+	}
+}
+
+func TestSeriesSeasonUsesOrderSpecificDVDCoordinates(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		malformed   bool
+		wantFailure bool
+	}{
+		{name: "split DVD coordinates"},
+		{name: "malformed order hierarchy", malformed: true, wantFailure: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var requests []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests = append(requests, r.URL.RequestURI())
+				switch r.URL.Path {
+				case "/login":
+					writeJSON(t, w, map[string]any{"status": "success", "data": map[string]string{"token": "token"}})
+				case "/series/404604/extended":
+					writeJSON(t, w, map[string]any{"status": "success", "data": map[string]any{
+						"id": 404604,
+						"seasonTypes": []map[string]any{{"id": 2, "name": "DVD Order", "type": "dvd"}},
+						"seasons": []map[string]any{{
+							"id": 2112814, "name": "DVD Season 1", "number": 1, "seriesId": 404604,
+							"type": map[string]any{"id": 2, "type": "dvd"},
+						}},
+					}})
+				case "/seasons/2112814/extended":
+					writeJSON(t, w, map[string]any{"status": "success", "data": map[string]any{
+						"id": 2112814, "seriesId": 404604, "number": 1,
+						"type": map[string]any{"id": 2, "type": "dvd"},
+						"episodes": []map[string]any{{
+							"id": 1, "name": "Unusable extended coordinate", "seasonNumber": 99, "number": 99,
+						}},
+					}})
+				case "/series/404604/episodes/dvd":
+					if r.URL.Query().Get("page") != "0" || r.URL.Query().Get("season") != "1" {
+						t.Fatalf("unexpected order query %q", r.URL.RawQuery)
+					}
+					seriesID := 404604
+					if test.malformed {
+						seriesID = 999999
+					}
+					ids := []int{9226291, 9226292, 9226293, 9226294, 9226295, 9226296, 10357450, 10357451}
+					episodes := make([]map[string]any, 0, len(ids))
+					for index := len(ids) - 1; index >= 0; index-- {
+						episodes = append(episodes, map[string]any{
+							"id": ids[index], "seriesId": seriesID, "name": "DVD Episode",
+							"seasonNumber": 1, "number": index + 1,
+						})
+					}
+					writeJSON(t, w, map[string]any{
+						"status": "success",
+						"data": map[string]any{
+							"series":   map[string]any{"id": 404604},
+							"episodes": episodes,
+						},
+						"links": map[string]any{"next": nil},
+					})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			client := newWithBaseURL("api-key", "", server.URL, server.Client())
+			got, err := client.SeriesSeason(context.Background(), "404604", "2112814")
+			if test.wantFailure {
+				if !errors.Is(err, metadata.ErrProviderFailure) {
+					t.Fatalf("malformed hierarchy error = %v, want provider failure", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("map DVD season: %v", err)
+			}
+			if got.EpisodeOrderID != "2" || got.EpisodeOrderType != "dvd" {
+				t.Fatalf("order identity = %q/%q, want 2/dvd", got.EpisodeOrderID, got.EpisodeOrderType)
+			}
+			if len(got.Episodes) != 8 {
+				t.Fatalf("episodes = %d, want 8", len(got.Episodes))
+			}
+			for index, episode := range got.Episodes {
+				if episode.SeasonNumber != 1 || episode.EpisodeNumber != index+1 {
+					t.Fatalf("episode %d coordinates = S%dE%d", index, episode.SeasonNumber, episode.EpisodeNumber)
+				}
+			}
+			if got.Episodes[6].ExternalID != "10357450" || got.Episodes[7].ExternalID != "10357451" {
+				t.Fatalf("split identities = %q/%q", got.Episodes[6].ExternalID, got.Episodes[7].ExternalID)
+			}
+			wantRequests := []string{
+				"/login",
+				"/series/404604/extended",
+				"/seasons/2112814/extended",
+				"/series/404604/episodes/dvd?page=0&season=1",
+			}
+			if len(requests) != len(wantRequests) {
+				t.Fatalf("requests = %q, want %q", requests, wantRequests)
+			}
+			for index := range wantRequests {
+				if requests[index] != wantRequests[index] {
+					t.Fatalf("request %d = %q, want %q", index, requests[index], wantRequests[index])
+				}
+			}
+		})
 	}
 }
 
@@ -224,6 +336,45 @@ func TestSeriesMappingUsesSelectedTVDBSeasonHierarchy(t *testing.T) {
 					{"id": 7102, "name": "Streaming Episode 2", "seasonNumber": 1, "number": 2},
 				},
 			}})
+		case "/series/81797/episodes/official":
+			if r.URL.Query().Get("season") != "2" || r.URL.Query().Get("page") != "0" {
+				t.Fatalf("unexpected official order query %q", r.URL.RawQuery)
+			}
+			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]any{
+				"series": map[string]any{"id": 81797},
+				"episodes": []map[string]any{{"id": 1201, "seriesId": 81797, "name": "Episode 1", "overview": "Second season", "aired": "2025-01-05", "runtime": 24, "seasonNumber": 2, "number": 1}},
+			}, "links": map[string]any{"next": nil}})
+		case "/series/81797/episodes/dvd":
+			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]any{
+				"series": map[string]any{"id": 81797},
+				"episodes": []map[string]any{{"id": 2101, "seriesId": 81797, "name": "DVD Episode", "aired": "2024-01-07", "seasonNumber": 1, "number": 1}},
+			}, "links": map[string]any{"next": nil}})
+		case "/series/81797/episodes/absolute":
+			page, err := strconv.Atoi(r.URL.Query().Get("page"))
+			if err != nil || (page != 0 && page != 1) || r.URL.Query().Get("season") != "1" {
+				t.Fatalf("unexpected absolute order query %q", r.URL.RawQuery)
+			}
+			start, count := 0, 500
+			next := any("https://api4.thetvdb.com/v4/series/81797/episodes/absolute?page=1&season=1")
+			if page == 1 {
+				start, count, next = 500, 1, nil
+			}
+			episodes := make([]map[string]any, count)
+			for index := range episodes {
+				ordinal := start + index + 1
+				episodes[index] = map[string]any{"id": 3100 + ordinal, "seriesId": 81797, "name": "Absolute Episode", "seasonNumber": 1, "number": ordinal}
+			}
+			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]any{
+				"series": map[string]any{"id": 81797}, "episodes": episodes,
+			}, "links": map[string]any{"next": next}})
+		case "/series/81797/episodes/alttwo":
+			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]any{
+				"series": map[string]any{"id": 81797},
+				"episodes": []map[string]any{
+					{"id": 7101, "seriesId": 81797, "name": "Streaming Episode 1", "seasonNumber": 1, "number": 1},
+					{"id": 7102, "seriesId": 81797, "name": "Streaming Episode 2", "seasonNumber": 1, "number": 2},
+				},
+			}, "links": map[string]any{"next": nil}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -273,6 +424,13 @@ func TestSeriesMappingUsesSelectedTVDBSeasonHierarchy(t *testing.T) {
 	if dvdSeason.SeasonNumber != 1 || len(dvdSeason.Episodes) != 1 || dvdSeason.Episodes[0].ExternalID != "2101" {
 		t.Fatalf("unexpected mapped DVD season: %+v", dvdSeason)
 	}
+	absoluteSeason, err := client.SeriesSeason(context.Background(), "81797", "3001")
+	if err != nil {
+		t.Fatalf("map absolute season: %v", err)
+	}
+	if len(absoluteSeason.Episodes) != 501 || absoluteSeason.Episodes[500].ExternalID != "3601" || absoluteSeason.Episodes[500].EpisodeNumber != 501 {
+		t.Fatalf("unexpected mapped absolute season: count=%d last=%+v", len(absoluteSeason.Episodes), absoluteSeason.Episodes[len(absoluteSeason.Episodes)-1])
+	}
 	streamingSeason, err := client.SeriesSeason(context.Background(), "81797", "7001")
 	if err != nil {
 		t.Fatalf("map streaming season: %v", err)
@@ -306,6 +464,16 @@ func TestSeriesMappingPreservesSpecialsSeasonZero(t *testing.T) {
 					"seasonNumber": 0, "number": 1,
 				}},
 			}})
+		case "/series/81797/episodes/official":
+			if r.URL.Query().Get("season") != "0" || r.URL.Query().Get("page") != "0" {
+				t.Fatalf("unexpected specials order query %q", r.URL.RawQuery)
+			}
+			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]any{
+				"series": map[string]any{"id": 81797},
+				"episodes": []map[string]any{{
+					"id": 10001, "seriesId": 81797, "name": "Behind the Scenes", "aired": "2024-01-01", "seasonNumber": 0, "number": 1,
+				}},
+			}, "links": map[string]any{"next": nil}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -327,6 +495,46 @@ func TestSeriesMappingPreservesSpecialsSeasonZero(t *testing.T) {
 	if season.SeasonNumber != 0 || season.Name != "Specials" || len(season.Episodes) != 1 ||
 		season.Episodes[0].SeasonNumber != 0 || season.Episodes[0].ExternalID != "10001" {
 		t.Fatalf("unexpected specials season: %+v", season)
+	}
+}
+
+func TestSeriesSeasonBoundsOrderPagination(t *testing.T) {
+	var pageRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login":
+			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]string{"token": "token"}})
+		case "/series/1/extended":
+			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]any{
+				"id": 1,
+				"seasons": []map[string]any{{
+					"id": 2, "number": 1, "seriesId": 1, "type": map[string]any{"id": 3, "type": "absolute"},
+				}},
+			}})
+		case "/seasons/2/extended":
+			writeJSON(t, w, map[string]any{"status": "success", "data": map[string]any{
+				"id": 2, "number": 1, "seriesId": 1, "type": map[string]any{"id": 3, "type": "absolute"},
+			}})
+		case "/series/1/episodes/absolute":
+			pageRequests.Add(1)
+			writeJSON(t, w, map[string]any{
+				"status": "success",
+				"data": map[string]any{"series": map[string]any{"id": 1}, "episodes": []any{}},
+				"links": map[string]any{"next": "http://127.0.0.1:1/private"},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := newWithBaseURL("api-key", "", server.URL, server.Client())
+	_, err := client.SeriesSeason(context.Background(), "1", "2")
+	if !errors.Is(err, metadata.ErrProviderFailure) {
+		t.Fatalf("unbounded pagination error = %v, want provider failure", err)
+	}
+	if got := pageRequests.Load(); got != 100 {
+		t.Fatalf("order page requests = %d, want 100 local requests", got)
 	}
 }
 
