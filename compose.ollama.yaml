@@ -10,7 +10,7 @@ services:
       RIVUNE_SEMANTIC_OLLAMA_MODEL: ${RIVUNE_SEMANTIC_OLLAMA_MODEL:?Set an operator-evaluated model explicitly; no benchmark candidate passed}
 
   ollama:
-    image: ollama/ollama:0.32.15
+    image: ollama/ollama:0.33.3
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -42,7 +42,7 @@ services:
       - edge
 
   ollama-model:
-    image: ollama/ollama:0.32.15
+    image: ollama/ollama:0.33.3
     restart: "no"
     depends_on:
       ollama:
@@ -56,7 +56,7 @@ services:
       - edge
 
   ollama-benchmark-models:
-    image: ollama/ollama:0.32.15
+    image: ollama/ollama:0.33.3
     profiles: ["semantic-benchmark"]
     restart: "no"
     depends_on:
