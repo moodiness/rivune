@@ -28,7 +28,8 @@ var episodeOrderCanonicalEpisodeIDs = []string{
 }
 
 type episodeOrderProvider struct {
-	mapped ProviderSeason
+	mapped     ProviderSeason
+	mappedByID map[string]ProviderSeason
 }
 
 func (*episodeOrderProvider) DiscoverMovies(context.Context, QueryOptions) (ProviderMoviePage, error) {
@@ -80,7 +81,17 @@ func (*episodeOrderProvider) SeriesSeasons(context.Context, string, string) ([]P
 	return nil, errors.New("unexpected series seasons call")
 }
 func (provider *episodeOrderProvider) SeriesSeason(_ context.Context, seriesTVDBID, seasonTVDBID string) (ProviderSeason, error) {
-	if seriesTVDBID != "404604" || seasonTVDBID != "2112814" {
+	if seriesTVDBID != "404604" {
+		return ProviderSeason{}, ErrProviderNotFound
+	}
+	if provider.mappedByID != nil {
+		mapped, exists := provider.mappedByID[seasonTVDBID]
+		if !exists {
+			return ProviderSeason{}, ErrProviderNotFound
+		}
+		return mapped, nil
+	}
+	if seasonTVDBID != "2112814" {
 		return ProviderSeason{}, ErrProviderNotFound
 	}
 	return provider.mapped, nil
@@ -135,6 +146,85 @@ func TestMappedDVDSeasonPersistsIndependentStableHierarchy(t *testing.T) {
 	}
 	if after := externalIDSnapshot(t, pool); after != canonicalExternalIDs {
 		t.Fatalf("canonical external IDs changed after omission/reappearance:\nbefore:\n%s\nafter:\n%s", canonicalExternalIDs, after)
+	}
+}
+
+func TestMappedDVDSeasonRefreshKeepsOtherVariantSeasonsCurrent(t *testing.T) {
+	pool := newCanonicalMergeTestPool(t)
+	seedEpisodeOrderCanonicalHierarchy(t, pool)
+	seasonOne := dvdProviderSeason()
+	seasonTwo := dvdProviderSeasonTwo()
+	provider := &episodeOrderProvider{mappedByID: map[string]ProviderSeason{
+		seasonOne.ExternalID: seasonOne,
+		seasonTwo.ExternalID: seasonTwo,
+	}}
+	service := NewServiceWithProviderSource(pool, staticProviderSource{providers: ProviderSet{
+		Primary: provider,
+		Mapper:  provider,
+	}}, time.Hour, nil)
+	ctx := context.Background()
+	principal := canonicalMergePrincipal()
+
+	if _, err := service.SeasonDetails(ctx, principal, mappedSeasonID(episodeOrderSeriesID, seasonOne.ExternalID), "en-US", "tvdb"); err != nil {
+		t.Fatalf("persist first DVD season: %v", err)
+	}
+	persistedSeasonTwo, err := service.SeasonDetails(ctx, principal, mappedSeasonID(episodeOrderSeriesID, seasonTwo.ExternalID), "en-US", "tvdb")
+	if err != nil {
+		t.Fatalf("persist second DVD season: %v", err)
+	}
+	seasonTwoEpisodeIDs := episodeIDs(persistedSeasonTwo.Episodes)
+	if _, err := service.SeasonDetails(ctx, principal, mappedSeasonID(episodeOrderSeriesID, seasonOne.ExternalID), "en-US", "tvdb"); err != nil {
+		t.Fatalf("refresh first DVD season: %v", err)
+	}
+
+	var storedSeasonTwoID string
+	if err := pool.QueryRow(ctx, `
+		SELECT title_id::text
+		FROM title_episode_order_identities
+		WHERE series_title_id = $1::uuid AND provider = 'tvdb' AND order_id = '2'
+		  AND namespace = 'season' AND external_id = $2
+	`, episodeOrderSeriesID, seasonTwo.ExternalID).Scan(&storedSeasonTwoID); err != nil {
+		t.Fatalf("resolve stored second DVD season: %v", err)
+	}
+	var playbackAddressable int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM titles
+		WHERE (id = $1::uuid OR parent_id = $1::uuid)
+		  AND hierarchy_variant = 'tvdb:2'
+		  AND is_current
+		  AND resource_provider = 'tvdb'
+		  AND resource_id <> ''
+	`, storedSeasonTwoID).Scan(&playbackAddressable); err != nil {
+		t.Fatalf("query playback-addressable second DVD hierarchy: %v", err)
+	}
+	if playbackAddressable != len(seasonTwo.Episodes)+1 {
+		t.Fatalf("refreshing season 1 left only %d/%d season-2 titles playback-addressable", playbackAddressable, len(seasonTwo.Episodes)+1)
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT id::text
+		FROM titles
+		WHERE parent_id = $1::uuid AND media_type = 'episode'
+		  AND hierarchy_variant = 'tvdb:2' AND is_current
+		ORDER BY ordinal
+	`, storedSeasonTwoID)
+	if err != nil {
+		t.Fatalf("query current second-season DVD episodes: %v", err)
+	}
+	defer rows.Close()
+	currentSeasonTwoEpisodeIDs := make([]string, 0, len(seasonTwoEpisodeIDs))
+	for rows.Next() {
+		var episodeID string
+		if err := rows.Scan(&episodeID); err != nil {
+			t.Fatalf("scan current second-season DVD episode: %v", err)
+		}
+		currentSeasonTwoEpisodeIDs = append(currentSeasonTwoEpisodeIDs, episodeID)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate current second-season DVD episodes: %v", err)
+	}
+	if !reflect.DeepEqual(currentSeasonTwoEpisodeIDs, seasonTwoEpisodeIDs) {
+		t.Fatalf("refreshing season 1 changed/deactivated season-2 UUIDs: before=%v after=%v", seasonTwoEpisodeIDs, currentSeasonTwoEpisodeIDs)
 	}
 }
 
@@ -236,6 +326,38 @@ func dvdProviderSeason() ProviderSeason {
 		EpisodeOrderID:   "2",
 		EpisodeOrderType: "dvd",
 		Episodes:         episodes,
+	}
+}
+
+func dvdProviderSeasonTwo() ProviderSeason {
+	return ProviderSeason{
+		ExternalID:       "2112815",
+		Name:             "DVD Season 2",
+		Overview:         "Second DVD season overview",
+		SeasonNumber:     2,
+		AirDate:          "2024-02-01",
+		PosterURL:        "https://images.example/dvd-season-2.jpg",
+		BackdropURL:      "https://images.example/dvd-background.jpg",
+		EpisodeOrderID:   "2",
+		EpisodeOrderType: "dvd",
+		Episodes: []ProviderEpisode{
+			{
+				ExternalID:  "20357450",
+				Name:        "DVD Season 2 Episode 1",
+				SeasonNumber: 2,
+				EpisodeNumber: 1,
+				AirDate:      "2024-02-01",
+				StillURL:     "https://images.example/dvd-season-2-episode-1.jpg",
+			},
+			{
+				ExternalID:  "20357451",
+				Name:        "DVD Season 2 Episode 2",
+				SeasonNumber: 2,
+				EpisodeNumber: 2,
+				AirDate:      "2024-02-08",
+				StillURL:     "https://images.example/dvd-season-2-episode-2.jpg",
+			},
+		},
 	}
 }
 

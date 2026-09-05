@@ -1390,7 +1390,27 @@ func persistMappedSeasonVariant(
 	`, seriesID, orderID); err != nil {
 		return Season{}, fmt.Errorf("lock TVDB episode-order hierarchy: %w", err)
 	}
+	variant := "tvdb:" + orderID
 	if _, err := tx.Exec(ctx, `
+		WITH targeted_seasons AS (
+			SELECT identity.title_id
+			FROM title_episode_order_identities AS identity
+			JOIN titles AS season ON season.id = identity.title_id
+			WHERE identity.series_title_id = $1::uuid
+			  AND identity.provider = 'tvdb'
+			  AND identity.order_id = $2
+			  AND identity.namespace = 'season'
+			  AND (
+				identity.external_id = $3
+				OR (
+					season.parent_id = $1::uuid
+					AND season.media_type = 'season'
+					AND season.hierarchy_variant = $4
+					AND season.ordinal = $5
+					AND season.is_current
+				)
+			  )
+		)
 		UPDATE titles AS title
 		SET is_current = false,
 		    updated_at = now()
@@ -1399,12 +1419,14 @@ func persistMappedSeasonVariant(
 		  AND identity.series_title_id = $1::uuid
 		  AND identity.provider = 'tvdb'
 		  AND identity.order_id = $2
+		  AND (
+			title.id IN (SELECT title_id FROM targeted_seasons)
+			OR title.parent_id IN (SELECT title_id FROM targeted_seasons)
+		  )
 		  AND title.is_current
-	`, seriesID, orderID); err != nil {
-		return Season{}, fmt.Errorf("deactivate prior TVDB episode-order hierarchy: %w", err)
+	`, seriesID, orderID, seasonExternalID, variant, provided.SeasonNumber); err != nil {
+		return Season{}, fmt.Errorf("deactivate prior TVDB episode-order season hierarchy: %w", err)
 	}
-
-	variant := "tvdb:" + orderID
 	seasonOrdinal := provided.SeasonNumber
 	storedSeasonID, err := upsertEpisodeOrderTitle(ctx, tx, seriesID, orderID, variant, episodeOrderTitle{
 		namespace:     MediaTypeSeason,
