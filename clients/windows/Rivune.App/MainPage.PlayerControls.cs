@@ -955,7 +955,7 @@ public sealed partial class MainPage
                     id => client.GetSeasonAsync(id, _detailSeries.MappingProvider, cancellationToken: _state.Token));
                 if (_state.IsCurrent(generation) && next is not null)
                 {
-                    _nextEpisodeTarget = EpisodeTarget(_detailSeries, next);
+                    _nextEpisodeTarget = EpisodeTarget(_detailSeries, next, _detailTarget);
                     PlayerNextButton.Visibility = Visibility.Visible;
                 }
             }
@@ -965,7 +965,9 @@ public sealed partial class MainPage
 
         try
         {
-            if (_detailTarget is not { MediaType: "episode", SeriesImdbId: { Length: > 0 } imdbId, SeasonNumber: int season, EpisodeNumber: int episode }) return;
+            var target = _detailTarget;
+            if (target is not { MediaType: "episode", SeriesImdbId: { Length: > 0 } imdbId, SeasonNumber: int season, EpisodeNumber: int episode } ||
+                !MediaIdentity.CanLoadCanonicalMarkers(target)) return;
             var markers = await client.GetPlaybackMarkersAsync(imdbId, season, episode, _state.Token);
             if (_state.IsCurrent(generation)) _playbackMarkers = markers.Markers;
         }
