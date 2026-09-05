@@ -144,14 +144,15 @@ func verifySignatureBytes(manifest, sidecarBytes []byte, publicKey *ecdsa.Public
 }
 
 func readP256PrivateKey(path string) (*ecdsa.PrivateKey, error) {
-	info, err := os.Stat(path)
+	file, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("stat private key: %w", err)
+		return nil, fmt.Errorf("open private key: %w", err)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return nil, errors.New("private key permissions must not grant group or other access")
+	defer file.Close()
+	if err := validatePrivateKeyPermissions(file); err != nil {
+		return nil, err
 	}
-	contents, err := os.ReadFile(path)
+	contents, err := io.ReadAll(file)
 	if err != nil {
 		return nil, fmt.Errorf("read private key: %w", err)
 	}
