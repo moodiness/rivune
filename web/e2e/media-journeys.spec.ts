@@ -145,6 +145,16 @@ test("canonical continuation bypasses a DVD-default profile on route reload", as
   expect(reloadedSeriesRequest.search.has("episodeOrder")).toBe(false);
 });
 
+test("ordinary series detail keeps the profile TVDB default", async ({ page, rivune }) => {
+  rivune.useDvdDefaultProfile();
+  await page.goto("/media/series/tt9000/season/1");
+
+  await expect(page.getByRole("button", { name: /Disc Opening/ }).first()).toBeVisible();
+  const seriesRequest = rivune.matching("/api/v1/metadata/series/series-1", "GET").at(-1)!;
+  expect(Object.fromEntries(seriesRequest.search)).toMatchObject({ mappingProvider: "tvdb" });
+  expect(seriesRequest.search.has("episodeOrder")).toBe(false);
+});
+
 test("DVD continuation retains its TVDB hierarchy through playback and route reload", async ({ page, rivune }) => {
   rivune.useDvdContinuation();
   await page.goto("/");
