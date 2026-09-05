@@ -2286,6 +2286,78 @@ class RivuneViewModelTest {
     }
 
     @Test
+    fun incompleteVariantContinuationClearsContextAndUsesCanonicalHierarchy() = runTest(dispatcher) {
+        val seriesId = UUID.randomUUID()
+        val persistedSeasonId = UUID.randomUUID()
+        val episodeId = UUID.randomUUID()
+        val opaqueSeasonId = "tvdb:$seriesId:2112814"
+        val canonicalEpisode = episode(episodeId, seriesId, number = 1)
+        val canonicalSeason = season(seriesId, listOf(canonicalEpisode))
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile(hasPin = false), active = true),
+            collections = listOf(collection()),
+        ).apply {
+            continueWatchingPage = io.rivune.api.ContinueWatchingPage(
+                listOf(
+                    io.rivune.api.ContinueWatchingItem(
+                        titleId = episodeId,
+                        mediaType = io.rivune.api.PlaybackProgressMediaType.EPISODE,
+                        seriesId = seriesId,
+                        seasonId = persistedSeasonId,
+                        seasonNumber = 1,
+                        episodeNumber = 1,
+                        mappingProvider = " unknown ",
+                        episodeOrderId = "2",
+                        metadataSeasonId = opaqueSeasonId,
+                        title = "Canonical Series",
+                        resourceId = "tt12345678:1:1",
+                        resourceProvider = "imdb",
+                        episodeTitle = "Canonical Episode 1",
+                        positionSeconds = 120,
+                        durationSeconds = 1_800,
+                        version = 1,
+                        reason = io.rivune.api.ContinueWatchingReason.RESUME,
+                        lastWatchedAt = "2026-09-04T00:00:00Z",
+                    ),
+                ),
+            )
+            seriesResult = series(seriesId, "tt12345678").copy(
+                seasons = listOf(seasonSummary(seriesId, canonicalSeason.id, 1, 1)),
+            )
+            seasons = mapOf(canonicalSeason.id to canonicalSeason)
+        }
+        val source = gateway.configurePlayback(episodeId)
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+
+        val continuation = viewModel.state.value.viewer.continueWatching.single()
+        assertNull(continuation.mappingProvider)
+        assertNull(continuation.episodeOrderId)
+        assertNull(continuation.metadataSeasonId)
+
+        viewModel.openMedia(continuation)
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf(Triple(seriesId, io.rivune.api.SeriesMappingProvider.TMDB, null)),
+            gateway.seriesRequests,
+        )
+        assertEquals(
+            listOf(canonicalSeason.id to io.rivune.api.SeriesMappingProvider.TMDB),
+            gateway.seasonRequests,
+        )
+        assertTrue(gateway.seasonRequests.none { it.first == opaqueSeasonId })
+        val picker = assertNotNull(viewModel.state.value.viewer.sourcePicker)
+        assertEquals(PlaybackMarkerRequest("tt12345678", 1, 1), picker.markerRequest)
+
+        viewModel.selectPlaybackSource(source)
+        viewModel.choosePlaybackTarget(PlaybackTargetSelection.Embedded(EmbeddedPlayerPreference.AUTOMATIC))
+        advanceUntilIdle()
+        assertEquals(listOf(PlaybackMarkerRequest("tt12345678", 1, 1)), gateway.markerRequests)
+    }
+
+    @Test
     fun episodeEntryResolvesSeriesOnceAndMarkerFailureFailsOpen() = runTest(dispatcher) {
         val seriesId = UUID.randomUUID()
         val episodeId = UUID.randomUUID()

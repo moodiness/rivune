@@ -3679,12 +3679,17 @@ class RivuneViewModel internal constructor(
             ?.trim()
             ?.takeIf(String::isNotBlank)
             ?.lowercase(Locale.ROOT)
-        val mappingProvider = item.mappingProvider
+        val parsedMappingProvider = item.mappingProvider
             ?.trim()
             ?.takeIf(String::isNotBlank)
             ?.let { value ->
                 SeriesMappingProvider.entries.firstOrNull { it.wireValue.equals(value, ignoreCase = true) }
             }
+        val episodeOrderId = item.episodeOrderId?.trim()?.takeIf(String::isNotBlank)
+        val metadataSeasonId = item.metadataSeasonId?.trim()?.takeIf(String::isNotBlank)
+        val mappingProvider = parsedMappingProvider.takeIf {
+            it == SeriesMappingProvider.TVDB && episodeOrderId != null && metadataSeasonId != null
+        }
         val isEpisode = item.mediaType == PlaybackProgressMediaType.EPISODE
         val episodeTitle = item.episodeTitle?.takeIf(String::isNotBlank)
             ?: item.episodeNumber?.let { "Episode $it" }
@@ -3714,8 +3719,8 @@ class RivuneViewModel internal constructor(
             released = if (isEpisode) item.episodeAirDate else null,
             seriesId = item.seriesId,
             mappingProvider = mappingProvider,
-            episodeOrderId = item.episodeOrderId?.trim()?.takeIf(String::isNotBlank),
-            metadataSeasonId = item.metadataSeasonId?.trim()?.takeIf(String::isNotBlank),
+            episodeOrderId = episodeOrderId.takeIf { mappingProvider != null },
+            metadataSeasonId = metadataSeasonId.takeIf { mappingProvider != null },
             seasonId = item.seasonId?.toString(),
             seasonNumber = item.seasonNumber,
             episodeNumber = item.episodeNumber,
