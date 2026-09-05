@@ -222,6 +222,9 @@ type ContinueItem struct {
 	SeasonID         string    `json:"seasonId,omitempty"`
 	SeasonNumber     *int      `json:"seasonNumber,omitempty"`
 	EpisodeNumber    *int      `json:"episodeNumber,omitempty"`
+	MappingProvider  string    `json:"mappingProvider,omitempty"`
+	EpisodeOrderID   string    `json:"episodeOrderId,omitempty"`
+	MetadataSeasonID string    `json:"metadataSeasonId,omitempty"`
 	PositionSeconds  int       `json:"positionSeconds"`
 	DurationSeconds  int       `json:"durationSeconds"`
 	Version          int64     `json:"version"`

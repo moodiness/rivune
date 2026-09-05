@@ -111,6 +111,23 @@ func validateContinueWindow(offset, limit int) error {
 
 const resumeItemsCTE = `
 	WITH accessible_titles AS (` + accessibleTitlesSQL + `),
+	active_hierarchy AS (
+		SELECT DISTINCT ON (series.id)
+		       series.id AS series_id,
+		       season.hierarchy_variant
+		FROM profile_progress hierarchy_progress
+		JOIN titles episode
+		  ON episode.id = hierarchy_progress.title_id
+		 AND episode.media_type = 'episode'
+		JOIN accessible_titles accessible_episode ON accessible_episode.id = episode.id
+		JOIN titles season ON season.id = episode.parent_id AND season.media_type = 'season'
+		JOIN accessible_titles accessible_season ON accessible_season.id = season.id
+		JOIN titles series ON series.id = season.parent_id AND series.media_type = 'series'
+		JOIN accessible_titles accessible_series ON accessible_series.id = series.id
+		WHERE hierarchy_progress.profile_id = $1::uuid
+		  AND series.source_addon_id IS NULL
+		ORDER BY series.id, hierarchy_progress.last_watched_at DESC, episode.id
+	),
 	resumable AS (
 		SELECT title.id,
 		       title.media_type,
@@ -118,6 +135,14 @@ const resumeItemsCTE = `
 		       season.id AS season_id,
 		       season.ordinal AS season_number,
 		       title.ordinal AS episode_number,
+		       CASE WHEN title.media_type = 'episode' AND season.hierarchy_variant <> ''
+		            THEN COALESCE(episode_order.provider, '') ELSE '' END AS mapping_provider,
+		       CASE WHEN title.media_type = 'episode' AND season.hierarchy_variant <> ''
+		            THEN COALESCE(episode_order.order_id, '') ELSE '' END AS episode_order_id,
+		       CASE WHEN title.media_type = 'episode' AND season.hierarchy_variant <> ''
+		            THEN COALESCE(season_order.provider, '') || ':' || series.id::text || ':' ||
+		                 COALESCE(season_order.external_id, '')
+		            ELSE '' END AS metadata_season_id,
 		       progress.position_seconds,
 		       progress.duration_seconds,
 		       progress.version,
@@ -126,11 +151,19 @@ const resumeItemsCTE = `
 		       COALESCE(CASE WHEN title.media_type = 'episode' THEN series.poster_url ELSE title.poster_url END, '') AS poster_url,
 		       COALESCE(CASE WHEN title.media_type = 'episode' THEN series.background_url ELSE title.background_url END, '') AS background_url,
 		       COALESCE(CASE WHEN title.media_type = 'episode' THEN series.release_info ELSE title.release_info END, '') AS release_info,
-		       CASE WHEN title.media_type = 'episode'
-		           THEN COALESCE(series.resource_id, '') || ':' || season.ordinal::text || ':' || title.ordinal::text
+		       CASE
+		           WHEN title.media_type = 'episode' AND season.hierarchy_variant <> ''
+		             THEN COALESCE(episode_order.provider, '') || ':' || COALESCE(episode_order.external_id, '')
+		           WHEN title.media_type = 'episode'
+		             THEN COALESCE(series.resource_id, '') || ':' || season.ordinal::text || ':' || title.ordinal::text
 		           ELSE COALESCE(title.resource_id, '')
 		       END AS resource_id,
-		       COALESCE(CASE WHEN title.media_type = 'episode' THEN series.resource_provider ELSE title.resource_provider END, '') AS resource_provider,
+		       CASE
+		           WHEN title.media_type = 'episode' AND season.hierarchy_variant <> ''
+		             THEN COALESCE(episode_order.provider, '')
+		           WHEN title.media_type = 'episode' THEN COALESCE(series.resource_provider, '')
+		           ELSE COALESCE(title.resource_provider, '')
+		       END AS resource_provider,
 		       COALESCE(CASE WHEN title.media_type = 'episode' THEN title.display_title END, '') AS episode_title,
 		       COALESCE(CASE WHEN title.media_type = 'episode' THEN NULLIF(title.poster_url, '') END, CASE WHEN title.media_type = 'episode' THEN NULLIF(series.background_url, '') END, '') AS episode_still_url,
 		       COALESCE(CASE WHEN title.media_type = 'episode' THEN title.release_date::text END, '') AS episode_air_date,
@@ -147,12 +180,24 @@ const resumeItemsCTE = `
 		LEFT JOIN titles series
 		  ON season.media_type = 'season' AND series.id = season.parent_id
 		LEFT JOIN accessible_titles accessible_series ON accessible_series.id = series.id
+		LEFT JOIN active_hierarchy active
+		  ON title.media_type = 'episode' AND active.series_id = series.id
+		LEFT JOIN title_episode_order_identities season_order
+		  ON season_order.title_id = season.id AND season_order.namespace = 'season'
+		LEFT JOIN title_episode_order_identities episode_order
+		  ON episode_order.title_id = title.id AND episode_order.namespace = 'episode'
 		WHERE progress.profile_id = $1::uuid
 		  AND NOT progress.completed
 		  AND progress.position_seconds > 0
 		  AND (
 		      title.media_type <> 'episode'
-		      OR (accessible_season.id IS NOT NULL AND accessible_series.id IS NOT NULL AND series.source_addon_id IS NULL)
+		      OR (
+		          accessible_season.id IS NOT NULL
+		          AND accessible_series.id IS NOT NULL
+		          AND series.source_addon_id IS NULL
+		          AND active.series_id IS NOT NULL
+		          AND season.hierarchy_variant = active.hierarchy_variant
+		      )
 		  )
 		  AND NOT EXISTS (
 		      SELECT 1 FROM profile_continue_dismissals dismissal
@@ -167,7 +212,8 @@ const resumeItemsCTE = `
 func queryResumeItems(ctx context.Context, tx pgx.Tx, profileID string, offset, limit int) ([]ContinueItem, error) {
 	rows, err := tx.Query(ctx, resumeItemsCTE+`
 		SELECT id::text, media_type, series_id::text, season_id::text,
-		       season_number, episode_number, position_seconds, duration_seconds,
+		       season_number, episode_number, mapping_provider, episode_order_id,
+		       metadata_season_id, position_seconds, duration_seconds,
 		       version, display_title, poster_url, background_url, release_info,
 		       resource_id, resource_provider, episode_title, episode_still_url,
 		       episode_air_date, last_watched_at
@@ -185,7 +231,8 @@ func queryResumeItems(ctx context.Context, tx pgx.Tx, profileID string, offset, 
 		var seriesID, seasonID *string
 		if err := rows.Scan(
 			&item.TitleID, &item.MediaType, &seriesID, &seasonID,
-			&item.SeasonNumber, &item.EpisodeNumber, &item.PositionSeconds,
+			&item.SeasonNumber, &item.EpisodeNumber, &item.MappingProvider,
+			&item.EpisodeOrderID, &item.MetadataSeasonID, &item.PositionSeconds,
 			&item.DurationSeconds, &item.Version, &item.Title, &item.PosterURL,
 			&item.BackgroundURL, &item.ReleaseInfo, &item.ResourceID,
 			&item.ResourceProvider, &item.EpisodeTitle, &item.EpisodeStillURL,
@@ -210,12 +257,31 @@ func queryResumeItems(ctx context.Context, tx pgx.Tx, profileID string, offset, 
 
 const nextUpItemsCTE = `
 	WITH accessible_titles AS (` + accessibleTitlesSQL + `),
+	active_hierarchy AS (
+		SELECT DISTINCT ON (series.id)
+		       series.id AS series_id,
+		       season.hierarchy_variant
+		FROM profile_progress hierarchy_progress
+		JOIN titles episode
+		  ON episode.id = hierarchy_progress.title_id
+		 AND episode.media_type = 'episode'
+		JOIN accessible_titles accessible_episode ON accessible_episode.id = episode.id
+		JOIN titles season ON season.id = episode.parent_id AND season.media_type = 'season'
+		JOIN accessible_titles accessible_season ON accessible_season.id = season.id
+		JOIN titles series ON series.id = season.parent_id AND series.media_type = 'series'
+		JOIN accessible_titles accessible_series ON accessible_series.id = series.id
+		WHERE hierarchy_progress.profile_id = $1::uuid
+		  AND series.source_addon_id IS NULL
+		  AND ($2::uuid IS NULL OR series.id = $2::uuid)
+		ORDER BY series.id, hierarchy_progress.last_watched_at DESC, episode.id
+	),
 	latest_completed AS (
 		SELECT DISTINCT ON (series.id)
 		       series.id AS series_id,
 		       season.ordinal AS season_number,
 		       episode.ordinal AS episode_number,
-		       progress.last_watched_at
+		       progress.last_watched_at,
+		       active.hierarchy_variant
 		FROM profile_progress progress
 		JOIN titles episode ON episode.id = progress.title_id AND episode.media_type = 'episode'
 		JOIN accessible_titles accessible_episode ON accessible_episode.id = episode.id
@@ -223,6 +289,9 @@ const nextUpItemsCTE = `
 		JOIN accessible_titles accessible_season ON accessible_season.id = season.id
 		JOIN titles series ON series.id = season.parent_id AND series.media_type = 'series'
 		JOIN accessible_titles accessible_series ON accessible_series.id = series.id
+		JOIN active_hierarchy active
+		  ON active.series_id = series.id
+		 AND active.hierarchy_variant = season.hierarchy_variant
 		WHERE progress.profile_id = $1::uuid
 		  AND progress.completed
 		  AND season.ordinal > 0
@@ -231,11 +300,13 @@ const nextUpItemsCTE = `
 		ORDER BY series.id, season.ordinal DESC, episode.ordinal DESC, progress.last_watched_at DESC, episode.id
 	), eligible_series AS (
 		SELECT series.id AS series_id,
+		       active.hierarchy_variant,
 		       latest.season_number,
 		       latest.episode_number,
 		       latest.last_watched_at
 		FROM titles series
 		JOIN accessible_titles accessible_series ON accessible_series.id = series.id
+		LEFT JOIN active_hierarchy active ON active.series_id = series.id
 		LEFT JOIN latest_completed latest ON latest.series_id = series.id
 		WHERE series.media_type = 'series'
 		  AND series.source_addon_id IS NULL
@@ -244,33 +315,33 @@ const nextUpItemsCTE = `
 		      SELECT 1 FROM profile_continue_dismissals dismissal
 		      WHERE dismissal.profile_id = $1::uuid AND dismissal.title_id = series.id
 		  )
-		  AND (
-		      latest.series_id IS NOT NULL
-		      OR NOT EXISTS (
-		          SELECT 1
-		          FROM profile_progress existing
-		          JOIN titles existing_episode
-		            ON existing_episode.id = existing.title_id
-		           AND existing_episode.media_type = 'episode'
-		          JOIN titles existing_season
-		            ON existing_season.id = existing_episode.parent_id
-		           AND existing_season.media_type = 'season'
-		          WHERE existing.profile_id = $1::uuid
-		            AND existing_season.parent_id = series.id
-		      )
-		  )
+		  AND (latest.series_id IS NOT NULL OR active.series_id IS NULL)
 	), selected AS (
 		SELECT next_episode.id,
 		       eligible.series_id,
 		       next_season.id AS season_id,
 		       next_season.ordinal AS season_number,
 		       next_episode.ordinal AS episode_number,
+		       CASE WHEN next_season.hierarchy_variant <> ''
+		            THEN COALESCE(episode_order.provider, '') ELSE '' END AS mapping_provider,
+		       CASE WHEN next_season.hierarchy_variant <> ''
+		            THEN COALESCE(episode_order.order_id, '') ELSE '' END AS episode_order_id,
+		       CASE WHEN next_season.hierarchy_variant <> ''
+		            THEN COALESCE(season_order.provider, '') || ':' || eligible.series_id::text || ':' ||
+		                 COALESCE(season_order.external_id, '')
+		            ELSE '' END AS metadata_season_id,
 		       COALESCE(series_title.display_title, '') AS display_title,
 		       COALESCE(series_title.poster_url, '') AS poster_url,
 		       COALESCE(series_title.background_url, '') AS background_url,
 		       COALESCE(series_title.release_info, '') AS release_info,
-		       COALESCE(series_title.resource_id, '') || ':' || next_season.ordinal::text || ':' || next_episode.ordinal::text AS resource_id,
-		       COALESCE(series_title.resource_provider, '') AS resource_provider,
+		       CASE WHEN next_season.hierarchy_variant <> ''
+		            THEN COALESCE(episode_order.provider, '') || ':' || COALESCE(episode_order.external_id, '')
+		            ELSE COALESCE(series_title.resource_id, '') || ':' || next_season.ordinal::text || ':' || next_episode.ordinal::text
+		       END AS resource_id,
+		       CASE WHEN next_season.hierarchy_variant <> ''
+		            THEN COALESCE(episode_order.provider, '')
+		            ELSE COALESCE(series_title.resource_provider, '')
+		       END AS resource_provider,
 		       COALESCE(next_episode.display_title, '') AS episode_title,
 		       COALESCE(NULLIF(next_episode.poster_url, ''), NULLIF(series_title.background_url, ''), '') AS episode_still_url,
 		       COALESCE(next_episode.release_date::text, '') AS episode_air_date,
@@ -287,6 +358,7 @@ const nextUpItemsCTE = `
 			JOIN accessible_titles accessible_candidate_season ON accessible_candidate_season.id = candidate_season.id
 			WHERE candidate_episode.media_type = 'episode'
 			  AND candidate_season.parent_id = eligible.series_id
+			  AND candidate_season.hierarchy_variant = COALESCE(eligible.hierarchy_variant, '')
 			  AND candidate_season.ordinal > 0
 			  AND (
 			      eligible.season_number IS NULL
@@ -300,20 +372,25 @@ const nextUpItemsCTE = `
 			        AND existing.title_id = candidate_episode.id
 			        AND existing.completed
 			  )
-			ORDER BY candidate_season.ordinal, candidate_episode.ordinal
+			ORDER BY candidate_season.ordinal, candidate_episode.ordinal, candidate_episode.id
 			LIMIT 1
 		) next_episode ON true
 		JOIN titles next_season ON next_season.id = next_episode.parent_id
 		JOIN titles series_title ON series_title.id = eligible.series_id
+		LEFT JOIN title_episode_order_identities season_order
+		  ON season_order.title_id = next_season.id AND season_order.namespace = 'season'
+		LEFT JOIN title_episode_order_identities episode_order
+		  ON episode_order.title_id = next_episode.id AND episode_order.namespace = 'episode'
 	)
 `
 
 func queryNextUpItems(ctx context.Context, tx pgx.Tx, profileID string, seriesID any, offset, limit int) ([]ContinueItem, error) {
 	rows, err := tx.Query(ctx, nextUpItemsCTE+`
 		SELECT id::text, series_id::text, season_id::text, season_number,
-		       episode_number, display_title, poster_url, background_url,
-		       release_info, resource_id, resource_provider, episode_title,
-		       episode_still_url, episode_air_date, last_watched_at
+		       episode_number, mapping_provider, episode_order_id, metadata_season_id,
+		       display_title, poster_url, background_url, release_info, resource_id,
+		       resource_provider, episode_title, episode_still_url, episode_air_date,
+		       last_watched_at
 		FROM selected
 		ORDER BY last_watched_at DESC NULLS LAST, series_id, season_number, episode_number, id
 		LIMIT $3 OFFSET $4
@@ -327,10 +404,11 @@ func queryNextUpItems(ctx context.Context, tx pgx.Tx, profileID string, seriesID
 		var item ContinueItem
 		if err := rows.Scan(
 			&item.TitleID, &item.SeriesID, &item.SeasonID, &item.SeasonNumber,
-			&item.EpisodeNumber, &item.Title, &item.PosterURL, &item.BackgroundURL,
-			&item.ReleaseInfo, &item.ResourceID, &item.ResourceProvider,
-			&item.EpisodeTitle, &item.EpisodeStillURL, &item.EpisodeAirDate,
-			&item.LastWatchedAt,
+			&item.EpisodeNumber, &item.MappingProvider, &item.EpisodeOrderID,
+			&item.MetadataSeasonID, &item.Title, &item.PosterURL,
+			&item.BackgroundURL, &item.ReleaseInfo, &item.ResourceID,
+			&item.ResourceProvider, &item.EpisodeTitle, &item.EpisodeStillURL,
+			&item.EpisodeAirDate, &item.LastWatchedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan next-up item: %w", err)
 		}
