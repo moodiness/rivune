@@ -2889,6 +2889,60 @@ func mergeProfileState(ctx context.Context, tx pgx.Tx, destinationID, sourceID s
 	if _, err := tx.Exec(ctx, "DELETE FROM profile_progress WHERE title_id = $1::uuid", sourceID); err != nil {
 		return fmt.Errorf("remove duplicate profile progress state: %w", err)
 	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO profile_user_data AS destination (
+			profile_id, title_id, rating, rating_set,
+			played_percentage, played_percentage_set,
+			unplayed_item_count, unplayed_item_count_set,
+			play_count, play_count_set, likes, likes_set,
+			last_played_date, last_played_date_submicrosecond,
+			last_played_date_set, updated_at
+		)
+		SELECT profile_id, $1::uuid, rating, rating_set,
+		       played_percentage, played_percentage_set,
+		       unplayed_item_count, unplayed_item_count_set,
+		       play_count, play_count_set, likes, likes_set,
+		       last_played_date, last_played_date_submicrosecond,
+		       last_played_date_set, updated_at
+		FROM profile_user_data
+		WHERE title_id = $2::uuid
+		ON CONFLICT (profile_id, title_id) DO UPDATE
+		SET rating = EXCLUDED.rating,
+		    rating_set = EXCLUDED.rating_set,
+		    played_percentage = EXCLUDED.played_percentage,
+		    played_percentage_set = EXCLUDED.played_percentage_set,
+		    unplayed_item_count = EXCLUDED.unplayed_item_count,
+		    unplayed_item_count_set = EXCLUDED.unplayed_item_count_set,
+		    play_count = EXCLUDED.play_count,
+		    play_count_set = EXCLUDED.play_count_set,
+		    likes = EXCLUDED.likes,
+		    likes_set = EXCLUDED.likes_set,
+		    last_played_date = EXCLUDED.last_played_date,
+		    last_played_date_submicrosecond = EXCLUDED.last_played_date_submicrosecond,
+		    last_played_date_set = EXCLUDED.last_played_date_set,
+		    updated_at = EXCLUDED.updated_at
+		WHERE EXCLUDED.updated_at > destination.updated_at
+	`, destinationID, sourceID); err != nil {
+		return fmt.Errorf("merge profile user data: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM profile_user_data WHERE title_id = $1::uuid", sourceID); err != nil {
+		return fmt.Errorf("remove duplicate profile user data: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO profile_continue_dismissals AS destination (
+			profile_id, title_id, dismissed_at
+		)
+		SELECT profile_id, $1::uuid, dismissed_at
+		FROM profile_continue_dismissals
+		WHERE title_id = $2::uuid
+		ON CONFLICT (profile_id, title_id) DO UPDATE
+		SET dismissed_at = GREATEST(destination.dismissed_at, EXCLUDED.dismissed_at)
+	`, destinationID, sourceID); err != nil {
+		return fmt.Errorf("merge profile continue dismissal: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM profile_continue_dismissals WHERE title_id = $1::uuid", sourceID); err != nil {
+		return fmt.Errorf("remove duplicate profile continue dismissal: %w", err)
+	}
 	return nil
 }
 
