@@ -245,6 +245,170 @@ func TestArchiveRoundTripPreservesEpisodeOrderVariant(t *testing.T) {
 	}
 }
 
+type identityClassSnapshot struct {
+	boundTitleID, mediaType, parentID, hierarchyVariant, canonicalExternalIDs, episodeOrderIdentity string
+	ordinal, progressPosition, progressDuration                                                  int
+	progressVersion                                                                               int64
+	progressCompleted                                                                             bool
+	bindingUpdatedAt, progressLastWatchedAt, progressUpdatedAt                                    time.Time
+}
+
+func portableIdentityClassTestService(t *testing.T) (context.Context, *Service, auth.Principal, string) {
+	t.Helper()
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL to run portable archive integration tests")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	basePool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(basePool.Close)
+	schema := fmt.Sprintf("portable_identity_class_%d", time.Now().UnixNano())
+	if _, err := basePool.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = basePool.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") })
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	if err := database.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO instances(id,name) VALUES(1,'Portable identity-class test'); INSERT INTO instance_settings(instance_id,schema_version,settings) VALUES(1,3,'{}')`); err != nil {
+		t.Fatal(err)
+	}
+	var categoryID, userID, profileID string
+	if err := pool.QueryRow(ctx, `SELECT id::text FROM access_categories WHERE is_default`).Scan(&categoryID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO users(username,password_hash,role) VALUES('portable-identity-class','test','admin') RETURNING id::text`).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO profiles(name,category_id) VALUES('Identity class',$1::uuid) RETURNING id::text`, categoryID).Scan(&profileID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO profile_settings(profile_id,schema_version,settings) VALUES($1::uuid,1,'{}')`, profileID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO user_profile_access(user_id,profile_id,can_manage) VALUES($1::uuid,$2::uuid,true)`, userID, profileID); err != nil {
+		t.Fatal(err)
+	}
+	principal := portableTestPrincipal(t, ctx, pool, userID, profileID, categoryID)
+	return ctx, NewService(pool, portableTestRuntimeSettings(t)), principal, profileID
+}
+
+func identityClassDocument(now time.Time, variantEpisode bool) Document {
+	seriesKey := "sha256:" + strings.Repeat("a", 64)
+	canonicalSeasonKey := "sha256:" + strings.Repeat("b", 64)
+	variantSeasonKey := "sha256:" + strings.Repeat("c", 64)
+	episodeKey := "sha256:" + strings.Repeat("d", 64)
+	seasonOrdinal, episodeOrdinal := 1, 1
+	episode := Title{
+		Key: episodeKey, MediaType: "episode", ParentKey: canonicalSeasonKey, Ordinal: &episodeOrdinal,
+		ExternalIDs: []ExternalID{{Provider: "tvdb", Namespace: "episode", ExternalID: "7954418"}},
+	}
+	position := 100
+	if variantEpisode {
+		episode.ParentKey = variantSeasonKey
+		episode.HierarchyVariant = "tvdb:2"
+		episode.EpisodeOrderIdentity = &EpisodeOrderIdentity{SeriesKey: seriesKey, Provider: "tvdb", OrderID: "2", Namespace: "episode", ExternalID: "10357450"}
+		episode.ExternalIDs = []ExternalID{}
+		position = 200
+	}
+	return Document{
+		Version: DocumentVersion, ExportedAt: now,
+		Identity: Identity{Name: "Identity class", Avatar: Avatar{Kind: "preset", PresetID: "aurora"}},
+		Addons: []Addon{}, Collections: []PortableCollection{},
+		Titles: []Title{
+			{Key: seriesKey, MediaType: "series", ExternalIDs: []ExternalID{{Provider: "tvdb", Namespace: "series", ExternalID: "404604"}}},
+			{Key: canonicalSeasonKey, MediaType: "season", ParentKey: seriesKey, Ordinal: &seasonOrdinal, ExternalIDs: []ExternalID{{Provider: "tvdb", Namespace: "season", ExternalID: "871838"}}},
+			{
+				Key: variantSeasonKey, MediaType: "season", ParentKey: seriesKey, Ordinal: &seasonOrdinal, HierarchyVariant: "tvdb:2",
+				EpisodeOrderIdentity: &EpisodeOrderIdentity{SeriesKey: seriesKey, Provider: "tvdb", OrderID: "2", Namespace: "season", ExternalID: "871838"},
+				ExternalIDs:          []ExternalID{},
+			},
+			episode,
+		},
+		Library: []LibraryState{},
+		Progress: []ProgressState{{TitleKey: episodeKey, PositionSeconds: position, DurationSeconds: 600, Version: 1, LastWatchedAt: now, UpdatedAt: now}},
+		Favorites: []FavoriteState{}, UserData: []UserDataState{}, ContinueDismissals: []ContinueDismissal{}, TrackingPreferences: []TrackingPreference{},
+	}
+}
+
+func readIdentityClassSnapshot(t *testing.T, ctx context.Context, service *Service, profileID, key string) identityClassSnapshot {
+	t.Helper()
+	var snapshot identityClassSnapshot
+	err := service.pool.QueryRow(ctx, `
+		SELECT binding.resource_id::text,title.media_type,COALESCE(title.parent_id::text,''),COALESCE(title.ordinal,-1),title.hierarchy_variant,
+		       COALESCE((SELECT string_agg(provider || ':' || namespace || ':' || external_id, ',' ORDER BY provider,namespace,external_id)
+		                 FROM title_external_ids WHERE title_id=title.id),''),
+		       COALESCE((SELECT series_title_id::text || ':' || provider || ':' || order_id || ':' || namespace || ':' || external_id
+		                 FROM title_episode_order_identities WHERE title_id=title.id),''),
+		       binding.updated_at,progress.position_seconds,progress.duration_seconds,progress.completed,
+		       progress.version,progress.last_watched_at,progress.updated_at
+		FROM portable_profile_resource_bindings binding
+		JOIN titles title ON title.id=binding.resource_id
+		JOIN profile_progress progress ON progress.profile_id=binding.profile_id AND progress.title_id=title.id
+		WHERE binding.profile_id=$1::uuid AND binding.resource_kind='title' AND binding.portable_key=$2
+	`, profileID, key).Scan(
+		&snapshot.boundTitleID, &snapshot.mediaType, &snapshot.parentID, &snapshot.ordinal, &snapshot.hierarchyVariant,
+		&snapshot.canonicalExternalIDs, &snapshot.episodeOrderIdentity,
+		&snapshot.bindingUpdatedAt, &snapshot.progressPosition, &snapshot.progressDuration, &snapshot.progressCompleted,
+		&snapshot.progressVersion, &snapshot.progressLastWatchedAt, &snapshot.progressUpdatedAt,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+func TestImportRejectsEpisodeOrderIdentityClassChanges(t *testing.T) {
+	for _, test := range []struct {
+		name, initialClass string
+		initialVariant     bool
+	}{
+		{name: "canonical to variant", initialClass: "canonical"},
+		{name: "variant to canonical", initialClass: "variant", initialVariant: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, service, principal, profileID := portableIdentityClassTestService(t)
+			now := time.Now().UTC().Truncate(time.Microsecond)
+			initial := identityClassDocument(now, test.initialVariant)
+			if _, err := service.Import(ctx, principal, profileID, initial); err != nil {
+				t.Fatalf("initial %s import: %v", test.initialClass, err)
+			}
+			episodeKey := "sha256:" + strings.Repeat("d", 64)
+			before := readIdentityClassSnapshot(t, ctx, service, profileID, episodeKey)
+			if test.initialVariant {
+				if before.hierarchyVariant != "tvdb:2" || before.canonicalExternalIDs != "" || before.episodeOrderIdentity == "" {
+					t.Fatalf("initial variant snapshot = %+v", before)
+				}
+			} else if before.hierarchyVariant != "" || before.canonicalExternalIDs == "" || before.episodeOrderIdentity != "" {
+				t.Fatalf("initial canonical snapshot = %+v", before)
+			}
+
+			reclassified := identityClassDocument(now.Add(time.Minute), !test.initialVariant)
+			if _, err := service.Import(ctx, principal, profileID, reclassified); !errors.Is(err, ErrConflict) {
+				t.Fatalf("%s reclassification error = %v, want ErrConflict", test.name, err)
+			}
+			after := readIdentityClassSnapshot(t, ctx, service, profileID, episodeKey)
+			if after != before {
+				t.Fatalf("%s changed bound title/state:\nbefore=%+v\nafter=%+v", test.name, before, after)
+			}
+		})
+	}
+}
+
 func TestArchiveRoundTripIdempotenceSecretExclusionAndRollback(t *testing.T) {
 	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
 	if databaseURL == "" {

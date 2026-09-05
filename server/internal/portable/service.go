@@ -1105,9 +1105,23 @@ func importTitles(ctx context.Context, tx pgx.Tx, profileID string, document Doc
 			}
 			created++
 		} else {
-			var currentSourceAddonID string
+			var currentSourceAddonID, currentMediaType, currentParentID, currentHierarchyVariant string
+			var currentOrdinal *int
+			var hasCanonicalExternalIDs bool
 			var existingScopedProfile, existingScopedProvider, existingScopedNamespace, existingScopedID *string
-			if err := tx.QueryRow(ctx, `SELECT COALESCE(title.source_addon_id::text,''),identity.profile_id::text,identity.provider,identity.namespace,identity.external_id FROM titles title LEFT JOIN profile_title_external_ids identity ON identity.title_id=title.id WHERE title.id=$1::uuid FOR UPDATE OF title`, id).Scan(&currentSourceAddonID, &existingScopedProfile, &existingScopedProvider, &existingScopedNamespace, &existingScopedID); err != nil {
+			if err := tx.QueryRow(ctx, `
+				SELECT COALESCE(title.source_addon_id::text,''),title.media_type,COALESCE(title.parent_id::text,''),
+				       title.ordinal,title.hierarchy_variant,
+				       EXISTS (SELECT 1 FROM title_external_ids canonical WHERE canonical.title_id=title.id),
+				       scoped.profile_id::text,scoped.provider,scoped.namespace,scoped.external_id
+				FROM titles title
+				LEFT JOIN profile_title_external_ids scoped ON scoped.title_id=title.id
+				WHERE title.id=$1::uuid
+				FOR UPDATE OF title
+			`, id).Scan(
+				&currentSourceAddonID, &currentMediaType, &currentParentID, &currentOrdinal, &currentHierarchyVariant,
+				&hasCanonicalExternalIDs, &existingScopedProfile, &existingScopedProvider, &existingScopedNamespace, &existingScopedID,
+			); err != nil {
 				return nil, 0, 0, fmt.Errorf("check imported title provenance: %w", err)
 			}
 			if currentSourceAddonID != sourceAddonID {
@@ -1123,7 +1137,43 @@ func importTitles(ctx context.Context, tx pgx.Tx, profileID string, document Doc
 					}
 				}
 			}
-			if value.EpisodeOrderIdentity != nil {
+
+			var existingOrderSeriesID, existingOrderProvider, existingOrderID, existingOrderNamespace, existingOrderExternalID string
+			orderErr := tx.QueryRow(ctx, `
+				SELECT series_title_id::text,provider,order_id,namespace,external_id
+				FROM title_episode_order_identities
+				WHERE title_id=$1::uuid
+				FOR UPDATE
+			`, id).Scan(&existingOrderSeriesID, &existingOrderProvider, &existingOrderID, &existingOrderNamespace, &existingOrderExternalID)
+			hasEpisodeOrderIdentity := orderErr == nil
+			if orderErr != nil && !errors.Is(orderErr, pgx.ErrNoRows) {
+				return nil, 0, 0, fmt.Errorf("check imported episode-order identity: %w", orderErr)
+			}
+
+			incomingOrderIdentity := value.EpisodeOrderIdentity
+			if incomingOrderIdentity == nil {
+				if currentMediaType != value.MediaType || currentHierarchyVariant != "" || hasEpisodeOrderIdentity {
+					return nil, 0, 0, fmt.Errorf("%w: canonical archive title resolved to a noncanonical title", ErrConflict)
+				}
+			} else {
+				if currentMediaType != value.MediaType || hasCanonicalExternalIDs {
+					return nil, 0, 0, fmt.Errorf("%w: episode-order archive title resolved to an incompatible title", ErrConflict)
+				}
+				if hasEpisodeOrderIdentity {
+					if existingOrderSeriesID != episodeOrderSeriesID ||
+						existingOrderProvider != incomingOrderIdentity.Provider ||
+						existingOrderID != incomingOrderIdentity.OrderID ||
+						existingOrderNamespace != incomingOrderIdentity.Namespace ||
+						existingOrderExternalID != incomingOrderIdentity.ExternalID {
+						return nil, 0, 0, fmt.Errorf("%w: resolved title has a different episode-order identity", ErrConflict)
+					}
+				} else {
+					sameOrdinal := currentOrdinal == nil && value.Ordinal == nil ||
+						currentOrdinal != nil && value.Ordinal != nil && *currentOrdinal == *value.Ordinal
+					if currentHierarchyVariant != value.HierarchyVariant || currentParentID != parentID || !sameOrdinal {
+						return nil, 0, 0, fmt.Errorf("%w: episode-order archive title resolved to an incompatible legacy title", ErrConflict)
+					}
+				}
 				tag, err := tx.Exec(ctx, `
 					UPDATE titles
 					SET parent_id=NULLIF($2,'')::uuid,ordinal=$3,hierarchy_variant=$4,updated_at=now()
