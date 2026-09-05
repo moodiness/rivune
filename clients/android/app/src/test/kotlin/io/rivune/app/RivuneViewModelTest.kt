@@ -2463,6 +2463,104 @@ class RivuneViewModelTest {
 
 
     @Test
+    fun canonicalSeriesAlwaysReloadsTheDiscoveredOfficialOrder() = runTest(dispatcher) {
+        val seriesId = UUID.randomUUID()
+        val discovery = series(seriesId).copy(
+            episodeOrders = listOf(io.rivune.api.EpisodeOrder("7", "Aired Order", "official", true)),
+            selectedEpisodeOrderId = "7",
+            mappingProvider = io.rivune.api.SeriesMappingProvider.TVDB,
+        )
+        val reloaded = discovery.copy(name = "Reloaded official series")
+        val gateway = FakeGateway().apply {
+            seriesResult = discovery
+            seriesResults = mapOf(
+                Pair(io.rivune.api.SeriesMappingProvider.TVDB, "7") to reloaded,
+            )
+            seriesFailures = mapOf(
+                io.rivune.api.SeriesMappingProvider.TMDB to IllegalStateException("canonical unavailable"),
+            )
+        }
+
+        assertEquals(reloaded, gateway.canonicalSeries(seriesId, language = null))
+        assertEquals(
+            listOf<Triple<UUID, io.rivune.api.SeriesMappingProvider, String?>>(
+                Triple(seriesId, io.rivune.api.SeriesMappingProvider.TMDB, null),
+                Triple(seriesId, io.rivune.api.SeriesMappingProvider.TVDB, null),
+                Triple(seriesId, io.rivune.api.SeriesMappingProvider.TVDB, "7"),
+            ),
+            gateway.seriesRequests,
+        )
+    }
+
+    @Test
+    fun canonicalSeriesRejectsInvalidOfficialDiscoveryResponses() = runTest(dispatcher) {
+        val seriesId = UUID.randomUUID()
+        val valid = series(seriesId).copy(
+            episodeOrders = listOf(io.rivune.api.EpisodeOrder("7", "Aired Order", "official", true)),
+            selectedEpisodeOrderId = "7",
+            mappingProvider = io.rivune.api.SeriesMappingProvider.TVDB,
+        )
+        val fixtures = listOf(
+            "wrong discovery provider" to valid.copy(mappingProvider = io.rivune.api.SeriesMappingProvider.TMDB),
+            "noncanonical official ID" to valid.copy(
+                episodeOrders = listOf(io.rivune.api.EpisodeOrder("07", "Aired Order", "official", true)),
+                selectedEpisodeOrderId = "07",
+            ),
+            "nonpositive official ID" to valid.copy(
+                episodeOrders = listOf(io.rivune.api.EpisodeOrder("0", "Aired Order", "official", true)),
+                selectedEpisodeOrderId = "0",
+            ),
+            "overflowing official ID" to valid.copy(
+                episodeOrders = listOf(
+                    io.rivune.api.EpisodeOrder("9223372036854775808", "Aired Order", "official", true),
+                ),
+                selectedEpisodeOrderId = "9223372036854775808",
+            ),
+        )
+
+        fixtures.forEach { (name, discovery) ->
+            val gateway = FakeGateway().apply {
+                seriesResult = discovery
+                seriesFailures = mapOf(
+                    io.rivune.api.SeriesMappingProvider.TMDB to IllegalStateException("canonical unavailable"),
+                )
+            }
+
+            val failure = runCatching { gateway.canonicalSeries(seriesId, language = null) }.exceptionOrNull()
+            assertIs<IllegalStateException>(failure, name)
+        }
+    }
+
+    @Test
+    fun canonicalSeriesRejectsNonofficialReloadResponse() = runTest(dispatcher) {
+        val seriesId = UUID.randomUUID()
+        val discovery = series(seriesId).copy(
+            episodeOrders = listOf(
+                io.rivune.api.EpisodeOrder("7", "Aired Order", "official", false),
+                io.rivune.api.EpisodeOrder("8", "DVD Order", "dvd", true),
+            ),
+            selectedEpisodeOrderId = "8",
+            mappingProvider = io.rivune.api.SeriesMappingProvider.TVDB,
+        )
+        val nonofficialReload = discovery.copy(
+            episodeOrders = listOf(io.rivune.api.EpisodeOrder("7", "Not Aired", "dvd", false)),
+            selectedEpisodeOrderId = "7",
+        )
+        val gateway = FakeGateway().apply {
+            seriesResult = discovery
+            seriesResults = mapOf(
+                Pair(io.rivune.api.SeriesMappingProvider.TVDB, "7") to nonofficialReload,
+            )
+            seriesFailures = mapOf(
+                io.rivune.api.SeriesMappingProvider.TMDB to IllegalStateException("canonical unavailable"),
+            )
+        }
+
+        val failure = runCatching { gateway.canonicalSeries(seriesId, language = null) }.exceptionOrNull()
+        assertIs<IllegalStateException>(failure)
+    }
+
+    @Test
     fun episodeEntryResolvesSeriesOnceAndMarkerFailureFailsOpen() = runTest(dispatcher) {
         val seriesId = UUID.randomUUID()
         val episodeId = UUID.randomUUID()

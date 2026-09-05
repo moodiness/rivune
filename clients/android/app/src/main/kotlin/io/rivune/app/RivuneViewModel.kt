@@ -165,6 +165,7 @@ internal fun coordinatedHostRoomState(ending: Boolean, playing: Boolean): String
 internal fun shouldPublishHostRoomProgress(ending: Boolean, ended: Boolean): Boolean = !ending && !ended
 private val NAMESPACED_ID = Regex("^([a-z0-9._-]+):(.+)$", RegexOption.IGNORE_CASE)
 private val CANONICAL_SEARCH_PROVIDERS = setOf("tmdb", "imdb", "tvdb", "trakt")
+private val POSITIVE_SIGNED_INT64_DECIMAL = Regex("^[1-9][0-9]{0,18}$")
 
 internal fun searchMediaTargetKey(target: MediaTarget): String =
     "${target.mediaType.lowercase()}:${searchMediaTargetIdentities(target).minOrNull()}"
@@ -338,7 +339,7 @@ internal interface RivuneGateway {
     fun resolveArtworkUrl(value: String): String?
 }
 private fun unsupportedV22(): Nothing = throw UnsupportedOperationException("v22 feature unavailable")
-private suspend fun RivuneGateway.canonicalSeries(id: UUID, language: String?): Series {
+internal suspend fun RivuneGateway.canonicalSeries(id: UUID, language: String?): Series {
     val canonicalFailure = try {
         return series(
             id,
@@ -351,30 +352,37 @@ private suspend fun RivuneGateway.canonicalSeries(id: UUID, language: String?): 
     } catch (cause: Throwable) {
         cause
     }
-    val fallback = series(
+    val discovery = series(
         id,
         mappingProvider = SeriesMappingProvider.TVDB,
         language = language,
         episodeOrder = null,
     )
-    if (fallback.mappingProvider != SeriesMappingProvider.TVDB) return fallback
-    val selectedOrderId = fallback.selectedEpisodeOrderId?.trim()?.takeIf(String::isNotBlank)
-    val officialOrderId = fallback.episodeOrders.firstOrNull {
+    if (discovery.mappingProvider != SeriesMappingProvider.TVDB) {
+        throw IllegalStateException("TVDB order discovery returned a different mapping provider", canonicalFailure)
+    }
+    val officialOrderId = discovery.episodeOrders.firstOrNull {
         it.type.trim().equals("official", ignoreCase = true)
-    }?.id?.trim()?.takeIf(String::isNotBlank)
-        ?: throw IllegalStateException("TVDB did not expose an official episode order", canonicalFailure)
-    if (selectedOrderId == officialOrderId) return fallback
+    }?.id ?: throw IllegalStateException("TVDB did not expose an official episode order", canonicalFailure)
+    if (
+        !POSITIVE_SIGNED_INT64_DECIMAL.matches(officialOrderId) ||
+        officialOrderId.toLongOrNull()?.takeIf { it > 0 } == null
+    ) {
+        throw IllegalStateException("TVDB exposed an invalid official episode order", canonicalFailure)
+    }
     val official = series(
         id,
         mappingProvider = SeriesMappingProvider.TVDB,
         language = language,
         episodeOrder = officialOrderId,
     )
+    val confirmedOrder = official.episodeOrders.firstOrNull { it.id == officialOrderId }
     if (
         official.mappingProvider != SeriesMappingProvider.TVDB ||
-        official.selectedEpisodeOrderId?.trim() != officialOrderId
+        official.selectedEpisodeOrderId != officialOrderId ||
+        confirmedOrder?.type?.trim()?.equals("official", ignoreCase = true) != true
     ) {
-        throw IllegalStateException("TVDB did not select the requested official episode order", canonicalFailure)
+        throw IllegalStateException("TVDB did not confirm the requested official episode order", canonicalFailure)
     }
     return official
 }

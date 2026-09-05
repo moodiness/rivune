@@ -345,6 +345,89 @@ final class MediaRegressionTests: XCTestCase {
     ])
   }
 
+  func testCanonicalContinuationReloadsAlreadySelectedOfficialTvdbOrder() async throws {
+    let currentEpisode = episodeID(1)
+    let transport = MediaRegressionTransport(
+      episodeIDs: [currentEpisode],
+      failTMDBSeries: true,
+      tvdbDefaultEpisodeOrderID: "1",
+      tvdbOfficialEpisodeOrderID: "1"
+    )
+    let (model, defaults) = try makeModel(transport: transport)
+    defer { defaults.removePersistentDomain(forName: defaultsSuite(defaults)) }
+    let item = try JSONDecoder().decode(
+      ContinueWatchingItem.self,
+      from: Data(
+        """
+        {"titleId":"\(currentEpisode.uuidString.lowercased())","mediaType":"episode","seriesId":"\(Self.seriesID.uuidString.lowercased())","seasonId":"77777777-7777-4777-8777-777777777777","seasonNumber":1,"episodeNumber":1,"title":"Canonical Series","resourceId":"tt1234567:1:1","resourceProvider":"imdb","episodeTitle":"Episode 1","positionSeconds":120,"durationSeconds":1800,"version":3,"reason":"resume","lastWatchedAt":"2026-09-04T12:00:00Z"}
+        """.utf8))
+
+    model.openMedia(item)
+    try await waitUntil { model.mediaDetail?.titleId == currentEpisode && !model.mediaLoading }
+
+    let seriesQueries = await transport.seriesQueries()
+    XCTAssertEqual(seriesQueries, [
+      ["mappingProvider": "tmdb"],
+      ["mappingProvider": "tvdb"],
+      ["mappingProvider": "tvdb", "episodeOrder": "1"],
+    ])
+  }
+
+  func testCanonicalContinuationRejectsOutOfRangeSelectedOfficialOrder() async throws {
+    let currentEpisode = episodeID(1)
+    let invalidOrderID = "9223372036854775808"
+    let transport = MediaRegressionTransport(
+      episodeIDs: [currentEpisode],
+      failTMDBSeries: true,
+      tvdbDefaultEpisodeOrderID: invalidOrderID,
+      tvdbOfficialEpisodeOrderID: invalidOrderID
+    )
+    let (model, defaults) = try makeModel(transport: transport)
+    defer { defaults.removePersistentDomain(forName: defaultsSuite(defaults)) }
+    let item = try JSONDecoder().decode(
+      ContinueWatchingItem.self,
+      from: Data(
+        """
+        {"titleId":"\(currentEpisode.uuidString.lowercased())","mediaType":"episode","seriesId":"\(Self.seriesID.uuidString.lowercased())","seasonId":"77777777-7777-4777-8777-777777777777","seasonNumber":1,"episodeNumber":1,"title":"Canonical Series","resourceId":"tt1234567:1:1","resourceProvider":"imdb","episodeTitle":"Episode 1","positionSeconds":120,"durationSeconds":1800,"version":3,"reason":"resume","lastWatchedAt":"2026-09-04T12:00:00Z"}
+        """.utf8))
+
+    model.openMedia(item)
+    try await waitUntil { model.mediaDetail?.titleId == currentEpisode && !model.mediaLoading }
+
+    XCTAssertNil(model.mediaDetail?.parentSeries)
+    let seriesQueries = await transport.seriesQueries()
+    XCTAssertEqual(seriesQueries, [
+      ["mappingProvider": "tmdb"],
+      ["mappingProvider": "tvdb"],
+    ])
+  }
+
+  func testCanonicalContinuationRejectsWrongProviderOnOfficialReload() async throws {
+    let currentEpisode = episodeID(1)
+    let transport = MediaRegressionTransport(
+      episodeIDs: [currentEpisode],
+      failTMDBSeries: true,
+      tvdbDefaultEpisodeOrderID: "2",
+      tvdbOfficialEpisodeOrderID: "1",
+      tvdbReloadMappingProvider: "tmdb"
+    )
+    let (model, defaults) = try makeModel(transport: transport)
+    defer { defaults.removePersistentDomain(forName: defaultsSuite(defaults)) }
+    let item = try JSONDecoder().decode(
+      ContinueWatchingItem.self,
+      from: Data(
+        """
+        {"titleId":"\(currentEpisode.uuidString.lowercased())","mediaType":"episode","seriesId":"\(Self.seriesID.uuidString.lowercased())","seasonId":"77777777-7777-4777-8777-777777777777","seasonNumber":1,"episodeNumber":1,"title":"Canonical Series","resourceId":"tt1234567:1:1","resourceProvider":"imdb","episodeTitle":"Episode 1","positionSeconds":120,"durationSeconds":1800,"version":3,"reason":"resume","lastWatchedAt":"2026-09-04T12:00:00Z"}
+        """.utf8))
+
+    model.openMedia(item)
+    try await waitUntil { model.mediaDetail?.titleId == currentEpisode && !model.mediaLoading }
+
+    XCTAssertNil(model.mediaDetail?.parentSeries)
+    let seasonIDs = await transport.seasonIDs()
+    XCTAssertEqual(seasonIDs, [])
+  }
+
   func testSelectedOfficialOrderClearsStaleContextAndKeepsCanonicalIdentity() throws {
     let episode = try JSONDecoder().decode(
       Episode.self,
@@ -949,6 +1032,7 @@ private actor MediaRegressionTransport: HTTPTransport {
   private let failTMDBSeries: Bool
   private let tvdbDefaultEpisodeOrderID: String?
   private let tvdbOfficialEpisodeOrderID: String?
+  private let tvdbReloadMappingProvider: String
   private var recordedProgressBatchSizes: [Int] = []
   private var recordedWatchedBatchSizes: [Int] = []
   private var recordedSeriesQueries: [[String: String]] = []
@@ -966,7 +1050,8 @@ private actor MediaRegressionTransport: HTTPTransport {
     metadataSeasonID: String? = nil,
     failTMDBSeries: Bool = false,
     tvdbDefaultEpisodeOrderID: String? = nil,
-    tvdbOfficialEpisodeOrderID: String? = nil
+    tvdbOfficialEpisodeOrderID: String? = nil,
+    tvdbReloadMappingProvider: String = "tvdb"
   ) {
     self.episodeIDs = episodeIDs
     self.initiallyCompleted = initiallyCompleted
@@ -978,6 +1063,7 @@ private actor MediaRegressionTransport: HTTPTransport {
     self.failTMDBSeries = failTMDBSeries
     self.tvdbDefaultEpisodeOrderID = tvdbDefaultEpisodeOrderID
     self.tvdbOfficialEpisodeOrderID = tvdbOfficialEpisodeOrderID
+    self.tvdbReloadMappingProvider = tvdbReloadMappingProvider
   }
 
   func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
@@ -1006,11 +1092,14 @@ private actor MediaRegressionTransport: HTTPTransport {
         let selectedOrderID = requestedOrderID ?? defaultOrderID
         let selectedType =
           selectedOrderID == tvdbOfficialEpisodeOrderID ? "official" : "dvd"
+        let responseMappingProvider =
+          requestedOrderID == nil ? "tvdb" : tvdbReloadMappingProvider
         return response(
           request,
           body: fallbackSeriesJSON(
             selectedOrderID: selectedOrderID,
-            selectedType: selectedType
+            selectedType: selectedType,
+            mappingProvider: responseMappingProvider
           ))
       }
       return response(request, body: seriesJSON())
@@ -1127,14 +1216,25 @@ private actor MediaRegressionTransport: HTTPTransport {
       "{\"id\":\"11111111-1111-4111-8111-111111111111\",\"mediaType\":\"series\",\"name\":\"Series\",\"originalName\":\"Series\",\"originalLanguage\":\"en\",\"overview\":\"\",\"genres\":[],\"cast\":[],\"voteAverage\":0,\"voteCount\":0,\"seasons\":\(seasons),\"aliases\":[],\(orders),\"externalIds\":{\"imdb\":\"tt1234567\"}}"
   }
 
-  private func fallbackSeriesJSON(selectedOrderID: String, selectedType: String) -> String {
-    var orders = [
-      "{\"id\":\"\(tvdbDefaultEpisodeOrderID ?? selectedOrderID)\",\"name\":\"DVD\",\"type\":\"dvd\",\"isDefault\":true}"
-    ]
-    if let officialOrderID = tvdbOfficialEpisodeOrderID {
+  private func fallbackSeriesJSON(
+    selectedOrderID: String,
+    selectedType: String,
+    mappingProvider: String
+  ) -> String {
+    var orders: [String] = []
+    if tvdbDefaultEpisodeOrderID == tvdbOfficialEpisodeOrderID {
       orders.append(
-        "{\"id\":\"\(officialOrderID)\",\"name\":\"Aired\",\"type\":\"official\",\"isDefault\":false}"
+        "{\"id\":\"\(selectedOrderID)\",\"name\":\"Aired\",\"type\":\"official\",\"isDefault\":true}"
       )
+    } else {
+      orders.append(
+        "{\"id\":\"\(tvdbDefaultEpisodeOrderID ?? selectedOrderID)\",\"name\":\"DVD\",\"type\":\"dvd\",\"isDefault\":true}"
+      )
+      if let officialOrderID = tvdbOfficialEpisodeOrderID {
+        orders.append(
+          "{\"id\":\"\(officialOrderID)\",\"name\":\"Aired\",\"type\":\"official\",\"isDefault\":false}"
+        )
+      }
     }
     let canonical = selectedType == "official"
     let seasonID =
@@ -1145,7 +1245,7 @@ private actor MediaRegressionTransport: HTTPTransport {
       ? "[]"
       : "[{\"id\":\"\(seasonID)\",\"mediaType\":\"season\",\"seriesId\":\"11111111-1111-4111-8111-111111111111\",\"name\":\"Season 1\",\"overview\":\"\",\"seasonNumber\":1,\"episodeCount\":\(episodeIDs.count),\"voteAverage\":0,\"externalIds\":{}}]"
     return
-      "{\"id\":\"11111111-1111-4111-8111-111111111111\",\"mediaType\":\"series\",\"name\":\"Series\",\"originalName\":\"Series\",\"originalLanguage\":\"en\",\"overview\":\"\",\"genres\":[],\"cast\":[],\"voteAverage\":0,\"voteCount\":0,\"seasons\":\(seasons),\"aliases\":[],\"episodeOrders\":[\(orders.joined(separator: ","))],\"selectedEpisodeOrderId\":\"\(selectedOrderID)\",\"mappingProvider\":\"tvdb\",\"externalIds\":{\"imdb\":\"tt1234567\"}}"
+      "{\"id\":\"11111111-1111-4111-8111-111111111111\",\"mediaType\":\"series\",\"name\":\"Series\",\"originalName\":\"Series\",\"originalLanguage\":\"en\",\"overview\":\"\",\"genres\":[],\"cast\":[],\"voteAverage\":0,\"voteCount\":0,\"seasons\":\(seasons),\"aliases\":[],\"episodeOrders\":[\(orders.joined(separator: ","))],\"selectedEpisodeOrderId\":\"\(selectedOrderID)\",\"mappingProvider\":\"\(mappingProvider)\",\"externalIds\":{\"imdb\":\"tt1234567\"}}"
   }
 
   private func seasonJSON() -> String {

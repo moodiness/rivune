@@ -148,6 +148,73 @@ public sealed class MediaIdentityTests
     }
 
     [Fact]
+    public async Task CanonicalSeriesFallbackReloadsAlreadySelectedOfficialOrder()
+    {
+        var requests = new List<(SeriesMappingProvider Provider, string? EpisodeOrderId)>();
+        var discovery = Series("1", "official", SeriesMappingProvider.Tvdb);
+        var reload = discovery with { Name = "Reloaded official" };
+
+        var result = await MediaIdentity.LoadSeriesAsync(
+            context: null,
+            (provider, episodeOrderId) =>
+            {
+                requests.Add((provider, episodeOrderId));
+                if (provider == SeriesMappingProvider.Tmdb)
+                    throw new RivuneServerException(404, "not_found", "No TMDB mapping.");
+                return Task.FromResult(episodeOrderId is null ? discovery : reload);
+            });
+
+        Assert.Same(reload, result);
+        Assert.Equal(
+            [
+                (SeriesMappingProvider.Tmdb, null),
+                (SeriesMappingProvider.Tvdb, null),
+                (SeriesMappingProvider.Tvdb, "1"),
+            ],
+            requests);
+    }
+
+    [Fact]
+    public async Task CanonicalSeriesFallbackRejectsOutOfRangeSelectedOfficialOrder()
+    {
+        var discovery = Series("9223372036854775808", "official", SeriesMappingProvider.Tvdb);
+
+        await Assert.ThrowsAsync<InvalidResponseException>(() =>
+            MediaIdentity.LoadSeriesAsync(
+                context: null,
+                (provider, _) =>
+                {
+                    if (provider == SeriesMappingProvider.Tmdb)
+                        throw new RivuneServerException(404, "not_found", "No TMDB mapping.");
+                    return Task.FromResult(discovery);
+                }));
+    }
+
+    [Fact]
+    public async Task CanonicalSeriesFallbackRejectsWrongProviderOnOfficialReload()
+    {
+        var dvdSeries = Series("2", "dvd", SeriesMappingProvider.Tvdb) with
+        {
+            EpisodeOrders =
+            [
+                new EpisodeOrder { Id = "2", Name = "DVD", Type = "dvd", IsDefault = true },
+                new EpisodeOrder { Id = "1", Name = "Aired", Type = "official", IsDefault = false },
+            ],
+        };
+        var wrongProvider = Series("1", "official", SeriesMappingProvider.Tmdb);
+
+        await Assert.ThrowsAsync<InvalidResponseException>(() =>
+            MediaIdentity.LoadSeriesAsync(
+                context: null,
+                (provider, episodeOrderId) =>
+                {
+                    if (provider == SeriesMappingProvider.Tmdb)
+                        throw new RivuneServerException(404, "not_found", "No TMDB mapping.");
+                    return Task.FromResult(episodeOrderId is null ? dvdSeries : wrongProvider);
+                }));
+    }
+
+    [Fact]
     public void VariantEpisodeIdentityUsesRawTvdbResourceAndSuppressesCanonicalMarkers()
     {
         var series = Series(selectedOrderId: "2", orderType: "dvd", mappingProvider: SeriesMappingProvider.Tvdb);

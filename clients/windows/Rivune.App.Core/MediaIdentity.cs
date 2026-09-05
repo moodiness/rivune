@@ -68,13 +68,7 @@ internal static class MediaIdentity
         catch (RivuneServerException)
         {
             var fallback = await load(SeriesMappingProvider.Tvdb, null);
-            if (SelectedOrderIsOfficial(fallback)) return fallback;
-
-            var officialOrderId = fallback.EpisodeOrders
-                .Where(order =>
-                    string.Equals(order.Type.Trim(), "official", StringComparison.OrdinalIgnoreCase))
-                .Select(order => NonEmpty(order.Id))
-                .FirstOrDefault(IsPositiveDecimalInt64);
+            var officialOrderId = OfficialOrderId(fallback);
             if (officialOrderId is null) throw new InvalidResponseException();
             var official = await load(SeriesMappingProvider.Tvdb, officialOrderId);
             if (!SelectedOrderIsOfficial(official, officialOrderId)) throw new InvalidResponseException();
@@ -143,8 +137,27 @@ internal static class MediaIdentity
         return $"{fallbackResourceId}:{episode.SeasonNumber}:{episode.EpisodeNumber}";
     }
 
+    private static string? OfficialOrderId(Series series)
+    {
+        if (series.MappingProvider != SeriesMappingProvider.Tvdb) return null;
+        var selectedOrderId = NonEmpty(series.SelectedEpisodeOrderId);
+        var selectedOrder = selectedOrderId is null
+            ? null
+            : series.EpisodeOrders.FirstOrDefault(order =>
+                string.Equals(order.Id, selectedOrderId, StringComparison.Ordinal));
+        if (selectedOrder is not null &&
+            string.Equals(selectedOrder.Type.Trim(), "official", StringComparison.OrdinalIgnoreCase))
+            return IsPositiveDecimalInt64(selectedOrderId) ? selectedOrderId : null;
+        return series.EpisodeOrders
+            .Where(order =>
+                string.Equals(order.Type.Trim(), "official", StringComparison.OrdinalIgnoreCase))
+            .Select(order => NonEmpty(order.Id))
+            .FirstOrDefault(IsPositiveDecimalInt64);
+    }
+
     private static bool SelectedOrderIsOfficial(Series series, string? expectedOrderId = null)
     {
+        if (series.MappingProvider != SeriesMappingProvider.Tvdb) return false;
         var selectedOrderId = NonEmpty(series.SelectedEpisodeOrderId);
         if (selectedOrderId is null ||
             expectedOrderId is not null &&

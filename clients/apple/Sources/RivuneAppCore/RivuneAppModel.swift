@@ -2458,15 +2458,13 @@ public final class RivuneAppModel: ObservableObject {
     guard let fallback = try? await client.series(id: id, mappingProvider: .tvdb) else {
       return nil
     }
-    if selectedOrderIsOfficial(fallback) { return fallback }
-    guard
-      let officialOrderID = fallback.episodeOrders.first(where: {
-        $0.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "official"
-      }).flatMap({ positiveDecimalInt64($0.id) }),
-      let official = try? await client.series(
-        id: id,
-        mappingProvider: .tvdb,
-        episodeOrder: officialOrderID),
+    guard let officialOrderID = officialOrderID(in: fallback) else {
+      return nil
+    }
+    guard let official = try? await client.series(
+      id: id,
+      mappingProvider: .tvdb,
+      episodeOrder: officialOrderID),
       selectedOrderIsOfficial(official, expectedOrderID: officialOrderID)
     else {
       return nil
@@ -2474,11 +2472,29 @@ public final class RivuneAppModel: ObservableObject {
     return official
   }
 
+  private static func officialOrderID(in series: Series) -> String? {
+    guard series.mappingProvider == .tvdb else { return nil }
+    let selectedOrderID = series.selectedEpisodeOrderId?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let selectedOrder = selectedOrderID.flatMap { selectedID in
+      series.episodeOrders.first { $0.id == selectedID }
+    }
+    if selectedOrder?.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      == "official"
+    {
+      return selectedOrderID.flatMap { positiveDecimalInt64($0) }
+    }
+    return series.episodeOrders.first(where: {
+      $0.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "official"
+    }).flatMap { positiveDecimalInt64($0.id) }
+  }
+
   private static func selectedOrderIsOfficial(
     _ series: Series,
     expectedOrderID: String? = nil
   ) -> Bool {
     guard
+      series.mappingProvider == .tvdb,
       let selectedOrderID = series.selectedEpisodeOrderId?
         .trimmingCharacters(in: .whitespacesAndNewlines),
       expectedOrderID == nil || selectedOrderID == expectedOrderID,
