@@ -17,6 +17,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -361,8 +363,18 @@ internal class OfflineMediaStore private constructor(private val root: File) {
 
     private fun atomicWrite(file: File, value: String) {
         val temporary = File(file.parentFile, ".${file.name}.tmp")
-        FileOutputStream(temporary).use { output -> output.write(value.toByteArray(Charsets.UTF_8)); output.fd.sync() }
-        check(temporary.renameTo(file)) { "Could not persist offline data" }
+        try {
+            FileOutputStream(temporary).use { output -> output.write(value.toByteArray(Charsets.UTF_8)); output.fd.sync() }
+            Files.move(
+                temporary.toPath(),
+                file.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+        } catch (failure: Throwable) {
+            runCatching { Files.deleteIfExists(temporary.toPath()) }
+            throw failure
+        }
     }
 
     internal fun reserve(operationId: UUID, bytes: Long, quotaBytes: Long): Boolean = synchronized(this) {
