@@ -525,7 +525,8 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 				Genres: []metadata.Genre{}, Cast: []metadata.CastMember{}, VoteAverage: 8, VoteCount: 20, Seasons: []metadata.SeasonSummary{},
 				PosterURL: "https://fanart.example/series-poster.jpg", BackdropURL: "https://fanart.example/series-background.jpg",
 				LogoURL: "https://fanart.example/series-logo.png",
-				Aliases: []metadata.Alias{}, EpisodeOrders: []metadata.EpisodeOrder{}, MappingProvider: "tvdb",
+				Aliases: []metadata.Alias{}, EpisodeOrders: []metadata.EpisodeOrder{{ID: "9223372036854775807", Name: "Maximum order", Type: "dvd", IsDefault: true}},
+				SelectedEpisodeOrderID: "9223372036854775807", MappingProvider: "tvdb",
 				ExternalIDs: map[string]string{"tmdb": "92001", "tvdb": "93001"},
 			},
 			seasonDetailsValue: metadata.Season{
@@ -548,6 +549,30 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		series := authenticatedContractRequest(http.MethodGet, "/api/v1/metadata/series/"+contractTitleID+"?language=en-US&mappingProvider=tvdb", nil)
 		seriesResponse := serveContractRequest(t, api, series, http.StatusOK)
 		validateContractResponse(t, document, "/metadata/series/{titleId}", map[string]string{"titleId": contractTitleID}, series, seriesResponse)
+
+		maximumOrderQuery := authenticatedContractRequest(http.MethodGet, "/api/v1/metadata/series/"+contractTitleID+"?language=en-US&mappingProvider=tvdb&episodeOrder=9223372036854775807", nil)
+		if valid, validationErrors := document.ValidateHttpRequest(maximumOrderQuery); !valid {
+			t.Fatalf("maximum signed-int64 episodeOrder query rejected: %v", validationErrors)
+		}
+		overflowOrderQuery := authenticatedContractRequest(http.MethodGet, "/api/v1/metadata/series/"+contractTitleID+"?language=en-US&mappingProvider=tvdb&episodeOrder=9223372036854775808", nil)
+		if valid, validationErrors := document.ValidateHttpRequest(overflowOrderQuery); valid {
+			t.Fatalf("overflow episodeOrder query accepted: %v", validationErrors)
+		}
+
+		metadataService.seriesDetailsValue.EpisodeOrders[0].ID = "9223372036854775808"
+		overflowListRequest := authenticatedContractRequest(http.MethodGet, "/api/v1/metadata/series/"+contractTitleID+"?language=en-US&mappingProvider=tvdb", nil)
+		overflowListResponse := serveContractRequest(t, api, overflowListRequest, http.StatusOK)
+		if valid, validationErrors := document.ValidateHttpResponse(overflowListRequest, overflowListResponse.Result()); valid {
+			t.Fatalf("overflow episodeOrders[].id response accepted: %v", validationErrors)
+		}
+		metadataService.seriesDetailsValue.EpisodeOrders[0].ID = "9223372036854775807"
+		metadataService.seriesDetailsValue.SelectedEpisodeOrderID = "9223372036854775808"
+		overflowSelectedRequest := authenticatedContractRequest(http.MethodGet, "/api/v1/metadata/series/"+contractTitleID+"?language=en-US&mappingProvider=tvdb", nil)
+		overflowSelectedResponse := serveContractRequest(t, api, overflowSelectedRequest, http.StatusOK)
+		if valid, validationErrors := document.ValidateHttpResponse(overflowSelectedRequest, overflowSelectedResponse.Result()); valid {
+			t.Fatalf("overflow selectedEpisodeOrderId response accepted: %v", validationErrors)
+		}
+		metadataService.seriesDetailsValue.SelectedEpisodeOrderID = "9223372036854775807"
 
 		season := authenticatedContractRequest(http.MethodGet, "/api/v1/metadata/seasons/"+contractSeasonID+"?language=en-US&mappingProvider=tvdb", nil)
 		seasonResponse := serveContractRequest(t, api, season, http.StatusOK)
@@ -1138,6 +1163,16 @@ func TestOpenAPIContractContinueWatchingContext(t *testing.T) {
 			name:      "TVDB episode-order continuation context",
 			suffix:    `,"mappingProvider":"tvdb","episodeOrderId":"2","metadataSeasonId":"tvdb:0392d6ce-02f0-4c75-a73f-13badb1c85ba:2112814"`,
 			wantValid: true,
+		},
+		{
+			name:      "maximum signed-int64 episode order",
+			suffix:    `,"mappingProvider":"tvdb","episodeOrderId":"9223372036854775807","metadataSeasonId":"season"`,
+			wantValid: true,
+		},
+		{
+			name:      "overflow episode order",
+			suffix:    `,"mappingProvider":"tvdb","episodeOrderId":"9223372036854775808","metadataSeasonId":"season"`,
+			wantValid: false,
 		},
 		{name: "partial context", suffix: `,"mappingProvider":"tvdb"`, wantValid: false},
 		{name: "unsupported provider", suffix: `,"mappingProvider":"tmdb","episodeOrderId":"2","metadataSeasonId":"season"`, wantValid: false},

@@ -6310,8 +6310,7 @@ components:
       in: query
       description: Optional TVDB season type ID selected from the series episodeOrders list. Requires mappingProvider=tvdb.
       schema:
-        type: string
-        pattern: ^[1-9][0-9]{0,18}$
+        $ref: '#/components/schemas/PositiveInt64DecimalString'
     Region:
       name: region
       in: query
@@ -11106,8 +11105,7 @@ components:
           items:
             $ref: '#/components/schemas/EpisodeOrder'
         selectedEpisodeOrderId:
-          type: string
-          pattern: ^[1-9][0-9]{0,18}$
+          $ref: '#/components/schemas/PositiveInt64DecimalString'
         mappingProvider:
           type: string
           enum:
@@ -11138,7 +11136,7 @@ components:
         - isDefault
       properties:
         id:
-          type: string
+          $ref: '#/components/schemas/PositiveInt64DecimalString'
         name:
           type: string
         type:
@@ -14735,9 +14733,7 @@ components:
           enum:
             - tvdb
         episodeOrderId:
-          type: string
-          pattern: ^[1-9][0-9]*$
-          maxLength: 32
+          $ref: '#/components/schemas/PositiveInt64DecimalString'
         metadataSeasonId:
           type: string
           minLength: 1
