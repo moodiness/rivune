@@ -273,7 +273,8 @@ func TestCatalogReaderScopesCanonicalHierarchyPaginationAndProviderIDs(t *testin
 			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000300', '2026-08-06T12:01:00Z'),
 			('22222222-2222-4222-8222-222222222222', '00000000-0000-4000-8000-000000000400', '2026-08-06T12:04:00Z');
 		INSERT INTO profile_favorites (profile_id, title_id) VALUES
-			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000101');
+			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000101'),
+			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000212');
 		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at, updated_at) VALUES
 			('00000000-0000-4000-8000-000000000100', 'tmdb', 'fr-FR',
 			 '{"overview":"Résumé matérialisé","runtimeMinutes":123,"genres":[{"id":18,"name":"Drama"}],"studios":[{"name":"Éclair Films"},{"name":"éCLAIR FILMS"},{"name":"Beta Studio"}],"voteAverage":8.25,"hasSubtitles":true,"officialRating":"PG-13","tags":["Featured"],"cast":[{"id":"9301","name":"Alice Actor","character":"Lead"}]}',
@@ -503,6 +504,12 @@ func TestCatalogReaderScopesCanonicalHierarchyPaginationAndProviderIDs(t *testin
 		canonicalTitleID string
 		variantTitleID   string
 	}{
+		{
+			name:             "favorite",
+			query:            CatalogQuery{Favorite: boolPointer(true), Recursive: true, Limit: 20},
+			canonicalTitleID: nonLibrary.ID,
+			variantTitleID:   variantEpisode.ID,
+		},
 		{
 			name:             "played",
 			query:            CatalogQuery{Played: boolPointer(true), Recursive: true, Limit: 20},

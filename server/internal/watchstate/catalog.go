@@ -355,7 +355,7 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 			WHERE ($2::uuid IS NULL AND (
 			          (library.title_id IS NOT NULL AND title.parent_id IS NULL)
 			          OR (cardinality($8::uuid[]) <> 0 AND title.id = ANY($8::uuid[]))
-			          OR ($12::boolean IS TRUE AND EXISTS (
+			          OR ($12::boolean IS TRUE AND title.hierarchy_variant = '' AND EXISTS (
 			              SELECT 1 FROM profile_favorites favorite
 			              WHERE favorite.profile_id = $1::uuid AND favorite.title_id = title.id
 			          ))
