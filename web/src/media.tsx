@@ -532,7 +532,20 @@ function formatPlaybackTime(seconds: number): string {
     : `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
 }
 
-function episodeResourceID(series: SeriesMetadata, episode: EpisodeMetadata, fallback: string): string {
+function nonOfficialEpisodeOrderID(series: SeriesMetadata): string | undefined {
+  const selectedID = series.selectedEpisodeOrderId?.trim();
+  if (!selectedID) return undefined;
+  const selected = series.episodeOrders.find((order) => order.id === selectedID);
+  return selected?.type.trim().toLowerCase() === "official" ? undefined : selectedID;
+}
+
+function episodeResourceID(series: SeriesMetadata, episode: EpisodeMetadata, fallback: string, context?: MediaItem): string {
+  const continuationOrderID = typeof context?.raw?.episodeOrderId === "string" && context.raw.episodeOrderId.trim()
+    ? context.raw.episodeOrderId.trim()
+    : undefined;
+  if ((continuationOrderID || nonOfficialEpisodeOrderID(series)) && episode.externalIds.tvdb) {
+    return `tvdb:${episode.externalIds.tvdb}`;
+  }
   const seriesIMDB = series.externalIds.imdb;
   if (seriesIMDB) return `${seriesIMDB}:${episode.seasonNumber}:${episode.episodeNumber}`;
   if (episode.externalIds.imdb) return episode.externalIds.imdb;
@@ -542,8 +555,18 @@ function episodeResourceID(series: SeriesMetadata, episode: EpisodeMetadata, fal
 }
 
 function episodeItem(series: SeriesMetadata, episode: EpisodeMetadata, fallback: MediaItem): MediaItem {
+  const continuationOrderID = typeof fallback.raw?.episodeOrderId === "string" && fallback.raw.episodeOrderId.trim()
+    ? fallback.raw.episodeOrderId.trim()
+    : undefined;
+  const episodeOrderID = continuationOrderID ?? nonOfficialEpisodeOrderID(series);
+  const previousMetadataSeasonID = typeof fallback.raw?.metadataSeasonId === "string"
+    ? fallback.raw.metadataSeasonId
+    : undefined;
+  const continueSeasonID = previousMetadataSeasonID === episode.seasonId
+    ? fallback.raw?.continueSeasonId
+    : episode.seasonId;
   return {
-    id: episodeResourceID(series, episode, fallback.id),
+    id: episodeResourceID(series, episode, fallback.id, fallback),
     titleId: episode.id,
     mediaType: "episode",
     seasonNumber: episode.seasonNumber,
@@ -559,10 +582,13 @@ function episodeItem(series: SeriesMetadata, episode: EpisodeMetadata, fallback:
       ...fallback.raw,
       episodeSeriesName: series.name,
       continueSeriesId: series.id,
-      continueSeasonId: episode.seasonId,
+      continueSeasonId: continueSeasonID,
       continueSeasonNumber: episode.seasonNumber,
       continueEpisodeNumber: episode.episodeNumber,
       continueEpisodeId: episode.id,
+      mappingProvider: episodeOrderID ? "tvdb" : undefined,
+      episodeOrderId: episodeOrderID,
+      metadataSeasonId: episodeOrderID ? episode.seasonId : undefined,
     },
   };
 }
@@ -576,6 +602,17 @@ function seriesItem(series: SeriesMetadata, fallback: MediaItem, episode: Episod
   const routeSeriesResourceID = typeof fallback.raw?.routeSeriesResourceId === "string"
     ? fallback.raw.routeSeriesResourceId
     : canonicalSeriesResourceID;
+  const continuationOrderID = typeof fallback.raw?.episodeOrderId === "string" && fallback.raw.episodeOrderId.trim()
+    ? fallback.raw.episodeOrderId.trim()
+    : undefined;
+  const episodeOrderID = continuationOrderID ?? nonOfficialEpisodeOrderID(series);
+  const previousMetadataSeasonID = typeof fallback.raw?.metadataSeasonId === "string"
+    ? fallback.raw.metadataSeasonId
+    : undefined;
+  const metadataSeasonID = episodeOrderID ? episode?.seasonId ?? previousMetadataSeasonID : undefined;
+  const continueSeasonID = episode && previousMetadataSeasonID === episode.seasonId
+    ? fallback.raw?.continueSeasonId
+    : episode?.seasonId ?? fallback.raw?.continueSeasonId;
   return {
     id: routeSeriesResourceID,
     titleId: series.id,
@@ -592,10 +629,13 @@ function seriesItem(series: SeriesMetadata, fallback: MediaItem, episode: Episod
       ...fallback.raw,
       routeSeriesResourceId: routeSeriesResourceID,
       continueSeriesId: series.id,
-      continueSeasonId: episode?.seasonId ?? fallback.raw?.continueSeasonId,
+      continueSeasonId: continueSeasonID,
       continueSeasonNumber: episode?.seasonNumber ?? fallback.raw?.continueSeasonNumber,
       continueEpisodeNumber: undefined,
       continueEpisodeId: undefined,
+      mappingProvider: episodeOrderID ? "tvdb" : undefined,
+      episodeOrderId: episodeOrderID,
+      metadataSeasonId: metadataSeasonID,
       startFromBeginning: undefined,
     },
   };
@@ -611,7 +651,7 @@ function withoutEmptySeasons(series: SeriesMetadata): SeriesMetadata {
   return seasons.length === series.seasons.length ? series : { ...series, seasons };
 }
 
-export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClose, onNavigateContext, onOpenMedia, onOpenSeason, onLibraryMutation }: { item: MediaItem; maximumCastMembers: number; onCanonicalRoute?: (metadata: CanonicalRouteMetadata) => void; onClose: () => void; onNavigateContext?: (context: { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number }) => void; onOpenMedia?: (item: MediaItem) => void; onOpenSeason?: (item: MediaItem) => void; onLibraryMutation?: () => void }) {
+export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClose, onNavigateContext, onOpenMedia, onOpenSeason, onLibraryMutation }: { item: MediaItem; maximumCastMembers: number; onCanonicalRoute?: (metadata: CanonicalRouteMetadata) => void; onClose: () => void; onNavigateContext?: (context: { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number; mappingProvider?: "tvdb"; episodeOrderId?: string; metadataSeasonId?: string }) => void; onOpenMedia?: (item: MediaItem) => void; onOpenSeason?: (item: MediaItem) => void; onLibraryMutation?: () => void }) {
   const metadataLocale = api.metadataLocale();
   const customType = item.mediaType !== "movie" && item.mediaType !== "series" && item.mediaType !== "episode" && item.mediaType !== "tv";
   const preferredMetaAddonID = item.sourceAddonId ?? item.sources?.find((source) => source.addonId)?.addonId;
@@ -693,6 +733,13 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
   const continueEpisodeID = typeof item.raw?.continueEpisodeId === "string" ? item.raw.continueEpisodeId : "";
   const continueSeasonNumber = typeof item.raw?.continueSeasonNumber === "number" ? item.raw.continueSeasonNumber : undefined;
   const continueEpisodeNumber = typeof item.raw?.continueEpisodeNumber === "number" ? item.raw.continueEpisodeNumber : undefined;
+  const continuationMappingProvider = item.raw?.mappingProvider === "tvdb" ? "tvdb" : undefined;
+  const continuationEpisodeOrderID = typeof item.raw?.episodeOrderId === "string" && item.raw.episodeOrderId.trim()
+    ? item.raw.episodeOrderId.trim()
+    : undefined;
+  const metadataSeasonID = typeof item.raw?.metadataSeasonId === "string" && item.raw.metadataSeasonId.trim()
+    ? item.raw.metadataSeasonId.trim()
+    : undefined;
   const libraryTitleID = item.mediaType === "episode" ? series?.id || continueSeriesID || undefined : titleID ?? item.titleId;
   const trailerSeriesContext = item.mediaType === "series" || item.mediaType === "episode";
   const trailerTitleID = item.mediaType === "episode"
@@ -731,7 +778,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
     ?? (customVideos.length === 0 ? resolvedCustomMeta?.id : undefined);
   const streamResourceID = customType
     ? customPlaybackResourceID ?? ""
-    : selectedEpisode && series ? episodeResourceID(series, selectedEpisode, item.id) : mediaResourceID(item);
+    : selectedEpisode && series ? episodeResourceID(series, selectedEpisode, item.id, item) : mediaResourceID(item);
   const playbackMediaType = selectedEpisode || item.mediaType === "episode" ? "episode" : item.mediaType;
   const startFromBeginning = item.raw?.startFromBeginning === true;
   const selectedProgress = selectedEpisode
@@ -999,7 +1046,9 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
         : item.mediaType === "episode" && routeSeriesResourceID
           ? await resolveMediaTitle({ ...item, id: routeSeriesResourceID, titleId: undefined, mediaType: "series", externalIds: undefined })
           : await resolveMediaTitle(item);
-      const resolved = withoutEmptySeasons(await api.seriesDetails(resolvedTitleID));
+      const resolved = withoutEmptySeasons(await api.seriesDetails(resolvedTitleID, continuationMappingProvider
+        ? { mappingProvider: continuationMappingProvider, episodeOrderId: continuationEpisodeOrderID }
+        : undefined));
       if (!active) return;
       onCanonicalRoute?.({
         sourceID: item.id,
@@ -1026,12 +1075,13 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
         raw: { ...current.raw, ...resolved },
       }));
       const seasons = [...resolved.seasons].sort((left, right) => left.seasonNumber - right.seasonNumber);
-      const requestedSeason = seasons.find((candidate) => candidate.id === continueSeasonID)
+      const requestedSeason = (metadataSeasonID ? seasons.find((candidate) => candidate.id === metadataSeasonID) : undefined)
+        ?? seasons.find((candidate) => candidate.id === continueSeasonID)
         ?? (continueSeasonNumber !== undefined ? seasons.find((candidate) => candidate.seasonNumber === continueSeasonNumber) : undefined);
       let initial = requestedSeason
         ?? seasons.find((candidate) => candidate.seasonNumber > 0)
         ?? seasons[0];
-      if (resolved.mappingProvider === "tvdb" && continueEpisodeID) {
+      if (resolved.mappingProvider === "tvdb" && continueEpisodeID && !metadataSeasonID) {
         const episodeAirDate = item.released ?? item.releaseInfo;
         const episodeAirTime = episodeAirDate ? Date.parse(episodeAirDate) : Number.NaN;
         const candidates = [...seasons].sort((left, right) => {
@@ -1068,7 +1118,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
       if (active) setSeriesError(notifyError(cause, t("media.series.error.loadFailed"), t("media.series.error.unavailableTitle")));
     }).finally(() => { if (active) setSeriesLoading(false); });
     return () => { active = false; };
-  }, [continueEpisodeID, continueSeasonID, continueSeasonNumber, continueSeriesID, item.id, item.mediaType, item.releaseInfo, item.released, item.titleId, onCanonicalRoute, routeSeriesResourceID, seriesContextEnabled]);
+  }, [continuationEpisodeOrderID, continuationMappingProvider, continueEpisodeID, continueSeasonID, continueSeasonNumber, continueSeriesID, item.id, item.mediaType, item.releaseInfo, item.released, item.titleId, metadataSeasonID, onCanonicalRoute, routeSeriesResourceID, seriesContextEnabled]);
 
   useEffect(() => {
     let active = true;
@@ -1494,7 +1544,16 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
       setSeasonID(initial?.id ?? "");
       setSelectedEpisode(undefined);
       setEpisodeProgress({});
-      if (initial) onNavigateContext?.({ seasonID: initial.id, seasonNumber: initial.seasonNumber });
+      if (initial) {
+        const selectedOrderID = nonOfficialEpisodeOrderID(resolved);
+        onNavigateContext?.({
+          seasonID: initial.id,
+          seasonNumber: initial.seasonNumber,
+          mappingProvider: selectedOrderID ? "tvdb" : undefined,
+          episodeOrderId: selectedOrderID,
+          metadataSeasonId: selectedOrderID ? initial.id : undefined,
+        });
+      }
     } catch (cause) {
       setEpisodeOrderError(notifyError(cause, t("media.episodeOrder.error.loadFailed"), t("media.episodeOrder.error.unavailableTitle")));
     } finally {
@@ -1901,7 +1960,14 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                           <button key={candidate.id} type="button" role="tab" aria-selected={seasonID === candidate.id} className={seasonID === candidate.id ? "is-active" : ""} onClick={() => {
                             autoPlayNextRef.current = false;
                             setSeasonID(candidate.id);
-                            onNavigateContext?.({ seasonID: candidate.id, seasonNumber: candidate.seasonNumber });
+                            const selectedOrderID = nonOfficialEpisodeOrderID(series);
+                            onNavigateContext?.({
+                              seasonID: candidate.id,
+                              seasonNumber: candidate.seasonNumber,
+                              mappingProvider: selectedOrderID ? "tvdb" : undefined,
+                              episodeOrderId: selectedOrderID,
+                              metadataSeasonId: selectedOrderID ? candidate.id : undefined,
+                            });
                           }}>
                             <span>{candidate.seasonNumber === 0 ? t("media.season.specials") : t("media.season.number", { number: candidate.seasonNumber })}</span>
                             <small>{t(candidate.episodeCount === 1 ? "media.episode.count.one" : "media.episode.count.many", { count: candidate.episodeCount })}</small>
@@ -2393,11 +2459,22 @@ export function Player(
     const imdbID = item.externalIds?.imdb?.trim() ?? "";
     const season = item.seasonNumber ?? 0;
     const episode = item.episodeNumber ?? 0;
+    const continuationOrderID = typeof item.raw?.episodeOrderId === "string" && item.raw.episodeOrderId.trim()
+      ? item.raw.episodeOrderId.trim()
+      : undefined;
+    const selectedOrderID = typeof item.raw?.selectedEpisodeOrderId === "string" && item.raw.selectedEpisodeOrderId.trim()
+      ? item.raw.selectedEpisodeOrderId.trim()
+      : undefined;
+    const selectedOrder = selectedOrderID && Array.isArray(item.raw?.episodeOrders)
+      ? item.raw.episodeOrders.map(record).find((order) => order?.id === selectedOrderID)
+      : undefined;
+    const selectedOrderType = typeof selectedOrder?.type === "string" ? selectedOrder.type.trim().toLowerCase() : "";
+    const canonicalHierarchy = !continuationOrderID && (!selectedOrderID || selectedOrderType === "official");
     const controller = new AbortController();
     let active = true;
     setMarkers([]);
     setDismissedMarkers(new Set());
-    if (item.mediaType === "episode" && imdbID && Number.isInteger(season) && season > 0 && Number.isInteger(episode) && episode > 0) {
+    if (canonicalHierarchy && item.mediaType === "episode" && imdbID && Number.isInteger(season) && season > 0 && Number.isInteger(episode) && episode > 0) {
       void api.playbackMarkers(imdbID, season, episode, controller.signal)
         .then((response) => {
           if (!active || !Array.isArray(response.markers)) return;
@@ -2409,7 +2486,7 @@ export function Player(
       active = false;
       controller.abort();
     };
-  }, [item.episodeNumber, item.externalIds?.imdb, item.id, item.mediaType, item.seasonNumber]);
+  }, [item.episodeNumber, item.externalIds?.imdb, item.id, item.mediaType, item.raw, item.seasonNumber]);
 
   useEffect(() => {
     if (!progressReady || !failoverReady) return;

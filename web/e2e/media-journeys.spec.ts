@@ -1,5 +1,7 @@
-import { CATEGORY_IDS, expect, test } from "./fixtures/rivune";
+import { CATEGORY_IDS, DVD_EPISODE_RESOURCE_ID, DVD_METADATA_SEASON_ID, expect, test } from "./fixtures/rivune";
 import { selectListbox, selectOption, selectOptions } from "./helpers/select";
+const dvdMetadataSeasonPath = `/api/v1/metadata/seasons/${encodeURIComponent(DVD_METADATA_SEASON_ID)}`;
+
 
 function longSeason(episodeCount: number) {
   return {
@@ -120,6 +122,72 @@ test("media details use a refresh-safe route with browser and in-page history", 
   await page.getByRole("button", { name: "Back to browse" }).click();
   await expect(page.getByRole("heading", { name: "Continue Watching" })).toBeVisible();
   await expect(page.locator(".route-surface").getByRole("heading").first()).toBeFocused();
+});
+
+test("DVD continuation retains its TVDB hierarchy through playback and route reload", async ({ page, rivune }) => {
+  rivune.useDvdContinuation();
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+
+  await expect(page).toHaveURL(/\/media\/series\/tt9000\/season\/1\/episode\/2$/);
+  await expect(page.getByRole("heading", { name: "Disc Middle" })).toBeVisible();
+  await expect.poll(() => rivune.matching("/api/v1/metadata/series/series-1", "GET")
+    .filter((request) => request.search.get("mappingProvider") === "tvdb" && request.search.get("episodeOrder") === "2").length).toBeGreaterThan(0);
+  await expect.poll(() => rivune.matching(dvdMetadataSeasonPath, "GET")
+    .filter((request) => request.search.get("mappingProvider") === "tvdb").length).toBeGreaterThan(0);
+  await expect.poll(() => rivune.matching("/api/v1/playback/sources", "POST").at(-1)?.body).toMatchObject({
+    mediaType: "episode",
+    resourceId: DVD_EPISODE_RESOURCE_ID,
+  });
+  await expect.poll(() => page.evaluate(() => window.history.state?.rivuneMediaItem?.raw)).toMatchObject({
+    mappingProvider: "tvdb",
+    episodeOrderId: "2",
+    metadataSeasonId: DVD_METADATA_SEASON_ID,
+    continueSeasonId: "persisted-dvd-season-1",
+  });
+
+  await page.locator(".details-stream-list__option").first().click();
+  await page.locator('[data-media-action="play-selected-stream"]').click();
+  await expect(page.locator(".player")).toBeVisible();
+  await rivune.waitForRequest("/api/v1/playback/resolve", "POST");
+  expect(rivune.matching("/api/v1/playback/markers", "GET")).toHaveLength(0);
+
+  const orderedSeriesRequests = rivune.matching("/api/v1/metadata/series/series-1", "GET").length;
+  const orderedSeasonRequests = rivune.matching(dvdMetadataSeasonPath, "GET").length;
+  const sourceRequests = rivune.matching("/api/v1/playback/sources", "POST").length;
+  await page.reload();
+
+  await expect(page.getByRole("heading", { name: "Disc Middle" })).toBeVisible();
+  await expect.poll(() => rivune.matching("/api/v1/metadata/series/series-1", "GET").length).toBeGreaterThan(orderedSeriesRequests);
+  const reloadedSeries = rivune.matching("/api/v1/metadata/series/series-1", "GET").at(-1)!;
+  expect(Object.fromEntries(reloadedSeries.search)).toMatchObject({ mappingProvider: "tvdb", episodeOrder: "2" });
+  await expect.poll(() => rivune.matching(dvdMetadataSeasonPath, "GET").length).toBeGreaterThan(orderedSeasonRequests);
+  await expect.poll(() => rivune.matching("/api/v1/playback/sources", "POST").length).toBeGreaterThan(sourceRequests);
+  expect(rivune.matching("/api/v1/playback/sources", "POST").at(-1)?.body).toMatchObject({
+    mediaType: "episode",
+    resourceId: DVD_EPISODE_RESOURCE_ID,
+  });
+  await expect.poll(() => page.evaluate(() => window.history.state?.rivuneMediaItem?.raw)).toMatchObject({
+    mappingProvider: "tvdb",
+    episodeOrderId: "2",
+    metadataSeasonId: DVD_METADATA_SEASON_ID,
+    continueSeasonId: "persisted-dvd-season-1",
+  });
+});
+
+test("canonical episode playback retains IMDb coordinates and marker requests", async ({ page, rivune }) => {
+  await page.goto("/media/series/tt9000/season/1/episode/1");
+  await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();
+  await expect.poll(() => rivune.matching("/api/v1/playback/sources", "POST").at(-1)?.body).toMatchObject({
+    mediaType: "episode",
+    resourceId: "tt9000:1:1",
+  });
+
+  await page.locator(".details-stream-list__option").first().click();
+  await page.locator('[data-media-action="play-selected-stream"]').click();
+  await expect(page.locator(".player")).toBeVisible();
+  const markerRequest = await rivune.waitForRequest("/api/v1/playback/markers", "GET");
+  expect(Object.fromEntries(markerRequest.search)).toMatchObject({ imdbId: "tt9000", season: "1", episode: "1" });
 });
 
 test("TMDB media routes canonicalize to IMDb identifiers after metadata resolves", async ({ page, rivune }) => {
@@ -1336,7 +1404,7 @@ test("series guide switches to a selected TVDB episode order", async ({ page, ri
 
   await expect.poll(() => rivune.matching("/api/v1/metadata/series/series-1", "GET")
     .some((request) => request.search.get("mappingProvider") === "tvdb" && request.search.get("episodeOrder") === "2")).toBe(true);
-  await expect.poll(() => rivune.matching("/api/v1/metadata/seasons/dvd-season-1", "GET")
+  await expect.poll(() => rivune.matching(dvdMetadataSeasonPath, "GET")
     .some((request) => request.search.get("mappingProvider") === "tvdb")).toBe(true);
 });
 

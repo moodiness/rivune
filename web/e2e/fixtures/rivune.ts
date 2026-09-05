@@ -137,6 +137,8 @@ type ReadingQueueFixtureItem = {
 };
 const expiresAt = "2099-01-01T00:00:00Z";
 const createdAt = "2024-01-01T00:00:00Z";
+export const DVD_METADATA_SEASON_ID = "tvdb:0392d6ce-02f0-4c75-a73f-13badb1c85ba:2112814";
+export const DVD_EPISODE_RESOURCE_ID = "tvdb:10357450";
 const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="100%" height="100%" fill="#241f35"/></svg>`;
 
 export const CATEGORY_IDS = {
@@ -214,11 +216,11 @@ const seasonTwo = {
 };
 
 const dvdSeason = {
-  id: "dvd-season-1", mediaType: "season", seriesId: "series-1", name: "DVD Season 1", overview: "The disc order.", seasonNumber: 1, episodeCount: 3, airDate: "2024-01-01", posterUrl: "https://fixtures.rivune.test/dvd-season-1-poster.svg", backdropUrl: "https://fixtures.rivune.test/dvd-season-1-backdrop.svg", voteAverage: 8.4, externalIds: { tvdb: "2001" },
+  id: DVD_METADATA_SEASON_ID, mediaType: "season", seriesId: "series-1", name: "DVD Season 1", overview: "The disc order.", seasonNumber: 1, episodeCount: 3, airDate: "2024-01-01", posterUrl: "https://fixtures.rivune.test/dvd-season-1-poster.svg", backdropUrl: "https://fixtures.rivune.test/dvd-season-1-backdrop.svg", voteAverage: 8.4, externalIds: { tvdb: "2112814" },
   episodes: [
-    { id: "dvd-episode-1", mediaType: "episode", seasonId: "dvd-season-1", name: "Disc Opening", overview: "The DVD order begins.", seasonNumber: 1, episodeNumber: 1, airDate: "2024-01-03", runtimeMinutes: 30, voteAverage: 8.1, voteCount: 100, externalIds: { tvdb: "2101" } },
-    { id: "dvd-episode-2", mediaType: "episode", seasonId: "dvd-season-1", name: "Disc Middle", overview: "The DVD order continues.", seasonNumber: 1, episodeNumber: 2, airDate: "2024-01-10", runtimeMinutes: 31, voteAverage: 8.3, voteCount: 95, externalIds: { tvdb: "2102" } },
-    { id: "dvd-episode-3", mediaType: "episode", seasonId: "dvd-season-1", name: "Disc Finale", overview: "The DVD order concludes.", seasonNumber: 1, episodeNumber: 3, airDate: "2024-01-17", runtimeMinutes: 32, voteAverage: 8.4, voteCount: 90, externalIds: { tvdb: "2103" } },
+    { id: "dvd-episode-1", mediaType: "episode", seasonId: DVD_METADATA_SEASON_ID, name: "Disc Opening", overview: "The DVD order begins.", seasonNumber: 1, episodeNumber: 1, airDate: "2024-01-03", runtimeMinutes: 30, voteAverage: 8.1, voteCount: 100, externalIds: { tvdb: "10357449" } },
+    { id: "dvd-episode-2", mediaType: "episode", seasonId: DVD_METADATA_SEASON_ID, name: "Disc Middle", overview: "The DVD order continues.", seasonNumber: 1, episodeNumber: 2, airDate: "2024-01-10", runtimeMinutes: 31, voteAverage: 8.3, voteCount: 95, externalIds: { tvdb: "10357450" } },
+    { id: "dvd-episode-3", mediaType: "episode", seasonId: DVD_METADATA_SEASON_ID, name: "Disc Finale", overview: "The DVD order concludes.", seasonNumber: 1, episodeNumber: 3, airDate: "2024-01-17", runtimeMinutes: 32, voteAverage: 8.4, voteCount: 90, externalIds: { tvdb: "10357451" } },
   ],
 };
 
@@ -454,6 +456,7 @@ export class RivuneHarness {
   private readonly collectionAssignments = new Map<string, { profileIds: string[]; categoryIds: string[] }>();
   private readonly folderDelays = new Map<string, number>();
   private readonly seasonOverrides = new Map<string, unknown>();
+  private dvdContinuation = false;
   private libraryItems: Array<Record<string, unknown>> = [];
   private libraryMembershipDelay = 0;
   private readingQueueRevision = 1;
@@ -865,6 +868,9 @@ export class RivuneHarness {
 
   setSeason(id: string, season: unknown) {
     this.seasonOverrides.set(id, season);
+  }
+  useDvdContinuation() {
+    this.dvdContinuation = true;
   }
 
   setLibraryItems(items: Array<Record<string, unknown>>) {
@@ -1730,7 +1736,9 @@ export class RivuneHarness {
     if (path === "/continue-watching") {
       const items = profileAtRequest === "bob"
         ? [{ titleId: "bob-episode", mediaType: "episode", seriesId: "bob-series", seasonId: "bob-season", seasonNumber: 1, episodeNumber: 1, positionSeconds: 60, durationSeconds: 1200, version: 1, reason: "resume", title: "Bob Queue", posterUrl: "https://fixtures.rivune.test/bob-series-poster.svg", backgroundUrl: "https://fixtures.rivune.test/bob-series-backdrop.svg", releaseInfo: "2024", resourceId: "bob-resource", resourceProvider: "imdb", episodeTitle: "Bob Pilot", episodeStillUrl: "https://fixtures.rivune.test/bob-episode-still.svg", episodeAirDate: "2024-01-02", lastWatchedAt: createdAt }]
-        : [{ titleId: "episode-1", mediaType: "episode", seriesId: "series-1", seasonId: "season-1", seasonNumber: 1, episodeNumber: 1, positionSeconds: 321, durationSeconds: 1800, version: 4, reason: "resume", title: "Signal Horizon", posterUrl: "https://fixtures.rivune.test/series-poster.svg", backgroundUrl: "https://fixtures.rivune.test/series-backdrop.svg", releaseInfo: "2024", resourceId: "tt9000:1:1", resourceProvider: "imdb", episodeTitle: "First Light", episodeStillUrl: "https://fixtures.rivune.test/episode-1-still.svg", episodeAirDate: "2024-01-03", lastWatchedAt: createdAt }];
+        : this.dvdContinuation
+          ? [{ titleId: "dvd-episode-2", mediaType: "episode", seriesId: "series-1", seasonId: "persisted-dvd-season-1", seasonNumber: 1, episodeNumber: 2, mappingProvider: "tvdb", episodeOrderId: "2", metadataSeasonId: DVD_METADATA_SEASON_ID, positionSeconds: 480, durationSeconds: 1860, version: 3, reason: "resume", title: "Signal Horizon", posterUrl: "https://fixtures.rivune.test/series-poster.svg", backgroundUrl: "https://fixtures.rivune.test/series-backdrop.svg", releaseInfo: "2024", resourceId: DVD_EPISODE_RESOURCE_ID, resourceProvider: "tvdb", episodeTitle: "Disc Middle", episodeStillUrl: "https://fixtures.rivune.test/dvd-episode-2-still.svg", episodeAirDate: "2024-01-10", lastWatchedAt: createdAt }]
+          : [{ titleId: "episode-1", mediaType: "episode", seriesId: "series-1", seasonId: "season-1", seasonNumber: 1, episodeNumber: 1, positionSeconds: 321, durationSeconds: 1800, version: 4, reason: "resume", title: "Signal Horizon", posterUrl: "https://fixtures.rivune.test/series-poster.svg", backgroundUrl: "https://fixtures.rivune.test/series-backdrop.svg", releaseInfo: "2024", resourceId: "tt9000:1:1", resourceProvider: "imdb", episodeTitle: "First Light", episodeStillUrl: "https://fixtures.rivune.test/episode-1-still.svg", episodeAirDate: "2024-01-03", lastWatchedAt: createdAt }];
       await json(route, { items });
       return;
     }
@@ -1742,7 +1750,7 @@ export class RivuneHarness {
     if (path === "/metadata/seasons/season-specials") { await json(route, seasonZero); return; }
     if (path === "/metadata/seasons/season-1") { await json(route, seasonOne); return; }
     if (path === "/metadata/seasons/season-2") { await json(route, seasonTwo); return; }
-    if (path === "/metadata/seasons/dvd-season-1") { await json(route, dvdSeason); return; }
+    if (path === `/metadata/seasons/${encodeURIComponent(DVD_METADATA_SEASON_ID)}`) { await json(route, dvdSeason); return; }
     if (path === "/metadata/seasons/bob-season") { await json(route, { ...seasonOne, id: "bob-season", seriesId: "bob-series", episodes: [] }); return; }
     if (path === "/metadata/series/series-1") {
       if (url.searchParams.get("episodeOrder") === "2") {

@@ -184,6 +184,9 @@ export interface MediaItem {
   seasonId?: string;
   seasonNumber?: number;
   episodeNumber?: number;
+  mappingProvider?: "tvdb";
+  episodeOrderId?: string;
+  metadataSeasonId?: string;
   title: string;
   posterUrl?: string;
   backgroundUrl?: string;
