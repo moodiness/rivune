@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/moodiness/rivune/server/internal/database"
@@ -245,7 +248,7 @@ func TestCapacityRootRecordFailureStopsBeforeCursorAdvance(t *testing.T) {
 	if skipped || !errors.Is(err, recordFailure) { t.Fatalf("record failure skipped=%v error=%v", skipped, err) }
 }
 
-func TestFollowNewSeriesPersistsBoundedBaselinePostgreSQL(t *testing.T) {
+func TestFollowSeriesKeepsVariantSubjectsOutOfBaselineCurrentUpcomingAndOverflow(t *testing.T) {
 	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
 	if databaseURL == "" { t.Skip("set RIVUNE_TEST_DATABASE_URL to run PostgreSQL media notification tests") }
 	ctx := context.Background()
@@ -254,10 +257,17 @@ func TestFollowNewSeriesPersistsBoundedBaselinePostgreSQL(t *testing.T) {
 	t.Cleanup(pool.Close)
 	if err := database.Migrate(ctx, pool); err != nil { t.Fatalf("migrate notification integration database: %v", err) }
 	const (
-		profileID = "94000000-0000-4000-8000-000000000001"
-		seriesID = "94000000-0000-4000-8000-000000000002"
-		seasonID = "94000000-0000-4000-8000-000000000003"
-		episodeID = "94000000-0000-4000-8000-000000000004"
+		profileID            = "94000000-0000-4000-8000-000000000001"
+		seriesID             = "94000000-0000-4000-8000-000000000002"
+		seasonID             = "94000000-0000-4000-8000-000000000003"
+		episodeID            = "94000000-0000-4000-8000-000000000004"
+		variantSeasonID      = "94000000-0000-4000-8000-000000000005"
+		variantEpisodeID     = "94000000-0000-4000-8000-000000000006"
+		directVariantID      = "94000000-0000-4000-8000-000000000007"
+		newSeasonID          = "94000000-0000-4000-8000-000000000008"
+		newEpisodeID         = "94000000-0000-4000-8000-000000000009"
+		newVariantSeasonID   = "94000000-0000-4000-8000-000000000010"
+		newVariantEpisodeID  = "94000000-0000-4000-8000-000000000011"
 	)
 	cleanup := func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM profiles WHERE id = $1::uuid`, profileID)
@@ -273,21 +283,139 @@ func TestFollowNewSeriesPersistsBoundedBaselinePostgreSQL(t *testing.T) {
 		), series AS (
 			INSERT INTO titles (id, media_type, display_title) VALUES ($2::uuid, 'series', 'Integration Series')
 		), season AS (
-			INSERT INTO titles (id, media_type, parent_id, ordinal, display_title)
-			VALUES ($3::uuid, 'season', $2::uuid, 1, 'Season 1')
+			INSERT INTO titles (id, media_type, parent_id, ordinal, hierarchy_variant, display_title)
+			VALUES
+				($3::uuid, 'season', $2::uuid, 1, '', 'Season 1'),
+				($5::uuid, 'season', $2::uuid, 1, 'tvdb:2', 'Variant Season')
 		), episode AS (
-			INSERT INTO titles (id, media_type, parent_id, ordinal, display_title, release_date)
-			VALUES ($4::uuid, 'episode', $3::uuid, 1, 'Pilot', $5::date)
+			INSERT INTO titles (id, media_type, parent_id, ordinal, hierarchy_variant, display_title, release_date)
+			VALUES
+				($4::uuid, 'episode', $3::uuid, 1, '', 'Pilot', $8::date),
+				($6::uuid, 'episode', $5::uuid, 1, 'tvdb:2', 'Variant Branch Pilot', $8::date),
+				($7::uuid, 'episode', $3::uuid, 1, 'tvdb:3', 'Variant Direct Pilot', $8::date)
+		), overflow_variants AS (
+			INSERT INTO titles (media_type, parent_id, ordinal, hierarchy_variant, display_title, release_date)
+			SELECT 'episode', $3::uuid, value + 10, 'tvdb:' || (value + 10), 'Variant Overflow ' || value, $8::date
+			FROM generate_series(1, $9::integer) AS value
 		)
 		INSERT INTO profile_library (profile_id, title_id) VALUES ($1::uuid, $2::uuid)
-	`, profileID, seriesID, seasonID, episodeID, releaseDate); err != nil { t.Fatalf("seed notification series: %v", err) }
+	`, profileID, seriesID, seasonID, episodeID, variantSeasonID, variantEpisodeID, directVariantID,
+		releaseDate, maximumSeriesSubjects+1); err != nil {
+		t.Fatalf("seed notification series: %v", err)
+	}
 	expires := time.Now().UTC().Add(time.Hour)
 	principal := auth.Principal{Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator, ActiveProfileID: new(profileID), ProfileGrantExpiresAt: &expires}
 	horizon, lead := 30, 1
 	service := NewService(pool, nil)
 	if _, err := service.Follow(ctx, principal, seriesID, FollowInput{Timezone: "UTC", HorizonDays: &horizon, LeadDays: &lead}); err != nil { t.Fatalf("follow new series: %v", err) }
 	var observations, subscriptions int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM profile_media_notification_observations WHERE profile_id = $1::uuid AND root_title_id = $2::uuid`, profileID, seriesID).Scan(&observations); err != nil { t.Fatal(err) }
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM profile_media_notification_subscriptions WHERE profile_id = $1::uuid AND title_id = $2::uuid`, profileID, seriesID).Scan(&subscriptions); err != nil { t.Fatal(err) }
-	if observations != 2 || subscriptions != 1 { t.Fatalf("baseline observations=%d subscriptions=%d", observations, subscriptions) }
+	var observedIDs []string
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*), array_agg(subject_title_id::text ORDER BY subject_title_id)
+		FROM profile_media_notification_observations
+		WHERE profile_id = $1::uuid AND root_title_id = $2::uuid
+	`, profileID, seriesID).Scan(&observations, &observedIDs); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM profile_media_notification_subscriptions WHERE profile_id = $1::uuid AND title_id = $2::uuid`, profileID, seriesID).Scan(&subscriptions); err != nil {
+		t.Fatal(err)
+	}
+	if observations != 2 || subscriptions != 1 ||
+		!reflect.DeepEqual(observedIDs, []string{seasonID, episodeID}) {
+		t.Fatalf("baseline observations=%d ids=%v subscriptions=%d", observations, observedIDs, subscriptions)
+	}
+	var variantNotificationCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM profile_media_notifications
+		WHERE profile_id = $1::uuid
+		  AND subject_title_id IS NOT NULL
+		  AND subject_title_id NOT IN ($2::uuid, $3::uuid)
+	`, profileID, seasonID, episodeID).Scan(&variantNotificationCount); err != nil {
+		t.Fatal(err)
+	}
+	if variantNotificationCount != 0 {
+		t.Fatalf("initial generation persisted %d variant notifications", variantNotificationCount)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO titles (id, media_type, parent_id, ordinal, hierarchy_variant, display_title) VALUES
+			($2::uuid, 'season', $1::uuid, 2, '', 'Season 2'),
+			($4::uuid, 'season', $1::uuid, 2, 'tvdb:4', 'Variant Season 2');
+		INSERT INTO titles (id, media_type, parent_id, ordinal, hierarchy_variant, display_title, release_date) VALUES
+			($3::uuid, 'episode', $2::uuid, 1, '', 'Second Pilot', $6::date),
+			($5::uuid, 'episode', $4::uuid, 1, 'tvdb:4', 'Variant Second Pilot', $6::date);
+	`, pgx.QueryExecModeSimpleProtocol, seriesID, newSeasonID, newEpisodeID, newVariantSeasonID, newVariantEpisodeID, releaseDate); err != nil {
+		t.Fatalf("seed notification refresh subjects: %v", err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin targeted notification generation: %v", err)
+	}
+	if err := service.generateOne(ctx, tx, time.Now().UTC(), profileID, seriesID); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("generate canonical notification refresh: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit canonical notification refresh: %v", err)
+	}
+	var newCanonicalNotifications, anyVariantNotifications int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (
+		         WHERE subject_title_id IN ($3::uuid, $4::uuid)
+		           AND kind IN ('season-available', 'episode-available', 'calendar-event-upcoming')
+		       ),
+		       count(*) FILTER (
+		         WHERE subject_title_id IN ($5::uuid, $6::uuid, $7::uuid, $8::uuid, $9::uuid)
+		            OR subject_title_id IN (
+		                 SELECT id FROM titles WHERE hierarchy_variant <> ''
+		               )
+		       )
+		FROM profile_media_notifications
+		WHERE profile_id = $1::uuid AND root_title_id = $2::uuid
+	`, profileID, seriesID, newSeasonID, newEpisodeID, variantSeasonID, variantEpisodeID,
+		directVariantID, newVariantSeasonID, newVariantEpisodeID).Scan(&newCanonicalNotifications, &anyVariantNotifications); err != nil {
+		t.Fatal(err)
+	}
+	if newCanonicalNotifications != 3 || anyVariantNotifications != 0 {
+		t.Fatalf("refreshed notifications canonical=%d variant=%d", newCanonicalNotifications, anyVariantNotifications)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO titles (media_type, parent_id, ordinal, hierarchy_variant, display_title)
+		SELECT 'episode', $1::uuid, value + 100, '', 'Canonical Boundary ' || value
+		FROM generate_series(1, $2::integer) AS value
+	`, seasonID, maximumSeriesSubjects-4); err != nil {
+		t.Fatalf("seed canonical notification boundary: %v", err)
+	}
+	tx, err = pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin notification overflow boundary: %v", err)
+	}
+	overflow, err := seriesSubjectOverflow(ctx, tx, seriesID)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("check exact notification boundary: %v", err)
+	}
+	if overflow {
+		_ = tx.Rollback(ctx)
+		t.Fatal("variants counted toward exact notification subject boundary")
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO titles (media_type, parent_id, ordinal, hierarchy_variant, display_title)
+		VALUES ('episode', $1::uuid, $2, '', 'Canonical Boundary Overflow')
+	`, seasonID, maximumSeriesSubjects+101); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("seed notification boundary overflow: %v", err)
+	}
+	overflow, err = seriesSubjectOverflow(ctx, tx, seriesID)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("check notification boundary overflow: %v", err)
+	}
+	if !overflow {
+		_ = tx.Rollback(ctx)
+		t.Fatal("canonical notification subject 5001 did not overflow")
+	}
+	_ = tx.Rollback(ctx)
 }

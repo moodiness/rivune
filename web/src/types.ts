@@ -1011,6 +1011,9 @@ export type ContinueItem = {
   seasonId?: string;
   seasonNumber?: number;
   episodeNumber?: number;
+  mappingProvider?: "tvdb" | null;
+  episodeOrderId?: string | null;
+  metadataSeasonId?: string | null;
   positionSeconds: number;
   durationSeconds: number;
   version: number;
@@ -1027,6 +1030,13 @@ export type ContinueItem = {
   lastWatchedAt: string;
 };
 export type ContinueWatching = { items: ContinueItem[] };
+
+type ContinueItemContinuationContract<T extends Pick<ContinueItem, "mappingProvider" | "episodeOrderId" | "metadataSeasonId">> = T;
+export type ContinueItemContinuationContractFixture = ContinueItemContinuationContract<{
+  readonly mappingProvider: "tvdb";
+  readonly episodeOrderId: "2";
+  readonly metadataSeasonId: "tvdb:0392d6ce-02f0-4c75-a73f-13badb1c85ba:2112814";
+}>;
 
 export type TrackingProvider = "trakt" | "simkl";
 export type TrackingStatus = {

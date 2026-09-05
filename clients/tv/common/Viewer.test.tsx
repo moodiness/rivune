@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RivuneTvClient } from "./api";
 import type { ViewerSearchRequest, ViewerSearchResult } from "./ViewerSearch";
 import { performViewerSearch } from "./ViewerSearch";
-import type { Account, Discovery, Profile } from "./types";
+import { mediaFromContinue } from "./media";
+import type { Account, ContinueWatchingItem, Discovery, Profile } from "./types";
 import { Viewer } from "./Viewer";
 
 vi.mock("./updates", () => ({
@@ -63,6 +64,39 @@ const account = {
   profiles: [profile],
   maintenance: { enabled: false, message: null },
 } as Account;
+describe("TV continuation mapping", () => {
+  it("retains the complete TVDB episode-order context", () => {
+    const item = mediaFromContinue({
+      titleId: "dvd-episode-2",
+      mediaType: "episode",
+      seriesId: "series-1",
+      seasonId: "persisted-dvd-season-1",
+      seasonNumber: 1,
+      episodeNumber: 2,
+      mappingProvider: "tvdb",
+      episodeOrderId: "2",
+      metadataSeasonId: "tvdb:0392d6ce-02f0-4c75-a73f-13badb1c85ba:2112814",
+      positionSeconds: 480,
+      durationSeconds: 1860,
+      version: 3,
+      reason: "resume",
+      resourceId: "tvdb:10357450",
+      resourceProvider: "tvdb",
+      episodeTitle: "Disc Middle",
+      lastWatchedAt: "2026-09-04T12:00:00Z",
+    } satisfies ContinueWatchingItem);
+
+    expect(item).toMatchObject({
+      mappingProvider: "tvdb",
+      episodeOrderId: "2",
+      metadataSeasonId: "tvdb:0392d6ce-02f0-4c75-a73f-13badb1c85ba:2112814",
+      seriesId: "series-1",
+      seasonId: "persisted-dvd-season-1",
+      resourceId: "tvdb:10357450",
+    });
+  });
+});
+
 
 describe("TV Viewer progressive search", () => {
   let container: HTMLDivElement;

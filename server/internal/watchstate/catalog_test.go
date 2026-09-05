@@ -95,7 +95,7 @@ func TestCatalogTitleBatchRejectsUnboundedOrMalformedIDsBeforeDatabase(t *testin
 	}
 }
 
-func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
+func TestCatalogReaderScopesCanonicalHierarchyPaginationAndProviderIDs(t *testing.T) {
 	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
 	if databaseURL == "" {
 		databaseURL = os.Getenv("RIVUNE_DATABASE_URL")
@@ -142,7 +142,7 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 			release_date date, resource_id text, resource_provider text,
 			source_addon_id uuid, source_catalog_id text, source_name text,
 			country text, language text, category text,
-			is_current boolean NOT NULL DEFAULT true,
+			hierarchy_variant text NOT NULL DEFAULT '', is_current boolean NOT NULL DEFAULT true,
 			created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
 		);
 		CREATE TEMPORARY TABLE title_external_ids (
@@ -222,6 +222,12 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 			('00000000-0000-4000-8000-000000000320', 'series', NULL, NULL, 'Profile One Search Result', NULL, NULL, 'Custom', NULL, 'custom-series-search', 'addon', '99999999-9999-4999-8999-999999999999', 'search', 'Addon One', 'US', 'en', 'Drama'),
 			('00000000-0000-4000-8000-000000000321', 'season', '00000000-0000-4000-8000-000000000320', 1, 'One', NULL, NULL, NULL, NULL, NULL, NULL, '99999999-9999-4999-8999-999999999999', NULL, NULL, NULL, NULL, NULL),
 			('00000000-0000-4000-8000-000000000400', 'series', NULL, NULL, 'Éclair Hidden', NULL, NULL, 'Custom', NULL, 'custom-series-two', 'addon', '99999999-9999-4999-8999-999999999999', 'custom', 'Addon Two', 'GB', 'en', 'Comedy');
+		INSERT INTO titles (
+			id, media_type, parent_id, ordinal, hierarchy_variant, display_title
+		) VALUES
+			('00000000-0000-4000-8000-000000000230', 'season', '00000000-0000-4000-8000-000000000200', 1, 'tvdb:2', 'Season Variant'),
+			('00000000-0000-4000-8000-000000000231', 'episode', '00000000-0000-4000-8000-000000000230', 2, 'tvdb:2', 'Season Variant Episode'),
+			('00000000-0000-4000-8000-000000000212', 'episode', '00000000-0000-4000-8000-000000000210', 1, 'tvdb:3', 'Special Variant Episode');
 		UPDATE titles
 		SET created_at = CASE id
 		        WHEN '00000000-0000-4000-8000-000000000100'::uuid THEN '2026-08-06T12:03:00Z'::timestamptz
@@ -235,6 +241,13 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 		        WHEN '00000000-0000-4000-8000-000000000311'::uuid THEN '2026-08-06T12:04:00Z'::timestamptz
 		        ELSE '2026-08-06T12:00:00Z'::timestamptz
 		    END;
+		UPDATE titles
+		SET updated_at = CASE id
+			WHEN '00000000-0000-4000-8000-000000000230'::uuid THEN '2026-09-01T12:00:00Z'::timestamptz
+			WHEN '00000000-0000-4000-8000-000000000231'::uuid THEN '2026-09-02T12:00:00Z'::timestamptz
+			WHEN '00000000-0000-4000-8000-000000000212'::uuid THEN '2026-09-03T12:00:00Z'::timestamptz
+			ELSE updated_at
+		END;
 
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
 			('00000000-0000-4000-8000-000000000100', 'tmdb', 'movie', '100'),
@@ -260,7 +273,8 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000300', '2026-08-06T12:01:00Z'),
 			('22222222-2222-4222-8222-222222222222', '00000000-0000-4000-8000-000000000400', '2026-08-06T12:04:00Z');
 		INSERT INTO profile_favorites (profile_id, title_id) VALUES
-			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000101');
+			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000101'),
+			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000212');
 		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at, updated_at) VALUES
 			('00000000-0000-4000-8000-000000000100', 'tmdb', 'fr-FR',
 			 '{"overview":"Résumé matérialisé","runtimeMinutes":123,"genres":[{"id":18,"name":"Drama"}],"studios":[{"name":"Éclair Films"},{"name":"éCLAIR FILMS"},{"name":"Beta Studio"}],"voteAverage":8.25,"hasSubtitles":true,"officialRating":"PG-13","tags":["Featured"],"cast":[{"id":"9301","name":"Alice Actor","character":"Lead"}]}',
@@ -274,7 +288,9 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 			 now() + interval '1 hour', '2026-08-06T12:05:45Z');
 		INSERT INTO profile_progress (profile_id, title_id, position_seconds, duration_seconds, completed, last_watched_at) VALUES
 			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000100', 61, 7380, true, '2026-08-06T12:06:00Z'),
-			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000101', 120, 5700, false, '2026-08-06T12:07:00Z');
+			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000101', 120, 5700, false, '2026-08-06T12:07:00Z'),
+			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000212', 321, 1800, false, '2026-09-03T12:01:00Z'),
+			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000231', 1800, 1800, true, '2026-09-03T12:02:00Z');
 	`); err != nil {
 		t.Fatalf("create catalog fixtures: %v", err)
 	}
@@ -338,6 +354,26 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 		t.Fatalf("episode children emitted %d catalog page queries, want 3 total", counter.pages.Load())
 	}
 
+	canonicalHierarchy, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{
+		ParentID: "00000000-0000-4000-8000-000000000200", Recursive: true, Limit: 20,
+	})
+	if err != nil {
+		t.Fatalf("list recursive canonical hierarchy: %v", err)
+	}
+	canonicalHierarchyIDs := make(map[string]bool, len(canonicalHierarchy.Items))
+	for _, item := range canonicalHierarchy.Items {
+		canonicalHierarchyIDs[item.ID] = true
+	}
+	expectedCanonicalHierarchyIDs := map[string]bool{
+		"00000000-0000-4000-8000-000000000210": true,
+		"00000000-0000-4000-8000-000000000211": true,
+		"00000000-0000-4000-8000-000000000220": true,
+		"00000000-0000-4000-8000-000000000221": true,
+	}
+	if canonicalHierarchy.Total != len(expectedCanonicalHierarchyIDs) || !reflect.DeepEqual(canonicalHierarchyIDs, expectedCanonicalHierarchyIDs) {
+		t.Fatalf("recursive canonical hierarchy = %+v", canonicalHierarchy)
+	}
+
 	episode, err := service.GetCatalogTitle(ctx, profileOne, "00000000-0000-4000-8000-000000000211")
 	if err != nil {
 		t.Fatalf("get individual episode: %v", err)
@@ -350,6 +386,30 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 		episode.ProviderIDs["tvdb"] != "2110" || episode.Released != "2020-03-04" {
 		t.Fatalf("individual episode snapshot incomplete: %+v", episode)
 	}
+	variantEpisode, err := service.GetCatalogTitle(ctx, profileOne, "00000000-0000-4000-8000-000000000212")
+	if err != nil {
+		t.Fatalf("hydrate exact variant episode UUID: %v", err)
+	}
+	if variantEpisode.ID != "00000000-0000-4000-8000-000000000212" ||
+		variantEpisode.Progress == nil || variantEpisode.Progress.PositionSeconds != 321 ||
+		variantEpisode.Progress.DurationSeconds != 1800 || variantEpisode.Progress.Completed ||
+		variantEpisode.Progress.LastWatchedAt == nil {
+		t.Fatalf("exact variant progress hydration = %+v", variantEpisode)
+	}
+	canonicalSeries, err := service.GetCatalogTitle(ctx, profileOne, "00000000-0000-4000-8000-000000000200")
+	if err != nil {
+		t.Fatalf("hydrate canonical series aggregate: %v", err)
+	}
+	if !canonicalSeries.LastContentAddedAt.Equal(time.Date(2026, 8, 6, 12, 5, 0, 0, time.UTC)) {
+		t.Fatalf("canonical series last content = %s, want canonical grandchild timestamp", canonicalSeries.LastContentAddedAt)
+	}
+	canonicalSeason, err := service.GetCatalogTitle(ctx, profileOne, "00000000-0000-4000-8000-000000000210")
+	if err != nil {
+		t.Fatalf("hydrate canonical season aggregate: %v", err)
+	}
+	if !canonicalSeason.LastContentAddedAt.Equal(time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("canonical season last content = %s, want canonical child timestamp", canonicalSeason.LastContentAddedAt)
+	}
 	movie, err := service.GetCatalogTitle(ctx, profileOne, "00000000-0000-4000-8000-000000000100")
 	if err != nil || !reflect.DeepEqual(movie.ProviderIDs, map[string]string{"imdb": "tt0000100", "tmdb": "100"}) {
 		t.Fatalf("global provider IDs missing: %+v error %v", movie, err)
@@ -360,8 +420,8 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 		movie.Progress == nil || movie.Progress.PositionSeconds != 61 || !movie.Progress.Completed || movie.Progress.LastWatchedAt == nil {
 		t.Fatalf("materialized metadata or user state missing: %+v", movie)
 	}
-	if counter.titles.Load() != 2 {
-		t.Fatalf("two details emitted %d catalog title queries", counter.titles.Load())
+	if counter.titles.Load() != 5 {
+		t.Fatalf("canonical and exact-variant details emitted %d catalog title queries, want 5", counter.titles.Load())
 	}
 	nonLibrary, err := service.GetCatalogTitle(ctx, profileOne, "00000000-0000-4000-8000-000000000101")
 	if err != nil {
@@ -384,8 +444,8 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 	if err != nil || len(batch) != 1 || batch[0].ID != nonLibrary.ID || batch[0].Progress == nil || batch[0].InLibrary {
 		t.Fatalf("non-library resume batch projection = %+v error %v", batch, err)
 	}
-	if counter.titles.Load() != 4 {
-		t.Fatalf("detail and batch emitted %d catalog title queries, want 4", counter.titles.Load())
+	if counter.titles.Load() != 7 {
+		t.Fatalf("detail and batch emitted %d catalog title queries, want 7", counter.titles.Load())
 	}
 
 	profileOneCustom, err := service.GetCatalogTitle(ctx, profileOne, "00000000-0000-4000-8000-000000000300")
@@ -423,8 +483,8 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 	if err != nil || paginatedSearch.Total != 8 || paginatedSearch.Offset != 1 || len(paginatedSearch.Items) != 2 {
 		t.Fatalf("search pagination lost exact total: %+v error %v", paginatedSearch, err)
 	}
-	if counter.pages.Load() != 5 {
-		t.Fatalf("five list operations emitted %d catalog page queries, want 5", counter.pages.Load())
+	if counter.pages.Load() != 6 {
+		t.Fatalf("six list operations emitted %d catalog page queries, want 6", counter.pages.Load())
 	}
 	favorites, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{Favorite: boolPointer(true), Limit: 20})
 	if err != nil || favorites.Total != 1 || len(favorites.Items) != 1 || favorites.Items[0].ID != nonLibrary.ID || !favorites.Items[0].Favorite || favorites.Items[0].InLibrary {
@@ -437,6 +497,47 @@ func TestCatalogReaderScopesHierarchyPaginationAndProviderIDs(t *testing.T) {
 	resumable, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{Resumable: boolPointer(true), Limit: 20})
 	if err != nil || resumable.Total != 1 || len(resumable.Items) != 1 || resumable.Items[0].ID != nonLibrary.ID {
 		t.Fatalf("resumable filter = %+v error %v", resumable, err)
+	}
+	for _, stateFilter := range []struct {
+		name             string
+		query            CatalogQuery
+		canonicalTitleID string
+		variantTitleID   string
+	}{
+		{
+			name:             "favorite",
+			query:            CatalogQuery{Favorite: boolPointer(true), Recursive: true, Limit: 20},
+			canonicalTitleID: nonLibrary.ID,
+			variantTitleID:   variantEpisode.ID,
+		},
+		{
+			name:             "played",
+			query:            CatalogQuery{Played: boolPointer(true), Recursive: true, Limit: 20},
+			canonicalTitleID: movie.ID,
+			variantTitleID:   "00000000-0000-4000-8000-000000000231",
+		},
+		{
+			name:             "resumable",
+			query:            CatalogQuery{Resumable: boolPointer(true), Recursive: true, Limit: 20},
+			canonicalTitleID: nonLibrary.ID,
+			variantTitleID:   variantEpisode.ID,
+		},
+	} {
+		t.Run("recursive_"+stateFilter.name+"_state_excludes_variants", func(t *testing.T) {
+			page, err := service.ListCatalogItems(ctx, profileOne, stateFilter.query)
+			if err != nil || page.Total != 1 || len(page.Items) != 1 || page.Items[0].ID != stateFilter.canonicalTitleID {
+				t.Fatalf("recursive %s state catalog = %+v error %v, want canonical title %s only",
+					stateFilter.name, page, err, stateFilter.canonicalTitleID)
+			}
+
+			exactQuery := stateFilter.query
+			exactQuery.IDs = []string{stateFilter.variantTitleID}
+			exact, err := service.ListCatalogItems(ctx, profileOne, exactQuery)
+			if err != nil || exact.Total != 1 || len(exact.Items) != 1 || exact.Items[0].ID != stateFilter.variantTitleID {
+				t.Fatalf("exact recursive %s variant catalog = %+v error %v, want %s",
+					stateFilter.name, exact, err, stateFilter.variantTitleID)
+			}
+		})
 	}
 	combined, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{
 		Played: boolPointer(true), MinCommunityRating: float64Pointer(8), HasSubtitles: boolPointer(true),

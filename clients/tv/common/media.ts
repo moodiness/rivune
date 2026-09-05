@@ -64,6 +64,9 @@ export function mediaFromContinue(item: ContinueWatchingItem): MediaItem {
     mediaType: item.mediaType,
     seasonNumber: item.seasonNumber ?? undefined,
     episodeNumber: item.episodeNumber ?? undefined,
+    mappingProvider: item.mappingProvider ?? undefined,
+    episodeOrderId: item.episodeOrderId ?? undefined,
+    metadataSeasonId: item.metadataSeasonId ?? undefined,
     title: episode ? item.episodeTitle || `${t("media.episodes")} ${item.episodeNumber ?? ""}`.trim() : item.title || t("media.untitled"),
     posterUrl: item.episodeStillUrl || item.posterUrl || undefined,
     backgroundUrl: item.episodeStillUrl || item.backgroundUrl || item.posterUrl || undefined,
@@ -188,7 +191,24 @@ export function mediaFromSeries(series: Series, fallback: MediaItem): MediaItem 
 }
 
 export function mediaFromEpisode(episode: Episode, series: Series, season: Season, fallback: MediaItem): MediaItem {
-  const resource = series.externalIds.imdb ? `${series.externalIds.imdb}:${episode.seasonNumber}:${episode.episodeNumber}` : episode.externalIds.imdb || episode.externalIds.tvdb && `tvdb:${episode.externalIds.tvdb}` || episode.id;
+  const selectedOrderId = series.selectedEpisodeOrderId?.trim();
+  const selectedOrder = selectedOrderId
+    ? series.episodeOrders.find((order) => order.id === selectedOrderId)
+    : undefined;
+  const selectedNonOfficialOrder = Boolean(selectedOrderId && selectedOrder?.type.trim().toLowerCase() !== "official");
+  const variant = Boolean(fallback.episodeOrderId) || selectedNonOfficialOrder;
+  const episodeOrderId = fallback.episodeOrderId || (selectedNonOfficialOrder ? selectedOrderId : undefined);
+  const metadataSeasonId = fallback.metadataSeasonId === season.id
+    ? fallback.metadataSeasonId
+    : variant ? season.id : undefined;
+  const persistedSeasonId = fallback.metadataSeasonId === season.id && fallback.seasonId
+    ? fallback.seasonId
+    : season.id;
+  const resource = variant && episode.externalIds.tvdb
+    ? `tvdb:${episode.externalIds.tvdb}`
+    : series.externalIds.imdb
+      ? `${series.externalIds.imdb}:${episode.seasonNumber}:${episode.episodeNumber}`
+      : episode.externalIds.imdb || episode.externalIds.tvdb && `tvdb:${episode.externalIds.tvdb}` || episode.id;
   return {
     id: resource,
     resourceId: resource,
@@ -196,6 +216,12 @@ export function mediaFromEpisode(episode: Episode, series: Series, season: Seaso
     mediaType: "episode",
     seasonNumber: episode.seasonNumber,
     episodeNumber: episode.episodeNumber,
+    mappingProvider: variant ? "tvdb" : undefined,
+    episodeOrderId,
+    metadataSeasonId,
+    resumePositionSeconds: fallback.titleId === episode.id ? fallback.resumePositionSeconds : undefined,
+    durationSeconds: fallback.titleId === episode.id ? fallback.durationSeconds : undefined,
+    progressVersion: fallback.titleId === episode.id ? fallback.progressVersion : undefined,
     title: episode.name || `${t("media.episodes")} ${episode.episodeNumber}`,
     posterUrl: episode.stillUrl || season.backdropUrl || fallback.posterUrl,
     backgroundUrl: episode.backdropUrl || episode.stillUrl || series.backdropUrl || fallback.backgroundUrl,
@@ -204,7 +230,7 @@ export function mediaFromEpisode(episode: Episode, series: Series, season: Seaso
     voteAverage: episode.voteAverage,
     externalIds: episode.externalIds,
     seriesId: series.id,
-    seasonId: season.id,
+    seasonId: persistedSeasonId,
   };
 }
 

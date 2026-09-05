@@ -32,7 +32,15 @@ type MediaRoute = {
   item: MediaItem;
   origin: View;
 };
-type MediaRouteContext = { seasonID: string; episodeID?: string; seasonNumber: number; episodeNumber?: number };
+type MediaRouteContext = {
+  seasonID: string;
+  episodeID?: string;
+  seasonNumber: number;
+  episodeNumber?: number;
+  mappingProvider?: "tvdb";
+  episodeOrderId?: string;
+  metadataSeasonId?: string;
+};
 
 type AppRoute = { view: View; media: MediaRoute | null; canonicalURL?: string };
 
@@ -124,6 +132,9 @@ function cleanMediaRoute(): MediaRoute | null {
       continueSeasonNumber: seasonNumber,
       continueEpisodeId: storedContextMatchesPath ? item.raw?.continueEpisodeId : undefined,
       continueEpisodeNumber: episodeNumber,
+      mappingProvider: storedContextMatchesPath ? item.raw?.mappingProvider : undefined,
+      episodeOrderId: storedContextMatchesPath ? item.raw?.episodeOrderId : undefined,
+      metadataSeasonId: storedContextMatchesPath ? item.raw?.metadataSeasonId : undefined,
     };
     return { item, origin };
   }
@@ -654,6 +665,9 @@ export default function App() {
         continueSeasonNumber: context.seasonNumber,
         continueEpisodeId: context.episodeID,
         continueEpisodeNumber: context.episodeNumber,
+        mappingProvider: context.mappingProvider,
+        episodeOrderId: context.episodeOrderId,
+        metadataSeasonId: context.metadataSeasonId,
       },
     };
     mediaRouteRef.current = { ...currentRoute, item: storedItem };

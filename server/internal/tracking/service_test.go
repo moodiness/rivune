@@ -776,6 +776,131 @@ func TestAdmissionEvictsOnlyProvenStalePendingWork(t *testing.T) {
 	}
 }
 
+func TestVariantTrackingAdmissionSkipsVariantsWithoutCapacityUse(t *testing.T) {
+	t.Run("single", func(t *testing.T) {
+		pool := openTrackingOutboxTestPool(t, 2)
+		seedTrackingAccount(t, pool, trackingTestProfileID, "trakt")
+		canonicalID := trackingOutboxTitleID(201)
+		variantID := trackingOutboxTitleID(202)
+		if _, err := pool.Exec(t.Context(), `
+			INSERT INTO titles (id, hierarchy_variant) VALUES ($1::uuid, ''), ($2::uuid, 'tvdb:2')
+		`, canonicalID, variantID); err != nil {
+			t.Fatalf("seed tracking titles: %v", err)
+		}
+		service := &Service{pool: pool, logger: slog.Default(), profileProviderOutboxLimit: 1, globalOutboxLimit: 1}
+		tx, err := pool.Begin(t.Context())
+		if err != nil {
+			t.Fatalf("begin variant tracking transaction: %v", err)
+		}
+		err = service.EnqueueTx(t.Context(), tx, trackingTestProfileID, variantID, "progress:variant", Event{
+			Type: "progress", TitleID: variantID, Version: 1,
+		})
+		if err != nil {
+			_ = tx.Rollback(t.Context())
+			t.Fatalf("skip variant enqueue: %v", err)
+		}
+		if err := tx.Commit(t.Context()); err != nil {
+			t.Fatalf("commit skipped variant transaction: %v", err)
+		}
+		var heads, outbox int
+		if err := pool.QueryRow(t.Context(), `
+			SELECT (SELECT count(*) FROM profile_tracking_event_heads),
+			       (SELECT count(*) FROM profile_tracking_outbox)
+		`).Scan(&heads, &outbox); err != nil {
+			t.Fatalf("query skipped variant state: %v", err)
+		}
+		if heads != 0 || outbox != 0 {
+			t.Fatalf("skipped variant left heads=%d outbox=%d", heads, outbox)
+		}
+		if err := service.Enqueue(t.Context(), trackingTestProfileID, canonicalID, "progress:canonical", Event{
+			Type: "progress", TitleID: canonicalID, Version: 1,
+		}); err != nil {
+			t.Fatalf("canonical enqueue after skipped variant consumed capacity: %v", err)
+		}
+		if err := pool.QueryRow(t.Context(), `
+			SELECT (SELECT count(*) FROM profile_tracking_event_heads),
+			       (SELECT count(*) FROM profile_tracking_outbox)
+		`).Scan(&heads, &outbox); err != nil {
+			t.Fatalf("query canonical tracking state: %v", err)
+		}
+		if heads != 1 || outbox != 1 {
+			t.Fatalf("canonical enqueue left heads=%d outbox=%d", heads, outbox)
+		}
+	})
+
+	t.Run("mixed batch", func(t *testing.T) {
+		pool := openTrackingOutboxTestPool(t, 2)
+		seedTrackingAccount(t, pool, trackingTestProfileID, "trakt")
+		canonicalID := trackingOutboxTitleID(203)
+		variantID := trackingOutboxTitleID(204)
+		if _, err := pool.Exec(t.Context(), `
+			INSERT INTO titles (id, hierarchy_variant) VALUES ($1::uuid, ''), ($2::uuid, 'tvdb:3')
+		`, canonicalID, variantID); err != nil {
+			t.Fatalf("seed mixed tracking titles: %v", err)
+		}
+		service := &Service{pool: pool, logger: slog.Default(), profileProviderOutboxLimit: 1, globalOutboxLimit: 1}
+		tx, err := pool.Begin(t.Context())
+		if err != nil {
+			t.Fatalf("begin mixed tracking transaction: %v", err)
+		}
+		err = service.EnqueueBatchTx(t.Context(), tx, trackingTestProfileID, []BatchEvent{
+			{TitleID: canonicalID, IdempotencyKey: "watched:canonical", Event: Event{Type: "watched", TitleID: canonicalID}},
+			{TitleID: variantID, IdempotencyKey: "watched:variant", Event: Event{Type: "watched", TitleID: variantID}},
+		})
+		if err != nil {
+			_ = tx.Rollback(t.Context())
+			t.Fatalf("enqueue mixed canonical and variant batch: %v", err)
+		}
+		if err := tx.Commit(t.Context()); err != nil {
+			t.Fatalf("commit mixed batch transaction: %v", err)
+		}
+		var canonicalHeads, canonicalOutbox, variantHeads, variantOutbox int
+		if err := pool.QueryRow(t.Context(), `
+			SELECT
+				(SELECT count(*) FROM profile_tracking_event_heads WHERE title_id = $1::uuid),
+				(SELECT count(*) FROM profile_tracking_outbox WHERE title_id = $1::uuid),
+				(SELECT count(*) FROM profile_tracking_event_heads WHERE title_id = $2::uuid),
+				(SELECT count(*) FROM profile_tracking_outbox WHERE title_id = $2::uuid)
+		`, canonicalID, variantID).Scan(&canonicalHeads, &canonicalOutbox, &variantHeads, &variantOutbox); err != nil {
+			t.Fatalf("query mixed batch state: %v", err)
+		}
+		if canonicalHeads != 1 || canonicalOutbox != 1 || variantHeads != 0 || variantOutbox != 0 {
+			t.Fatalf(
+				"mixed batch heads/outbox canonical=%d/%d variant=%d/%d",
+				canonicalHeads, canonicalOutbox, variantHeads, variantOutbox,
+			)
+		}
+	})
+
+	t.Run("validation precedes filtering", func(t *testing.T) {
+		pool := openTrackingOutboxTestPool(t, 2)
+		variantID := trackingOutboxTitleID(205)
+		if _, err := pool.Exec(t.Context(), `
+			INSERT INTO titles (id, hierarchy_variant) VALUES ($1::uuid, 'tvdb:4')
+		`, variantID); err != nil {
+			t.Fatalf("seed validation variant title: %v", err)
+		}
+		service := &Service{pool: pool, logger: slog.Default()}
+		tx, err := pool.Begin(t.Context())
+		if err != nil {
+			t.Fatalf("begin validation transaction: %v", err)
+		}
+		defer func() { _ = tx.Rollback(t.Context()) }()
+		if err := service.EnqueueBatchTx(t.Context(), tx, trackingTestProfileID, []BatchEvent{
+			{TitleID: variantID, IdempotencyKey: "progress:one", Event: Event{Type: "progress", TitleID: variantID}},
+			{TitleID: variantID, IdempotencyKey: "progress:two", Event: Event{Type: "progress", TitleID: variantID}},
+		}); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("duplicate variant batch error=%v, want ErrInvalidInput", err)
+		}
+		if err := service.EnqueueBatchTx(t.Context(), tx, trackingTestProfileID, []BatchEvent{
+			{TitleID: variantID, IdempotencyKey: "progress:variant", Event: Event{Type: "progress", TitleID: variantID}},
+			{TitleID: trackingOutboxTitleID(206), IdempotencyKey: "watched:canonical", Event: Event{Type: "watched", TitleID: trackingOutboxTitleID(206)}},
+		}); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("mixed-type variant batch error=%v, want ErrInvalidInput", err)
+		}
+	})
+}
+
 func TestProcessAvailableDrainsMoreThanTwentyDueRows(t *testing.T) {
 	pool := openTrackingOutboxTestPool(t, 2)
 	seedTrackingAccount(t, pool, trackingTestProfileID, "trakt")
@@ -837,6 +962,10 @@ func openTrackingOutboxTestPool(t *testing.T, maxConns int32) *pgxpool.Pool {
 	if _, err := pool.Exec(context.Background(), fmt.Sprintf(`
 		CREATE SCHEMA %[1]s;
 		SET search_path TO %[1]s, public;
+		CREATE TABLE titles (
+			id uuid PRIMARY KEY,
+			hierarchy_variant text NOT NULL DEFAULT ''
+		);
 		CREATE TABLE profile_tracking_accounts (
 			profile_id uuid NOT NULL,
 			provider text NOT NULL,

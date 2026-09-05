@@ -39,9 +39,14 @@ type exportedAddon struct {
 }
 
 type exportedTitle struct {
-	id            string
-	value         Title
-	sourceAddonID string
+	id                       string
+	value                    Title
+	sourceAddonID            string
+	episodeOrderSeriesID     string
+	episodeOrderProvider     string
+	episodeOrderID           string
+	episodeOrderNamespace    string
+	episodeOrderExternalID   string
 }
 
 func (s *Service) Export(ctx context.Context, principal auth.Principal, profileID string) (Document, error) {
@@ -252,7 +257,29 @@ func exportCollections(ctx context.Context, tx pgx.Tx, profileID string, addons 
 }
 
 func exportTitles(ctx context.Context, tx pgx.Tx, profileID string, addons map[string]exportedAddon, document *Document) (map[string]string, []string, error) {
-	rows, err := tx.Query(ctx, `WITH RECURSIVE selected(id) AS (SELECT title_id FROM profile_library WHERE profile_id=$1::uuid UNION SELECT title_id FROM profile_progress WHERE profile_id=$1::uuid UNION SELECT title_id FROM profile_favorites WHERE profile_id=$1::uuid UNION SELECT title_id FROM profile_user_data WHERE profile_id=$1::uuid UNION SELECT title.parent_id FROM titles title JOIN selected child ON child.id=title.id WHERE title.parent_id IS NOT NULL) SELECT title.id::text,title.media_type,title.parent_id::text,title.ordinal,COALESCE(title.display_title,''),COALESCE(title.poster_url,''),COALESCE(title.background_url,''),COALESCE(title.release_info,''),COALESCE(title.release_date::text,''),COALESCE(title.resource_id,''),COALESCE(title.resource_provider,''),COALESCE(title.source_addon_id::text,''),COALESCE(title.source_catalog_id,''),COALESCE(title.source_name,''),COALESCE(title.country,''),COALESCE(title.language,''),COALESCE(title.category,''),binding.portable_key FROM titles title JOIN selected ON selected.id=title.id LEFT JOIN portable_profile_resource_bindings binding ON binding.profile_id=$1::uuid AND binding.resource_kind='title' AND binding.resource_id=title.id ORDER BY CASE title.media_type WHEN 'movie' THEN 0 WHEN 'series' THEN 0 WHEN 'tv' THEN 0 WHEN 'season' THEN 1 ELSE 2 END,title.id`, profileID)
+	rows, err := tx.Query(ctx, `
+		WITH RECURSIVE selected(id) AS (
+			SELECT title_id FROM profile_library WHERE profile_id=$1::uuid
+			UNION SELECT title_id FROM profile_progress WHERE profile_id=$1::uuid
+			UNION SELECT title_id FROM profile_favorites WHERE profile_id=$1::uuid
+			UNION SELECT title_id FROM profile_user_data WHERE profile_id=$1::uuid
+			UNION SELECT title.parent_id FROM titles title JOIN selected child ON child.id=title.id WHERE title.parent_id IS NOT NULL
+		)
+		SELECT title.id::text,title.media_type,title.parent_id::text,title.ordinal,
+		       COALESCE(title.display_title,''),COALESCE(title.poster_url,''),COALESCE(title.background_url,''),
+		       COALESCE(title.release_info,''),COALESCE(title.release_date::text,''),COALESCE(title.resource_id,''),
+		       COALESCE(title.resource_provider,''),COALESCE(title.source_addon_id::text,''),COALESCE(title.source_catalog_id,''),
+		       COALESCE(title.source_name,''),COALESCE(title.country,''),COALESCE(title.language,''),COALESCE(title.category,''),
+		       title.hierarchy_variant,COALESCE(order_identity.series_title_id::text,''),COALESCE(order_identity.provider,''),
+		       COALESCE(order_identity.order_id,''),COALESCE(order_identity.namespace,''),COALESCE(order_identity.external_id,''),
+		       binding.portable_key
+		FROM titles title
+		JOIN selected ON selected.id=title.id
+		LEFT JOIN title_episode_order_identities order_identity ON order_identity.title_id=title.id
+		LEFT JOIN portable_profile_resource_bindings binding
+		  ON binding.profile_id=$1::uuid AND binding.resource_kind='title' AND binding.resource_id=title.id
+		ORDER BY CASE title.media_type WHEN 'movie' THEN 0 WHEN 'series' THEN 0 WHEN 'tv' THEN 0 WHEN 'season' THEN 1 ELSE 2 END,title.id
+	`, profileID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("export profile titles: %w", err)
 	}
@@ -263,7 +290,7 @@ func exportTitles(ctx context.Context, tx pgx.Tx, profileID string, addons map[s
 		var value exportedTitle
 		var parentID *string
 		var boundKey *string
-		if err := rows.Scan(&value.id, &value.value.MediaType, &parentID, &value.value.Ordinal, &value.value.DisplayTitle, &value.value.PosterURL, &value.value.BackgroundURL, &value.value.ReleaseInfo, &value.value.ReleaseDate, &value.value.ResourceID, &value.value.ResourceProvider, &value.sourceAddonID, &value.value.SourceCatalogID, &value.value.SourceName, &value.value.Country, &value.value.Language, &value.value.Category, &boundKey); err != nil {
+		if err := rows.Scan(&value.id, &value.value.MediaType, &parentID, &value.value.Ordinal, &value.value.DisplayTitle, &value.value.PosterURL, &value.value.BackgroundURL, &value.value.ReleaseInfo, &value.value.ReleaseDate, &value.value.ResourceID, &value.value.ResourceProvider, &value.sourceAddonID, &value.value.SourceCatalogID, &value.value.SourceName, &value.value.Country, &value.value.Language, &value.value.Category, &value.value.HierarchyVariant, &value.episodeOrderSeriesID, &value.episodeOrderProvider, &value.episodeOrderID, &value.episodeOrderNamespace, &value.episodeOrderExternalID, &boundKey); err != nil {
 			return nil, nil, fmt.Errorf("scan profile title: %w", err)
 		}
 		value.value.Key = portableKey("title", value.id)
@@ -292,6 +319,16 @@ func exportTitles(ctx context.Context, tx pgx.Tx, profileID string, addons map[s
 		if exported[i].value.ParentKey != "" {
 			exported[i].value.ParentKey = idToKey[exported[i].value.ParentKey]
 		}
+		if exported[i].episodeOrderSeriesID != "" {
+			seriesKey, exists := idToKey[exported[i].episodeOrderSeriesID]
+			if !exists {
+				return nil, nil, fmt.Errorf("%w: episode-order title references a series outside the archive", ErrConflict)
+			}
+			exported[i].value.EpisodeOrderIdentity = &EpisodeOrderIdentity{
+				SeriesKey: seriesKey, Provider: exported[i].episodeOrderProvider, OrderID: exported[i].episodeOrderID,
+				Namespace: exported[i].episodeOrderNamespace, ExternalID: exported[i].episodeOrderExternalID,
+			}
+		}
 	}
 	if len(ids) > 0 {
 		identityRows, err := tx.Query(ctx, `SELECT identity.title_id::text,identity.provider,identity.namespace,identity.external_id,false FROM title_external_ids identity WHERE identity.title_id=ANY($1::uuid[]) UNION ALL SELECT identity.title_id::text,identity.provider,identity.namespace,identity.external_id,true FROM profile_title_external_ids identity WHERE identity.profile_id=$2::uuid AND identity.title_id=ANY($1::uuid[]) ORDER BY 1,2,3,4,5`, ids, profileID)
@@ -315,6 +352,9 @@ func exportTitles(ctx context.Context, tx pgx.Tx, profileID string, addons map[s
 		identityRows.Close()
 		for i := range exported {
 			exported[i].value.ExternalIDs = identityByTitle[exported[i].id]
+			if exported[i].value.ExternalIDs == nil {
+				exported[i].value.ExternalIDs = []ExternalID{}
+			}
 		}
 	}
 	for _, value := range exported {
@@ -558,6 +598,13 @@ func lockImportResources(ctx context.Context, tx pgx.Tx, profileID string, docum
 	for _, title := range document.Titles {
 		for _, identity := range title.ExternalIDs {
 			key := identity.Provider + ":" + identity.Namespace + ":" + identity.ExternalID
+			if _, exists := seen[key]; !exists {
+				seen[key] = struct{}{}
+				keys = append(keys, key)
+			}
+		}
+		if identity := title.EpisodeOrderIdentity; identity != nil {
+			key := "episode-order:" + identity.SeriesKey + ":" + identity.Provider + ":" + identity.OrderID + ":" + identity.Namespace + ":" + identity.ExternalID
 			if _, exists := seen[key]; !exists {
 				seen[key] = struct{}{}
 				keys = append(keys, key)
@@ -1001,6 +1048,25 @@ func importTitles(ctx context.Context, tx pgx.Tx, profileID string, document Doc
 				candidates[candidate] = struct{}{}
 			}
 		}
+		episodeOrderSeriesID := ""
+		if identity := value.EpisodeOrderIdentity; identity != nil {
+			episodeOrderSeriesID = ids[identity.SeriesKey]
+			if episodeOrderSeriesID == "" {
+				return nil, 0, 0, invalid("episode-order identity series was not imported")
+			}
+			var candidate string
+			err = tx.QueryRow(ctx, `
+				SELECT title_id::text
+				FROM title_episode_order_identities
+				WHERE series_title_id=$1::uuid AND provider=$2 AND order_id=$3 AND namespace=$4 AND external_id=$5
+			`, episodeOrderSeriesID, identity.Provider, identity.OrderID, identity.Namespace, identity.ExternalID).Scan(&candidate)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return nil, 0, 0, fmt.Errorf("resolve imported episode-order identity: %w", err)
+			}
+			if candidate != "" {
+				candidates[candidate] = struct{}{}
+			}
+		}
 		if len(candidates) > 1 {
 			return nil, 0, 0, fmt.Errorf("%w: title identities resolve to different target titles", ErrConflict)
 		}
@@ -1020,16 +1086,42 @@ func importTitles(ctx context.Context, tx pgx.Tx, profileID string, document Doc
 			sourceAddonID = addonIDs[value.SourceAddonKey]
 		}
 		createdTitle := id == ""
+		changedTitle := false
 		if createdTitle {
-			err = tx.QueryRow(ctx, `INSERT INTO titles(media_type,parent_id,ordinal,display_title,poster_url,background_url,release_info,release_date,resource_id,resource_provider,source_addon_id,source_catalog_id,source_name,country,language,category) VALUES($1,NULLIF($2,'')::uuid,$3,NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),NULLIF($8,'')::date,NULLIF($9,''),NULLIF($10,''),NULLIF($11,'')::uuid,NULLIF($12,''),NULLIF($13,''),NULLIF($14,''),NULLIF($15,''),NULLIF($16,'')) RETURNING id::text`, value.MediaType, parentID, value.Ordinal, value.DisplayTitle, value.PosterURL, value.BackgroundURL, value.ReleaseInfo, value.ReleaseDate, value.ResourceID, value.ResourceProvider, sourceAddonID, value.SourceCatalogID, value.SourceName, value.Country, value.Language, value.Category).Scan(&id)
+			err = tx.QueryRow(ctx, `
+				INSERT INTO titles(
+					media_type,parent_id,ordinal,hierarchy_variant,display_title,poster_url,background_url,release_info,
+					release_date,resource_id,resource_provider,source_addon_id,source_catalog_id,source_name,country,language,category
+				)
+				VALUES($1,NULLIF($2,'')::uuid,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),
+					NULLIF($9,'')::date,NULLIF($10,''),NULLIF($11,''),NULLIF($12,'')::uuid,NULLIF($13,''),NULLIF($14,''),
+					NULLIF($15,''),NULLIF($16,''),NULLIF($17,''))
+				RETURNING id::text
+			`, value.MediaType, parentID, value.Ordinal, value.HierarchyVariant, value.DisplayTitle, value.PosterURL, value.BackgroundURL,
+				value.ReleaseInfo, value.ReleaseDate, value.ResourceID, value.ResourceProvider, sourceAddonID, value.SourceCatalogID,
+				value.SourceName, value.Country, value.Language, value.Category).Scan(&id)
 			if err != nil {
 				return nil, 0, 0, fmt.Errorf("create imported title: %w", err)
 			}
 			created++
 		} else {
-			var currentSourceAddonID string
+			var currentSourceAddonID, currentMediaType, currentParentID, currentHierarchyVariant string
+			var currentOrdinal *int
+			var hasCanonicalExternalIDs bool
 			var existingScopedProfile, existingScopedProvider, existingScopedNamespace, existingScopedID *string
-			if err := tx.QueryRow(ctx, `SELECT COALESCE(title.source_addon_id::text,''),identity.profile_id::text,identity.provider,identity.namespace,identity.external_id FROM titles title LEFT JOIN profile_title_external_ids identity ON identity.title_id=title.id WHERE title.id=$1::uuid FOR UPDATE OF title`, id).Scan(&currentSourceAddonID, &existingScopedProfile, &existingScopedProvider, &existingScopedNamespace, &existingScopedID); err != nil {
+			if err := tx.QueryRow(ctx, `
+				SELECT COALESCE(title.source_addon_id::text,''),title.media_type,COALESCE(title.parent_id::text,''),
+				       title.ordinal,title.hierarchy_variant,
+				       EXISTS (SELECT 1 FROM title_external_ids canonical WHERE canonical.title_id=title.id),
+				       scoped.profile_id::text,scoped.provider,scoped.namespace,scoped.external_id
+				FROM titles title
+				LEFT JOIN profile_title_external_ids scoped ON scoped.title_id=title.id
+				WHERE title.id=$1::uuid
+				FOR UPDATE OF title
+			`, id).Scan(
+				&currentSourceAddonID, &currentMediaType, &currentParentID, &currentOrdinal, &currentHierarchyVariant,
+				&hasCanonicalExternalIDs, &existingScopedProfile, &existingScopedProvider, &existingScopedNamespace, &existingScopedID,
+			); err != nil {
 				return nil, 0, 0, fmt.Errorf("check imported title provenance: %w", err)
 			}
 			if currentSourceAddonID != sourceAddonID {
@@ -1045,6 +1137,53 @@ func importTitles(ctx context.Context, tx pgx.Tx, profileID string, document Doc
 					}
 				}
 			}
+
+			var existingOrderSeriesID, existingOrderProvider, existingOrderID, existingOrderNamespace, existingOrderExternalID string
+			orderErr := tx.QueryRow(ctx, `
+				SELECT series_title_id::text,provider,order_id,namespace,external_id
+				FROM title_episode_order_identities
+				WHERE title_id=$1::uuid
+				FOR UPDATE
+			`, id).Scan(&existingOrderSeriesID, &existingOrderProvider, &existingOrderID, &existingOrderNamespace, &existingOrderExternalID)
+			hasEpisodeOrderIdentity := orderErr == nil
+			if orderErr != nil && !errors.Is(orderErr, pgx.ErrNoRows) {
+				return nil, 0, 0, fmt.Errorf("check imported episode-order identity: %w", orderErr)
+			}
+
+			incomingOrderIdentity := value.EpisodeOrderIdentity
+			if incomingOrderIdentity == nil {
+				if currentMediaType != value.MediaType || currentHierarchyVariant != "" || hasEpisodeOrderIdentity {
+					return nil, 0, 0, fmt.Errorf("%w: canonical archive title resolved to a noncanonical title", ErrConflict)
+				}
+			} else {
+				if currentMediaType != value.MediaType || hasCanonicalExternalIDs || existingScopedProfile != nil {
+					return nil, 0, 0, fmt.Errorf("%w: episode-order archive title resolved to an incompatible title", ErrConflict)
+				}
+				if hasEpisodeOrderIdentity {
+					if existingOrderSeriesID != episodeOrderSeriesID ||
+						existingOrderProvider != incomingOrderIdentity.Provider ||
+						existingOrderID != incomingOrderIdentity.OrderID ||
+						existingOrderNamespace != incomingOrderIdentity.Namespace ||
+						existingOrderExternalID != incomingOrderIdentity.ExternalID {
+						return nil, 0, 0, fmt.Errorf("%w: resolved title has a different episode-order identity", ErrConflict)
+					}
+				} else {
+					sameOrdinal := currentOrdinal == nil && value.Ordinal == nil ||
+						currentOrdinal != nil && value.Ordinal != nil && *currentOrdinal == *value.Ordinal
+					if currentHierarchyVariant != value.HierarchyVariant || currentParentID != parentID || !sameOrdinal {
+						return nil, 0, 0, fmt.Errorf("%w: episode-order archive title resolved to an incompatible legacy title", ErrConflict)
+					}
+					tag, err := tx.Exec(ctx, `
+						UPDATE titles
+						SET parent_id=NULLIF($2,'')::uuid,ordinal=$3,hierarchy_variant=$4,updated_at=now()
+						WHERE id=$1::uuid AND (parent_id,ordinal,hierarchy_variant) IS DISTINCT FROM (NULLIF($2,'')::uuid,$3,$4)
+					`, id, parentID, value.Ordinal, value.HierarchyVariant)
+					if err != nil {
+						return nil, 0, 0, fmt.Errorf("restore imported episode-order hierarchy: %w", err)
+					}
+					changedTitle = tag.RowsAffected() == 1
+				}
+			}
 		}
 		if createdTitle {
 			for _, identity := range value.ExternalIDs {
@@ -1058,8 +1197,34 @@ func importTitles(ctx context.Context, tx pgx.Tx, profileID string, document Doc
 				}
 			}
 		}
+		if identity := value.EpisodeOrderIdentity; identity != nil {
+			tag, err := tx.Exec(ctx, `
+				INSERT INTO title_episode_order_identities(title_id,series_title_id,provider,order_id,namespace,external_id)
+				VALUES($1::uuid,$2::uuid,$3,$4,$5,$6)
+				ON CONFLICT (title_id) DO NOTHING
+			`, id, episodeOrderSeriesID, identity.Provider, identity.OrderID, identity.Namespace, identity.ExternalID)
+			if err != nil {
+				return nil, 0, 0, fmt.Errorf("bind imported episode-order identity: %w", err)
+			}
+			var exact bool
+			if err := tx.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM title_episode_order_identities
+					WHERE title_id=$1::uuid AND series_title_id=$2::uuid AND provider=$3 AND order_id=$4 AND namespace=$5 AND external_id=$6
+				)
+			`, id, episodeOrderSeriesID, identity.Provider, identity.OrderID, identity.Namespace, identity.ExternalID).Scan(&exact); err != nil {
+				return nil, 0, 0, fmt.Errorf("verify imported episode-order identity: %w", err)
+			}
+			if !exact {
+				return nil, 0, 0, fmt.Errorf("%w: resolved title has a different episode-order identity", ErrConflict)
+			}
+			changedTitle = changedTitle || tag.RowsAffected() == 1
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO portable_profile_resource_bindings(profile_id,resource_kind,portable_key,resource_id) VALUES($1::uuid,'title',$2,$3::uuid) ON CONFLICT(profile_id,resource_kind,portable_key) DO UPDATE SET resource_id=EXCLUDED.resource_id,updated_at=now()`, profileID, value.Key, id); err != nil {
 			return nil, 0, 0, err
+		}
+		if !createdTitle && changedTitle {
+			changed++
 		}
 		ids[value.Key] = id
 	}

@@ -2151,6 +2151,9 @@ public sealed record ContinueWatchingItem
     public Guid? SeasonId { get; init; }
     public int? SeasonNumber { get; init; }
     public int? EpisodeNumber { get; init; }
+    public string? MappingProvider { get; init; }
+    public string? EpisodeOrderId { get; init; }
+    public string? MetadataSeasonId { get; init; }
     public string? Title { get; init; }
     public string? PosterUrl { get; init; }
     public string? BackgroundUrl { get; init; }

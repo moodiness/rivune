@@ -350,15 +350,17 @@ type ProviderSeasonSummary struct {
 }
 
 type ProviderSeason struct {
-	ExternalID   string
-	Name         string
-	Overview     string
-	SeasonNumber int
-	AirDate      string
-	PosterURL    string
-	BackdropURL  string
-	VoteAverage  float64
-	Episodes     []ProviderEpisode
+	ExternalID       string
+	Name             string
+	Overview         string
+	SeasonNumber     int
+	AirDate          string
+	PosterURL        string
+	BackdropURL      string
+	VoteAverage      float64
+	EpisodeOrderID   string
+	EpisodeOrderType string
+	Episodes         []ProviderEpisode
 }
 
 type ProviderEpisode struct {

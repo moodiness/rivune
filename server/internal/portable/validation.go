@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -19,6 +20,7 @@ import (
 var (
 	portableKeyPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	providerPattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
+	positiveIDPattern  = regexp.MustCompile(`^[1-9][0-9]*$`)
 )
 
 func invalid(message string) error { return fmt.Errorf("%w: %s", ErrInvalidDocument, message) }
@@ -188,11 +190,12 @@ func validateTitlesAndState(document Document, now time.Time, addonKeys map[stri
 	titles := make(map[string]Title, len(document.Titles))
 	globalIdentities := make(map[string]struct{})
 	profileIdentities := make(map[string]struct{})
+	episodeOrderIdentities := make(map[string]struct{})
 	for _, title := range document.Titles {
 		if err := addUniqueTitle(titles, title); err != nil {
 			return err
 		}
-		if err := validateTitle(title, addonKeys, globalIdentities, profileIdentities); err != nil {
+		if err := validateTitle(title, addonKeys, globalIdentities, profileIdentities, episodeOrderIdentities); err != nil {
 			return err
 		}
 	}
@@ -201,6 +204,22 @@ func validateTitlesAndState(document Document, now time.Time, addonKeys map[stri
 			parent, exists := titles[title.ParentKey]
 			if !exists || (title.MediaType == "season" && parent.MediaType != "series") || (title.MediaType == "episode" && parent.MediaType != "season") {
 				return invalid("title hierarchy is inconsistent")
+			}
+			if title.MediaType == "episode" && title.HierarchyVariant != parent.HierarchyVariant {
+				return invalid("episode hierarchy variant differs from its season")
+			}
+		}
+		if identity := title.EpisodeOrderIdentity; identity != nil {
+			series, exists := titles[identity.SeriesKey]
+			if !exists || series.MediaType != "series" || series.HierarchyVariant != "" {
+				return invalid("episode-order identity series key is invalid")
+			}
+			seriesKey := title.ParentKey
+			if title.MediaType == "episode" {
+				seriesKey = titles[title.ParentKey].ParentKey
+			}
+			if identity.SeriesKey != seriesKey {
+				return invalid("episode-order identity references a different series")
 			}
 		}
 	}
@@ -274,7 +293,7 @@ func addUniqueTitle(titles map[string]Title, title Title) error {
 	return nil
 }
 
-func validateTitle(title Title, addonKeys, global, scoped map[string]struct{}) error {
+func validateTitle(title Title, addonKeys, global, scoped, episodeOrders map[string]struct{}) error {
 	if title.MediaType != "movie" && title.MediaType != "series" && title.MediaType != "season" && title.MediaType != "episode" && title.MediaType != "tv" {
 		return invalid("unsupported title media type")
 	}
@@ -284,6 +303,31 @@ func validateTitle(title Title, addonKeys, global, scoped map[string]struct{}) e
 	}
 	if title.ParentKey != "" && !portableKeyPattern.MatchString(title.ParentKey) {
 		return invalid("title parent key is invalid")
+	}
+	if !child && title.HierarchyVariant != "" {
+		return invalid("root titles must use the canonical hierarchy")
+	}
+	if title.HierarchyVariant == "" {
+		if title.EpisodeOrderIdentity != nil {
+			return invalid("canonical title cannot carry an episode-order identity")
+		}
+	} else {
+		identity := title.EpisodeOrderIdentity
+		if identity == nil || identity.Provider != "tvdb" || identity.Namespace != title.MediaType ||
+			!portableKeyPattern.MatchString(identity.SeriesKey) ||
+			!validPositiveInt64ID(identity.OrderID) ||
+			!validPositiveInt64ID(identity.ExternalID) ||
+			title.HierarchyVariant != "tvdb:"+identity.OrderID {
+			return invalid("title episode-order identity is invalid")
+		}
+		if len(title.ExternalIDs) != 0 {
+			return invalid("episode-order title cannot carry canonical external identities")
+		}
+		key := identity.SeriesKey + "\x00" + identity.Provider + "\x00" + identity.OrderID + "\x00" + identity.Namespace + "\x00" + identity.ExternalID
+		if _, duplicate := episodeOrders[key]; duplicate {
+			return invalid("episode-order identity belongs to multiple titles")
+		}
+		episodeOrders[key] = struct{}{}
 	}
 	if title.SourceAddonKey != "" {
 		if _, ok := addonKeys[title.SourceAddonKey]; !ok {
@@ -310,6 +354,9 @@ func validateTitle(title Title, addonKeys, global, scoped map[string]struct{}) e
 		}
 		if !identity.ProfileScoped && len(identity.ExternalID) > 128 {
 			return invalid("global title external identity is too long")
+		}
+		if identity.Provider == "tvdb" && (identity.Namespace == "season" || identity.Namespace == "episode") && !validPositiveInt64ID(identity.ExternalID) {
+			return invalid("TVDB season and episode external identities must be positive signed-int64 decimals")
 		}
 		key := identity.Provider + "\x00" + identity.Namespace + "\x00" + identity.ExternalID
 		if _, duplicate := seen[key]; duplicate {
@@ -382,6 +429,14 @@ func addUniqueKey(values map[string]struct{}, key, kind string) error {
 	values[key] = struct{}{}
 	return nil
 }
+func validPositiveInt64ID(value string) bool {
+	if !positiveIDPattern.MatchString(value) {
+		return false
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	return err == nil && parsed > 0
+}
+
 func validText(value string, maximum int) bool {
 	return len(value) <= maximum && utf8.ValidString(value) && !strings.ContainsRune(value, '\x00') && (value == "" || strings.TrimSpace(value) == value)
 }

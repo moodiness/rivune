@@ -157,6 +157,167 @@ public sealed class ViewerPresentationTests
     }
 
     [Fact]
+    public void TvdbContinuationMappingRetainsCompleteOrderContextAndPersistedSeason()
+    {
+        var titleId = Guid.Parse("88888888-8888-4888-8888-888888888888");
+        var seriesId = Guid.Parse("99999999-9999-4999-8999-999999999999");
+        var persistedSeasonId = Guid.Parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        var metadataSeasonId = $"tvdb:{seriesId:D}:2112814";
+
+        var target = new ContinueWatchingItem
+        {
+            TitleId = titleId,
+            MediaType = PlaybackProgressMediaType.Episode,
+            SeriesId = seriesId,
+            SeasonId = persistedSeasonId,
+            SeasonNumber = 1,
+            EpisodeNumber = 2,
+            MappingProvider = " TVDB ",
+            EpisodeOrderId = " 2 ",
+            MetadataSeasonId = $" {metadataSeasonId} ",
+            Title = "Variant Series",
+            ResourceId = "tvdb:10357450",
+            ResourceProvider = "tvdb",
+            EpisodeTitle = "DVD Episode 2",
+            PositionSeconds = 480,
+            DurationSeconds = 1860,
+            Version = 3,
+            Reason = ContinueWatchingReason.Resume,
+            LastWatchedAt = "2026-09-04T12:00:00Z",
+        }.ToMediaTarget();
+
+        Assert.Equal("tvdb:10357450", target.ResourceId);
+        Assert.Equal(SeriesMappingProvider.Tvdb, target.MappingProvider);
+        Assert.Equal("2", target.EpisodeOrderId);
+        Assert.Equal(metadataSeasonId, target.MetadataSeasonId);
+        Assert.Equal(persistedSeasonId.ToString("D"), target.SeasonId);
+        Assert.Equal(480, target.ResumePositionSeconds);
+        Assert.Equal(1860, target.DurationSeconds);
+    }
+
+    [Theory]
+    [InlineData("unknown", "2", "tvdb:series:2112814")]
+    [InlineData("tvdb", null, "tvdb:series:2112814")]
+    [InlineData("tvdb", "2", null)]
+    public void IncompleteContinuationContextIsCleared(
+        string? mappingProvider,
+        string? episodeOrderId,
+        string? metadataSeasonId)
+    {
+        var target = new ContinueWatchingItem
+        {
+            TitleId = Guid.Parse("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            MediaType = PlaybackProgressMediaType.Episode,
+            MappingProvider = mappingProvider,
+            EpisodeOrderId = episodeOrderId,
+            MetadataSeasonId = metadataSeasonId,
+            PositionSeconds = 0,
+            DurationSeconds = 0,
+            Version = 0,
+            Reason = ContinueWatchingReason.Resume,
+            LastWatchedAt = "2026-09-04T12:00:00Z",
+        }.ToMediaTarget();
+
+        Assert.Null(target.MappingProvider);
+        Assert.Null(target.EpisodeOrderId);
+        Assert.Null(target.MetadataSeasonId);
+    }
+
+    [Fact]
+    public void VariantEpisodeMappingUsesRawTvdbIdentityAndIsolatesSiblingProgress()
+    {
+        var seriesId = Guid.Parse("cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+        var persistedSeasonId = Guid.Parse("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+        var metadataSeasonId = $"tvdb:{seriesId:D}:2112814";
+        var series = Series(
+            seriesId,
+            metadataSeasonId,
+            selectedOrderId: "2",
+            orderType: "dvd",
+            mappingProvider: SeriesMappingProvider.Tvdb);
+        var current = Episode(
+            Guid.Parse("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
+            metadataSeasonId,
+            2,
+            "10357450");
+        var sibling = Episode(
+            Guid.Parse("ffffffff-ffff-4fff-8fff-ffffffffffff"),
+            metadataSeasonId,
+            3,
+            "10357451");
+        var source = new MediaTarget
+        {
+            Id = "tvdb:10357450",
+            ResourceId = "tvdb:10357450",
+            MediaType = "episode",
+            Title = "DVD Episode 2",
+            TitleId = current.Id,
+            SeriesId = seriesId,
+            MappingProvider = SeriesMappingProvider.Tvdb,
+            EpisodeOrderId = "stale-order",
+            MetadataSeasonId = metadataSeasonId,
+            SeasonId = persistedSeasonId.ToString("D"),
+            SeasonNumber = 1,
+            EpisodeNumber = 2,
+            ResumePositionSeconds = 480,
+            DurationSeconds = 1860,
+        };
+
+        var currentTarget = current.ToMediaTarget(series, seriesId.ToString("D"), source);
+        var siblingTarget = sibling.ToMediaTarget(series, seriesId.ToString("D"), source);
+
+        Assert.Equal("tvdb:10357450", currentTarget.ResourceId);
+        Assert.Equal("tvdb:10357451", siblingTarget.ResourceId);
+        Assert.Equal(SeriesMappingProvider.Tvdb, siblingTarget.MappingProvider);
+        Assert.Equal("2", siblingTarget.EpisodeOrderId);
+        Assert.Equal(metadataSeasonId, siblingTarget.MetadataSeasonId);
+        Assert.Equal(persistedSeasonId.ToString("D"), siblingTarget.SeasonId);
+        Assert.Equal(480, currentTarget.ResumePositionSeconds);
+        Assert.Equal(1860, currentTarget.DurationSeconds);
+        Assert.Equal(0, siblingTarget.ResumePositionSeconds);
+        Assert.Equal(0, siblingTarget.DurationSeconds);
+    }
+
+    [Fact]
+    public void SelectedOfficialOrderClearsStaleVariantContext()
+    {
+        var seriesId = Guid.Parse("12121212-1212-4212-8212-121212121212");
+        var episode = Episode(
+            Guid.Parse("13131313-1313-4313-8313-131313131313"),
+            "canonical-season-1",
+            2,
+            "10357450");
+        var source = new MediaTarget
+        {
+            Id = "tvdb:10357450",
+            ResourceId = "tvdb:10357450",
+            MediaType = "episode",
+            Title = "Stale DVD Episode",
+            TitleId = episode.Id,
+            MappingProvider = SeriesMappingProvider.Tvdb,
+            EpisodeOrderId = "2",
+            MetadataSeasonId = "tvdb:stale:2112814",
+            SeasonId = Guid.Parse("14141414-1414-4414-8414-141414141414").ToString("D"),
+            ResumePositionSeconds = 10,
+            DurationSeconds = 20,
+        };
+        var series = Series(
+            seriesId,
+            "canonical-season-1",
+            selectedOrderId: "official",
+            orderType: "official",
+            mappingProvider: SeriesMappingProvider.Tmdb);
+
+        var target = episode.ToMediaTarget(series, seriesId.ToString("D"), source);
+
+        Assert.Equal("tt12345678:1:2", target.ResourceId);
+        Assert.Null(target.MappingProvider);
+        Assert.Null(target.EpisodeOrderId);
+        Assert.Null(target.MetadataSeasonId);
+        Assert.Equal("canonical-season-1", target.SeasonId);
+    }
+
+    [Fact]
     public void ContinueMappingFallsBackToStableIdsAndEpisodeNumbers()
     {
         var titleId = Guid.Parse("66666666-6666-4666-8666-666666666666");
@@ -392,6 +553,68 @@ public sealed class ViewerPresentationTests
         Assert.Same(existingControl, selectedControl);
         Assert.Same(existingControl, focusedControl);
     }
+
+    private static Series Series(
+        Guid id,
+        string seasonId,
+        string? selectedOrderId,
+        string orderType,
+        SeriesMappingProvider mappingProvider) => new()
+    {
+        Id = id,
+        MediaType = MediaType.Series,
+        Name = "Series",
+        OriginalName = "Series",
+        OriginalLanguage = "en",
+        Overview = string.Empty,
+        Genres = [],
+        Cast = [],
+        VoteAverage = 0,
+        VoteCount = 0,
+        Seasons =
+        [
+            new SeasonSummary
+            {
+                Id = seasonId,
+                MediaType = MediaType.Season,
+                SeriesId = id,
+                Name = "Season 1",
+                Overview = string.Empty,
+                SeasonNumber = 1,
+                EpisodeCount = 2,
+                VoteAverage = 0,
+                ExternalIds = new Dictionary<string, string>(),
+            },
+        ],
+        Aliases = [],
+        EpisodeOrders =
+        [
+            new EpisodeOrder
+            {
+                Id = selectedOrderId ?? "2",
+                Name = "Selected",
+                Type = orderType,
+                IsDefault = true,
+            },
+        ],
+        SelectedEpisodeOrderId = selectedOrderId,
+        MappingProvider = mappingProvider,
+        ExternalIds = new Dictionary<string, string> { ["imdb"] = "tt12345678" },
+    };
+
+    private static Episode Episode(Guid id, string seasonId, int number, string tvdbId) => new()
+    {
+        Id = id,
+        MediaType = MediaType.Episode,
+        SeasonId = seasonId,
+        Name = $"Episode {number}",
+        Overview = string.Empty,
+        SeasonNumber = 1,
+        EpisodeNumber = number,
+        VoteAverage = 0,
+        VoteCount = 0,
+        ExternalIds = new Dictionary<string, string> { ["tvdb"] = tvdbId },
+    };
 
     private static MediaTarget Target(string id, string title, string tmdb) => new()
     {

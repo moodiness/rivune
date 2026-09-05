@@ -7,6 +7,7 @@ import io.rivune.api.Movie
 import io.rivune.api.PlaybackProgress
 import io.rivune.api.PlaybackSourceOption
 import io.rivune.api.Series
+import io.rivune.api.SeriesMappingProvider
 import io.rivune.api.EffectiveSettings
 import io.rivune.api.EffectiveSettingsSources
 import io.rivune.api.SettingsValues
@@ -68,6 +69,9 @@ data class MediaTarget(
     val category: String? = null,
     val available: Boolean = true,
     val seriesId: UUID? = null,
+    val mappingProvider: SeriesMappingProvider? = null,
+    val episodeOrderId: String? = null,
+    val metadataSeasonId: String? = null,
     val seasonId: String? = null,
     val seasonNumber: Int? = null,
     val episodeNumber: Int? = null,
@@ -76,6 +80,21 @@ data class MediaTarget(
     val rating: Double? = null,
     val queueItemId: UUID? = null,
 )
+internal fun MediaTarget.withAtomicVariantContext(): MediaTarget {
+    val episodeOrderId = episodeOrderId?.trim()?.takeIf(String::isNotBlank)
+    val metadataSeasonId = metadataSeasonId?.trim()?.takeIf(String::isNotBlank)
+    return if (
+        mappingProvider == SeriesMappingProvider.TVDB &&
+        episodeOrderId != null &&
+        metadataSeasonId != null
+    ) {
+        copy(episodeOrderId = episodeOrderId, metadataSeasonId = metadataSeasonId)
+    } else if (mappingProvider == null && this.episodeOrderId == null && this.metadataSeasonId == null) {
+        this
+    } else {
+        copy(mappingProvider = null, episodeOrderId = null, metadataSeasonId = null)
+    }
+}
 
 data class MediaDetailState(
     val target: MediaTarget,
@@ -332,13 +351,18 @@ data class ViewerState(
 )
 
 internal fun Episode.toMediaTarget(series: Series, fallback: MediaTarget): MediaTarget {
+    val context = fallback.withAtomicVariantContext()
+    val variantOrder = context.episodeOrderId
+    val variantProvider = context.mappingProvider
     val resourceId = when {
+        variantProvider != null && !externalIds["tvdb"].isNullOrBlank() -> "tvdb:${externalIds.getValue("tvdb")}"
         !series.externalIds["imdb"].isNullOrBlank() -> "${series.externalIds.getValue("imdb")}:$seasonNumber:$episodeNumber"
         !externalIds["imdb"].isNullOrBlank() -> externalIds.getValue("imdb")
         !externalIds["tvdb"].isNullOrBlank() -> "tvdb:${externalIds.getValue("tvdb")}"
         !series.externalIds["tmdb"].isNullOrBlank() -> "tmdb:${series.externalIds.getValue("tmdb")}:$seasonNumber:$episodeNumber"
-        else -> "${fallback.resourceId}:$seasonNumber:$episodeNumber"
+        else -> "${context.resourceId}:$seasonNumber:$episodeNumber"
     }
+    val matchingFallback = context.titleId == id
     return MediaTarget(
         id = resourceId,
         resourceId = resourceId,
@@ -346,18 +370,23 @@ internal fun Episode.toMediaTarget(series: Series, fallback: MediaTarget): Media
         title = name.ifBlank { "Episode $episodeNumber" },
         titleId = id,
         externalIds = externalIds,
-        posterUrl = stillUrl ?: fallback.posterUrl,
-        backgroundUrl = backdropUrl ?: stillUrl ?: fallback.backgroundUrl,
+        posterUrl = stillUrl ?: context.posterUrl,
+        backgroundUrl = backdropUrl ?: stillUrl ?: context.backgroundUrl,
         description = overview,
         releaseInfo = airDate,
         released = airDate,
         seriesId = series.id,
+        mappingProvider = variantProvider,
+        episodeOrderId = variantOrder,
+        metadataSeasonId = seasonId.takeIf { variantProvider != null },
         seriesImdbId = series.externalIds["imdb"],
-        seasonId = seasonId,
+        seasonId = context.seasonId.takeIf { context.metadataSeasonId == seasonId } ?: seasonId,
         seasonNumber = seasonNumber,
         episodeNumber = episodeNumber,
         runtimeMinutes = runtimeMinutes,
         rating = voteAverage.takeIf { it > 0.0 },
+        resumePositionSeconds = context.resumePositionSeconds.takeIf { matchingFallback } ?: 0,
+        durationSeconds = context.durationSeconds.takeIf { matchingFallback } ?: 0,
     )
 }
 

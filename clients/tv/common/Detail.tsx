@@ -64,15 +64,30 @@ export function Detail({ client, item, profileId, timezone, accessibility, quali
       ]);
       let movie: Movie | null = null;
       let series: Series | null = null;
+      let initialSeason: Season | null = null;
       let enriched: MediaItem = { ...item, titleId };
       if (item.mediaType === "movie") {
         movie = await client.movie(titleId);
         enriched = mediaFromMovie(movie, enriched);
-      } else if (item.mediaType === "series") {
-        series = await client.series(titleId);
-        enriched = mediaFromSeries(series, enriched);
+      } else if (item.mediaType === "series" || item.mediaType === "episode" && item.seriesId) {
+        const seriesId = item.mediaType === "episode" ? item.seriesId! : titleId;
+        series = await client.series(seriesId, item.mappingProvider ?? "tmdb", undefined, item.episodeOrderId);
+        if (item.mediaType === "series") {
+          enriched = mediaFromSeries(series, enriched);
+        } else {
+          const initialSeasonId = item.metadataSeasonId
+            || series.seasons.find((entry) => entry.id === item.seasonId)?.id
+            || series.seasons.find((entry) => entry.seasonNumber === item.seasonNumber)?.id;
+          if (initialSeasonId) {
+            initialSeason = await client.season(initialSeasonId, series.mappingProvider);
+            const episode = initialSeason.episodes.find((entry) => entry.id === titleId)
+              ?? initialSeason.episodes.find((entry) => entry.episodeNumber === item.episodeNumber);
+            if (episode) enriched = mediaFromEpisode(episode, series, initialSeason, enriched);
+          }
+        }
       }
       if (!active) return;
+      setSeason(initialSeason);
       setDetail({ item: enriched, titleId, movie, series, progress, inLibrary: library.items.some((entry) => entry.titleId === titleId) });
     })().then(() => {
       if (active) setBusy(false);

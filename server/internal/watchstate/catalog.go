@@ -224,6 +224,7 @@ func (s *Service) GetCatalogTitles(ctx context.Context, principal auth.Principal
 		               FROM titles child
 		               JOIN accessible_titles accessible_child ON accessible_child.id = child.id
 		               WHERE child.parent_id = title.id
+		                 AND child.hierarchy_variant = ''
 		           ), title.updated_at),
 		           COALESCE((
 		               SELECT max(grandchild.updated_at)
@@ -232,6 +233,8 @@ func (s *Service) GetCatalogTitles(ctx context.Context, principal auth.Principal
 		               JOIN titles grandchild ON grandchild.parent_id = child.id
 		               JOIN accessible_titles accessible_grandchild ON accessible_grandchild.id = grandchild.id
 		               WHERE child.parent_id = title.id
+		                 AND child.hierarchy_variant = ''
+		                 AND grandchild.hierarchy_variant = ''
 		           ), title.updated_at)
 		       ),
 		       COALESCE(metadata.overview, ''), metadata.runtime_minutes, COALESCE(metadata.genres, ARRAY[]::text[]),
@@ -352,11 +355,11 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 			WHERE ($2::uuid IS NULL AND (
 			          (library.title_id IS NOT NULL AND title.parent_id IS NULL)
 			          OR (cardinality($8::uuid[]) <> 0 AND title.id = ANY($8::uuid[]))
-			          OR ($12::boolean IS TRUE AND EXISTS (
+			          OR ($12::boolean IS TRUE AND title.hierarchy_variant = '' AND EXISTS (
 			              SELECT 1 FROM profile_favorites favorite
 			              WHERE favorite.profile_id = $1::uuid AND favorite.title_id = title.id
 			          ))
-			          OR (($11::boolean IS NOT NULL OR $13::boolean IS NOT NULL) AND EXISTS (
+			          OR (($11::boolean IS NOT NULL OR $13::boolean IS NOT NULL) AND title.hierarchy_variant = '' AND EXISTS (
 			              SELECT 1 FROM profile_progress progress
 			              WHERE progress.profile_id = $1::uuid AND progress.title_id = title.id
 			          ))
@@ -367,6 +370,7 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 			FROM titles child
 			JOIN profile_catalog parent ON parent.id = child.parent_id
 			JOIN accessible_titles accessible ON accessible.id = child.id
+			WHERE child.hierarchy_variant = ''
 		), selected_descendants AS (
 			SELECT title.id
 			FROM profile_catalog title
@@ -381,12 +385,19 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 			       to_char(title.created_at AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS.US') AS catalog_date_created_sort,
 			       GREATEST(
 			           title.updated_at,
-			           COALESCE((SELECT max(child.updated_at) FROM profile_catalog child WHERE child.parent_id = title.id), title.updated_at),
+			           COALESCE((
+			               SELECT max(child.updated_at)
+			               FROM profile_catalog child
+			               WHERE child.parent_id = title.id
+			                 AND child.hierarchy_variant = ''
+			           ), title.updated_at),
 			           COALESCE((
 			               SELECT max(grandchild.updated_at)
 			               FROM profile_catalog child
 			               JOIN profile_catalog grandchild ON grandchild.parent_id = child.id
 			               WHERE child.parent_id = title.id
+			                 AND child.hierarchy_variant = ''
+			                 AND grandchild.hierarchy_variant = ''
 			           ), title.updated_at)
 			       ) AS catalog_last_content_added,
 			       COALESCE(

@@ -3,7 +3,6 @@ package watchstate
 import (
 	"context"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -22,28 +21,56 @@ func TestContinueWindowBounds(t *testing.T) {
 	}
 }
 
-func TestCompatContinueQueriesAreDeterministicAndProfileScoped(t *testing.T) {
-	resume := strings.Join(strings.Fields(resumeItemsCTE), " ")
-	for _, clause := range []string{
-		"progress.profile_id = $1::uuid",
-		"PARTITION BY CASE WHEN title.media_type = 'episode' THEN series.id ELSE title.id END",
-		"ORDER BY progress.last_watched_at DESC, title.id",
-	} {
-		if !strings.Contains(resume, clause) {
-			t.Fatalf("resume query missing %q", clause)
-		}
+
+func TestCompatibilityContinuePreservesActiveHierarchy(t *testing.T) {
+	fixture := newEpisodeOrderContinueFixture(t)
+	ctx := context.Background()
+	if _, err := fixture.pool.Exec(ctx, `
+		UPDATE profile_progress
+		SET position_seconds = 222, completed = false, last_watched_at = '2026-08-03T00:00:00Z'
+		WHERE profile_id = $1::uuid AND title_id = $2::uuid
+	`, fixture.profileID, fixture.dvdEpisodeOneID); err != nil {
+		t.Fatalf("make DVD progress resumable: %v", err)
 	}
-	next := strings.Join(strings.Fields(nextUpItemsCTE), " ")
-	for _, clause := range []string{
-		"progress.profile_id = $1::uuid",
-		"($2::uuid IS NULL OR series.id = $2::uuid)",
-		"ORDER BY candidate_season.ordinal, candidate_episode.ordinal",
-		"existing.profile_id = $1::uuid",
-	} {
-		if !strings.Contains(next, clause) {
-			t.Fatalf("next-up query missing %q", clause)
-		}
+
+	resume, err := fixture.service.ListResume(ctx, fixture.principal, 0, 10)
+	if err != nil {
+		t.Fatalf("list compatibility resume for active DVD hierarchy: %v", err)
 	}
+	if resume.Total != 1 || len(resume.Items) != 1 {
+		t.Fatalf("compatibility resume page = %+v", resume)
+	}
+	resumeItem := resume.Items[0]
+	if resumeItem.TitleID != fixture.dvdEpisodeOneID ||
+		resumeItem.SeasonID != fixture.dvdSeasonID ||
+		resumeItem.PositionSeconds != 222 || resumeItem.Version != 7 ||
+		resumeItem.ResourceID != "tvdb:10357450" || resumeItem.ResourceProvider != "tvdb" {
+		t.Fatalf("compatibility DVD resume item = %+v", resumeItem)
+	}
+	assertContinueEpisodeOrderContext(t, resumeItem, "tvdb", "2", "tvdb:"+fixture.seriesID+":2112814")
+
+	if _, err := fixture.pool.Exec(ctx, `
+		UPDATE profile_progress
+		SET position_seconds = duration_seconds, completed = true, version = 8,
+		    last_watched_at = '2026-08-04T00:00:00Z'
+		WHERE profile_id = $1::uuid AND title_id = $2::uuid
+	`, fixture.profileID, fixture.dvdEpisodeOneID); err != nil {
+		t.Fatalf("complete active DVD episode: %v", err)
+	}
+	nextUp, err := fixture.service.ListNextUp(ctx, fixture.principal, fixture.seriesID, 0, 10)
+	if err != nil {
+		t.Fatalf("list compatibility next-up for active DVD hierarchy: %v", err)
+	}
+	if nextUp.Total != 1 || len(nextUp.Items) != 1 {
+		t.Fatalf("compatibility next-up page = %+v", nextUp)
+	}
+	nextItem := nextUp.Items[0]
+	if nextItem.TitleID != fixture.dvdEpisodeTwoID ||
+		nextItem.SeasonID != fixture.dvdSeasonID ||
+		nextItem.ResourceID != "tvdb:10357451" || nextItem.ResourceProvider != "tvdb" {
+		t.Fatalf("compatibility DVD next-up item = %+v", nextItem)
+	}
+	assertContinueEpisodeOrderContext(t, nextItem, "tvdb", "2", "tvdb:"+fixture.seriesID+":2112814")
 }
 
 func TestQueryResumeItemsOrdersDeduplicatesAndPaginates(t *testing.T) {
@@ -68,9 +95,14 @@ func TestQueryResumeItemsOrdersDeduplicatesAndPaginates(t *testing.T) {
 	if _, err := pool.Exec(ctx, `
 		CREATE TEMPORARY TABLE titles (
 			id uuid PRIMARY KEY, media_type text NOT NULL, parent_id uuid, ordinal integer,
+			hierarchy_variant text NOT NULL DEFAULT '',
 			display_title text, poster_url text, background_url text, release_info text,
 			resource_id text, resource_provider text, release_date date,
 			is_current boolean NOT NULL DEFAULT true, source_addon_id uuid
+		);
+		CREATE TEMPORARY TABLE title_episode_order_identities (
+			title_id uuid PRIMARY KEY, series_title_id uuid NOT NULL, provider text NOT NULL,
+			order_id text NOT NULL, namespace text NOT NULL, external_id text NOT NULL
 		);
 		CREATE TEMPORARY TABLE profiles (id uuid PRIMARY KEY, category_id uuid);
 		CREATE TEMPORARY TABLE profile_title_external_ids (profile_id uuid, title_id uuid, provider text, namespace text, external_id text);
@@ -152,9 +184,14 @@ func TestQueryNextUpIncludesNeverStartedSeriesOnceAndPaginates(t *testing.T) {
 	if _, err := pool.Exec(ctx, `
 		CREATE TEMPORARY TABLE titles (
 			id uuid PRIMARY KEY, media_type text NOT NULL, parent_id uuid, ordinal integer,
+			hierarchy_variant text NOT NULL DEFAULT '',
 			display_title text, poster_url text, background_url text, release_info text,
 			resource_id text, resource_provider text, release_date date,
 			is_current boolean NOT NULL DEFAULT true, source_addon_id uuid
+		);
+		CREATE TEMPORARY TABLE title_episode_order_identities (
+			title_id uuid PRIMARY KEY, series_title_id uuid NOT NULL, provider text NOT NULL,
+			order_id text NOT NULL, namespace text NOT NULL, external_id text NOT NULL
 		);
 		CREATE TEMPORARY TABLE profiles (id uuid PRIMARY KEY, category_id uuid);
 		CREATE TEMPORARY TABLE profile_title_external_ids (profile_id uuid, title_id uuid, provider text, namespace text, external_id text);

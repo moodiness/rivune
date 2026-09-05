@@ -222,6 +222,9 @@ public struct RivuneMediaTarget: Identifiable, Equatable, Sendable {
   public let releaseInfo: String?
   public let released: String?
   public let seriesId: UUID?
+  public let mappingProvider: SeriesMappingProvider?
+  public let episodeOrderId: String?
+  public let metadataSeasonId: String?
   public let seasonId: String?
   public let seasonNumber: Int?
   public let episodeNumber: Int?
@@ -2438,6 +2441,84 @@ public final class RivuneAppModel: ObservableObject {
     }
   }
 
+  private static func loadSeries(
+    id: UUID,
+    context: RivuneMediaTarget,
+    using client: RivuneAPIClient
+  ) async -> Series? {
+    if let mappingProvider = context.mappingProvider {
+      return try? await client.series(
+        id: id,
+        mappingProvider: mappingProvider,
+        episodeOrder: context.episodeOrderId)
+    }
+    if let canonical = try? await client.series(id: id, mappingProvider: .tmdb) {
+      return canonical
+    }
+    guard let fallback = try? await client.series(id: id, mappingProvider: .tvdb) else {
+      return nil
+    }
+    guard let officialOrderID = officialOrderID(in: fallback) else {
+      return nil
+    }
+    guard let official = try? await client.series(
+      id: id,
+      mappingProvider: .tvdb,
+      episodeOrder: officialOrderID),
+      selectedOrderIsOfficial(official, expectedOrderID: officialOrderID)
+    else {
+      return nil
+    }
+    return official
+  }
+
+  private static func officialOrderID(in series: Series) -> String? {
+    guard series.mappingProvider == .tvdb else { return nil }
+    let selectedOrderID = series.selectedEpisodeOrderId?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let selectedOrder = selectedOrderID.flatMap { selectedID in
+      series.episodeOrders.first { $0.id == selectedID }
+    }
+    if selectedOrder?.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      == "official"
+    {
+      return selectedOrderID.flatMap { positiveDecimalInt64($0) }
+    }
+    return series.episodeOrders.first(where: {
+      $0.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "official"
+    }).flatMap { positiveDecimalInt64($0.id) }
+  }
+
+  private static func selectedOrderIsOfficial(
+    _ series: Series,
+    expectedOrderID: String? = nil
+  ) -> Bool {
+    guard
+      series.mappingProvider == .tvdb,
+      let selectedOrderID = series.selectedEpisodeOrderId?
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+      expectedOrderID == nil || selectedOrderID == expectedOrderID,
+      let selectedOrder = series.episodeOrders.first(where: { $0.id == selectedOrderID })
+    else {
+      return false
+    }
+    return selectedOrder.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      == "official"
+  }
+
+  private static func positiveDecimalInt64(_ value: String) -> String? {
+    let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard
+      let first = normalized.utf8.first,
+      first >= 49 && first <= 57,
+      normalized.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }),
+      Int64(normalized) != nil
+    else {
+      return nil
+    }
+    return normalized
+  }
+
   public func openMedia(_ target: RivuneMediaTarget) {
     guard let client else { return }
     let autoplayAddonID = pendingEpisodeAutoplay.flatMap { pending in
@@ -2467,13 +2548,9 @@ public final class RivuneAppModel: ObservableObject {
           (target.mediaType == "movie" || target.mediaType == "series")
           ? (try? client.trailers(titleId: titleID).trailers) : []
         let movie = target.mediaType == "movie" ? try? await client.movie(id: titleID) : nil
-        var series: Series?
-        if target.mediaType == "series" {
-          series = try? await client.series(id: titleID, mappingProvider: .tmdb)
-          if series == nil {
-            series = try? await client.series(id: titleID, mappingProvider: .tvdb)
-          }
-        }
+        let series =
+          target.mediaType == "series"
+          ? await Self.loadSeries(id: titleID, context: target, using: client) : nil
         var seriesWatchState: SeriesWatchState?
         if let series {
           do {
@@ -2487,16 +2564,19 @@ public final class RivuneAppModel: ObservableObject {
         var episode: Episode?
         var episodeSeason: Season?
         var parentSeries: Series?
-        if target.mediaType == "episode", let seriesID = target.seriesId,
-          let seasonID = target.seasonId
-        {
-          parentSeries = try? await client.series(id: seriesID, mappingProvider: .tmdb)
-          if parentSeries == nil {
-            parentSeries = try? await client.series(id: seriesID, mappingProvider: .tvdb)
+        if target.mediaType == "episode", let seriesID = target.seriesId {
+          parentSeries = await Self.loadSeries(id: seriesID, context: target, using: client)
+          let provider = target.mappingProvider ?? parentSeries?.mappingProvider ?? .tmdb
+          let seasonID =
+            target.metadataSeasonId
+            ?? parentSeries?.seasons.first { $0.id == target.seasonId }?.id
+            ?? parentSeries?.seasons.first { $0.seasonNumber == target.seasonNumber }?.id
+          if let seasonID {
+            episodeSeason = try? await client.season(id: seasonID, mappingProvider: provider)
+            episode =
+              episodeSeason?.episodes.first { $0.id == titleID }
+              ?? episodeSeason?.episodes.first { $0.episodeNumber == target.episodeNumber }
           }
-          let provider = parentSeries?.mappingProvider ?? .tmdb
-          episodeSeason = try? await client.season(id: seasonID, mappingProvider: provider)
-          episode = episodeSeason?.episodes.first { $0.id == titleID }
         }
         let progress = await progressValue
         let library = await libraryValue
@@ -3051,6 +3131,7 @@ public final class RivuneAppModel: ObservableObject {
         else { throw RivuneAPIError.invalidResponse }
         var markers: [PlaybackMarker] = []
         if detail.target.mediaType == "episode",
+          detail.target.episodeOrderId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
           let imdb = (detail.parentSeries ?? detail.series)?.externalIds["imdb"],
           let season = detail.target.seasonNumber,
           let episode = detail.target.episodeNumber
@@ -3915,7 +3996,8 @@ public final class RivuneAppModel: ObservableObject {
       sourceAddonId: item.sourceAddonId, sourceCatalogId: nil, sourceName: nil,
       posterUrl: item.posterUrl, backgroundUrl: item.backgroundUrl, logoUrl: nil,
       overview: nil, releaseInfo: item.releaseInfo, released: nil,
-      seriesId: nil, seasonId: nil, seasonNumber: nil, episodeNumber: nil, runtimeMinutes: nil)
+      seriesId: nil, mappingProvider: nil, episodeOrderId: nil, metadataSeasonId: nil,
+      seasonId: nil, seasonNumber: nil, episodeNumber: nil, runtimeMinutes: nil)
     return RivuneRecommendationItem(id: item.id, reason: recommendation.reason, target: target)
   }
   private func coordinatedItem(for detail: RivuneMediaDetail) -> CoordinatedPlaybackItem {
@@ -4176,7 +4258,8 @@ public final class RivuneAppModel: ObservableObject {
         logoUrl: jsonString(object["logo"]) ?? jsonString(object["logoUrl"]),
         overview: jsonString(object["description"]) ?? jsonString(object["overview"]),
         releaseInfo: jsonString(object["releaseInfo"]), released: jsonString(object["released"]),
-        seriesId: nil, seasonId: nil, seasonNumber: nil, episodeNumber: nil, runtimeMinutes: nil
+        seriesId: nil, mappingProvider: nil, episodeOrderId: nil, metadataSeasonId: nil,
+        seasonId: nil, seasonNumber: nil, episodeNumber: nil, runtimeMinutes: nil
       )
     }
   }
@@ -4202,6 +4285,9 @@ public final class RivuneAppModel: ObservableObject {
       releaseInfo: item.releaseInfo,
       released: item.released,
       seriesId: nil,
+      mappingProvider: nil,
+      episodeOrderId: nil,
+      metadataSeasonId: nil,
       seasonId: nil,
       seasonNumber: nil,
       episodeNumber: nil,
@@ -4257,7 +4343,8 @@ public final class RivuneAppModel: ObservableObject {
       sourceCatalogId: addon?.catalogId, sourceName: addon?.title, posterUrl: item.posterUrl,
       backgroundUrl: item.backgroundUrl, logoUrl: item.logoUrl, overview: item.description,
       releaseInfo: item.releaseInfo,
-      released: item.released, seriesId: nil, seasonId: nil, seasonNumber: nil, episodeNumber: nil,
+      released: item.released, seriesId: nil, mappingProvider: nil, episodeOrderId: nil,
+      metadataSeasonId: nil, seasonId: nil, seasonNumber: nil, episodeNumber: nil,
       runtimeMinutes: nil
     )
   }
@@ -4274,13 +4361,21 @@ public final class RivuneAppModel: ObservableObject {
       sourceName: item.sourceName,
       posterUrl: item.posterUrl, backgroundUrl: item.backgroundUrl, logoUrl: nil, overview: nil,
       releaseInfo: item.releaseInfo,
-      released: nil, seriesId: nil, seasonId: nil, seasonNumber: nil, episodeNumber: nil,
+      released: nil, seriesId: nil, mappingProvider: nil, episodeOrderId: nil,
+      metadataSeasonId: nil, seasonId: nil, seasonNumber: nil, episodeNumber: nil,
       runtimeMinutes: nil
     )
   }
 
   nonisolated private static func target(from item: ContinueWatchingItem) -> RivuneMediaTarget {
-    RivuneMediaTarget(
+    let episodeOrderID = item.episodeOrderId?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let metadataSeasonID = item.metadataSeasonId?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let mappingProvider =
+      item.mappingProvider?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "tvdb"
+        && episodeOrderID?.isEmpty == false
+        && metadataSeasonID?.isEmpty == false
+      ? SeriesMappingProvider.tvdb : nil
+    return RivuneMediaTarget(
       id: item.titleId.uuidString, resourceId: item.resourceId ?? item.titleId.uuidString,
       mediaType: item.mediaType.rawValue,
       title: item.title ?? item.episodeTitle ?? "Untitled", titleId: item.titleId,
@@ -4289,7 +4384,9 @@ public final class RivuneAppModel: ObservableObject {
       posterUrl: item.posterUrl, backgroundUrl: item.episodeStillUrl ?? item.backgroundUrl,
       logoUrl: nil,
       overview: nil, releaseInfo: item.releaseInfo, released: item.episodeAirDate,
-      seriesId: item.seriesId,
+      seriesId: item.seriesId, mappingProvider: mappingProvider,
+      episodeOrderId: mappingProvider == nil ? nil : episodeOrderID,
+      metadataSeasonId: mappingProvider == nil ? nil : metadataSeasonID,
       seasonId: item.seasonId?.uuidString, seasonNumber: item.seasonNumber,
       episodeNumber: item.episodeNumber, runtimeMinutes: nil
     )
@@ -4304,7 +4401,7 @@ public final class RivuneAppModel: ObservableObject {
       sourceAddonId: nil, sourceCatalogId: nil, sourceName: nil, posterUrl: item.posterUrl,
       backgroundUrl: nil,
       logoUrl: nil, overview: nil, releaseInfo: item.releaseDate, released: item.releaseDate,
-      seriesId: item.seriesId,
+      seriesId: item.seriesId, mappingProvider: nil, episodeOrderId: nil, metadataSeasonId: nil,
       seasonId: item.seasonId?.uuidString, seasonNumber: item.seasonNumber,
       episodeNumber: item.episodeNumber, runtimeMinutes: nil
     )
@@ -4315,9 +4412,34 @@ public final class RivuneAppModel: ObservableObject {
     series: Series?,
     source: RivuneMediaTarget
   ) -> RivuneMediaTarget {
-    RivuneMediaTarget(
+    let selectedOrderID = series?.selectedEpisodeOrderId?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let selectedOrder = selectedOrderID.flatMap { selectedID in
+      series?.episodeOrders.first { $0.id == selectedID }
+    }
+    let inheritedOrderID = source.episodeOrderId?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let inheritedSeasonID = source.metadataSeasonId?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let inheritedVariant =
+      source.mappingProvider == .tvdb
+        && inheritedOrderID?.isEmpty == false
+        && inheritedSeasonID?.isEmpty == false
+    let selectedVariant =
+      selectedOrder != nil
+        && selectedOrder?.type.trimmingCharacters(in: .whitespacesAndNewlines)
+          .lowercased() != "official"
+    let variant = selectedOrder == nil ? inheritedVariant : selectedVariant
+    let episodeOrderID =
+      selectedVariant ? selectedOrderID : (variant ? inheritedOrderID : nil)
+    let metadataSeasonID = variant ? episode.seasonId : nil
+    let persistedSeasonID =
+      variant && source.metadataSeasonId == episode.seasonId
+        ? source.seasonId ?? episode.seasonId : episode.seasonId
+    return RivuneMediaTarget(
       id: episode.id.uuidString,
-      resourceId: episodeResourceID(episode, series: series),
+      resourceId: episodeResourceID(
+        episode, series: series, episodeOrderId: episodeOrderID),
       mediaType: "episode",
       title: episode.name,
       titleId: episode.id,
@@ -4327,14 +4449,17 @@ public final class RivuneAppModel: ObservableObject {
       sourceAddonId: source.sourceAddonId,
       sourceCatalogId: source.sourceCatalogId,
       sourceName: source.sourceName,
-      posterUrl: episode.stillUrl,
-      backgroundUrl: episode.backdropUrl,
+      posterUrl: episode.stillUrl ?? source.posterUrl,
+      backgroundUrl: episode.backdropUrl ?? episode.stillUrl ?? source.backgroundUrl,
       logoUrl: nil,
       overview: episode.overview,
       releaseInfo: "S\(episode.seasonNumber) E\(episode.episodeNumber)",
       released: episode.airDate,
-      seriesId: series?.id,
-      seasonId: episode.seasonId,
+      seriesId: series?.id ?? source.seriesId,
+      mappingProvider: variant ? .tvdb : nil,
+      episodeOrderId: episodeOrderID,
+      metadataSeasonId: metadataSeasonID,
+      seasonId: persistedSeasonID,
       seasonNumber: episode.seasonNumber,
       episodeNumber: episode.episodeNumber,
       runtimeMinutes: episode.runtimeMinutes
@@ -4425,7 +4550,16 @@ public final class RivuneAppModel: ObservableObject {
     ).titleId
   }
 
-  nonisolated private static func episodeResourceID(_ episode: Episode, series: Series?) -> String {
+  nonisolated private static func episodeResourceID(
+    _ episode: Episode,
+    series: Series?,
+    episodeOrderId: String? = nil
+  ) -> String {
+    if episodeOrderId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+      let tvdb = episode.externalIds["tvdb"], !tvdb.isEmpty
+    {
+      return "tvdb:\(tvdb)"
+    }
     if let imdb = series?.externalIds["imdb"] {
       return "\(imdb):\(episode.seasonNumber):\(episode.episodeNumber)"
     }

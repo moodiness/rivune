@@ -25,6 +25,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/metadata"
 	"github.com/moodiness/rivune/server/internal/operations"
 	"github.com/moodiness/rivune/server/internal/playback"
+	"github.com/moodiness/rivune/server/internal/portable"
 	"github.com/moodiness/rivune/server/internal/profile"
 	"github.com/moodiness/rivune/server/internal/settings"
 	"github.com/moodiness/rivune/server/internal/watchstate"
@@ -234,6 +235,126 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		validateContractResponse(t, document, "/profiles", nil, profiles, profilesResponse)
 	})
 
+	t.Run("profile archive episode-order identity", func(t *testing.T) {
+		seriesKey := "sha256:" + strings.Repeat("b", 64)
+		seasonKey := "sha256:" + strings.Repeat("c", 64)
+		episodeKey := "sha256:" + strings.Repeat("d", 64)
+		now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+		ordinal := 1
+		archive := portable.Document{
+			Version: portable.DocumentVersion, ExportedAt: now,
+			Identity: portable.Identity{Name: "Contract archive", Avatar: portable.Avatar{Kind: "preset", PresetID: "aurora"}},
+			Addons: []portable.Addon{}, Collections: []portable.PortableCollection{},
+			Titles: []portable.Title{
+				{Key: seriesKey, MediaType: "series", ExternalIDs: []portable.ExternalID{{Provider: "tvdb", Namespace: "series", ExternalID: "404604"}}},
+				{
+					Key: seasonKey, MediaType: "season", ParentKey: seriesKey, Ordinal: &ordinal, HierarchyVariant: "tvdb:2",
+					EpisodeOrderIdentity: &portable.EpisodeOrderIdentity{SeriesKey: seriesKey, Provider: "tvdb", OrderID: "2", Namespace: "season", ExternalID: "871838"},
+					ExternalIDs:          []portable.ExternalID{},
+				},
+				{
+					Key: episodeKey, MediaType: "episode", ParentKey: seasonKey, Ordinal: &ordinal, HierarchyVariant: "tvdb:2",
+					EpisodeOrderIdentity: &portable.EpisodeOrderIdentity{SeriesKey: seriesKey, Provider: "tvdb", OrderID: "2", Namespace: "episode", ExternalID: "10357450"},
+					ExternalIDs:          []portable.ExternalID{},
+				},
+			},
+			Library: []portable.LibraryState{},
+			Progress: []portable.ProgressState{{TitleKey: episodeKey, PositionSeconds: 120, DurationSeconds: 600, Version: 1, LastWatchedAt: now, UpdatedAt: now}},
+			Favorites: []portable.FavoriteState{}, UserData: []portable.UserDataState{},
+			ContinueDismissals: []portable.ContinueDismissal{}, TrackingPreferences: []portable.TrackingPreference{},
+		}
+		service := &fakePortableService{
+			document: archive,
+			report: portable.ImportReport{Mode: "merge", ProfileID: contractProfileID, Sections: []portable.SectionReport{}},
+		}
+		api := portableHandlerAPI(service, contractPrincipal())
+		path := "/api/v1/profiles/" + contractProfileID + "/archive"
+		parameters := map[string]string{"profileId": contractProfileID}
+
+		exportRequest := authenticatedContractRequest(http.MethodGet, path, nil)
+		exportResponse := serveContractRequest(t, api, exportRequest, http.StatusOK)
+		validateContractResponse(t, document, "/profiles/{profileId}/archive", parameters, exportRequest, exportResponse)
+
+		encoded, err := json.Marshal(archive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		validateContractRequestBody(t, document, http.MethodPost, path+"/import", string(encoded), true)
+		unknownIdentityMember := strings.Replace(string(encoded), `"externalId":"10357450"}`, `"externalId":"10357450","unexpected":true}`, 1)
+		validateContractRequestBody(t, document, http.MethodPost, path+"/import", unknownIdentityMember, false)
+
+		const maximumTVDBID = "9223372036854775807"
+		maximumArchive := archive
+		maximumArchive.Titles = append([]portable.Title(nil), archive.Titles...)
+		for _, index := range []int{1, 2} {
+			identity := *archive.Titles[index].EpisodeOrderIdentity
+			identity.OrderID = maximumTVDBID
+			identity.ExternalID = maximumTVDBID
+			maximumArchive.Titles[index].HierarchyVariant = "tvdb:" + maximumTVDBID
+			maximumArchive.Titles[index].EpisodeOrderIdentity = &identity
+		}
+		canonicalSeasonKey := "sha256:" + strings.Repeat("e", 64)
+		canonicalEpisodeKey := "sha256:" + strings.Repeat("f", 64)
+		maximumArchive.Titles = append(maximumArchive.Titles,
+			portable.Title{
+				Key: canonicalSeasonKey, MediaType: "season", ParentKey: seriesKey, Ordinal: &ordinal,
+				ExternalIDs: []portable.ExternalID{{Provider: "tvdb", Namespace: "season", ExternalID: maximumTVDBID}},
+			},
+			portable.Title{
+				Key: canonicalEpisodeKey, MediaType: "episode", ParentKey: canonicalSeasonKey, Ordinal: &ordinal,
+				ExternalIDs: []portable.ExternalID{{Provider: "tvdb", Namespace: "episode", ExternalID: maximumTVDBID}},
+			},
+		)
+		maximumBody, err := json.Marshal(maximumArchive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		validateContractRequestBody(t, document, http.MethodPost, path+"/import", string(maximumBody), true)
+
+		const overflowTVDBID = "9223372036854775808"
+		overflowCases := []struct {
+			name   string
+			mutate func(*portable.Document)
+		}{
+			{"hierarchy variant", func(value *portable.Document) {
+				value.Titles[1].HierarchyVariant = "tvdb:" + overflowTVDBID
+			}},
+			{"order ID", func(value *portable.Document) {
+				value.Titles[1].EpisodeOrderIdentity.OrderID = overflowTVDBID
+			}},
+			{"ordered season external ID", func(value *portable.Document) {
+				value.Titles[1].EpisodeOrderIdentity.ExternalID = overflowTVDBID
+			}},
+			{"ordered episode external ID", func(value *portable.Document) {
+				value.Titles[2].EpisodeOrderIdentity.ExternalID = overflowTVDBID
+			}},
+			{"canonical season external ID", func(value *portable.Document) {
+				value.Titles[3].ExternalIDs[0].ExternalID = overflowTVDBID
+			}},
+			{"canonical episode external ID", func(value *portable.Document) {
+				value.Titles[4].ExternalIDs[0].ExternalID = overflowTVDBID
+			}},
+		}
+		for _, test := range overflowCases {
+			t.Run("signed-int64 "+test.name, func(t *testing.T) {
+				var overflowArchive portable.Document
+				if err := json.Unmarshal(maximumBody, &overflowArchive); err != nil {
+					t.Fatal(err)
+				}
+				test.mutate(&overflowArchive)
+				overflowBody, err := json.Marshal(overflowArchive)
+				if err != nil {
+					t.Fatal(err)
+				}
+				validateContractRequestBody(t, document, http.MethodPost, path+"/import", string(overflowBody), false)
+			})
+		}
+		importRequest := authenticatedContractRequest(http.MethodPost, path+"/import", bytes.NewBuffer(encoded))
+		importRequest.Header.Set("Content-Type", "application/json")
+		importResponse := serveContractRequest(t, api, importRequest, http.StatusOK)
+		validateContractResponse(t, document, "/profiles/{profileId}/archive/import", parameters, importRequest, importResponse)
+	})
+
 	t.Run("add-on diagnostics", func(t *testing.T) {
 		now := time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC)
 		latency := int64(12)
@@ -404,7 +525,8 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 				Genres: []metadata.Genre{}, Cast: []metadata.CastMember{}, VoteAverage: 8, VoteCount: 20, Seasons: []metadata.SeasonSummary{},
 				PosterURL: "https://fanart.example/series-poster.jpg", BackdropURL: "https://fanart.example/series-background.jpg",
 				LogoURL: "https://fanart.example/series-logo.png",
-				Aliases: []metadata.Alias{}, EpisodeOrders: []metadata.EpisodeOrder{}, MappingProvider: "tvdb",
+				Aliases: []metadata.Alias{}, EpisodeOrders: []metadata.EpisodeOrder{{ID: "9223372036854775807", Name: "Maximum order", Type: "dvd", IsDefault: true}},
+				SelectedEpisodeOrderID: "9223372036854775807", MappingProvider: "tvdb",
 				ExternalIDs: map[string]string{"tmdb": "92001", "tvdb": "93001"},
 			},
 			seasonDetailsValue: metadata.Season{
@@ -427,6 +549,30 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		series := authenticatedContractRequest(http.MethodGet, "/api/v1/metadata/series/"+contractTitleID+"?language=en-US&mappingProvider=tvdb", nil)
 		seriesResponse := serveContractRequest(t, api, series, http.StatusOK)
 		validateContractResponse(t, document, "/metadata/series/{titleId}", map[string]string{"titleId": contractTitleID}, series, seriesResponse)
+
+		maximumOrderQuery := authenticatedContractRequest(http.MethodGet, "/api/v1/metadata/series/"+contractTitleID+"?language=en-US&mappingProvider=tvdb&episodeOrder=9223372036854775807", nil)
+		if valid, validationErrors := document.ValidateHttpRequest(maximumOrderQuery); !valid {
+			t.Fatalf("maximum signed-int64 episodeOrder query rejected: %v", validationErrors)
+		}
+		overflowOrderQuery := authenticatedContractRequest(http.MethodGet, "/api/v1/metadata/series/"+contractTitleID+"?language=en-US&mappingProvider=tvdb&episodeOrder=9223372036854775808", nil)
+		if valid, validationErrors := document.ValidateHttpRequest(overflowOrderQuery); valid {
+			t.Fatalf("overflow episodeOrder query accepted: %v", validationErrors)
+		}
+
+		metadataService.seriesDetailsValue.EpisodeOrders[0].ID = "9223372036854775808"
+		overflowListRequest := authenticatedContractRequest(http.MethodGet, "/api/v1/metadata/series/"+contractTitleID+"?language=en-US&mappingProvider=tvdb", nil)
+		overflowListResponse := serveContractRequest(t, api, overflowListRequest, http.StatusOK)
+		if valid, validationErrors := document.ValidateHttpResponse(overflowListRequest, overflowListResponse.Result()); valid {
+			t.Fatalf("overflow episodeOrders[].id response accepted: %v", validationErrors)
+		}
+		metadataService.seriesDetailsValue.EpisodeOrders[0].ID = "9223372036854775807"
+		metadataService.seriesDetailsValue.SelectedEpisodeOrderID = "9223372036854775808"
+		overflowSelectedRequest := authenticatedContractRequest(http.MethodGet, "/api/v1/metadata/series/"+contractTitleID+"?language=en-US&mappingProvider=tvdb", nil)
+		overflowSelectedResponse := serveContractRequest(t, api, overflowSelectedRequest, http.StatusOK)
+		if valid, validationErrors := document.ValidateHttpResponse(overflowSelectedRequest, overflowSelectedResponse.Result()); valid {
+			t.Fatalf("overflow selectedEpisodeOrderId response accepted: %v", validationErrors)
+		}
+		metadataService.seriesDetailsValue.SelectedEpisodeOrderID = "9223372036854775807"
 
 		season := authenticatedContractRequest(http.MethodGet, "/api/v1/metadata/seasons/"+contractSeasonID+"?language=en-US&mappingProvider=tvdb", nil)
 		seasonResponse := serveContractRequest(t, api, season, http.StatusOK)
@@ -991,6 +1137,57 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestOpenAPIContractContinueWatchingContext(t *testing.T) {
+	validator := loadOpenAPIContract(t)
+	const prefix = `{"items":[{"titleId":"55555555-5555-4555-8555-555555555555","mediaType":"episode","positionSeconds":120,"durationSeconds":1800,"version":9,"reason":"resume","lastWatchedAt":"2026-09-05T12:00:00Z"`
+	validate := func(suffix string) (bool, string) {
+		request := authenticatedContractRequest(http.MethodGet, "/api/v1/continue-watching", nil)
+		response := httptest.NewRecorder()
+		response.Header().Set("Content-Type", "application/json")
+		response.Header().Set("X-Request-ID", "continue-watching-context-contract")
+		response.WriteHeader(http.StatusOK)
+		_, _ = response.WriteString(prefix + suffix + `}]}`)
+		valid, validationErrors := validator.ValidateHttpResponse(request, response.Result())
+		return valid, fmt.Sprint(validationErrors)
+	}
+
+	fixtures := []struct {
+		name      string
+		suffix    string
+		wantValid bool
+	}{
+		{name: "canonical payload omits continuation context", suffix: "", wantValid: true},
+		{
+			name:      "TVDB episode-order continuation context",
+			suffix:    `,"mappingProvider":"tvdb","episodeOrderId":"2","metadataSeasonId":"tvdb:0392d6ce-02f0-4c75-a73f-13badb1c85ba:2112814"`,
+			wantValid: true,
+		},
+		{
+			name:      "maximum signed-int64 episode order",
+			suffix:    `,"mappingProvider":"tvdb","episodeOrderId":"9223372036854775807","metadataSeasonId":"season"`,
+			wantValid: true,
+		},
+		{
+			name:      "overflow episode order",
+			suffix:    `,"mappingProvider":"tvdb","episodeOrderId":"9223372036854775808","metadataSeasonId":"season"`,
+			wantValid: false,
+		},
+		{name: "partial context", suffix: `,"mappingProvider":"tvdb"`, wantValid: false},
+		{name: "unsupported provider", suffix: `,"mappingProvider":"tmdb","episodeOrderId":"2","metadataSeasonId":"season"`, wantValid: false},
+		{name: "nonpositive episode order", suffix: `,"mappingProvider":"tvdb","episodeOrderId":"0","metadataSeasonId":"season"`, wantValid: false},
+		{name: "episode order too long", suffix: `,"mappingProvider":"tvdb","episodeOrderId":"` + strings.Repeat("1", 33) + `","metadataSeasonId":"season"`, wantValid: false},
+		{name: "empty metadata season", suffix: `,"mappingProvider":"tvdb","episodeOrderId":"2","metadataSeasonId":""`, wantValid: false},
+		{name: "metadata season too long", suffix: `,"mappingProvider":"tvdb","episodeOrderId":"2","metadataSeasonId":"` + strings.Repeat("s", 513) + `"`, wantValid: false},
+	}
+	for _, fixture := range fixtures {
+		t.Run(fixture.name, func(t *testing.T) {
+			if valid, validationErrors := validate(fixture.suffix); valid != fixture.wantValid {
+				t.Fatalf("continue-watching response validity = %t, want %t: %s; suffix: %s", valid, fixture.wantValid, validationErrors, fixture.suffix)
+			}
+		})
+	}
 }
 
 func TestOpenAPISavedResourceUpdateBodies(t *testing.T) {

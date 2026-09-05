@@ -864,6 +864,9 @@ function mediaFromContinue(item: EnrichedContinueItem): MediaItem {
       continueSeasonNumber: item.seasonNumber,
       continueEpisodeNumber: item.episodeNumber,
       continueEpisodeId: item.titleId,
+      mappingProvider: item.mappingProvider ?? undefined,
+      episodeOrderId: item.episodeOrderId ?? undefined,
+      metadataSeasonId: item.metadataSeasonId ?? undefined,
       episodeSeriesName: item.mediaType === "episode" ? seriesTitle : undefined,
       continueCardTitle: item.mediaType === "episode" ? seriesTitle : item.title || t("media.untitled"),
       continueCardSubtitle: item.mediaType === "episode"

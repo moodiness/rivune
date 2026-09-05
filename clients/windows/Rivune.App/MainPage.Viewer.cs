@@ -2344,7 +2344,7 @@ public sealed partial class MainPage
             }
             else if (reference.MediaType == TitleResolveMediaType.Series)
             {
-                try { _detailSeries = await LoadSeriesAsync(reference.TitleId); }
+                try { _detailSeries = await LoadSeriesAsync(reference.TitleId, target); }
                 catch (Exception exception) when (exception is not OperationCanceledException) { }
             }
             if (_detailSeries is not null)
@@ -2414,18 +2414,21 @@ public sealed partial class MainPage
             var client = _state.Client ?? throw new NotAuthenticatedException();
             if (!hadSeasonContext && target.SeriesId is Guid seriesId)
             {
-                _detailSeries = await LoadSeriesAsync(seriesId);
-                var summary = _detailSeries.Seasons.FirstOrDefault(value => value.Id == target.SeasonId)
-                    ?? _detailSeries.Seasons.FirstOrDefault(value => value.SeasonNumber == target.SeasonNumber);
-                _detailSeason = summary is null
+                _detailSeries = await LoadSeriesAsync(seriesId, target);
+                var seasonId = MediaIdentity.DetailSeasonId(target, _detailSeries);
+                _detailSeason = seasonId is null
                     ? null
-                    : await client.GetSeasonAsync(summary.Id, _detailSeries.MappingProvider, language: MetadataLanguage(), cancellationToken: _state.Token);
+                    : await client.GetSeasonAsync(
+                        seasonId,
+                        _detailSeries.MappingProvider,
+                        language: MetadataLanguage(),
+                        cancellationToken: _state.Token);
             }
             var episode = _detailSeason?.Episodes.FirstOrDefault(value => value.Id == target.TitleId)
                 ?? _detailSeason?.Episodes.FirstOrDefault(value => value.EpisodeNumber == target.EpisodeNumber);
             if (episode is not null && _detailSeries is not null)
             {
-                _detailTarget = EpisodeTarget(_detailSeries, episode);
+                _detailTarget = EpisodeTarget(_detailSeries, episode, target);
             }
             if (!_state.IsCurrent(generation)) return;
             _progressTitleId = _detailTarget.TitleId
@@ -2521,11 +2524,15 @@ public sealed partial class MainPage
         }, _state.Token);
     }
 
-    private async Task<Series> LoadSeriesAsync(Guid id)
-    {
-        try { return await _state.Client!.GetSeriesAsync(id, SeriesMappingProvider.Tmdb, language: MetadataLanguage(), cancellationToken: _state.Token); }
-        catch (RivuneServerException) { return await _state.Client!.GetSeriesAsync(id, SeriesMappingProvider.Tvdb, language: MetadataLanguage(), cancellationToken: _state.Token); }
-    }
+    private Task<Series> LoadSeriesAsync(Guid id, MediaTarget? context = null) =>
+        MediaIdentity.LoadSeriesAsync(
+            context,
+            (mappingProvider, episodeOrderId) => _state.Client!.GetSeriesAsync(
+                id,
+                mappingProvider,
+                language: MetadataLanguage(),
+                episodeOrder: episodeOrderId,
+                cancellationToken: _state.Token));
 
     private async Task LoadSeriesWatchStateAsync(Series series, long generation)
     {
@@ -2667,7 +2674,7 @@ public sealed partial class MainPage
             var row = HorizontalList();
             foreach (var episode in _detailSeason.Episodes)
             {
-                var target = EpisodeTarget(_detailSeries, episode);
+                var target = EpisodeTarget(_detailSeries, episode, _detailTarget);
                 if (_episodeProgress.GetValueOrDefault(episode.Id) is { } progress)
                     target = target with { ResumePositionSeconds = progress.PositionSeconds, DurationSeconds = progress.DurationSeconds };
                 var button = CreateEpisodeCard(target, _episodeProgress.GetValueOrDefault(episode.Id));
@@ -3087,8 +3094,11 @@ public sealed partial class MainPage
         finally { DetailProgress.IsActive = false; }
     }
 
-    private MediaTarget EpisodeTarget(Series series, Episode episode) =>
-        episode.ToMediaTarget(series, _detailReference?.ResourceId ?? series.Id.ToString("D"));
+    private MediaTarget EpisodeTarget(Series series, Episode episode, MediaTarget? source = null) =>
+        episode.ToMediaTarget(
+            series,
+            _detailReference?.ResourceId ?? series.Id.ToString("D"),
+            source);
 
     private async Task ToggleLibraryAsync()
     {

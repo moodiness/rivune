@@ -101,6 +101,7 @@ func (s *Service) Recommendations(ctx context.Context, principal auth.Principal,
 			) metadata ON true
 			WHERE title.media_type IN ('movie', 'series')
 			  AND title.parent_id IS NULL
+			  AND title.hierarchy_variant = ''
 			  AND (favorite.title_id IS NOT NULL OR library.title_id IS NOT NULL OR progress.title_id IS NOT NULL
 			       OR (user_data.likes_set AND user_data.likes IS TRUE)
 			       OR (user_data.rating_set AND user_data.rating >= 7))
@@ -126,6 +127,7 @@ func (s *Service) Recommendations(ctx context.Context, principal auth.Principal,
 			LEFT JOIN profile_progress progress ON progress.profile_id = $1::uuid AND progress.title_id = title.id
 			WHERE title.media_type IN ('movie', 'series')
 			  AND title.parent_id IS NULL
+			  AND title.hierarchy_variant = ''
 			  AND COALESCE(progress.completed, false) = false
 			  AND NOT EXISTS (SELECT 1 FROM signal_titles signal WHERE signal.id = title.id)
 			  AND ($3 = '' OR ($3 = 'poster' AND NULLIF(title.poster_url, '') IS NOT NULL)

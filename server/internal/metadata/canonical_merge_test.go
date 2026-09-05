@@ -153,7 +153,7 @@ func TestMovieDetailsFallsBackWhenFanartFails(t *testing.T) {
 	}
 }
 
-func TestSeriesDetailsConsolidatesResolvedCanonicalTitleHierarchyAndProfileState(t *testing.T) {
+func TestSeriesDetailsConsolidatesCanonicalHierarchyAndPreservesVariantTrees(t *testing.T) {
 	pool := newCanonicalMergeTestPool(t)
 	ctx := context.Background()
 	seedCanonicalMergeSuccess(t, pool)
@@ -209,7 +209,16 @@ func TestSeriesDetailsConsolidatesResolvedCanonicalTitleHierarchyAndProfileState
 		remainingIDs = append(remainingIDs, id)
 	}
 	rows.Close()
-	expectedIDs := []string{canonicalDestinationSeriesID, canonicalDestinationSeasonID, canonicalDestinationEpisodeID, canonicalUniqueEpisodeID}
+	expectedIDs := []string{
+		canonicalDestinationSeriesID,
+		canonicalDestinationSeasonID,
+		canonicalDestinationEpisodeID,
+		canonicalDestinationVariantSeasonID,
+		canonicalDestinationVariantEpisodeID,
+		canonicalUniqueEpisodeID,
+		canonicalSourceVariantSeasonID,
+		canonicalSourceVariantEpisodeID,
+	}
 	if len(remainingIDs) != len(expectedIDs) {
 		t.Fatalf("unexpected title rows after consolidation: %v", remainingIDs)
 	}
@@ -217,6 +226,185 @@ func TestSeriesDetailsConsolidatesResolvedCanonicalTitleHierarchyAndProfileState
 		if remainingIDs[index] != expectedIDs[index] {
 			t.Fatalf("unexpected title rows after consolidation: %v", remainingIDs)
 		}
+	}
+	var destinationVariantParent, sourceVariantParent, sourceVariantEpisodeParent string
+	var destinationVariantCurrent, sourceVariantCurrent, sourceVariantEpisodeCurrent bool
+	if err := pool.QueryRow(ctx, `
+		SELECT parent_id::text, is_current
+		FROM titles
+		WHERE id = $1::uuid
+	`, canonicalDestinationVariantSeasonID).Scan(&destinationVariantParent, &destinationVariantCurrent); err != nil {
+		t.Fatalf("query destination variant season: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT parent_id::text, is_current
+		FROM titles
+		WHERE id = $1::uuid
+	`, canonicalSourceVariantSeasonID).Scan(&sourceVariantParent, &sourceVariantCurrent); err != nil {
+		t.Fatalf("query preserved source variant season: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT parent_id::text, is_current
+		FROM titles
+		WHERE id = $1::uuid
+	`, canonicalSourceVariantEpisodeID).Scan(&sourceVariantEpisodeParent, &sourceVariantEpisodeCurrent); err != nil {
+		t.Fatalf("query preserved source variant episode: %v", err)
+	}
+	if destinationVariantParent != canonicalDestinationSeriesID || !destinationVariantCurrent ||
+		sourceVariantParent != canonicalDestinationSeriesID || !sourceVariantCurrent ||
+		sourceVariantEpisodeParent != canonicalSourceVariantSeasonID || !sourceVariantEpisodeCurrent {
+		t.Fatalf("variant hierarchy changed destination=(%s,%t) source=(%s,%t) episode=(%s,%t)",
+			destinationVariantParent, destinationVariantCurrent, sourceVariantParent, sourceVariantCurrent,
+			sourceVariantEpisodeParent, sourceVariantEpisodeCurrent)
+	}
+	var sourceVariantIdentitySeriesID string
+	if err := pool.QueryRow(ctx, `
+		SELECT series_title_id::text
+		FROM title_episode_order_identities
+		WHERE title_id = $1::uuid
+	`, canonicalSourceVariantEpisodeID).Scan(&sourceVariantIdentitySeriesID); err != nil {
+		t.Fatalf("query preserved source variant identity: %v", err)
+	}
+	if sourceVariantIdentitySeriesID != canonicalDestinationSeriesID {
+		t.Fatalf("source variant identity still references %s", sourceVariantIdentitySeriesID)
+	}
+	var duplicateVariantRows int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM titles
+		WHERE id IN ($1::uuid, $2::uuid)
+	`, canonicalSourceDuplicateVariantSeasonID, canonicalSourceDuplicateVariantEpisodeID).Scan(&duplicateVariantRows); err != nil {
+		t.Fatalf("query reconciled duplicate variant rows: %v", err)
+	}
+	var reconciledProgressTitleID string
+	if err := pool.QueryRow(ctx, `
+		SELECT title_id::text
+		FROM profile_progress
+		WHERE profile_id = $1::uuid AND title_id = $2::uuid
+	`, canonicalOtherProfileID, canonicalDestinationVariantEpisodeID).Scan(&reconciledProgressTitleID); err != nil {
+		t.Fatalf("query reconciled exact variant identity progress: %v", err)
+	}
+	if duplicateVariantRows != 0 || reconciledProgressTitleID != canonicalDestinationVariantEpisodeID {
+		t.Fatalf("exact variant identity reconciliation rows=%d progress=%s", duplicateVariantRows, reconciledProgressTitleID)
+	}
+	type expectedUserData struct {
+		signature float64
+		updatedAt time.Time
+	}
+	expectedUserDataByProfile := map[string]expectedUserData{
+		"33333333-3333-4333-8333-333333333333": {signature: 1, updatedAt: time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC)},
+		"44444444-4444-4444-8444-444444444444": {signature: 2, updatedAt: time.Date(2026, 1, 11, 0, 0, 0, 0, time.UTC)},
+		"55555555-5555-4555-8555-555555555555": {signature: 4, updatedAt: time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC)},
+		"66666666-6666-4666-8666-666666666666": {signature: 5, updatedAt: time.Date(2026, 3, 3, 0, 0, 0, 0, time.UTC)},
+		"77777777-7777-4777-8777-777777777777": {signature: 7, updatedAt: time.Date(2026, 4, 4, 0, 0, 0, 0, time.UTC)},
+	}
+	userDataRows, err := pool.Query(ctx, `
+		SELECT profile_id::text, rating, rating_set, played_percentage, played_percentage_set,
+		       unplayed_item_count, unplayed_item_count_set, play_count, play_count_set,
+		       likes, likes_set, last_played_date, last_played_date_submicrosecond,
+		       last_played_date_set, updated_at
+		FROM profile_user_data
+		WHERE title_id = $1::uuid
+		ORDER BY profile_id
+	`, canonicalDestinationVariantEpisodeID)
+	if err != nil {
+		t.Fatalf("query reconciled variant user data: %v", err)
+	}
+	userDataCount := 0
+	for userDataRows.Next() {
+		var profileID string
+		var rating, playedPercentage float64
+		var unplayedItemCount, playCount int
+		var lastPlayedSubmicrosecond int16
+		var ratingSet, playedPercentageSet, unplayedItemCountSet, playCountSet bool
+		var likes, likesSet, lastPlayedDateSet bool
+		var lastPlayedDate, stateUpdatedAt time.Time
+		if err := userDataRows.Scan(
+			&profileID, &rating, &ratingSet, &playedPercentage, &playedPercentageSet,
+			&unplayedItemCount, &unplayedItemCountSet, &playCount, &playCountSet,
+			&likes, &likesSet, &lastPlayedDate, &lastPlayedSubmicrosecond,
+			&lastPlayedDateSet, &stateUpdatedAt,
+		); err != nil {
+			userDataRows.Close()
+			t.Fatalf("scan reconciled variant user data: %v", err)
+		}
+		expected, exists := expectedUserDataByProfile[profileID]
+		signature := expected.signature
+		expectedLikes := int(signature)%2 == 1
+		expectedLastPlayedDate := time.Date(2024, 1, int(signature), 0, 0, 0, 0, time.UTC)
+		if !exists || rating != signature || !ratingSet ||
+			playedPercentage != signature*10 || !playedPercentageSet ||
+			unplayedItemCount != int(signature) || !unplayedItemCountSet ||
+			playCount != int(signature)*2 || !playCountSet ||
+			likes != expectedLikes || !likesSet ||
+			!lastPlayedDate.Equal(expectedLastPlayedDate) ||
+			lastPlayedSubmicrosecond != int16(signature) || !lastPlayedDateSet ||
+			!stateUpdatedAt.Equal(expected.updatedAt) {
+			userDataRows.Close()
+			t.Fatalf("reconciled variant user data profile=%s signature=%g expected=%+v", profileID, rating, expected)
+		}
+		delete(expectedUserDataByProfile, profileID)
+		userDataCount++
+	}
+	if err := userDataRows.Err(); err != nil {
+		userDataRows.Close()
+		t.Fatalf("iterate reconciled variant user data: %v", err)
+	}
+	userDataRows.Close()
+	var sourceUserDataCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM profile_user_data WHERE title_id = $1::uuid
+	`, canonicalSourceDuplicateVariantEpisodeID).Scan(&sourceUserDataCount); err != nil {
+		t.Fatalf("count source variant user data: %v", err)
+	}
+	if userDataCount != 5 || len(expectedUserDataByProfile) != 0 || sourceUserDataCount != 0 {
+		t.Fatalf("reconciled variant user data count=%d missing=%v source=%d", userDataCount, expectedUserDataByProfile, sourceUserDataCount)
+	}
+
+	expectedDismissals := map[string]time.Time{
+		"33333333-3333-4333-8333-333333333333": time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		"44444444-4444-4444-8444-444444444444": time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+		"55555555-5555-4555-8555-555555555555": time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC),
+		"66666666-6666-4666-8666-666666666666": time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+		"77777777-7777-4777-8777-777777777777": time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
+	}
+	dismissalRows, err := pool.Query(ctx, `
+		SELECT profile_id::text, dismissed_at
+		FROM profile_continue_dismissals
+		WHERE title_id = $1::uuid
+		ORDER BY profile_id
+	`, canonicalDestinationVariantEpisodeID)
+	if err != nil {
+		t.Fatalf("query reconciled variant dismissals: %v", err)
+	}
+	dismissalCount := 0
+	for dismissalRows.Next() {
+		var profileID string
+		var dismissedAt time.Time
+		if err := dismissalRows.Scan(&profileID, &dismissedAt); err != nil {
+			dismissalRows.Close()
+			t.Fatalf("scan reconciled variant dismissal: %v", err)
+		}
+		expected, exists := expectedDismissals[profileID]
+		if !exists || !dismissedAt.Equal(expected) {
+			dismissalRows.Close()
+			t.Fatalf("reconciled variant dismissal profile=%s dismissed=%s expected=%s", profileID, dismissedAt, expected)
+		}
+		delete(expectedDismissals, profileID)
+		dismissalCount++
+	}
+	if err := dismissalRows.Err(); err != nil {
+		dismissalRows.Close()
+		t.Fatalf("iterate reconciled variant dismissals: %v", err)
+	}
+	dismissalRows.Close()
+	var sourceDismissalCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM profile_continue_dismissals WHERE title_id = $1::uuid
+	`, canonicalSourceDuplicateVariantEpisodeID).Scan(&sourceDismissalCount); err != nil {
+		t.Fatalf("count source variant dismissals: %v", err)
+	}
+	if dismissalCount != 5 || len(expectedDismissals) != 0 || sourceDismissalCount != 0 {
+		t.Fatalf("reconciled variant dismissals count=%d missing=%v source=%d", dismissalCount, expectedDismissals, sourceDismissalCount)
 	}
 	var uniqueParentID string
 	if err := pool.QueryRow(ctx, `SELECT parent_id::text FROM titles WHERE id = $1::uuid`, canonicalUniqueEpisodeID).Scan(&uniqueParentID); err != nil {
@@ -323,19 +511,21 @@ func TestSeasonZeroPersistsCanonicalHierarchy(t *testing.T) {
 	}
 }
 
-func TestSeriesRefreshRepairsPoisonedSeasonOrdinalAndInvalidatesCachedHierarchy(t *testing.T) {
+func TestSeriesRefreshRepairsCanonicalOrdinalWithoutChangingVariantSibling(t *testing.T) {
 	pool := newCanonicalMergeTestPool(t)
 	ctx := context.Background()
 	const (
-		seriesID  = "00000000-0000-4000-8000-000000000300"
-		seasonID  = "00000000-0000-4000-8000-000000000309"
-		episodeID = "00000000-0000-4000-8000-000000000399"
+		seriesID       = "00000000-0000-4000-8000-000000000300"
+		seasonID       = "00000000-0000-4000-8000-000000000309"
+		episodeID      = "00000000-0000-4000-8000-000000000399"
+		variantSeasonID = "00000000-0000-4000-8000-000000000398"
 	)
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO titles (id, media_type, display_title) VALUES
 			($1::uuid, 'series', 'Fixture Series Beta');
-		INSERT INTO titles (id, media_type, parent_id, ordinal, display_title) VALUES
-			($2::uuid, 'season', $1::uuid, 2, 'Saison 9');
+		INSERT INTO titles (id, media_type, parent_id, ordinal, hierarchy_variant, display_title) VALUES
+			($2::uuid, 'season', $1::uuid, 2, '', 'Saison 9'),
+			($4::uuid, 'season', $1::uuid, 9, 'tvdb:4', 'Variant Season 9');
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
 			($1::uuid, 'tmdb', 'series', '900202'),
 			($2::uuid, 'tmdb', 'season', '910209');
@@ -350,7 +540,7 @@ func TestSeriesRefreshRepairsPoisonedSeasonOrdinalAndInvalidatesCachedHierarchy(
 			     'externalIds', jsonb_build_object('tmdb', '910209')
 			 ),
 			 now() + interval '1 hour')
-	`, pgx.QueryExecModeSimpleProtocol, seriesID, seasonID, episodeID); err != nil {
+	`, pgx.QueryExecModeSimpleProtocol, seriesID, seasonID, episodeID, variantSeasonID); err != nil {
 		t.Fatalf("seed poisoned season hierarchy: %v", err)
 	}
 	provider := &canonicalMergeProvider{
@@ -400,6 +590,19 @@ func TestSeriesRefreshRepairsPoisonedSeasonOrdinalAndInvalidatesCachedHierarchy(
 	if persistedOrdinal != 9 || cachedSeasonNumber != 9 {
 		t.Fatalf("poisoned hierarchy survived refresh: ordinal=%d cachedSeason=%d", persistedOrdinal, cachedSeasonNumber)
 	}
+	var variantParentID, variant string
+	var variantOrdinal int
+	var variantCurrent bool
+	if err := pool.QueryRow(ctx, `
+		SELECT parent_id::text, ordinal, hierarchy_variant, is_current
+		FROM titles WHERE id = $1::uuid
+	`, variantSeasonID).Scan(&variantParentID, &variantOrdinal, &variant, &variantCurrent); err != nil {
+		t.Fatalf("query variant ordinal sibling: %v", err)
+	}
+	if variantParentID != seriesID || variantOrdinal != 9 || variant != "tvdb:4" || !variantCurrent {
+		t.Fatalf("variant ordinal sibling changed parent=%s ordinal=%d variant=%q current=%t",
+			variantParentID, variantOrdinal, variant, variantCurrent)
+	}
 }
 
 func TestSeriesDetailsCanonicalConflictRollsBackAtomically(t *testing.T) {
@@ -448,17 +651,23 @@ func TestSeriesDetailsCanonicalConflictRollsBackAtomically(t *testing.T) {
 }
 
 const (
-	canonicalDestinationMovieID   = "00000000-0000-4000-8000-000000000010"
-	canonicalSourceMovieID        = "00000000-0000-4000-8000-000000000020"
-	canonicalDestinationSeriesID  = "00000000-0000-4000-8000-000000000100"
-	canonicalDestinationSeasonID  = "00000000-0000-4000-8000-000000000110"
-	canonicalDestinationEpisodeID = "00000000-0000-4000-8000-000000000111"
-	canonicalSourceSeriesID       = "00000000-0000-4000-8000-000000000200"
-	canonicalSourceSeasonID       = "00000000-0000-4000-8000-000000000210"
-	canonicalSourceEpisodeID      = "00000000-0000-4000-8000-000000000211"
-	canonicalUniqueEpisodeID      = "00000000-0000-4000-8000-000000000212"
-	canonicalProfileID            = "11111111-1111-4111-8111-111111111111"
-	canonicalOtherProfileID       = "22222222-2222-4222-8222-222222222222"
+	canonicalDestinationMovieID           = "00000000-0000-4000-8000-000000000010"
+	canonicalSourceMovieID                = "00000000-0000-4000-8000-000000000020"
+	canonicalDestinationSeriesID          = "00000000-0000-4000-8000-000000000100"
+	canonicalDestinationSeasonID          = "00000000-0000-4000-8000-000000000110"
+	canonicalDestinationEpisodeID         = "00000000-0000-4000-8000-000000000111"
+	canonicalDestinationVariantSeasonID   = "00000000-0000-4000-8000-000000000120"
+	canonicalDestinationVariantEpisodeID  = "00000000-0000-4000-8000-000000000121"
+	canonicalSourceSeriesID               = "00000000-0000-4000-8000-000000000200"
+	canonicalSourceSeasonID               = "00000000-0000-4000-8000-000000000210"
+	canonicalSourceEpisodeID              = "00000000-0000-4000-8000-000000000211"
+	canonicalUniqueEpisodeID              = "00000000-0000-4000-8000-000000000212"
+	canonicalSourceVariantSeasonID        = "00000000-0000-4000-8000-000000000220"
+	canonicalSourceVariantEpisodeID       = "00000000-0000-4000-8000-000000000221"
+	canonicalSourceDuplicateVariantSeasonID  = "00000000-0000-4000-8000-000000000230"
+	canonicalSourceDuplicateVariantEpisodeID = "00000000-0000-4000-8000-000000000231"
+	canonicalProfileID                    = "11111111-1111-4111-8111-111111111111"
+	canonicalOtherProfileID               = "22222222-2222-4222-8222-222222222222"
 )
 
 func canonicalMergePrincipal() auth.Principal {
@@ -493,7 +702,11 @@ func newCanonicalMergeTestPool(t *testing.T, queryTracers ...pgx.QueryTracer) *p
 		CREATE TEMPORARY TABLE titles (
 			id uuid PRIMARY KEY DEFAULT gen_random_uuid(), media_type text NOT NULL, parent_id uuid REFERENCES titles(id) ON DELETE CASCADE, ordinal integer,
 			display_title text, poster_url text, background_url text, release_info text, resource_id text, resource_provider text, release_date date,
-			created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE (parent_id, media_type, ordinal));
+			hierarchy_variant text NOT NULL DEFAULT '', is_current boolean NOT NULL DEFAULT true,
+			created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+		CREATE UNIQUE INDEX titles_parent_ordinal_unique
+			ON titles (parent_id, media_type, hierarchy_variant, ordinal)
+			WHERE is_current;
 		CREATE TEMPORARY TABLE title_external_ids (
 			title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE, provider text NOT NULL, namespace text NOT NULL, external_id text NOT NULL,
 			PRIMARY KEY (provider, namespace, external_id), UNIQUE (title_id, provider));
@@ -501,6 +714,15 @@ func newCanonicalMergeTestPool(t *testing.T, queryTracers ...pgx.QueryTracer) *p
 			title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE, provider text NOT NULL, language text NOT NULL, payload jsonb NOT NULL,
 			expires_at timestamptz NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (title_id, provider, language),
 			FOREIGN KEY (title_id, provider) REFERENCES title_external_ids(title_id, provider) ON DELETE CASCADE);
+		CREATE TEMPORARY TABLE title_episode_order_identities (
+			title_id uuid PRIMARY KEY REFERENCES titles(id) ON DELETE CASCADE,
+			series_title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+			provider text NOT NULL CHECK (provider = 'tvdb'),
+			order_id text NOT NULL CHECK (order_id ~ '^[1-9][0-9]*$' AND char_length(order_id) <= 32),
+			namespace text NOT NULL CHECK (namespace IN ('season', 'episode')),
+			external_id text NOT NULL CHECK (external_id ~ '^[1-9][0-9]*$' AND char_length(external_id) <= 512),
+			CONSTRAINT title_episode_order_identities_unique
+				UNIQUE (series_title_id, provider, order_id, namespace, external_id));
 		CREATE TEMPORARY TABLE profiles (
 			id uuid PRIMARY KEY, category_id uuid, name text NOT NULL DEFAULT '');
 		CREATE TEMPORARY TABLE user_profile_access (
@@ -509,7 +731,11 @@ func newCanonicalMergeTestPool(t *testing.T, queryTracers ...pgx.QueryTracer) *p
 		INSERT INTO profiles (id) VALUES
 			('44444444-4444-4444-8444-444444444444'::uuid),
 			('11111111-1111-4111-8111-111111111111'::uuid),
-			('22222222-2222-4222-8222-222222222222'::uuid);
+			('22222222-2222-4222-8222-222222222222'::uuid),
+			('33333333-3333-4333-8333-333333333333'::uuid),
+			('55555555-5555-4555-8555-555555555555'::uuid),
+			('66666666-6666-4666-8666-666666666666'::uuid),
+			('77777777-7777-4777-8777-777777777777'::uuid);
 		CREATE TEMPORARY TABLE profile_library (
 			profile_id uuid NOT NULL, title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE, added_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
 			PRIMARY KEY (profile_id, title_id));
@@ -519,9 +745,25 @@ func newCanonicalMergeTestPool(t *testing.T, queryTracers ...pgx.QueryTracer) *p
 			PRIMARY KEY (profile_id, title_id));
 		CREATE TEMPORARY TABLE profile_progress (
 			profile_id uuid NOT NULL, title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE, position_seconds integer NOT NULL, duration_seconds integer NOT NULL,
-			completed boolean NOT NULL, version bigint NOT NULL, last_watched_at timestamptz NOT NULL, updated_at timestamptz NOT NULL, PRIMARY KEY (profile_id, title_id))
+			completed boolean NOT NULL, version bigint NOT NULL, last_watched_at timestamptz NOT NULL, updated_at timestamptz NOT NULL, PRIMARY KEY (profile_id, title_id));
+		CREATE TEMPORARY TABLE profile_user_data (
+			profile_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+			title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+			rating double precision, rating_set boolean NOT NULL DEFAULT false,
+			played_percentage double precision, played_percentage_set boolean NOT NULL DEFAULT false,
+			unplayed_item_count integer, unplayed_item_count_set boolean NOT NULL DEFAULT false,
+			play_count integer, play_count_set boolean NOT NULL DEFAULT false,
+			likes boolean, likes_set boolean NOT NULL DEFAULT false,
+			last_played_date timestamptz, last_played_date_submicrosecond smallint,
+			last_played_date_set boolean NOT NULL DEFAULT false,
+			updated_at timestamptz NOT NULL,
+			PRIMARY KEY (profile_id, title_id));
+		CREATE TEMPORARY TABLE profile_continue_dismissals (
+			profile_id uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+			title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+			dismissed_at timestamptz NOT NULL,
+			PRIMARY KEY (profile_id, title_id));
 	`); err != nil {
-		pool.Close()
 		t.Fatalf("create canonical metadata test schema: %v", err)
 	}
 	return pool
@@ -535,6 +777,22 @@ func seedCanonicalMergeSuccess(t *testing.T, pool *pgxpool.Pool) {
 			($3::uuid, 'season', $1::uuid, 1, 'Requested Season 1'), ($4::uuid, 'season', $2::uuid, 1, 'Source Season 1'),
 			($5::uuid, 'episode', $3::uuid, 1, 'Fixture Episode 1'), ($6::uuid, 'episode', $4::uuid, 1, 'Fixture Episode 1 Source'),
 			($7::uuid, 'episode', $4::uuid, 2, 'Fixture Episode 2');
+		INSERT INTO titles (id, media_type, parent_id, ordinal, hierarchy_variant, display_title) VALUES
+			($10::uuid, 'season', $1::uuid, 1, 'tvdb:2', 'Destination Variant Season'),
+			($11::uuid, 'episode', $10::uuid, 1, 'tvdb:2', 'Destination Variant Episode'),
+			($12::uuid, 'season', $2::uuid, 1, 'tvdb:3', 'Source Variant Season'),
+			($13::uuid, 'episode', $12::uuid, 1, 'tvdb:3', 'Source Variant Episode'),
+			($14::uuid, 'season', $2::uuid, 1, 'tvdb:2', 'Duplicate Variant Season'),
+			($15::uuid, 'episode', $14::uuid, 1, 'tvdb:2', 'Duplicate Variant Episode');
+		INSERT INTO title_episode_order_identities
+			(title_id, series_title_id, provider, order_id, namespace, external_id)
+		VALUES
+			($10::uuid, $1::uuid, 'tvdb', '2', 'season', '7001'),
+			($11::uuid, $1::uuid, 'tvdb', '2', 'episode', '7002'),
+			($12::uuid, $2::uuid, 'tvdb', '3', 'season', '8001'),
+			($13::uuid, $2::uuid, 'tvdb', '3', 'episode', '8002'),
+			($14::uuid, $2::uuid, 'tvdb', '2', 'season', '7001'),
+			($15::uuid, $2::uuid, 'tvdb', '2', 'episode', '7002');
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
 			($1::uuid, 'imdb', 'series', 'tt9000101'), ($2::uuid, 'tmdb', 'series', '900101'),
 			($3::uuid, 'tvdb', 'season', '930101'), ($4::uuid, 'tmdb', 'season', '910101'),
@@ -554,9 +812,35 @@ func seedCanonicalMergeSuccess(t *testing.T, pool *pgxpool.Pool) {
 		INSERT INTO profile_progress (profile_id, title_id, position_seconds, duration_seconds, completed, version, last_watched_at, updated_at) VALUES
 			($8::uuid, $5::uuid, 20, 100, false, 4, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'),
 			($8::uuid, $6::uuid, 90, 100, true, 7, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
-			($9::uuid, $7::uuid, 10, 100, false, 3, '2026-02-01T00:00:00Z', '2026-02-01T00:00:00Z')
+			($9::uuid, $7::uuid, 10, 100, false, 3, '2026-02-01T00:00:00Z', '2026-02-01T00:00:00Z'),
+			($9::uuid, $15::uuid, 45, 100, false, 5, '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z');
+		INSERT INTO profile_user_data (
+			profile_id, title_id, rating, rating_set, played_percentage, played_percentage_set,
+			unplayed_item_count, unplayed_item_count_set, play_count, play_count_set,
+			likes, likes_set, last_played_date, last_played_date_submicrosecond,
+			last_played_date_set, updated_at
+		) VALUES
+			('33333333-3333-4333-8333-333333333333', $15::uuid, 1, true, 10, true, 1, true, 2, true, true, true, '2024-01-01T00:00:00Z', 1, true, '2026-01-10T00:00:00Z'),
+			('44444444-4444-4444-8444-444444444444', $11::uuid, 2, true, 20, true, 2, true, 4, true, false, true, '2024-01-02T00:00:00Z', 2, true, '2026-01-11T00:00:00Z'),
+			('55555555-5555-4555-8555-555555555555', $11::uuid, 3, true, 30, true, 3, true, 6, true, true, true, '2024-01-03T00:00:00Z', 3, true, '2026-01-01T00:00:00Z'),
+			('55555555-5555-4555-8555-555555555555', $15::uuid, 4, true, 40, true, 4, true, 8, true, false, true, '2024-01-04T00:00:00Z', 4, true, '2026-02-02T00:00:00Z'),
+			('66666666-6666-4666-8666-666666666666', $11::uuid, 5, true, 50, true, 5, true, 10, true, true, true, '2024-01-05T00:00:00Z', 5, true, '2026-03-03T00:00:00Z'),
+			('66666666-6666-4666-8666-666666666666', $15::uuid, 6, true, 60, true, 6, true, 12, true, false, true, '2024-01-06T00:00:00Z', 6, true, '2026-02-02T00:00:00Z'),
+			('77777777-7777-4777-8777-777777777777', $11::uuid, 7, true, 70, true, 7, true, 14, true, true, true, '2024-01-07T00:00:00Z', 7, true, '2026-04-04T00:00:00Z'),
+			('77777777-7777-4777-8777-777777777777', $15::uuid, 8, true, 80, true, 8, true, 16, true, false, true, '2024-01-08T00:00:00Z', 8, true, '2026-04-04T00:00:00Z');
+		INSERT INTO profile_continue_dismissals (profile_id, title_id, dismissed_at) VALUES
+			('33333333-3333-4333-8333-333333333333', $15::uuid, '2026-01-01T00:00:00Z'),
+			('44444444-4444-4444-8444-444444444444', $11::uuid, '2026-02-01T00:00:00Z'),
+			('55555555-5555-4555-8555-555555555555', $11::uuid, '2026-01-01T00:00:00Z'),
+			('55555555-5555-4555-8555-555555555555', $15::uuid, '2026-03-01T00:00:00Z'),
+			('66666666-6666-4666-8666-666666666666', $11::uuid, '2026-04-01T00:00:00Z'),
+			('66666666-6666-4666-8666-666666666666', $15::uuid, '2026-03-01T00:00:00Z'),
+			('77777777-7777-4777-8777-777777777777', $11::uuid, '2026-05-01T00:00:00Z'),
+			('77777777-7777-4777-8777-777777777777', $15::uuid, '2026-05-01T00:00:00Z')
 	`, pgx.QueryExecModeSimpleProtocol, canonicalDestinationSeriesID, canonicalSourceSeriesID, canonicalDestinationSeasonID, canonicalSourceSeasonID,
-		canonicalDestinationEpisodeID, canonicalSourceEpisodeID, canonicalUniqueEpisodeID, canonicalProfileID, canonicalOtherProfileID); err != nil {
+		canonicalDestinationEpisodeID, canonicalSourceEpisodeID, canonicalUniqueEpisodeID, canonicalProfileID, canonicalOtherProfileID,
+		canonicalDestinationVariantSeasonID, canonicalDestinationVariantEpisodeID, canonicalSourceVariantSeasonID, canonicalSourceVariantEpisodeID,
+		canonicalSourceDuplicateVariantSeasonID, canonicalSourceDuplicateVariantEpisodeID); err != nil {
 		t.Fatalf("seed canonical metadata hierarchy: %v", err)
 	}
 }

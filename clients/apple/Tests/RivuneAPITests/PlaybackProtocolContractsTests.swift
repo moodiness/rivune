@@ -48,9 +48,13 @@ func testMarkerProgressAndContinueWatchingModelsDecodeClosedEnums() throws {
     """.utf8)))
 
     let page = try JSONDecoder().decode(ContinueWatchingPage.self, from: Data("""
-    {"items":[{"titleId":"11111111-1111-4111-8111-111111111111","mediaType":"episode","seriesId":"22222222-2222-4222-8222-222222222222","seasonId":"33333333-3333-4333-8333-333333333333","seasonNumber":1,"episodeNumber":2,"positionSeconds":0,"durationSeconds":2700,"version":7,"reason":"next_episode","lastWatchedAt":"2026-08-03T10:00:00Z"}]}
+    {"items":[{"titleId":"11111111-1111-4111-8111-111111111111","mediaType":"episode","seriesId":"22222222-2222-4222-8222-222222222222","seasonId":"33333333-3333-4333-8333-333333333333","seasonNumber":1,"episodeNumber":2,"positionSeconds":0,"durationSeconds":2700,"version":7,"reason":"next_episode","lastWatchedAt":"2026-08-03T10:00:00Z","mappingProvider":"tvdb","episodeOrderId":"2","metadataSeasonId":"tvdb:0392d6ce-02f0-4c75-a73f-13badb1c85ba:2112814"}]}
     """.utf8))
-    XCTAssertEqual(page.items.first?.reason, .nextEpisode)
+    let continueItem = try XCTUnwrap(page.items.first)
+    XCTAssertEqual(continueItem.reason, .nextEpisode)
+    XCTAssertEqual(continueItem.mappingProvider, "tvdb")
+    XCTAssertEqual(continueItem.episodeOrderId, "2")
+    XCTAssertEqual(continueItem.metadataSeasonId, "tvdb:0392d6ce-02f0-4c75-a73f-13badb1c85ba:2112814")
     XCTAssertThrowsError(try JSONDecoder().decode(PlaybackMarker.self, from: Data("""
     {"type":"credits","startSeconds":1.0,"endSeconds":2.0,"confidence":1.0,"submissionCount":1}
     """.utf8)))

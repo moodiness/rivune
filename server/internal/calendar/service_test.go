@@ -1552,3 +1552,89 @@ func TestCalendarLinkLifecyclePersistsOnlyHashAndImmediatelyRevokesOldTokens(t *
 		t.Fatalf("cascade-revoked calendar token error = %v, want %v", err, ErrNotFound)
 	}
 }
+
+func TestVariantEpisodesStayOutOfCalendarOutputAndCapacitySentinel(t *testing.T) {
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = os.Getenv("RIVUNE_DATABASE_URL")
+	}
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL or RIVUNE_DATABASE_URL to run PostgreSQL calendar tests")
+	}
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatalf("parse calendar test database URL: %v", err)
+	}
+	config.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(t.Context(), config)
+	if err != nil {
+		t.Fatalf("open calendar test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	tx, err := pool.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin calendar variant fixture: %v", err)
+	}
+	defer func() { _ = tx.Rollback(t.Context()) }()
+	if _, err := tx.Exec(t.Context(), `
+		CREATE TEMPORARY TABLE profile_library (profile_id uuid NOT NULL, title_id uuid NOT NULL);
+		CREATE TEMPORARY TABLE titles (
+			id uuid PRIMARY KEY DEFAULT gen_random_uuid(), media_type text NOT NULL,
+			parent_id uuid REFERENCES titles(id) ON DELETE CASCADE, ordinal integer,
+			hierarchy_variant text NOT NULL DEFAULT '', display_title text,
+			release_date date, poster_url text, resource_id text, resource_provider text,
+			updated_at timestamptz NOT NULL DEFAULT now()
+		);
+		INSERT INTO titles (id, media_type, display_title) VALUES
+			('ca600000-0000-4000-8000-000000000001', 'series', 'Canonical Series');
+		INSERT INTO titles (id, media_type, parent_id, ordinal, hierarchy_variant, display_title) VALUES
+			('ca600000-0000-4000-8000-000000000002', 'season', 'ca600000-0000-4000-8000-000000000001', 1, '', 'Canonical Season'),
+			('ca600000-0000-4000-8000-000000000003', 'season', 'ca600000-0000-4000-8000-000000000001', 1, 'tvdb:2', 'Variant Season');
+		INSERT INTO titles (id, media_type, parent_id, ordinal, hierarchy_variant, display_title, release_date) VALUES
+			('ca600000-0000-4000-8000-000000000004', 'episode', 'ca600000-0000-4000-8000-000000000002', 1, '', 'Canonical Episode', '2026-09-05'),
+			('ca600000-0000-4000-8000-000000000005', 'episode', 'ca600000-0000-4000-8000-000000000003', 1, 'tvdb:2', 'Variant Branch Episode', '2026-09-05'),
+			('ca600000-0000-4000-8000-000000000006', 'episode', 'ca600000-0000-4000-8000-000000000002', 1, 'tvdb:3', 'Variant Direct Episode', '2026-09-05');
+		INSERT INTO profile_library (profile_id, title_id) VALUES
+			('ca600000-0000-4000-8000-000000000010', 'ca600000-0000-4000-8000-000000000001');
+	`); err != nil {
+		t.Fatalf("seed calendar variant fixture: %v", err)
+	}
+	repository := &postgresRepository{}
+	events, err := repository.List(t.Context(), tx, "ca600000-0000-4000-8000-000000000010",
+		time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("list calendar variant fixture: %v", err)
+	}
+	if len(events) != 1 || events[0].Title != "Canonical Episode" {
+		t.Fatalf("calendar events = %+v, want canonical episode only", events)
+	}
+
+	if _, err := tx.Exec(t.Context(), `
+		DELETE FROM titles WHERE media_type = 'episode';
+		INSERT INTO titles (media_type, parent_id, ordinal, hierarchy_variant, display_title, release_date)
+		SELECT 'episode', 'ca600000-0000-4000-8000-000000000002'::uuid, value, '', 'Canonical ' || value, '2026-09-05'
+		FROM generate_series(1, $1::integer) AS value;
+		INSERT INTO titles (media_type, parent_id, ordinal, hierarchy_variant, display_title, release_date)
+		VALUES
+			('episode', 'ca600000-0000-4000-8000-000000000002', 1, 'tvdb:4', 'Variant Capacity One', '2026-09-05'),
+			('episode', 'ca600000-0000-4000-8000-000000000003', 2, 'tvdb:2', 'Variant Capacity Two', '2026-09-05');
+	`, pgx.QueryExecModeSimpleProtocol, maximumCalendarEvents); err != nil {
+		t.Fatalf("seed calendar capacity boundary: %v", err)
+	}
+	events, err = repository.List(t.Context(), tx, "ca600000-0000-4000-8000-000000000010",
+		time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC))
+	if err != nil || len(events) != maximumCalendarEvents {
+		t.Fatalf("canonical calendar boundary count=%d error=%v, want %d", len(events), err, maximumCalendarEvents)
+	}
+	if _, err := tx.Exec(t.Context(), `
+		INSERT INTO titles (media_type, parent_id, ordinal, hierarchy_variant, display_title, release_date)
+		VALUES ('episode', 'ca600000-0000-4000-8000-000000000002', $1, '', 'Canonical Overflow', '2026-09-05')
+	`, maximumCalendarEvents+1); err != nil {
+		t.Fatalf("seed canonical calendar overflow: %v", err)
+	}
+	events, err = repository.List(t.Context(), tx, "ca600000-0000-4000-8000-000000000010",
+		time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC))
+	if err != nil || len(events) != calendarEventQueryLimit {
+		t.Fatalf("calendar overflow sentinel count=%d error=%v, want %d", len(events), err, calendarEventQueryLimit)
+	}
+}

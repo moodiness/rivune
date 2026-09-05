@@ -6310,8 +6310,7 @@ components:
       in: query
       description: Optional TVDB season type ID selected from the series episodeOrders list. Requires mappingProvider=tvdb.
       schema:
-        type: string
-        pattern: ^[1-9][0-9]{0,18}$
+        $ref: '#/components/schemas/PositiveInt64DecimalString'
     Region:
       name: region
       in: query
@@ -11106,8 +11105,7 @@ components:
           items:
             $ref: '#/components/schemas/EpisodeOrder'
         selectedEpisodeOrderId:
-          type: string
-          pattern: ^[1-9][0-9]{0,18}$
+          $ref: '#/components/schemas/PositiveInt64DecimalString'
         mappingProvider:
           type: string
           enum:
@@ -11138,7 +11136,7 @@ components:
         - isDefault
       properties:
         id:
-          type: string
+          $ref: '#/components/schemas/PositiveInt64DecimalString'
         name:
           type: string
         type:
@@ -14691,6 +14689,16 @@ components:
     ContinueWatchingItem:
       type: object
       additionalProperties: false
+      dependentRequired:
+        mappingProvider:
+          - episodeOrderId
+          - metadataSeasonId
+        episodeOrderId:
+          - mappingProvider
+          - metadataSeasonId
+        metadataSeasonId:
+          - mappingProvider
+          - episodeOrderId
       required:
         - titleId
         - mediaType
@@ -14720,6 +14728,16 @@ components:
         episodeNumber:
           type: integer
           minimum: 0
+        mappingProvider:
+          type: string
+          enum:
+            - tvdb
+        episodeOrderId:
+          $ref: '#/components/schemas/PositiveInt64DecimalString'
+        metadataSeasonId:
+          type: string
+          minLength: 1
+          maxLength: 512
         positionSeconds:
           type: integer
           minimum: 0
@@ -14773,6 +14791,10 @@ components:
     PortableArchiveKey:
       type: string
       pattern: ^sha256:[0-9a-f]{64}$
+    PositiveInt64DecimalString:
+      type: string
+      maxLength: 19
+      pattern: ^(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[01][0-9]{17}|92[01][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[01][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])$
     ReadingQueue:
       type: object
       additionalProperties: false
@@ -15238,6 +15260,12 @@ components:
             - tv
         parentKey:
           $ref: '#/components/schemas/PortableArchiveKey'
+        hierarchyVariant:
+          type: string
+          maxLength: 24
+          pattern: ^tvdb:(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[01][0-9]{17}|92[01][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[01][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])$
+        episodeOrderIdentity:
+          $ref: '#/components/schemas/ProfileArchiveEpisodeOrderIdentity'
         ordinal:
           type: integer
           minimum: 0
@@ -15285,6 +15313,30 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ProfileArchiveExternalId'
+    ProfileArchiveEpisodeOrderIdentity:
+      type: object
+      additionalProperties: false
+      required:
+        - seriesKey
+        - provider
+        - orderId
+        - namespace
+        - externalId
+      properties:
+        seriesKey:
+          $ref: '#/components/schemas/PortableArchiveKey'
+        provider:
+          type: string
+          const: tvdb
+        orderId:
+          $ref: '#/components/schemas/PositiveInt64DecimalString'
+        namespace:
+          type: string
+          enum:
+            - season
+            - episode
+        externalId:
+          $ref: '#/components/schemas/PositiveInt64DecimalString'
     ProfileArchiveExternalId:
       type: object
       additionalProperties: false
@@ -15293,6 +15345,22 @@ components:
         - namespace
         - externalId
         - profileScoped
+      allOf:
+        - if:
+            properties:
+              provider:
+                const: tvdb
+              namespace:
+                enum:
+                  - season
+                  - episode
+            required:
+              - provider
+              - namespace
+          then:
+            properties:
+              externalId:
+                $ref: '#/components/schemas/PositiveInt64DecimalString'
       properties:
         provider:
           type: string

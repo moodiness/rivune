@@ -2,6 +2,7 @@ package watchstate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -106,6 +107,234 @@ func captureActiveProfileTestSession(
 	principal.ProfileGrantExpiresAt = &expiresAt
 	principal.ProfileContextHash = contextHash
 	return principal
+}
+
+type episodeOrderContinueFixture struct {
+	pool                       *pgxpool.Pool
+	service                    *Service
+	principal                  auth.Principal
+	profileID                  string
+	seriesID                   string
+	canonicalSeasonID          string
+	canonicalEpisodeOneID      string
+	dvdSeasonID                string
+	dvdEpisodeOneID            string
+	dvdEpisodeTwoID            string
+	unstartedSeriesID          string
+	unstartedCanonicalSeasonID string
+	unstartedCanonicalEpisodeID string
+}
+
+func newEpisodeOrderContinueFixture(t *testing.T) episodeOrderContinueFixture {
+	t.Helper()
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = os.Getenv("RIVUNE_DATABASE_URL")
+	}
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL or RIVUNE_DATABASE_URL to run episode-order continue tests")
+	}
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatalf("parse episode-order continue database URL: %v", err)
+	}
+	config.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open episode-order continue database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	fixture := episodeOrderContinueFixture{
+		pool:                        pool,
+		service:                     NewService(pool, time.UTC),
+		profileID:                   "11111111-1111-4111-8111-111111111111",
+		seriesID:                    "10000000-0000-4000-8000-000000000001",
+		canonicalSeasonID:           "10000000-0000-4000-8000-000000000010",
+		canonicalEpisodeOneID:       "10000000-0000-4000-8000-000000000011",
+		dvdSeasonID:                 "10000000-0000-4000-8000-000000000020",
+		dvdEpisodeOneID:             "10000000-0000-4000-8000-000000000021",
+		dvdEpisodeTwoID:             "10000000-0000-4000-8000-000000000022",
+		unstartedSeriesID:           "10000000-0000-4000-8000-000000000100",
+		unstartedCanonicalSeasonID:  "10000000-0000-4000-8000-000000000110",
+		unstartedCanonicalEpisodeID: "10000000-0000-4000-8000-000000000111",
+	}
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		CREATE TEMPORARY TABLE profiles (id uuid PRIMARY KEY, category_id uuid);
+		CREATE TEMPORARY TABLE user_profile_access (
+			user_id uuid NOT NULL, profile_id uuid NOT NULL, can_manage boolean NOT NULL DEFAULT false,
+			PRIMARY KEY (user_id, profile_id)
+		);
+		CREATE TEMPORARY TABLE titles (
+			id uuid PRIMARY KEY, media_type text NOT NULL, parent_id uuid, ordinal integer,
+			hierarchy_variant text NOT NULL DEFAULT '', release_date date, display_title text,
+			poster_url text, background_url text, release_info text, resource_id text,
+			resource_provider text, is_current boolean NOT NULL DEFAULT true, source_addon_id uuid
+		);
+		CREATE TEMPORARY TABLE title_episode_order_identities (
+			title_id uuid PRIMARY KEY, series_title_id uuid NOT NULL, provider text NOT NULL,
+			order_id text NOT NULL, namespace text NOT NULL, external_id text NOT NULL
+		);
+		CREATE TEMPORARY TABLE profile_title_external_ids (
+			profile_id uuid NOT NULL, title_id uuid NOT NULL, provider text NOT NULL,
+			namespace text NOT NULL, external_id text NOT NULL
+		);
+		CREATE TEMPORARY TABLE profile_addons (id uuid PRIMARY KEY, enabled boolean NOT NULL DEFAULT true);
+		CREATE TEMPORARY TABLE addon_profile_access (addon_id uuid NOT NULL, profile_id uuid NOT NULL);
+		CREATE TEMPORARY TABLE addon_category_access (addon_id uuid NOT NULL, category_id uuid NOT NULL);
+		CREATE TEMPORARY TABLE profile_progress (
+			profile_id uuid NOT NULL, title_id uuid NOT NULL, position_seconds integer NOT NULL,
+			duration_seconds integer NOT NULL, completed boolean NOT NULL DEFAULT false,
+			version bigint NOT NULL DEFAULT 1, last_watched_at timestamptz NOT NULL,
+			updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (profile_id, title_id)
+		);
+		CREATE TEMPORARY TABLE profile_continue_dismissals (
+			profile_id uuid NOT NULL, title_id uuid NOT NULL, dismissed_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (profile_id, title_id)
+		);
+		INSERT INTO profiles (id) VALUES ('11111111-1111-4111-8111-111111111111');
+		INSERT INTO titles (
+			id, media_type, parent_id, ordinal, hierarchy_variant, release_date, display_title,
+			resource_id, resource_provider
+		) VALUES
+			('10000000-0000-4000-8000-000000000001', 'series', NULL, NULL, '', '2024-01-01', 'Ordered Series', '389597', 'tvdb'),
+			('10000000-0000-4000-8000-000000000010', 'season', '10000000-0000-4000-8000-000000000001', 1, '', '2024-01-01', 'Canonical Season 1', '871838', 'tvdb'),
+			('10000000-0000-4000-8000-000000000011', 'episode', '10000000-0000-4000-8000-000000000010', 1, '', '2024-01-01', 'Canonical Episode 1', '7954418', 'tvdb'),
+			('10000000-0000-4000-8000-000000000012', 'episode', '10000000-0000-4000-8000-000000000010', 2, '', '2024-01-08', 'Canonical Episode 2', '7954419', 'tvdb'),
+			('10000000-0000-4000-8000-000000000020', 'season', '10000000-0000-4000-8000-000000000001', 1, 'tvdb:2', '2024-01-01', 'DVD Season 1', '2112814', 'tvdb'),
+			('10000000-0000-4000-8000-000000000021', 'episode', '10000000-0000-4000-8000-000000000020', 1, 'tvdb:2', '2024-01-01', 'DVD Episode 1', '10357450', 'tvdb'),
+			('10000000-0000-4000-8000-000000000022', 'episode', '10000000-0000-4000-8000-000000000020', 2, 'tvdb:2', '2024-01-08', 'DVD Episode 2', '10357451', 'tvdb'),
+			('10000000-0000-4000-8000-000000000100', 'series', NULL, NULL, '', '2025-01-01', 'Unstarted Series', 'unstarted', 'tmdb'),
+			('10000000-0000-4000-8000-000000000110', 'season', '10000000-0000-4000-8000-000000000100', 1, '', '2025-01-01', 'Canonical Season', 'canonical-season', 'tmdb'),
+			('10000000-0000-4000-8000-000000000111', 'episode', '10000000-0000-4000-8000-000000000110', 1, '', '2025-01-01', 'Canonical Premiere', 'canonical-premiere', 'tmdb'),
+			('10000000-0000-4000-8000-000000000120', 'season', '10000000-0000-4000-8000-000000000100', 1, 'tvdb:2', '2025-01-01', 'DVD Season', '3112814', 'tvdb'),
+			('10000000-0000-4000-8000-000000000121', 'episode', '10000000-0000-4000-8000-000000000120', 0, 'tvdb:2', '2025-01-01', 'DVD Special', '20357450', 'tvdb');
+		INSERT INTO title_episode_order_identities (
+			title_id, series_title_id, provider, order_id, namespace, external_id
+		) VALUES
+			('10000000-0000-4000-8000-000000000020', '10000000-0000-4000-8000-000000000001', 'tvdb', '2', 'season', '2112814'),
+			('10000000-0000-4000-8000-000000000021', '10000000-0000-4000-8000-000000000001', 'tvdb', '2', 'episode', '10357450'),
+			('10000000-0000-4000-8000-000000000022', '10000000-0000-4000-8000-000000000001', 'tvdb', '2', 'episode', '10357451'),
+			('10000000-0000-4000-8000-000000000120', '10000000-0000-4000-8000-000000000100', 'tvdb', '2', 'season', '3112814'),
+			('10000000-0000-4000-8000-000000000121', '10000000-0000-4000-8000-000000000100', 'tvdb', '2', 'episode', '20357450');
+		INSERT INTO profile_progress (
+			profile_id, title_id, position_seconds, duration_seconds, completed, version, last_watched_at
+		) VALUES
+			('11111111-1111-4111-8111-111111111111', '10000000-0000-4000-8000-000000000011', 111, 1000, false, 3, '2026-08-01T00:00:00Z'),
+			('11111111-1111-4111-8111-111111111111', '10000000-0000-4000-8000-000000000021', 1000, 1000, true, 7, '2026-08-02T00:00:00Z');
+	`); err != nil {
+		t.Fatalf("create episode-order continue fixture: %v", err)
+	}
+	fixture.principal = captureActiveProfileTestSession(t, ctx, pool, auth.Principal{
+		Role: "admin", AuthorizationScope: auth.AuthorizationScopeGlobalAdministrator,
+	}, fixture.profileID)
+	return fixture
+}
+
+func assertContinueEpisodeOrderContext(
+	t *testing.T,
+	item ContinueItem,
+	mappingProvider, episodeOrderID, metadataSeasonID string,
+) {
+	t.Helper()
+	payload, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("marshal continue item: %v", err)
+	}
+	var contextFields struct {
+		MappingProvider  string `json:"mappingProvider"`
+		EpisodeOrderID   string `json:"episodeOrderId"`
+		MetadataSeasonID string `json:"metadataSeasonId"`
+	}
+	if err := json.Unmarshal(payload, &contextFields); err != nil {
+		t.Fatalf("decode continue hierarchy context: %v", err)
+	}
+	if contextFields.MappingProvider != mappingProvider ||
+		contextFields.EpisodeOrderID != episodeOrderID ||
+		contextFields.MetadataSeasonID != metadataSeasonID {
+		t.Fatalf("continue hierarchy context = %+v, want %q/%q/%q; item=%+v",
+			contextFields, mappingProvider, episodeOrderID, metadataSeasonID, item)
+	}
+}
+
+func TestContinueWatchingPreservesMostRecentEpisodeOrder(t *testing.T) {
+	fixture := newEpisodeOrderContinueFixture(t)
+	ctx := context.Background()
+	rows, err := fixture.pool.Query(ctx, `
+		SELECT title_id::text, position_seconds, version
+		FROM profile_progress
+		WHERE profile_id = $1::uuid AND title_id = ANY($2::uuid[])
+		ORDER BY title_id
+	`, fixture.profileID, []string{fixture.canonicalEpisodeOneID, fixture.dvdEpisodeOneID})
+	if err != nil {
+		t.Fatalf("query independent episode-order progress: %v", err)
+	}
+	defer rows.Close()
+	type progressSnapshot struct {
+		position int
+		version  int64
+	}
+	progress := make(map[string]progressSnapshot, 2)
+	for rows.Next() {
+		var titleID string
+		var snapshot progressSnapshot
+		if err := rows.Scan(&titleID, &snapshot.position, &snapshot.version); err != nil {
+			t.Fatalf("scan independent episode-order progress: %v", err)
+		}
+		progress[titleID] = snapshot
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate independent episode-order progress: %v", err)
+	}
+	if progress[fixture.canonicalEpisodeOneID] != (progressSnapshot{position: 111, version: 3}) ||
+		progress[fixture.dvdEpisodeOneID] != (progressSnapshot{position: 1000, version: 7}) {
+		t.Fatalf("episode-order progress converged: %+v", progress)
+	}
+
+	page, err := fixture.service.ContinueWatching(ctx, fixture.principal, "", 10)
+	if err != nil {
+		t.Fatalf("continue watching active DVD hierarchy: %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("continue watching items = %+v, want one DVD next-up item", page.Items)
+	}
+	item := page.Items[0]
+	if item.TitleID != fixture.dvdEpisodeTwoID || item.Reason != "next_episode" ||
+		item.SeasonID != fixture.dvdSeasonID || item.ResourceID != "tvdb:10357451" ||
+		item.ResourceProvider != "tvdb" {
+		t.Fatalf("active DVD next-up item = %+v", item)
+	}
+	assertContinueEpisodeOrderContext(t, item, "tvdb", "2", "tvdb:"+fixture.seriesID+":2112814")
+}
+
+func TestNextUpUsesCanonicalHierarchyForUnstartedSeries(t *testing.T) {
+	fixture := newEpisodeOrderContinueFixture(t)
+	page, err := fixture.service.ListNextUp(
+		context.Background(), fixture.principal, fixture.unstartedSeriesID, 0, 10,
+	)
+	if err != nil {
+		t.Fatalf("list next-up for unstarted series: %v", err)
+	}
+	if page.Total != 1 || len(page.Items) != 1 {
+		t.Fatalf("unstarted next-up page = %+v", page)
+	}
+	item := page.Items[0]
+	if item.TitleID != fixture.unstartedCanonicalEpisodeID ||
+		item.SeasonID != fixture.unstartedCanonicalSeasonID ||
+		item.ResourceID != "unstarted:1:1" || item.ResourceProvider != "tmdb" {
+		t.Fatalf("unstarted next-up selected noncanonical hierarchy: %+v", item)
+	}
+	assertContinueEpisodeOrderContext(t, item, "", "", "")
+	payload, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("marshal canonical next-up item: %v", err)
+	}
+	for _, field := range []string{"mappingProvider", "episodeOrderId", "metadataSeasonId"} {
+		if strings.Contains(string(payload), `"`+field+`"`) {
+			t.Fatalf("canonical next-up serialized optional %s: %s", field, payload)
+		}
+	}
 }
 
 func TestActiveProfileIDRequiresUnexpiredSelection(t *testing.T) {
@@ -587,6 +816,7 @@ func TestResolveTitleProfileScopedFallbackIsolatedAndLibraryPreservesIdentity(t 
 			media_type text NOT NULL,
 			parent_id uuid,
 			ordinal integer,
+			hierarchy_variant text NOT NULL DEFAULT '',
 			display_title text,
 			poster_url text,
 			background_url text,
@@ -602,6 +832,10 @@ func TestResolveTitleProfileScopedFallbackIsolatedAndLibraryPreservesIdentity(t 
 			category text,
 			is_current boolean NOT NULL DEFAULT true,
 			updated_at timestamptz NOT NULL DEFAULT now()
+		);
+		CREATE TEMPORARY TABLE title_episode_order_identities (
+			title_id uuid PRIMARY KEY, series_title_id uuid NOT NULL, provider text NOT NULL,
+			order_id text NOT NULL, namespace text NOT NULL, external_id text NOT NULL
 		);
 		CREATE TEMPORARY TABLE title_external_ids (
 			title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
@@ -1228,34 +1462,6 @@ func TestTVLibraryIsProfileScopedAndSurvivesAddonRemoval(t *testing.T) {
 	}
 }
 
-func TestNextEpisodeQuerySkipsKnownFutureSeasonAfterCompletedSeason(t *testing.T) {
-	query := strings.Join(strings.Fields(nextEpisodeQuery), " ")
-
-	for _, clause := range []string{
-		"progress.completed AND season.ordinal > 0",
-		"(candidate_season.ordinal, candidate_episode.ordinal) > (latest.season_number, latest.episode_number)",
-		"(candidate_season.release_date IS NULL OR candidate_season.release_date <= CURRENT_DATE)",
-		"(candidate_episode.release_date IS NULL OR candidate_episode.release_date <= CURRENT_DATE)",
-	} {
-		if !strings.Contains(query, clause) {
-			t.Fatalf("next-episode query is missing %q", clause)
-		}
-	}
-}
-
-func TestNextEpisodeQueryKeepsReleasedAndUnknownCandidatesDeterministic(t *testing.T) {
-	query := strings.Join(strings.Fields(nextEpisodeQuery), " ")
-
-	if count := strings.Count(query, "release_date IS NULL OR"); count != 2 {
-		t.Fatalf("unknown season and episode release dates must remain eligible; found %d nullable predicates", count)
-	}
-	if count := strings.Count(query, "release_date <= CURRENT_DATE"); count != 2 {
-		t.Fatalf("released seasons and episodes must remain eligible; found %d database-date predicates", count)
-	}
-	if !strings.Contains(query, "ORDER BY candidate_season.ordinal, candidate_episode.ordinal LIMIT 1") {
-		t.Fatal("next released or unknown-date episode must be selected in season and episode order")
-	}
-}
 
 func TestNextEpisodeItemsExcludeKnownFutureReleases(t *testing.T) {
 	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
@@ -1284,6 +1490,7 @@ func TestNextEpisodeItemsExcludeKnownFutureReleases(t *testing.T) {
 			media_type text NOT NULL,
 			parent_id uuid,
 			ordinal integer,
+			hierarchy_variant text NOT NULL DEFAULT '',
 			release_date date,
 			display_title text,
 			poster_url text,
@@ -1293,6 +1500,10 @@ func TestNextEpisodeItemsExcludeKnownFutureReleases(t *testing.T) {
 			resource_provider text,
 			is_current boolean NOT NULL DEFAULT true,
 			source_addon_id uuid
+		);
+		CREATE TEMPORARY TABLE title_episode_order_identities (
+			title_id uuid PRIMARY KEY, series_title_id uuid NOT NULL, provider text NOT NULL,
+			order_id text NOT NULL, namespace text NOT NULL, external_id text NOT NULL
 		);
 		CREATE TEMPORARY TABLE profile_title_external_ids (
 			profile_id uuid NOT NULL,
@@ -1464,6 +1675,7 @@ func TestDismissContinuePersistsUntilNewWatchActivity(t *testing.T) {
 			media_type text NOT NULL,
 			parent_id uuid,
 			ordinal integer,
+			hierarchy_variant text NOT NULL DEFAULT '',
 			release_date date,
 			display_title text,
 			poster_url text,
@@ -1473,6 +1685,10 @@ func TestDismissContinuePersistsUntilNewWatchActivity(t *testing.T) {
 			resource_provider text,
 			is_current boolean NOT NULL DEFAULT true,
 			source_addon_id uuid
+		);
+		CREATE TEMPORARY TABLE title_episode_order_identities (
+			title_id uuid PRIMARY KEY, series_title_id uuid NOT NULL, provider text NOT NULL,
+			order_id text NOT NULL, namespace text NOT NULL, external_id text NOT NULL
 		);
 		CREATE TEMPORARY TABLE profile_title_external_ids (
 			profile_id uuid NOT NULL,
@@ -1619,8 +1835,13 @@ func TestContinueWatchingOverlaysCachedMetadataLanguage(t *testing.T) {
 		);
 		CREATE TEMPORARY TABLE titles (
 			id uuid PRIMARY KEY, media_type text NOT NULL, parent_id uuid, ordinal integer,
+			hierarchy_variant text NOT NULL DEFAULT '',
 			release_date date, display_title text, poster_url text, background_url text, release_info text,
 			resource_id text, resource_provider text, is_current boolean NOT NULL DEFAULT true, source_addon_id uuid
+		);
+		CREATE TEMPORARY TABLE title_episode_order_identities (
+			title_id uuid PRIMARY KEY, series_title_id uuid NOT NULL, provider text NOT NULL,
+			order_id text NOT NULL, namespace text NOT NULL, external_id text NOT NULL
 		);
 		CREATE TEMPORARY TABLE profile_title_external_ids (
 			profile_id uuid NOT NULL, title_id uuid NOT NULL, provider text NOT NULL,
@@ -1925,10 +2146,15 @@ func TestResolveCustomSeriesPreservesStableHierarchyProgressAndScope(t *testing.
 		CREATE TEMPORARY TABLE titles (
 			id uuid PRIMARY KEY DEFAULT gen_random_uuid(), media_type text NOT NULL,
 			parent_id uuid REFERENCES titles(id) ON DELETE CASCADE, ordinal integer,
+			hierarchy_variant text NOT NULL DEFAULT '',
 			display_title text, poster_url text, background_url text, release_info text,
 			release_date date, resource_id text, resource_provider text, source_addon_id uuid,
 			is_current boolean NOT NULL DEFAULT true,
 			created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+		);
+		CREATE TEMPORARY TABLE title_episode_order_identities (
+			title_id uuid PRIMARY KEY, series_title_id uuid NOT NULL, provider text NOT NULL,
+			order_id text NOT NULL, namespace text NOT NULL, external_id text NOT NULL
 		);
 		CREATE UNIQUE INDEX titles_parent_ordinal_unique
 			ON titles (parent_id, media_type, ordinal) WHERE is_current;

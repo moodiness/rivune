@@ -254,6 +254,20 @@ class CoreProtocolContractsTest {
     }
 
     @Test
+    fun continueWatchingDecodesEpisodeOrderContinuationContext() {
+        val item = json.decodeFromString<ContinueWatchingItem>(
+            """{"titleId":"11111111-1111-4111-8111-111111111111","mediaType":"episode","positionSeconds":120,"durationSeconds":1800,"version":9,"reason":"resume","lastWatchedAt":"2026-09-05T12:00:00Z","mappingProvider":"tvdb","episodeOrderId":"2","metadataSeasonId":"tvdb:0392d6ce-02f0-4c75-a73f-13badb1c85ba:2112814"}""",
+        )
+
+        assertEquals("tvdb", item.mappingProvider)
+        assertEquals("2", item.episodeOrderId)
+        assertEquals(
+            "tvdb:0392d6ce-02f0-4c75-a73f-13badb1c85ba:2112814",
+            item.metadataSeasonId,
+        )
+    }
+
+    @Test
     fun progressionRoutesSerializeVersionsAndNoContentReturnsNull() = runBlocking {
         val progress = progressFixture(version = 9)
         val server = MockWebServer()

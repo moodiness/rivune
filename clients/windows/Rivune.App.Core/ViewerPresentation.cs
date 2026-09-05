@@ -36,6 +36,9 @@ internal sealed record MediaTarget
     public string? Category { get; init; }
     public bool Available { get; init; } = true;
     public Guid? SeriesId { get; init; }
+    public SeriesMappingProvider? MappingProvider { get; init; }
+    public string? EpisodeOrderId { get; init; }
+    public string? MetadataSeasonId { get; init; }
     public string? SeasonId { get; init; }
     public int? SeasonNumber { get; init; }
     public int? EpisodeNumber { get; init; }
@@ -215,6 +218,15 @@ internal static class MediaTargetMapping
         var episodeStillUrl = NonEmpty(item.EpisodeStillUrl);
         var episodeAirDate = NonEmpty(item.EpisodeAirDate);
 
+        var episodeOrderId = NonEmpty(item.EpisodeOrderId);
+        var metadataSeasonId = NonEmpty(item.MetadataSeasonId);
+        var mappingProvider =
+            string.Equals(NonEmpty(item.MappingProvider), "tvdb", StringComparison.OrdinalIgnoreCase) &&
+            episodeOrderId is not null &&
+            metadataSeasonId is not null
+                ? SeriesMappingProvider.Tvdb
+                : (SeriesMappingProvider?)null;
+
         return new MediaTarget
         {
             Id = resourceId,
@@ -232,6 +244,9 @@ internal static class MediaTargetMapping
             ReleaseInfo = episode ? episodeAirDate ?? releaseInfo : releaseInfo,
             Released = episode ? episodeAirDate : null,
             SeriesId = item.SeriesId,
+            MappingProvider = mappingProvider,
+            EpisodeOrderId = mappingProvider is null ? null : episodeOrderId,
+            MetadataSeasonId = mappingProvider is null ? null : metadataSeasonId,
             SeasonId = item.SeasonId?.ToString("D"),
             SeasonNumber = item.SeasonNumber,
             EpisodeNumber = item.EpisodeNumber,
@@ -254,9 +269,25 @@ internal static class MediaTargetMapping
     private static string? NonEmpty(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
-    public static MediaTarget ToMediaTarget(this Episode episode, Series series, string fallbackResourceId)
+    public static MediaTarget ToMediaTarget(
+        this Episode episode,
+        Series series,
+        string fallbackResourceId,
+        MediaTarget? source = null)
     {
-        var resourceId = MediaIdentity.EpisodeResourceId(series, episode, fallbackResourceId);
+        var variant = MediaIdentity.EpisodeVariantContext(series, episode, source);
+        var resourceId = MediaIdentity.EpisodeResourceId(
+            series,
+            episode,
+            fallbackResourceId,
+            variant?.EpisodeOrderId);
+        var matchingSource = source?.TitleId == episode.Id;
+        var persistedSeasonId =
+            variant is not null &&
+            string.Equals(source?.MetadataSeasonId, episode.SeasonId, StringComparison.Ordinal) &&
+            !string.IsNullOrWhiteSpace(source?.SeasonId)
+                ? source.SeasonId
+                : episode.SeasonId;
         return new MediaTarget
         {
             Id = resourceId,
@@ -266,17 +297,23 @@ internal static class MediaTargetMapping
             TitleId = episode.Id,
             Provider = series.MappingProvider == SeriesMappingProvider.Tvdb ? "tvdb" : "tmdb",
             ExternalIds = episode.ExternalIds,
-            PosterUrl = episode.StillUrl ?? series.PosterUrl,
-            BackgroundUrl = episode.BackdropUrl ?? episode.StillUrl ?? series.BackdropUrl,
+            PosterUrl = episode.StillUrl ?? source?.PosterUrl ?? series.PosterUrl,
+            BackgroundUrl = episode.BackdropUrl ?? episode.StillUrl ?? source?.BackgroundUrl ?? series.BackdropUrl,
             Description = episode.Overview,
             ReleaseInfo = episode.AirDate,
+            Released = episode.AirDate,
             SeriesId = series.Id,
-            SeasonId = episode.SeasonId,
+            MappingProvider = variant?.MappingProvider,
+            EpisodeOrderId = variant?.EpisodeOrderId,
+            MetadataSeasonId = variant?.MetadataSeasonId,
+            SeasonId = persistedSeasonId,
             SeasonNumber = episode.SeasonNumber,
             EpisodeNumber = episode.EpisodeNumber,
             SeriesImdbId = series.ExternalIds.GetValueOrDefault("imdb"),
             RuntimeMinutes = episode.RuntimeMinutes,
             Rating = episode.VoteAverage,
+            ResumePositionSeconds = matchingSource ? source!.ResumePositionSeconds : 0,
+            DurationSeconds = matchingSource ? source!.DurationSeconds : 0,
         };
     }
 

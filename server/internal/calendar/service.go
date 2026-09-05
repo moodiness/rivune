@@ -1127,8 +1127,10 @@ const listEventsSQL = `
 		  ON series.id = library.title_id AND series.media_type = 'series'
 		JOIN titles AS season
 		  ON season.parent_id = series.id AND season.media_type = 'season'
+		 AND season.hierarchy_variant = ''
 		JOIN titles AS episode
 		  ON episode.parent_id = season.id AND episode.media_type = 'episode'
+		 AND episode.hierarchy_variant = ''
 		WHERE library.profile_id = $1::uuid
 		  AND series.display_title IS NOT NULL
 		  AND episode.display_title IS NOT NULL

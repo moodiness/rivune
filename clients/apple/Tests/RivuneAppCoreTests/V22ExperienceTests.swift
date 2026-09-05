@@ -212,7 +212,8 @@ final class V22ExperienceTests: XCTestCase {
             externalId: String(identity), externalIds: ["tmdb": String(identity)],
             sourceAddonId: nil, sourceCatalogId: nil, sourceName: nil,
             posterUrl: nil, backgroundUrl: nil, logoUrl: nil, overview: nil,
-            releaseInfo: nil, released: nil, seriesId: nil, seasonId: nil,
+            releaseInfo: nil, released: nil, seriesId: nil, mappingProvider: nil,
+            episodeOrderId: nil, metadataSeasonId: nil, seasonId: nil,
             seasonNumber: nil, episodeNumber: nil, runtimeMinutes: nil)
     }
 
