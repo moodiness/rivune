@@ -457,6 +457,7 @@ export class RivuneHarness {
   private readonly folderDelays = new Map<string, number>();
   private readonly seasonOverrides = new Map<string, unknown>();
   private dvdContinuation = false;
+  private dvdDefaultProfile = false;
   private libraryItems: Array<Record<string, unknown>> = [];
   private libraryMembershipDelay = 0;
   private readingQueueRevision = 1;
@@ -871,6 +872,13 @@ export class RivuneHarness {
   }
   useDvdContinuation() {
     this.dvdContinuation = true;
+  }
+  useDvdDefaultProfile() {
+    this.dvdDefaultProfile = true;
+    this.profileSettings.set("alice", {
+      ...(this.profileSettings.get("alice") ?? {}),
+      seriesMappingProvider: "tvdb",
+    });
   }
 
   setLibraryItems(items: Array<Record<string, unknown>>) {
@@ -1658,7 +1666,7 @@ export class RivuneHarness {
         : typeof instanceLanguage === "string" ? instanceLanguage : "en";
       const responseDelay = this.effectiveSettingsDelays.shift() ?? 0;
       if (responseDelay > 0) await wait(responseDelay);
-      await json(route, { schemaVersion: 1, settings: { interfaceLanguage, allowTranscoding, transcoding, maximumCastMembers, maximumDirectTitles, autoplayNextEpisode: true, animationsEnabled: false, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds, metadataLanguage: "en-US", metadataRegion: "US", audioLanguage: "en", subtitleLanguage: "en" }, sources: { interfaceLanguage: typeof profileLanguage === "string" ? "profile" : typeof instanceLanguage === "string" ? "instance" : "default", allowTranscoding: instanceAllowsTranscoding ? transcoding === "disabled" ? "profile" : "instance" : "instance", transcoding: "profile", maximumCastMembers: typeof profileValues.maximumCastMembers === "number" ? "profile" : "instance", maximumDirectTitles: typeof profileValues.maximumDirectTitles === "number" ? "profile" : "instance", autoplayNextEpisode: "default", animationsEnabled: "default", notificationsEnabled: notificationSource("notificationsEnabled"), notificationDurationSeconds: notificationSource("notificationDurationSeconds"), notificationPollIntervalSeconds: notificationSource("notificationPollIntervalSeconds"), metadataLanguage: "default", metadataRegion: "default", audioLanguage: "default", subtitleLanguage: "default" } });
+      await json(route, { schemaVersion: 1, settings: { interfaceLanguage, allowTranscoding, transcoding, maximumCastMembers, maximumDirectTitles, autoplayNextEpisode: true, animationsEnabled: false, notificationsEnabled, notificationDurationSeconds, notificationPollIntervalSeconds, metadataLanguage: "en-US", metadataRegion: "US", seriesMappingProvider: typeof profileValues.seriesMappingProvider === "string" ? profileValues.seriesMappingProvider : "tmdb", audioLanguage: "en", subtitleLanguage: "en" }, sources: { interfaceLanguage: typeof profileLanguage === "string" ? "profile" : typeof instanceLanguage === "string" ? "instance" : "default", allowTranscoding: instanceAllowsTranscoding ? transcoding === "disabled" ? "profile" : "instance" : "instance", transcoding: "profile", maximumCastMembers: typeof profileValues.maximumCastMembers === "number" ? "profile" : "instance", maximumDirectTitles: typeof profileValues.maximumDirectTitles === "number" ? "profile" : "instance", seriesMappingProvider: typeof profileValues.seriesMappingProvider === "string" ? "profile" : "default", notificationsEnabled: notificationSource("notificationsEnabled"), notificationDurationSeconds: notificationSource("notificationDurationSeconds"), notificationPollIntervalSeconds: notificationSource("notificationPollIntervalSeconds") } });
       return;
     }
     if (path === "/auth/notifications") { await json(route, { notifications: [] }); return; }
@@ -1758,6 +1766,17 @@ export class RivuneHarness {
         return;
       }
       if (url.searchParams.get("episodeOrder") === "2") {
+        await json(route, {
+          ...series,
+          numberOfSeasons: 1,
+          numberOfEpisodes: 3,
+          seasons: [seasonSummary(dvdSeason)],
+          selectedEpisodeOrderId: "2",
+          mappingProvider: "tvdb",
+        });
+        return;
+      }
+      if (this.dvdDefaultProfile && url.searchParams.get("mappingProvider") === "tvdb" && !url.searchParams.has("episodeOrder")) {
         await json(route, {
           ...series,
           numberOfSeasons: 1,

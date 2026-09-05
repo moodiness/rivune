@@ -703,29 +703,22 @@ func (s *Service) enqueueBatchWithProviderTx(ctx context.Context, tx pgx.Tx, pro
 		affectsWatched[index] = item.Event.Type == "watched" || item.Event.Type == "progress" && item.Event.Completed
 	}
 
-	var containsVariant bool
-	if err := tx.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1
-			FROM titles
-			WHERE id = ANY($1::uuid[])
-			  AND hierarchy_variant <> ''
-		)
-	`, titleIDs).Scan(&containsVariant); err != nil {
-		return fmt.Errorf("validate tracking title hierarchy: %w", err)
-	}
-	if containsVariant {
-		return fmt.Errorf("%w: episode-order variants cannot be tracked", ErrInvalidInput)
-	}
 
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, trackingOutboxAdvisoryLock); err != nil {
 		return fmt.Errorf("lock tracking outbox admission: %w", err)
 	}
 	inputSQL := `
 		WITH input AS (
-			SELECT title_id, event_type, payload::jsonb, idempotency_key, affects_watched
+			SELECT event.title_id, event.event_type, event.payload::jsonb,
+			       event.idempotency_key, event.affects_watched
 			FROM unnest($2::uuid[], $3::text[], $4::text[], $5::text[], $6::boolean[])
 			  AS event(title_id, event_type, payload, idempotency_key, affects_watched)
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM titles title
+				WHERE title.id = event.title_id
+				  AND title.hierarchy_variant <> ''
+			)
 		), enabled AS (
 			SELECT account.profile_id, account.provider, input.*
 			FROM profile_tracking_accounts account

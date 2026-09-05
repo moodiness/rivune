@@ -1173,16 +1173,16 @@ func importTitles(ctx context.Context, tx pgx.Tx, profileID string, document Doc
 					if currentHierarchyVariant != value.HierarchyVariant || currentParentID != parentID || !sameOrdinal {
 						return nil, 0, 0, fmt.Errorf("%w: episode-order archive title resolved to an incompatible legacy title", ErrConflict)
 					}
+					tag, err := tx.Exec(ctx, `
+						UPDATE titles
+						SET parent_id=NULLIF($2,'')::uuid,ordinal=$3,hierarchy_variant=$4,updated_at=now()
+						WHERE id=$1::uuid AND (parent_id,ordinal,hierarchy_variant) IS DISTINCT FROM (NULLIF($2,'')::uuid,$3,$4)
+					`, id, parentID, value.Ordinal, value.HierarchyVariant)
+					if err != nil {
+						return nil, 0, 0, fmt.Errorf("restore imported episode-order hierarchy: %w", err)
+					}
+					changedTitle = tag.RowsAffected() == 1
 				}
-				tag, err := tx.Exec(ctx, `
-					UPDATE titles
-					SET parent_id=NULLIF($2,'')::uuid,ordinal=$3,hierarchy_variant=$4,updated_at=now()
-					WHERE id=$1::uuid AND (parent_id,ordinal,hierarchy_variant) IS DISTINCT FROM (NULLIF($2,'')::uuid,$3,$4)
-				`, id, parentID, value.Ordinal, value.HierarchyVariant)
-				if err != nil {
-					return nil, 0, 0, fmt.Errorf("restore imported episode-order hierarchy: %w", err)
-				}
-				changedTitle = tag.RowsAffected() == 1
 			}
 		}
 		if createdTitle {

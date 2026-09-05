@@ -9,7 +9,10 @@ ALTER TABLE titles
         (media_type IN ('movie', 'series', 'tv') AND parent_id IS NULL AND ordinal IS NULL AND hierarchy_variant = '')
         OR
         (media_type IN ('season', 'episode') AND parent_id IS NOT NULL AND ordinal >= 0
-            AND (hierarchy_variant = '' OR hierarchy_variant ~ '^tvdb:[1-9][0-9]*$'))
+            AND (hierarchy_variant = '' OR (
+                hierarchy_variant ~ '^tvdb:[1-9][0-9]{0,18}$'
+                AND (char_length(hierarchy_variant) < 24 OR hierarchy_variant <= 'tvdb:9223372036854775807')
+            )))
     );
 
 DROP INDEX titles_parent_ordinal_unique;
@@ -22,9 +25,15 @@ CREATE TABLE title_episode_order_identities (
     title_id uuid PRIMARY KEY REFERENCES titles(id) ON DELETE CASCADE,
     series_title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
     provider text NOT NULL CHECK (provider = 'tvdb'),
-    order_id text NOT NULL CHECK (order_id ~ '^[1-9][0-9]*$' AND char_length(order_id) <= 32),
+    order_id text NOT NULL CHECK (
+        order_id ~ '^[1-9][0-9]{0,18}$'
+        AND (char_length(order_id) < 19 OR order_id <= '9223372036854775807')
+    ),
     namespace text NOT NULL CHECK (namespace IN ('season', 'episode')),
-    external_id text NOT NULL CHECK (external_id ~ '^[1-9][0-9]*$' AND char_length(external_id) <= 512),
+    external_id text NOT NULL CHECK (
+        external_id ~ '^[1-9][0-9]{0,18}$'
+        AND (char_length(external_id) < 19 OR external_id <= '9223372036854775807')
+    ),
     CONSTRAINT title_episode_order_identities_unique
         UNIQUE (series_title_id, provider, order_id, namespace, external_id)
 );

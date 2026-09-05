@@ -40,6 +40,7 @@ func episodeOrderValidationFixture(t *testing.T) map[string]any {
 	variantSeasonKey := "sha256:" + strings.Repeat("c", 64)
 	variantEpisodeKey := "sha256:" + strings.Repeat("d", 64)
 	canonicalSeasonKey := "sha256:" + strings.Repeat("e", 64)
+	canonicalEpisodeKey := "sha256:" + strings.Repeat("1", 64)
 	fixture["titles"] = []any{
 		map[string]any{
 			"key": seriesKey, "mediaType": "series",
@@ -58,6 +59,10 @@ func episodeOrderValidationFixture(t *testing.T) map[string]any {
 		map[string]any{
 			"key": canonicalSeasonKey, "mediaType": "season", "parentKey": seriesKey, "ordinal": float64(2),
 			"externalIds": []any{map[string]any{"provider": "tvdb", "namespace": "season", "externalId": "900002", "profileScoped": false}},
+		},
+		map[string]any{
+			"key": canonicalEpisodeKey, "mediaType": "episode", "parentKey": canonicalSeasonKey, "ordinal": float64(1),
+			"externalIds": []any{map[string]any{"provider": "tvdb", "namespace": "episode", "externalId": "900003", "profileScoped": false}},
 		},
 	}
 	return fixture
@@ -113,11 +118,26 @@ func TestValidateRejectsInvalidEpisodeOrderIdentity(t *testing.T) {
 		{"leading-zero order ID", func(titles []any) { identity(titles, 2)["orderId"] = "02" }},
 		{"whitespace order ID", func(titles []any) { identity(titles, 2)["orderId"] = " 2" }},
 		{"oversize order ID", func(titles []any) { identity(titles, 2)["orderId"] = strings.Repeat("9", 33) }},
+		{"overflow order ID", func(titles []any) {
+			const overflow = "9223372036854775808"
+			titles[1].(map[string]any)["hierarchyVariant"] = "tvdb:" + overflow
+			titles[2].(map[string]any)["hierarchyVariant"] = "tvdb:" + overflow
+			identity(titles, 1)["orderId"] = overflow
+			identity(titles, 2)["orderId"] = overflow
+		}},
 		{"empty external ID", func(titles []any) { identity(titles, 2)["externalId"] = "" }},
 		{"zero external ID", func(titles []any) { identity(titles, 2)["externalId"] = "0" }},
 		{"leading-zero external ID", func(titles []any) { identity(titles, 2)["externalId"] = "010357450" }},
 		{"whitespace external ID", func(titles []any) { identity(titles, 2)["externalId"] = "10357450 " }},
 		{"oversize external ID", func(titles []any) { identity(titles, 2)["externalId"] = strings.Repeat("9", 513) }},
+		{"overflow ordered-season external ID", func(titles []any) { identity(titles, 1)["externalId"] = "9223372036854775808" }},
+		{"overflow ordered-episode external ID", func(titles []any) { identity(titles, 2)["externalId"] = "9223372036854775808" }},
+		{"overflow canonical TVDB season external ID", func(titles []any) {
+			titles[3].(map[string]any)["externalIds"].([]any)[0].(map[string]any)["externalId"] = "9223372036854775808"
+		}},
+		{"overflow canonical TVDB episode external ID", func(titles []any) {
+			titles[4].(map[string]any)["externalIds"].([]any)[0].(map[string]any)["externalId"] = "9223372036854775808"
+		}},
 		{"duplicate identity", func(titles []any) {
 			titles[3] = map[string]any{
 				"key": key("e"), "mediaType": "episode", "parentKey": key("c"), "ordinal": float64(2), "hierarchyVariant": "tvdb:2",
@@ -132,6 +152,23 @@ func TestValidateRejectsInvalidEpisodeOrderIdentity(t *testing.T) {
 				t.Fatalf("Validate() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestValidateAcceptsMaximumSignedInt64TVDBArchiveIDs(t *testing.T) {
+	const maximum = "9223372036854775807"
+	err := validateEpisodeOrderFixture(t, func(titles []any) {
+		for _, index := range []int{1, 2} {
+			titles[index].(map[string]any)["hierarchyVariant"] = "tvdb:" + maximum
+			titles[index].(map[string]any)["episodeOrderIdentity"].(map[string]any)["orderId"] = maximum
+			titles[index].(map[string]any)["episodeOrderIdentity"].(map[string]any)["externalId"] = maximum
+		}
+		for _, index := range []int{3, 4} {
+			titles[index].(map[string]any)["externalIds"].([]any)[0].(map[string]any)["externalId"] = maximum
+		}
+	})
+	if err != nil {
+		t.Fatalf("maximum signed-int64 TVDB archive IDs rejected: %v", err)
 	}
 }
 

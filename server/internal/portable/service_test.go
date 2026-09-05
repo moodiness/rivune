@@ -456,6 +456,84 @@ func TestImportRejectsScopedIdentityOnEpisodeOrderVariant(t *testing.T) {
 	}
 }
 
+func TestImportKeepsExistingExactEpisodeOrderCoordinatesAuthoritative(t *testing.T) {
+	ctx, service, principal, profileID := portableIdentityClassTestService(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	document := identityClassDocument(now, true)
+	secondSeasonKey := "sha256:" + strings.Repeat("e", 64)
+	secondSeasonOrdinal := 2
+	document.Titles = append(document.Titles, Title{
+		Key: secondSeasonKey, MediaType: "season", ParentKey: document.Titles[0].Key, Ordinal: &secondSeasonOrdinal, HierarchyVariant: "tvdb:2",
+		EpisodeOrderIdentity: &EpisodeOrderIdentity{
+			SeriesKey: document.Titles[0].Key, Provider: "tvdb", OrderID: "2", Namespace: "season", ExternalID: "871839",
+		},
+		ExternalIDs: []ExternalID{},
+	})
+	if _, err := service.Import(ctx, principal, profileID, document); err != nil {
+		t.Fatalf("initial variant import: %v", err)
+	}
+	episodeKey := "sha256:" + strings.Repeat("d", 64)
+	before := readIdentityClassSnapshot(t, ctx, service, profileID, episodeKey)
+
+	moved := document
+	moved.ExportedAt = now.Add(time.Minute)
+	moved.Titles = append([]Title(nil), document.Titles...)
+	archiveOrdinal := 9
+	moved.Titles[3].ParentKey = secondSeasonKey
+	moved.Titles[3].Ordinal = &archiveOrdinal
+	report, err := service.Import(ctx, principal, profileID, moved)
+	if err != nil {
+		t.Fatalf("reimport exact identity with different archive coordinates: %v", err)
+	}
+	after := readIdentityClassSnapshot(t, ctx, service, profileID, episodeKey)
+	if after.parentID != before.parentID || after.ordinal != before.ordinal || after.hierarchyVariant != before.hierarchyVariant {
+		t.Fatalf("exact identity moved to archive coordinates: before=%+v after=%+v", before, after)
+	}
+	for _, section := range report.Sections {
+		if section.Section == "titles" && section.Updated != 0 {
+			t.Fatalf("title report updated = %d, want 0 for authoritative exact identities", section.Updated)
+		}
+	}
+}
+
+func TestImportAcceptsMaximumTVDBIDsAndRejectsOverflowTransactionally(t *testing.T) {
+	ctx, service, principal, profileID := portableIdentityClassTestService(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	const maximum = "9223372036854775807"
+	document := identityClassDocument(now, true)
+	document.Titles[1].ExternalIDs[0].ExternalID = maximum
+	for _, index := range []int{2, 3} {
+		document.Titles[index].HierarchyVariant = "tvdb:" + maximum
+		document.Titles[index].EpisodeOrderIdentity.OrderID = maximum
+		document.Titles[index].EpisodeOrderIdentity.ExternalID = maximum
+	}
+	if _, err := service.Import(ctx, principal, profileID, document); err != nil {
+		t.Fatalf("import maximum signed-int64 TVDB IDs: %v", err)
+	}
+
+	const overflow = "9223372036854775808"
+	rejected := document
+	rejected.ExportedAt = now.Add(time.Minute)
+	rejected.Identity.Name = "Overflow import must roll back"
+	rejected.Titles = append([]Title(nil), document.Titles...)
+	for _, index := range []int{2, 3} {
+		identity := *document.Titles[index].EpisodeOrderIdentity
+		identity.OrderID = overflow
+		rejected.Titles[index].EpisodeOrderIdentity = &identity
+		rejected.Titles[index].HierarchyVariant = "tvdb:" + overflow
+	}
+	if _, err := service.Import(ctx, principal, profileID, rejected); !errors.Is(err, ErrInvalidDocument) {
+		t.Fatalf("overflow import error = %v, want ErrInvalidDocument", err)
+	}
+	var profileName string
+	if err := service.pool.QueryRow(ctx, `SELECT name FROM profiles WHERE id=$1::uuid`, profileID).Scan(&profileName); err != nil {
+		t.Fatal(err)
+	}
+	if profileName != document.Identity.Name {
+		t.Fatalf("profile name after rejected overflow import = %q, want %q", profileName, document.Identity.Name)
+	}
+}
+
 func TestArchiveRoundTripIdempotenceSecretExclusionAndRollback(t *testing.T) {
 	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
 	if databaseURL == "" {

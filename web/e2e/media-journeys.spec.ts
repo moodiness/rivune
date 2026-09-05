@@ -124,6 +124,27 @@ test("media details use a refresh-safe route with browser and in-page history", 
   await expect(page.locator(".route-surface").getByRole("heading").first()).toBeFocused();
 });
 
+test("canonical continuation bypasses a DVD-default profile on route reload", async ({ page, rivune }) => {
+  rivune.useDvdDefaultProfile();
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+
+  await expect(page).toHaveURL(/\/media\/series\/tt9000\/season\/1\/episode\/1$/);
+  await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();
+  const initialSeriesRequest = rivune.matching("/api/v1/metadata/series/series-1", "GET").at(-1)!;
+  expect(Object.fromEntries(initialSeriesRequest.search)).toMatchObject({ mappingProvider: "tmdb" });
+  expect(initialSeriesRequest.search.has("episodeOrder")).toBe(false);
+
+  const initialRequestCount = rivune.matching("/api/v1/metadata/series/series-1", "GET").length;
+  await page.reload();
+
+  await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();
+  await expect.poll(() => rivune.matching("/api/v1/metadata/series/series-1", "GET").length).toBeGreaterThan(initialRequestCount);
+  const reloadedSeriesRequest = rivune.matching("/api/v1/metadata/series/series-1", "GET").at(-1)!;
+  expect(Object.fromEntries(reloadedSeriesRequest.search)).toMatchObject({ mappingProvider: "tmdb" });
+  expect(reloadedSeriesRequest.search.has("episodeOrder")).toBe(false);
+});
+
 test("DVD continuation retains its TVDB hierarchy through playback and route reload", async ({ page, rivune }) => {
   rivune.useDvdContinuation();
   await page.goto("/");

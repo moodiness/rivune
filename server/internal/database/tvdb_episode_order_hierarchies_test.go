@@ -114,6 +114,10 @@ func TestTVDBEpisodeOrderHierarchyMigration(t *testing.T) {
 		INSERT INTO titles (media_type, parent_id, ordinal, hierarchy_variant)
 		VALUES ('season', $1::uuid, 2, 'tvdb:0')
 	`, seriesID)
+	assertExecPGError(t, ctx, pool, "23514", "titles_hierarchy_check", `
+		INSERT INTO titles (media_type, parent_id, ordinal, hierarchy_variant)
+		VALUES ('season', $1::uuid, 2, 'tvdb:9223372036854775808')
+	`, seriesID)
 
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO titles (id, media_type, parent_id, ordinal, hierarchy_variant)
@@ -139,13 +143,13 @@ func TestTVDBEpisodeOrderHierarchyMigration(t *testing.T) {
 	assertExecPGError(t, ctx, pool, "23514", "title_episode_order_identities_order_id_check", `
 		INSERT INTO title_episode_order_identities
 			(title_id, series_title_id, provider, order_id, namespace, external_id)
-		VALUES ($1::uuid, $2::uuid, 'tvdb', $3, 'episode', '10357451')
-	`, secondEpisodeID, seriesID, strings.Repeat("9", 33))
+		VALUES ($1::uuid, $2::uuid, 'tvdb', '9223372036854775808', 'episode', '10357451')
+	`, secondEpisodeID, seriesID)
 	assertExecPGError(t, ctx, pool, "23514", "title_episode_order_identities_external_id_check", `
 		INSERT INTO title_episode_order_identities
 			(title_id, series_title_id, provider, order_id, namespace, external_id)
-		VALUES ($1::uuid, $2::uuid, 'tvdb', '3', 'episode', $3)
-	`, secondEpisodeID, seriesID, strings.Repeat("9", 513))
+		VALUES ($1::uuid, $2::uuid, 'tvdb', '3', 'episode', '9223372036854775808')
+	`, secondEpisodeID, seriesID)
 	assertExecPGError(t, ctx, pool, "23503", "title_episode_order_identities_title_id_fkey", `
 		INSERT INTO title_episode_order_identities
 			(title_id, series_title_id, provider, order_id, namespace, external_id)
@@ -174,9 +178,9 @@ func TestTVDBEpisodeOrderHierarchyMigration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO title_episode_order_identities
 			(title_id, series_title_id, provider, order_id, namespace, external_id)
-		VALUES ($1::uuid, $2::uuid, 'tvdb', $3, 'episode', $4)
-	`, standaloneTitleID, seriesID, strings.Repeat("9", 32), strings.Repeat("9", 512)); err != nil {
-		t.Fatalf("insert maximum-length TVDB episode-order identity: %v", err)
+		VALUES ($1::uuid, $2::uuid, 'tvdb', '9223372036854775807', 'episode', '9223372036854775807')
+	`, standaloneTitleID, seriesID); err != nil {
+		t.Fatalf("insert maximum signed-int64 TVDB episode-order identity: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `DELETE FROM titles WHERE id = $1::uuid`, seriesID); err != nil {
 		t.Fatalf("delete series owning TVDB order identity: %v", err)

@@ -2259,7 +2259,9 @@ class RivuneViewModelTest {
         advanceUntilIdle()
 
         assertEquals(
-            listOf(Triple(seriesId, io.rivune.api.SeriesMappingProvider.TVDB, "2")),
+            listOf<Triple<UUID, io.rivune.api.SeriesMappingProvider, String?>>(
+                Triple(seriesId, io.rivune.api.SeriesMappingProvider.TVDB, "2"),
+            ),
             gateway.seriesRequests,
         )
         assertEquals(
@@ -2307,8 +2309,8 @@ class RivuneViewModelTest {
                         seasonId = persistedSeasonId,
                         seasonNumber = 1,
                         episodeNumber = 1,
-                        mappingProvider = " unknown ",
-                        episodeOrderId = "2",
+                        mappingProvider = " tvdb ",
+                        episodeOrderId = null,
                         metadataSeasonId = opaqueSeasonId,
                         title = "Canonical Series",
                         resourceId = "tt12345678:1:1",
@@ -2340,7 +2342,9 @@ class RivuneViewModelTest {
         advanceUntilIdle()
 
         assertEquals(
-            listOf(Triple(seriesId, io.rivune.api.SeriesMappingProvider.TMDB, null)),
+            listOf<Triple<UUID, io.rivune.api.SeriesMappingProvider, String?>>(
+                Triple(seriesId, io.rivune.api.SeriesMappingProvider.TMDB, null),
+            ),
             gateway.seriesRequests,
         )
         assertEquals(
@@ -2356,6 +2360,107 @@ class RivuneViewModelTest {
         advanceUntilIdle()
         assertEquals(listOf(PlaybackMarkerRequest("tt12345678", 1, 1)), gateway.markerRequests)
     }
+
+    @Test
+    fun canonicalContinuationDiscoversOfficialTvdbFallbackOrder() = runTest(dispatcher) {
+        val seriesId = UUID.randomUUID()
+        val episodeId = UUID.randomUUID()
+        val nextEpisodeId = UUID.randomUUID()
+        val officialSeasonId = "tvdb:$seriesId:1001"
+        val alternateSeasonId = "tvdb:$seriesId:2112814"
+        val profileDefaultSeries = series(seriesId).copy(
+            seasons = listOf(seasonSummary(seriesId, alternateSeasonId, 1, 1)),
+            episodeOrders = listOf(
+                io.rivune.api.EpisodeOrder("1", "Aired Order", "official", false),
+                io.rivune.api.EpisodeOrder("2", "DVD Order", "dvd", true),
+            ),
+            selectedEpisodeOrderId = "2",
+            mappingProvider = io.rivune.api.SeriesMappingProvider.TVDB,
+            externalIds = mapOf("tvdb" to "42"),
+        )
+        val officialSeries = profileDefaultSeries.copy(
+            seasons = listOf(seasonSummary(seriesId, officialSeasonId, 1, 2)),
+            selectedEpisodeOrderId = "1",
+        )
+        val gateway = FakeGateway(
+            restored = true,
+            account = account(profile(hasPin = false), active = true),
+            collections = listOf(collection()),
+        ).apply {
+            continueWatchingPage = io.rivune.api.ContinueWatchingPage(
+                listOf(
+                    io.rivune.api.ContinueWatchingItem(
+                        titleId = episodeId,
+                        mediaType = io.rivune.api.PlaybackProgressMediaType.EPISODE,
+                        seriesId = seriesId,
+                        seasonNumber = 1,
+                        episodeNumber = 1,
+                        title = "Canonical Series",
+                        resourceId = "tt12345678:1:1",
+                        resourceProvider = "imdb",
+                        episodeTitle = "Canonical Episode 1",
+                        positionSeconds = 120,
+                        durationSeconds = 1_800,
+                        version = 1,
+                        reason = io.rivune.api.ContinueWatchingReason.RESUME,
+                        lastWatchedAt = "2026-09-04T00:00:00Z",
+                    ),
+                ),
+            )
+            seriesResult = profileDefaultSeries
+            seriesResults = mapOf(
+                Pair(io.rivune.api.SeriesMappingProvider.TVDB, "1") to officialSeries,
+            )
+            seriesFailures = mapOf(
+                io.rivune.api.SeriesMappingProvider.TMDB to IllegalStateException("canonical unavailable"),
+            )
+            seasons = mapOf(
+                officialSeasonId to season(
+                    seriesId,
+                    listOf(
+                        episode(episodeId, seriesId, 1, seasonId = officialSeasonId),
+                        episode(nextEpisodeId, seriesId, 2, seasonId = officialSeasonId),
+                    ),
+                    id = officialSeasonId,
+                ),
+                alternateSeasonId to season(
+                    seriesId,
+                    listOf(episode(episodeId, seriesId, 1, seasonId = alternateSeasonId)),
+                    id = alternateSeasonId,
+                ),
+            )
+        }
+        gateway.configurePlayback(episodeId)
+        val viewModel = viewModel(FakeServerStore("https://saved.example.com"), gateway)
+        advanceUntilIdle()
+
+        val continuation = viewModel.state.value.viewer.continueWatching.single()
+        assertNull(continuation.mappingProvider)
+        assertNull(continuation.episodeOrderId)
+        assertNull(continuation.metadataSeasonId)
+
+        viewModel.openMedia(continuation)
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf<Triple<UUID, io.rivune.api.SeriesMappingProvider, String?>>(
+                Triple(seriesId, io.rivune.api.SeriesMappingProvider.TMDB, null),
+                Triple(seriesId, io.rivune.api.SeriesMappingProvider.TVDB, null),
+                Triple(seriesId, io.rivune.api.SeriesMappingProvider.TVDB, "1"),
+            ),
+            gateway.seriesRequests,
+        )
+        assertEquals(
+            listOf(officialSeasonId to io.rivune.api.SeriesMappingProvider.TVDB),
+            gateway.seasonRequests,
+        )
+        assertTrue(gateway.seasonRequests.none { it.first == alternateSeasonId })
+        val nextEpisode = assertNotNull(viewModel.state.value.viewer.sourcePicker?.nextEpisode)
+        assertNull(nextEpisode.mappingProvider)
+        assertNull(nextEpisode.episodeOrderId)
+        assertNull(nextEpisode.metadataSeasonId)
+    }
+
 
     @Test
     fun episodeEntryResolvesSeriesOnceAndMarkerFailureFailsOpen() = runTest(dispatcher) {
@@ -4124,6 +4229,8 @@ private class FakeGateway(
     val resolvedTitleInputs = mutableListOf<io.rivune.api.TitleResolveInput>()
     var movieResult: io.rivune.api.Movie? = null
     var seriesResult: io.rivune.api.Series? = null
+    var seriesFailures = emptyMap<io.rivune.api.SeriesMappingProvider, Throwable>()
+    var seriesResults = emptyMap<Pair<io.rivune.api.SeriesMappingProvider, String?>, io.rivune.api.Series>()
     var seasons = emptyMap<String, io.rivune.api.Season>()
     val seriesRequests = mutableListOf<Triple<UUID, io.rivune.api.SeriesMappingProvider, String?>>()
     val seasonRequests = mutableListOf<Pair<String, io.rivune.api.SeriesMappingProvider>>()
@@ -4279,7 +4386,8 @@ private class FakeGateway(
     ): io.rivune.api.Series {
         metadataRequests += "series" to language
         seriesRequests += Triple(id, mappingProvider, episodeOrder)
-        return requireNotNull(seriesResult)
+        seriesFailures[mappingProvider]?.let { throw it }
+        return seriesResults[mappingProvider to episodeOrder] ?: requireNotNull(seriesResult)
     }
     override suspend fun season(id: String, mappingProvider: io.rivune.api.SeriesMappingProvider, language: String?): io.rivune.api.Season {
         metadataRequests += "season" to language

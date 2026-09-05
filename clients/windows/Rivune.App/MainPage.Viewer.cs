@@ -2524,21 +2524,15 @@ public sealed partial class MainPage
         }, _state.Token);
     }
 
-    private async Task<Series> LoadSeriesAsync(Guid id, MediaTarget? context = null)
-    {
-        var variant = context is null ? null : MediaIdentity.VariantContext(context);
-        if (variant is not null)
-        {
-            return await _state.Client!.GetSeriesAsync(
+    private Task<Series> LoadSeriesAsync(Guid id, MediaTarget? context = null) =>
+        MediaIdentity.LoadSeriesAsync(
+            context,
+            (mappingProvider, episodeOrderId) => _state.Client!.GetSeriesAsync(
                 id,
-                variant.MappingProvider,
+                mappingProvider,
                 language: MetadataLanguage(),
-                episodeOrder: variant.EpisodeOrderId,
-                cancellationToken: _state.Token);
-        }
-        try { return await _state.Client!.GetSeriesAsync(id, SeriesMappingProvider.Tmdb, language: MetadataLanguage(), cancellationToken: _state.Token); }
-        catch (RivuneServerException) { return await _state.Client!.GetSeriesAsync(id, SeriesMappingProvider.Tvdb, language: MetadataLanguage(), cancellationToken: _state.Token); }
-    }
+                episodeOrder: episodeOrderId,
+                cancellationToken: _state.Token));
 
     private async Task LoadSeriesWatchStateAsync(Series series, long generation)
     {

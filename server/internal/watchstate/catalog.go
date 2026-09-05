@@ -359,7 +359,7 @@ func (s *Service) ListCatalogItems(ctx context.Context, principal auth.Principal
 			              SELECT 1 FROM profile_favorites favorite
 			              WHERE favorite.profile_id = $1::uuid AND favorite.title_id = title.id
 			          ))
-			          OR (($11::boolean IS NOT NULL OR $13::boolean IS NOT NULL) AND EXISTS (
+			          OR (($11::boolean IS NOT NULL OR $13::boolean IS NOT NULL) AND title.hierarchy_variant = '' AND EXISTS (
 			              SELECT 1 FROM profile_progress progress
 			              WHERE progress.profile_id = $1::uuid AND progress.title_id = title.id
 			          ))

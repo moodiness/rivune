@@ -149,6 +149,56 @@ func TestMappedDVDSeasonPersistsIndependentStableHierarchy(t *testing.T) {
 	}
 }
 
+func TestMappedSeasonVariantAdvisoryLockCanonicalizesSeriesUUID(t *testing.T) {
+	pool := newCanonicalMergeTestPool(t)
+	ctx := context.Background()
+	const lowerSeriesID = "abcdefab-cdef-4abc-8def-abcdefabcdef"
+	upperSeriesID := strings.ToUpper(lowerSeriesID)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO titles (id, media_type, display_title)
+		VALUES ($1::uuid, 'series', 'Lock Fixture Series')
+	`, lowerSeriesID); err != nil {
+		t.Fatalf("seed advisory-lock series: %v", err)
+	}
+	provided := dvdProviderSeason()
+
+	lockKey := func(seriesID string) string {
+		t.Helper()
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin advisory-lock transaction: %v", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if _, err := persistMappedSeasonVariant(
+			ctx,
+			tx,
+			seriesID,
+			mappedSeasonID(seriesID, provided.ExternalID),
+			"en-US",
+			provided,
+		); err != nil {
+			t.Fatalf("persist mapped hierarchy for series %q: %v", seriesID, err)
+		}
+		var key string
+		if err := tx.QueryRow(ctx, `
+			SELECT classid::text || ':' || objid::text || ':' || objsubid::text
+			FROM pg_locks
+			WHERE locktype = 'advisory'
+			  AND pid = pg_backend_pid()
+			  AND granted
+		`).Scan(&key); err != nil {
+			t.Fatalf("query advisory lock for series %q: %v", seriesID, err)
+		}
+		return key
+	}
+
+	lowerKey := lockKey(lowerSeriesID)
+	upperKey := lockKey(upperSeriesID)
+	if lowerKey != upperKey {
+		t.Fatalf("equivalent UUID spellings acquired different advisory locks: lower=%s upper=%s", lowerKey, upperKey)
+	}
+}
+
 func TestMappedDVDSeasonRefreshKeepsOtherVariantSeasonsCurrent(t *testing.T) {
 	pool := newCanonicalMergeTestPool(t)
 	seedEpisodeOrderCanonicalHierarchy(t, pool)

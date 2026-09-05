@@ -1386,7 +1386,7 @@ func persistMappedSeasonVariant(
 	}
 	if _, err := tx.Exec(ctx, `
 		SELECT pg_advisory_xact_lock(hashtextextended(
-			'episode-order:' || $1::text || ':tvdb:' || $2::text, 0))
+			'episode-order:' || $1::uuid::text || ':tvdb:' || $2::text, 0))
 	`, seriesID, orderID); err != nil {
 		return Season{}, fmt.Errorf("lock TVDB episode-order hierarchy: %w", err)
 	}

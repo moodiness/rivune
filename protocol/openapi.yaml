@@ -13379,7 +13379,7 @@ components:
         mediaType: { type: string, enum: [movie, series, season, episode, tv] }
         parentKey: { $ref: "#/components/schemas/PortableArchiveKey" }
         hierarchyVariant:
-          { type: string, pattern: "^tvdb:[1-9][0-9]*$", maxLength: 37 }
+          { type: string, pattern: "^tvdb:[1-9][0-9]*$", maxLength: 24 }
         episodeOrderIdentity:
           { $ref: "#/components/schemas/ProfileArchiveEpisodeOrderIdentity" }
         ordinal: { type: integer, minimum: 0 }
@@ -13408,14 +13408,24 @@ components:
         seriesKey: { $ref: "#/components/schemas/PortableArchiveKey" }
         provider: { type: string, const: tvdb }
         orderId:
-          { type: string, pattern: "^[1-9][0-9]*$", maxLength: 32 }
+          { type: string, pattern: "^[1-9][0-9]*$", maxLength: 19 }
         namespace: { type: string, enum: [season, episode] }
         externalId:
-          { type: string, pattern: "^[1-9][0-9]*$", maxLength: 512 }
+          { type: string, pattern: "^[1-9][0-9]*$", maxLength: 19 }
     ProfileArchiveExternalId:
       type: object
       additionalProperties: false
       required: [provider, namespace, externalId, profileScoped]
+      allOf:
+        - if:
+            properties:
+              provider: { const: tvdb }
+              namespace: { enum: [season, episode] }
+            required: [provider, namespace]
+          then:
+            properties:
+              externalId:
+                { type: string, pattern: "^[1-9][0-9]*$", maxLength: 19 }
       properties:
         provider: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,31}$" }
         namespace: { type: string, enum: [movie, series, season, episode, tv] }

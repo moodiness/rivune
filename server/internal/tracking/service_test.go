@@ -776,7 +776,7 @@ func TestAdmissionEvictsOnlyProvenStalePendingWork(t *testing.T) {
 	}
 }
 
-func TestVariantTrackingAdmissionRejectsCommittablyWithoutMutationOrCapacityUse(t *testing.T) {
+func TestVariantTrackingAdmissionSkipsVariantsWithoutCapacityUse(t *testing.T) {
 	t.Run("single", func(t *testing.T) {
 		pool := openTrackingOutboxTestPool(t, 2)
 		seedTrackingAccount(t, pool, trackingTestProfileID, "trakt")
@@ -795,27 +795,27 @@ func TestVariantTrackingAdmissionRejectsCommittablyWithoutMutationOrCapacityUse(
 		err = service.EnqueueTx(t.Context(), tx, trackingTestProfileID, variantID, "progress:variant", Event{
 			Type: "progress", TitleID: variantID, Version: 1,
 		})
-		if !errors.Is(err, ErrInvalidInput) {
+		if err != nil {
 			_ = tx.Rollback(t.Context())
-			t.Fatalf("variant enqueue error=%v, want ErrInvalidInput", err)
+			t.Fatalf("skip variant enqueue: %v", err)
 		}
 		if err := tx.Commit(t.Context()); err != nil {
-			t.Fatalf("commit rejected variant transaction: %v", err)
+			t.Fatalf("commit skipped variant transaction: %v", err)
 		}
 		var heads, outbox int
 		if err := pool.QueryRow(t.Context(), `
 			SELECT (SELECT count(*) FROM profile_tracking_event_heads),
 			       (SELECT count(*) FROM profile_tracking_outbox)
 		`).Scan(&heads, &outbox); err != nil {
-			t.Fatalf("query rejected variant state: %v", err)
+			t.Fatalf("query skipped variant state: %v", err)
 		}
 		if heads != 0 || outbox != 0 {
-			t.Fatalf("rejected variant left heads=%d outbox=%d", heads, outbox)
+			t.Fatalf("skipped variant left heads=%d outbox=%d", heads, outbox)
 		}
 		if err := service.Enqueue(t.Context(), trackingTestProfileID, canonicalID, "progress:canonical", Event{
 			Type: "progress", TitleID: canonicalID, Version: 1,
 		}); err != nil {
-			t.Fatalf("canonical enqueue after rejected variant consumed capacity: %v", err)
+			t.Fatalf("canonical enqueue after skipped variant consumed capacity: %v", err)
 		}
 		if err := pool.QueryRow(t.Context(), `
 			SELECT (SELECT count(*) FROM profile_tracking_event_heads),
@@ -847,27 +847,56 @@ func TestVariantTrackingAdmissionRejectsCommittablyWithoutMutationOrCapacityUse(
 			{TitleID: canonicalID, IdempotencyKey: "watched:canonical", Event: Event{Type: "watched", TitleID: canonicalID}},
 			{TitleID: variantID, IdempotencyKey: "watched:variant", Event: Event{Type: "watched", TitleID: variantID}},
 		})
-		if !errors.Is(err, ErrInvalidInput) {
+		if err != nil {
 			_ = tx.Rollback(t.Context())
-			t.Fatalf("mixed variant batch error=%v, want ErrInvalidInput", err)
+			t.Fatalf("enqueue mixed canonical and variant batch: %v", err)
 		}
 		if err := tx.Commit(t.Context()); err != nil {
-			t.Fatalf("commit rejected mixed batch transaction: %v", err)
+			t.Fatalf("commit mixed batch transaction: %v", err)
 		}
-		var heads, outbox int
+		var canonicalHeads, canonicalOutbox, variantHeads, variantOutbox int
 		if err := pool.QueryRow(t.Context(), `
-			SELECT (SELECT count(*) FROM profile_tracking_event_heads),
-			       (SELECT count(*) FROM profile_tracking_outbox)
-		`).Scan(&heads, &outbox); err != nil {
-			t.Fatalf("query rejected mixed batch state: %v", err)
+			SELECT
+				(SELECT count(*) FROM profile_tracking_event_heads WHERE title_id = $1::uuid),
+				(SELECT count(*) FROM profile_tracking_outbox WHERE title_id = $1::uuid),
+				(SELECT count(*) FROM profile_tracking_event_heads WHERE title_id = $2::uuid),
+				(SELECT count(*) FROM profile_tracking_outbox WHERE title_id = $2::uuid)
+		`, canonicalID, variantID).Scan(&canonicalHeads, &canonicalOutbox, &variantHeads, &variantOutbox); err != nil {
+			t.Fatalf("query mixed batch state: %v", err)
 		}
-		if heads != 0 || outbox != 0 {
-			t.Fatalf("rejected mixed batch left heads=%d outbox=%d", heads, outbox)
+		if canonicalHeads != 1 || canonicalOutbox != 1 || variantHeads != 0 || variantOutbox != 0 {
+			t.Fatalf(
+				"mixed batch heads/outbox canonical=%d/%d variant=%d/%d",
+				canonicalHeads, canonicalOutbox, variantHeads, variantOutbox,
+			)
 		}
-		if err := service.Enqueue(t.Context(), trackingTestProfileID, canonicalID, "watched:canonical", Event{
-			Type: "watched", TitleID: canonicalID,
-		}); err != nil {
-			t.Fatalf("canonical enqueue after rejected mixed batch consumed capacity: %v", err)
+	})
+
+	t.Run("validation precedes filtering", func(t *testing.T) {
+		pool := openTrackingOutboxTestPool(t, 2)
+		variantID := trackingOutboxTitleID(205)
+		if _, err := pool.Exec(t.Context(), `
+			INSERT INTO titles (id, hierarchy_variant) VALUES ($1::uuid, 'tvdb:4')
+		`, variantID); err != nil {
+			t.Fatalf("seed validation variant title: %v", err)
+		}
+		service := &Service{pool: pool, logger: slog.Default()}
+		tx, err := pool.Begin(t.Context())
+		if err != nil {
+			t.Fatalf("begin validation transaction: %v", err)
+		}
+		defer func() { _ = tx.Rollback(t.Context()) }()
+		if err := service.EnqueueBatchTx(t.Context(), tx, trackingTestProfileID, []BatchEvent{
+			{TitleID: variantID, IdempotencyKey: "progress:one", Event: Event{Type: "progress", TitleID: variantID}},
+			{TitleID: variantID, IdempotencyKey: "progress:two", Event: Event{Type: "progress", TitleID: variantID}},
+		}); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("duplicate variant batch error=%v, want ErrInvalidInput", err)
+		}
+		if err := service.EnqueueBatchTx(t.Context(), tx, trackingTestProfileID, []BatchEvent{
+			{TitleID: variantID, IdempotencyKey: "progress:variant", Event: Event{Type: "progress", TitleID: variantID}},
+			{TitleID: trackingOutboxTitleID(206), IdempotencyKey: "watched:canonical", Event: Event{Type: "watched", TitleID: trackingOutboxTitleID(206)}},
+		}); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("mixed-type variant batch error=%v, want ErrInvalidInput", err)
 		}
 	})
 }

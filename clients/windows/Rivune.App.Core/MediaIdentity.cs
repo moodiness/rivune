@@ -52,6 +52,36 @@ internal static class MediaIdentity
             : null;
     }
 
+    public static async Task<Series> LoadSeriesAsync(
+        MediaTarget? context,
+        Func<SeriesMappingProvider, string?, Task<Series>> load)
+    {
+        ArgumentNullException.ThrowIfNull(load);
+        var variant = context is null ? null : VariantContext(context);
+        if (variant is not null)
+            return await load(variant.MappingProvider, variant.EpisodeOrderId);
+
+        try
+        {
+            return await load(SeriesMappingProvider.Tmdb, null);
+        }
+        catch (RivuneServerException)
+        {
+            var fallback = await load(SeriesMappingProvider.Tvdb, null);
+            if (SelectedOrderIsOfficial(fallback)) return fallback;
+
+            var officialOrderId = fallback.EpisodeOrders
+                .Where(order =>
+                    string.Equals(order.Type.Trim(), "official", StringComparison.OrdinalIgnoreCase))
+                .Select(order => NonEmpty(order.Id))
+                .FirstOrDefault(IsPositiveDecimalInt64);
+            if (officialOrderId is null) throw new InvalidResponseException();
+            var official = await load(SeriesMappingProvider.Tvdb, officialOrderId);
+            if (!SelectedOrderIsOfficial(official, officialOrderId)) throw new InvalidResponseException();
+            return official;
+        }
+    }
+
     public static MediaVariantContext? EpisodeVariantContext(
         Series series,
         Episode episode,
@@ -112,6 +142,26 @@ internal static class MediaIdentity
             return $"tmdb:{seriesTmdb}:{episode.SeasonNumber}:{episode.EpisodeNumber}";
         return $"{fallbackResourceId}:{episode.SeasonNumber}:{episode.EpisodeNumber}";
     }
+
+    private static bool SelectedOrderIsOfficial(Series series, string? expectedOrderId = null)
+    {
+        var selectedOrderId = NonEmpty(series.SelectedEpisodeOrderId);
+        if (selectedOrderId is null ||
+            expectedOrderId is not null &&
+            !string.Equals(selectedOrderId, expectedOrderId, StringComparison.Ordinal))
+            return false;
+        var selectedOrder = series.EpisodeOrders.FirstOrDefault(order =>
+            string.Equals(order.Id, selectedOrderId, StringComparison.Ordinal));
+        return selectedOrder is not null &&
+               string.Equals(selectedOrder.Type.Trim(), "official", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsPositiveDecimalInt64(string? value) =>
+        value is { Length: > 0 } &&
+        value[0] is >= '1' and <= '9' &&
+        value.All(character => character is >= '0' and <= '9') &&
+        long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) &&
+        parsed > 0;
 
     private static string? NonEmpty(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();

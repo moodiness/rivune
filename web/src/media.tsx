@@ -1056,7 +1056,7 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
           : await resolveMediaTitle(item);
       const resolved = withoutEmptySeasons(await api.seriesDetails(resolvedTitleID, continuationMappingProvider
         ? { mappingProvider: continuationMappingProvider, episodeOrderId: continuationEpisodeOrderID }
-        : undefined));
+        : { mappingProvider: "tmdb" }));
       if (!active) return;
       onCanonicalRoute?.({
         sourceID: item.id,

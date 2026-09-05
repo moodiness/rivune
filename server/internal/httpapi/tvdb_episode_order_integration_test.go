@@ -28,12 +28,23 @@ import (
 )
 
 const (
-	tvdbHandlerSeriesID  = "11000000-0000-4000-8000-000000000100"
-	tvdbHandlerProfileID = "11000000-0000-4000-8000-000000000200"
-	tvdbHandlerUserID    = "11000000-0000-4000-8000-000000000300"
-	tvdbHandlerDeviceID  = "11000000-0000-4000-8000-000000000400"
-	tvdbHandlerSessionID = "11000000-0000-4000-8000-000000000500"
+	tvdbHandlerSeriesID          = "11000000-0000-4000-8000-000000000100"
+	tvdbHandlerCanonicalSeasonID = "11000000-0000-4000-8000-000000000110"
+	tvdbHandlerProfileID         = "11000000-0000-4000-8000-000000000200"
+	tvdbHandlerUserID            = "11000000-0000-4000-8000-000000000300"
+	tvdbHandlerDeviceID          = "11000000-0000-4000-8000-000000000400"
+	tvdbHandlerSessionID         = "11000000-0000-4000-8000-000000000500"
 )
+
+var tvdbHandlerCanonicalEpisodeIDs = []string{
+	"11000000-0000-4000-8000-000000000121",
+	"11000000-0000-4000-8000-000000000122",
+	"11000000-0000-4000-8000-000000000123",
+	"11000000-0000-4000-8000-000000000124",
+	"11000000-0000-4000-8000-000000000125",
+	"11000000-0000-4000-8000-000000000126",
+	"11000000-0000-4000-8000-000000000127",
+}
 
 var tvdbHandlerEpisodeExternalIDs = []string{
 	"9226291", "9226292", "9226293", "9226294", "9226295", "9226296", "10357450", "10357451",
@@ -41,6 +52,17 @@ var tvdbHandlerEpisodeExternalIDs = []string{
 
 var tvdbHandlerEpisodeNumbers = []int{
 	9226291, 9226292, 9226293, 9226294, 9226295, 9226296, 10357450, 10357451,
+}
+
+type tvdbHandlerCanonicalTitleState struct {
+	ID               string
+	MediaType        string
+	ParentID         string
+	Ordinal          int
+	HierarchyVariant string
+	IsCurrent        bool
+	DisplayTitle     string
+	TVDBExternalID   string
 }
 
 type tvdbHandlerProviderSource struct {
@@ -159,6 +181,8 @@ func (transport *tvdbHandlerFixtureTransport) RoundTrip(request *http.Request) (
 func TestTVDBEpisodeOrderHandlersEndToEnd(t *testing.T) {
 	pool := tvdbHandlerTestPool(t)
 	principal := seedTVDBHandlerFixture(t, pool)
+	canonicalBefore := tvdbHandlerCanonicalHierarchyState(t, pool)
+	assertTVDBHandlerCanonicalHierarchy(t, canonicalBefore)
 	transport := &tvdbHandlerFixtureTransport{}
 	providerClient := tvdb.New("deterministic-api-key", "deterministic-pin", &http.Client{Transport: transport})
 	providerSource := tvdbHandlerProviderSource{client: providerClient}
@@ -212,6 +236,21 @@ func TestTVDBEpisodeOrderHandlersEndToEnd(t *testing.T) {
 	if secondIDs := tvdbHandlerEpisodeIDs(secondSeason.Episodes); !reflect.DeepEqual(secondIDs, firstIDs) {
 		t.Fatalf("repeated DVD season changed episode UUIDs: first=%v second=%v", firstIDs, secondIDs)
 	}
+	canonicalAfter := tvdbHandlerCanonicalHierarchyState(t, pool)
+	if !reflect.DeepEqual(canonicalAfter, canonicalBefore) {
+		t.Fatalf("repeated DVD requests changed canonical aired hierarchy:\nbefore=%+v\nafter=%+v", canonicalBefore, canonicalAfter)
+	}
+
+	var storedSeasonID string
+	if err := pool.QueryRow(context.Background(), `
+		SELECT title_id::text
+		FROM title_episode_order_identities
+		WHERE series_title_id = $1::uuid AND provider = 'tvdb' AND order_id = '2'
+		  AND namespace = 'season' AND external_id = '2112814'
+	`, tvdbHandlerSeriesID).Scan(&storedSeasonID); err != nil {
+		t.Fatalf("resolve stored DVD season UUID: %v", err)
+	}
+	assertTVDBHandlerStoredDVDHierarchy(t, pool, storedSeasonID, firstIDs)
 
 	progressBody := tvdbHandlerRequest(t, client, http.MethodPut,
 		server.URL+"/api/v1/progress/"+firstSeason.Episodes[6].ID,
@@ -235,15 +274,7 @@ func TestTVDBEpisodeOrderHandlersEndToEnd(t *testing.T) {
 	if item.ResourceProvider != "tvdb" || item.ResourceID != "tvdb:10357450" {
 		t.Fatalf("continue watching resource = %q/%q", item.ResourceProvider, item.ResourceID)
 	}
-	var storedSeasonID string
-	if err := pool.QueryRow(context.Background(), `
-		SELECT title_id::text
-		FROM title_episode_order_identities
-		WHERE series_title_id = $1::uuid AND provider = 'tvdb' AND order_id = '2'
-		  AND namespace = 'season' AND external_id = '2112814'
-	`, tvdbHandlerSeriesID).Scan(&storedSeasonID); err != nil {
-		t.Fatalf("resolve stored DVD season UUID: %v", err)
-	}
+
 	if item.SeasonID != storedSeasonID {
 		t.Fatalf("continue watching season UUID = %q, want %q", item.SeasonID, storedSeasonID)
 	}
@@ -336,9 +367,26 @@ func seedTVDBHandlerFixture(t *testing.T, pool *pgxpool.Pool) auth.Principal {
 		);
 		INSERT INTO titles (id, media_type, display_title)
 		VALUES ($6::uuid, 'series', 'Fixture Series');
+		INSERT INTO titles (id, media_type, parent_id, ordinal, hierarchy_variant, display_title) VALUES
+			('11000000-0000-4000-8000-000000000110', 'season', $6::uuid, 1, '', 'Aired Season 1'),
+			('11000000-0000-4000-8000-000000000121', 'episode', '11000000-0000-4000-8000-000000000110', 1, '', 'Aired Episode 1'),
+			('11000000-0000-4000-8000-000000000122', 'episode', '11000000-0000-4000-8000-000000000110', 2, '', 'Aired Episode 2'),
+			('11000000-0000-4000-8000-000000000123', 'episode', '11000000-0000-4000-8000-000000000110', 3, '', 'Aired Episode 3'),
+			('11000000-0000-4000-8000-000000000124', 'episode', '11000000-0000-4000-8000-000000000110', 4, '', 'Aired Episode 4'),
+			('11000000-0000-4000-8000-000000000125', 'episode', '11000000-0000-4000-8000-000000000110', 5, '', 'Aired Episode 5'),
+			('11000000-0000-4000-8000-000000000126', 'episode', '11000000-0000-4000-8000-000000000110', 6, '', 'Aired Episode 6'),
+			('11000000-0000-4000-8000-000000000127', 'episode', '11000000-0000-4000-8000-000000000110', 7, '', 'Aired Episode 7');
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
 			($6::uuid, 'tmdb', 'series', '700001'),
-			($6::uuid, 'tvdb', 'series', '404604');
+			($6::uuid, 'tvdb', 'series', '404604'),
+			('11000000-0000-4000-8000-000000000110', 'tvdb', 'season', '2112801'),
+			('11000000-0000-4000-8000-000000000121', 'tvdb', 'episode', '9226291'),
+			('11000000-0000-4000-8000-000000000122', 'tvdb', 'episode', '9226292'),
+			('11000000-0000-4000-8000-000000000123', 'tvdb', 'episode', '9226293'),
+			('11000000-0000-4000-8000-000000000124', 'tvdb', 'episode', '9226294'),
+			('11000000-0000-4000-8000-000000000125', 'tvdb', 'episode', '9226295'),
+			('11000000-0000-4000-8000-000000000126', 'tvdb', 'episode', '9226296'),
+			('11000000-0000-4000-8000-000000000127', 'tvdb', 'episode', '9226297');
 		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at)
 		VALUES ($6::uuid, 'tmdb', 'fr-FR', $7::jsonb, now() + interval '1 hour');
 	`, pgx.QueryExecModeSimpleProtocol, tvdbHandlerUserID, tvdbHandlerProfileID, tvdbHandlerDeviceID,
@@ -422,4 +470,133 @@ func tvdbHandlerEpisodeIDs(episodes []metadata.Episode) []string {
 		ids[index] = episodes[index].ID
 	}
 	return ids
+}
+
+func tvdbHandlerCanonicalHierarchyState(t *testing.T, pool *pgxpool.Pool) []tvdbHandlerCanonicalTitleState {
+	t.Helper()
+	titleIDs := append([]string{tvdbHandlerCanonicalSeasonID}, tvdbHandlerCanonicalEpisodeIDs...)
+	rows, err := pool.Query(context.Background(), `
+		SELECT title.id::text, title.media_type, title.parent_id::text, title.ordinal,
+		       title.hierarchy_variant, title.is_current, title.display_title, external.external_id
+		FROM titles AS title
+		JOIN title_external_ids AS external
+		  ON external.title_id = title.id
+		 AND external.provider = 'tvdb'
+		 AND external.namespace = title.media_type
+		WHERE title.id = ANY($1::uuid[])
+		ORDER BY title.id
+	`, titleIDs)
+	if err != nil {
+		t.Fatalf("query canonical aired hierarchy: %v", err)
+	}
+	defer rows.Close()
+	states := make([]tvdbHandlerCanonicalTitleState, 0, len(titleIDs))
+	for rows.Next() {
+		var state tvdbHandlerCanonicalTitleState
+		if err := rows.Scan(
+			&state.ID,
+			&state.MediaType,
+			&state.ParentID,
+			&state.Ordinal,
+			&state.HierarchyVariant,
+			&state.IsCurrent,
+			&state.DisplayTitle,
+			&state.TVDBExternalID,
+		); err != nil {
+			t.Fatalf("scan canonical aired title: %v", err)
+		}
+		states = append(states, state)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate canonical aired hierarchy: %v", err)
+	}
+	return states
+}
+
+func assertTVDBHandlerCanonicalHierarchy(t *testing.T, states []tvdbHandlerCanonicalTitleState) {
+	t.Helper()
+	expected := make([]tvdbHandlerCanonicalTitleState, 0, len(tvdbHandlerCanonicalEpisodeIDs)+1)
+	expected = append(expected, tvdbHandlerCanonicalTitleState{
+		ID: tvdbHandlerCanonicalSeasonID, MediaType: "season", ParentID: tvdbHandlerSeriesID,
+		Ordinal: 1, HierarchyVariant: "", IsCurrent: true, DisplayTitle: "Aired Season 1", TVDBExternalID: "2112801",
+	})
+	for index, id := range tvdbHandlerCanonicalEpisodeIDs {
+		expected = append(expected, tvdbHandlerCanonicalTitleState{
+			ID: id, MediaType: "episode", ParentID: tvdbHandlerCanonicalSeasonID,
+			Ordinal: index + 1, HierarchyVariant: "", IsCurrent: true,
+			DisplayTitle: fmt.Sprintf("Aired Episode %d", index+1), TVDBExternalID: fmt.Sprintf("922629%d", index+1),
+		})
+	}
+	if !reflect.DeepEqual(states, expected) {
+		t.Fatalf("canonical aired hierarchy fixture = %+v, want %+v", states, expected)
+	}
+}
+
+func assertTVDBHandlerStoredDVDHierarchy(t *testing.T, pool *pgxpool.Pool, seasonID string, episodeIDs []string) {
+	t.Helper()
+	if seasonID == tvdbHandlerCanonicalSeasonID {
+		t.Fatalf("DVD season reused canonical aired season UUID %q", seasonID)
+	}
+	var parentID, hierarchyVariant string
+	var ordinal int
+	var isCurrent bool
+	if err := pool.QueryRow(context.Background(), `
+		SELECT parent_id::text, ordinal, hierarchy_variant, is_current
+		FROM titles
+		WHERE id = $1::uuid
+	`, seasonID).Scan(&parentID, &ordinal, &hierarchyVariant, &isCurrent); err != nil {
+		t.Fatalf("query stored DVD season: %v", err)
+	}
+	if parentID != tvdbHandlerSeriesID || ordinal != 1 || hierarchyVariant != "tvdb:2" || !isCurrent {
+		t.Fatalf("stored DVD season state = parent %q ordinal %d variant %q current %t", parentID, ordinal, hierarchyVariant, isCurrent)
+	}
+
+	rows, err := pool.Query(context.Background(), `
+		SELECT episode.id::text, episode.parent_id::text, episode.ordinal,
+		       episode.hierarchy_variant, episode.is_current, identity.external_id
+		FROM titles AS episode
+		JOIN title_episode_order_identities AS identity ON identity.title_id = episode.id
+		WHERE episode.parent_id = $1::uuid
+		  AND episode.media_type = 'episode'
+		  AND identity.series_title_id = $2::uuid
+		  AND identity.provider = 'tvdb'
+		  AND identity.order_id = '2'
+		  AND identity.namespace = 'episode'
+		ORDER BY episode.ordinal
+	`, seasonID, tvdbHandlerSeriesID)
+	if err != nil {
+		t.Fatalf("query stored DVD episodes: %v", err)
+	}
+	defer rows.Close()
+	canonicalIDs := make(map[string]struct{}, len(tvdbHandlerCanonicalEpisodeIDs))
+	for _, id := range tvdbHandlerCanonicalEpisodeIDs {
+		canonicalIDs[id] = struct{}{}
+	}
+	index := 0
+	for rows.Next() {
+		var id, storedParentID, variant, externalID string
+		var storedOrdinal int
+		var current bool
+		if err := rows.Scan(&id, &storedParentID, &storedOrdinal, &variant, &current, &externalID); err != nil {
+			t.Fatalf("scan stored DVD episode: %v", err)
+		}
+		if index >= len(episodeIDs) {
+			t.Fatalf("stored more than %d DVD episodes", len(episodeIDs))
+		}
+		if id != episodeIDs[index] || storedParentID != seasonID || storedOrdinal != index+1 ||
+			variant != "tvdb:2" || !current || externalID != tvdbHandlerEpisodeExternalIDs[index] {
+			t.Fatalf("stored DVD episode %d state = id %q parent %q ordinal %d variant %q current %t identity %q",
+				index, id, storedParentID, storedOrdinal, variant, current, externalID)
+		}
+		if _, canonical := canonicalIDs[id]; canonical {
+			t.Fatalf("DVD episode %d reused canonical aired UUID %q", index, id)
+		}
+		index++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate stored DVD episodes: %v", err)
+	}
+	if index != len(episodeIDs) {
+		t.Fatalf("stored DVD episodes = %d, want %d", index, len(episodeIDs))
+	}
 }

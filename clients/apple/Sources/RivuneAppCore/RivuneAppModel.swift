@@ -2441,6 +2441,68 @@ public final class RivuneAppModel: ObservableObject {
     }
   }
 
+  private static func loadSeries(
+    id: UUID,
+    context: RivuneMediaTarget,
+    using client: RivuneAPIClient
+  ) async -> Series? {
+    if let mappingProvider = context.mappingProvider {
+      return try? await client.series(
+        id: id,
+        mappingProvider: mappingProvider,
+        episodeOrder: context.episodeOrderId)
+    }
+    if let canonical = try? await client.series(id: id, mappingProvider: .tmdb) {
+      return canonical
+    }
+    guard let fallback = try? await client.series(id: id, mappingProvider: .tvdb) else {
+      return nil
+    }
+    if selectedOrderIsOfficial(fallback) { return fallback }
+    guard
+      let officialOrderID = fallback.episodeOrders.first(where: {
+        $0.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "official"
+      }).flatMap({ positiveDecimalInt64($0.id) }),
+      let official = try? await client.series(
+        id: id,
+        mappingProvider: .tvdb,
+        episodeOrder: officialOrderID),
+      selectedOrderIsOfficial(official, expectedOrderID: officialOrderID)
+    else {
+      return nil
+    }
+    return official
+  }
+
+  private static func selectedOrderIsOfficial(
+    _ series: Series,
+    expectedOrderID: String? = nil
+  ) -> Bool {
+    guard
+      let selectedOrderID = series.selectedEpisodeOrderId?
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+      expectedOrderID == nil || selectedOrderID == expectedOrderID,
+      let selectedOrder = series.episodeOrders.first(where: { $0.id == selectedOrderID })
+    else {
+      return false
+    }
+    return selectedOrder.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      == "official"
+  }
+
+  private static func positiveDecimalInt64(_ value: String) -> String? {
+    let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard
+      let first = normalized.utf8.first,
+      first >= 49 && first <= 57,
+      normalized.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }),
+      Int64(normalized) != nil
+    else {
+      return nil
+    }
+    return normalized
+  }
+
   public func openMedia(_ target: RivuneMediaTarget) {
     guard let client else { return }
     let autoplayAddonID = pendingEpisodeAutoplay.flatMap { pending in
@@ -2470,20 +2532,9 @@ public final class RivuneAppModel: ObservableObject {
           (target.mediaType == "movie" || target.mediaType == "series")
           ? (try? client.trailers(titleId: titleID).trailers) : []
         let movie = target.mediaType == "movie" ? try? await client.movie(id: titleID) : nil
-        var series: Series?
-        if target.mediaType == "series" {
-          if let mappingProvider = target.mappingProvider {
-            series = try? await client.series(
-              id: titleID,
-              mappingProvider: mappingProvider,
-              episodeOrder: target.episodeOrderId)
-          } else {
-            series = try? await client.series(id: titleID, mappingProvider: .tmdb)
-            if series == nil {
-              series = try? await client.series(id: titleID, mappingProvider: .tvdb)
-            }
-          }
-        }
+        let series =
+          target.mediaType == "series"
+          ? await Self.loadSeries(id: titleID, context: target, using: client) : nil
         var seriesWatchState: SeriesWatchState?
         if let series {
           do {
@@ -2498,17 +2549,7 @@ public final class RivuneAppModel: ObservableObject {
         var episodeSeason: Season?
         var parentSeries: Series?
         if target.mediaType == "episode", let seriesID = target.seriesId {
-          if let mappingProvider = target.mappingProvider {
-            parentSeries = try? await client.series(
-              id: seriesID,
-              mappingProvider: mappingProvider,
-              episodeOrder: target.episodeOrderId)
-          } else {
-            parentSeries = try? await client.series(id: seriesID, mappingProvider: .tmdb)
-            if parentSeries == nil {
-              parentSeries = try? await client.series(id: seriesID, mappingProvider: .tvdb)
-            }
-          }
+          parentSeries = await Self.loadSeries(id: seriesID, context: target, using: client)
           let provider = target.mappingProvider ?? parentSeries?.mappingProvider ?? .tmdb
           let seasonID =
             target.metadataSeasonId

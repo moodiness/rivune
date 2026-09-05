@@ -324,15 +324,19 @@ describe("TV detail episode-order context", () => {
     }));
   });
 
-  it("keeps canonical episode playback on IMDb series coordinates", async () => {
+  it("keeps a canonical continuation on the aired hierarchy when the platform default is DVD", async () => {
     const playbackSources = vi.fn(async () => sourceList());
     const onPlay = vi.fn();
+    const series = vi.fn(async (_id: string, mappingProvider = "tvdb") =>
+      mappingProvider === "tmdb" ? canonicalSeries : variantSeries);
+    const season = vi.fn(async (id: string) =>
+      id === canonicalSeason.id ? canonicalSeason : variantSeason);
     const client = {
       issuer: "https://example.test",
       playbackProgress: vi.fn(async () => null),
       library: vi.fn(async () => ({ items: [], page: 1, totalPages: 0, totalResults: 0 })),
-      series: vi.fn(async () => canonicalSeries),
-      season: vi.fn(async () => canonicalSeason),
+      series,
+      season,
       playbackSources,
       preparePlayback: vi.fn(async () => ({ sourceRef: "source-ref", mode: "direct", protocol: "http", subtitleCount: 0, expiresAt: "2099-01-01T00:00:00Z" })),
       resolveArtworkUrl: vi.fn(() => null),
@@ -362,6 +366,7 @@ describe("TV detail episode-order context", () => {
       onSendToDevice={vi.fn()}
       onRemoteResult={vi.fn()}
     />));
+    await vi.waitFor(() => expect(container.querySelector(".tv-episode")?.textContent).toContain("First Light"));
 
     const play = await vi.waitFor(() => {
       const button = Array.from(container.querySelectorAll<HTMLButtonElement>(".tv-actions button"))

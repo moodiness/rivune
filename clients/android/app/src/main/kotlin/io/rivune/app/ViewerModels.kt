@@ -80,6 +80,21 @@ data class MediaTarget(
     val rating: Double? = null,
     val queueItemId: UUID? = null,
 )
+internal fun MediaTarget.withAtomicVariantContext(): MediaTarget {
+    val episodeOrderId = episodeOrderId?.trim()?.takeIf(String::isNotBlank)
+    val metadataSeasonId = metadataSeasonId?.trim()?.takeIf(String::isNotBlank)
+    return if (
+        mappingProvider == SeriesMappingProvider.TVDB &&
+        episodeOrderId != null &&
+        metadataSeasonId != null
+    ) {
+        copy(episodeOrderId = episodeOrderId, metadataSeasonId = metadataSeasonId)
+    } else if (mappingProvider == null && this.episodeOrderId == null && this.metadataSeasonId == null) {
+        this
+    } else {
+        copy(mappingProvider = null, episodeOrderId = null, metadataSeasonId = null)
+    }
+}
 
 data class MediaDetailState(
     val target: MediaTarget,
@@ -336,16 +351,18 @@ data class ViewerState(
 )
 
 internal fun Episode.toMediaTarget(series: Series, fallback: MediaTarget): MediaTarget {
-    val variantOrder = fallback.episodeOrderId?.takeIf(String::isNotBlank)
+    val context = fallback.withAtomicVariantContext()
+    val variantOrder = context.episodeOrderId
+    val variantProvider = context.mappingProvider
     val resourceId = when {
-        variantOrder != null && !externalIds["tvdb"].isNullOrBlank() -> "tvdb:${externalIds.getValue("tvdb")}"
+        variantProvider != null && !externalIds["tvdb"].isNullOrBlank() -> "tvdb:${externalIds.getValue("tvdb")}"
         !series.externalIds["imdb"].isNullOrBlank() -> "${series.externalIds.getValue("imdb")}:$seasonNumber:$episodeNumber"
         !externalIds["imdb"].isNullOrBlank() -> externalIds.getValue("imdb")
         !externalIds["tvdb"].isNullOrBlank() -> "tvdb:${externalIds.getValue("tvdb")}"
         !series.externalIds["tmdb"].isNullOrBlank() -> "tmdb:${series.externalIds.getValue("tmdb")}:$seasonNumber:$episodeNumber"
-        else -> "${fallback.resourceId}:$seasonNumber:$episodeNumber"
+        else -> "${context.resourceId}:$seasonNumber:$episodeNumber"
     }
-    val matchingFallback = fallback.titleId == id
+    val matchingFallback = context.titleId == id
     return MediaTarget(
         id = resourceId,
         resourceId = resourceId,
@@ -353,23 +370,23 @@ internal fun Episode.toMediaTarget(series: Series, fallback: MediaTarget): Media
         title = name.ifBlank { "Episode $episodeNumber" },
         titleId = id,
         externalIds = externalIds,
-        posterUrl = stillUrl ?: fallback.posterUrl,
-        backgroundUrl = backdropUrl ?: stillUrl ?: fallback.backgroundUrl,
+        posterUrl = stillUrl ?: context.posterUrl,
+        backgroundUrl = backdropUrl ?: stillUrl ?: context.backgroundUrl,
         description = overview,
         releaseInfo = airDate,
         released = airDate,
         seriesId = series.id,
-        mappingProvider = fallback.mappingProvider ?: series.mappingProvider,
+        mappingProvider = variantProvider,
         episodeOrderId = variantOrder,
-        metadataSeasonId = seasonId,
+        metadataSeasonId = seasonId.takeIf { variantProvider != null },
         seriesImdbId = series.externalIds["imdb"],
-        seasonId = fallback.seasonId.takeIf { fallback.metadataSeasonId == seasonId } ?: seasonId,
+        seasonId = context.seasonId.takeIf { context.metadataSeasonId == seasonId } ?: seasonId,
         seasonNumber = seasonNumber,
         episodeNumber = episodeNumber,
         runtimeMinutes = runtimeMinutes,
         rating = voteAverage.takeIf { it > 0.0 },
-        resumePositionSeconds = fallback.resumePositionSeconds.takeIf { matchingFallback } ?: 0,
-        durationSeconds = fallback.durationSeconds.takeIf { matchingFallback } ?: 0,
+        resumePositionSeconds = context.resumePositionSeconds.takeIf { matchingFallback } ?: 0,
+        durationSeconds = context.durationSeconds.takeIf { matchingFallback } ?: 0,
     )
 }
 

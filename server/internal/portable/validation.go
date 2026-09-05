@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -314,8 +315,8 @@ func validateTitle(title Title, addonKeys, global, scoped, episodeOrders map[str
 		identity := title.EpisodeOrderIdentity
 		if identity == nil || identity.Provider != "tvdb" || identity.Namespace != title.MediaType ||
 			!portableKeyPattern.MatchString(identity.SeriesKey) ||
-			!positiveIDPattern.MatchString(identity.OrderID) || len(identity.OrderID) > 32 ||
-			!positiveIDPattern.MatchString(identity.ExternalID) || len(identity.ExternalID) > 512 ||
+			!validPositiveInt64ID(identity.OrderID) ||
+			!validPositiveInt64ID(identity.ExternalID) ||
 			title.HierarchyVariant != "tvdb:"+identity.OrderID {
 			return invalid("title episode-order identity is invalid")
 		}
@@ -353,6 +354,9 @@ func validateTitle(title Title, addonKeys, global, scoped, episodeOrders map[str
 		}
 		if !identity.ProfileScoped && len(identity.ExternalID) > 128 {
 			return invalid("global title external identity is too long")
+		}
+		if identity.Provider == "tvdb" && (identity.Namespace == "season" || identity.Namespace == "episode") && !validPositiveInt64ID(identity.ExternalID) {
+			return invalid("TVDB season and episode external identities must be positive signed-int64 decimals")
 		}
 		key := identity.Provider + "\x00" + identity.Namespace + "\x00" + identity.ExternalID
 		if _, duplicate := seen[key]; duplicate {
@@ -425,6 +429,14 @@ func addUniqueKey(values map[string]struct{}, key, kind string) error {
 	values[key] = struct{}{}
 	return nil
 }
+func validPositiveInt64ID(value string) bool {
+	if !positiveIDPattern.MatchString(value) {
+		return false
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	return err == nil && parsed > 0
+}
+
 func validText(value string, maximum int) bool {
 	return len(value) <= maximum && utf8.ValidString(value) && !strings.ContainsRune(value, '\x00') && (value == "" || strings.TrimSpace(value) == value)
 }

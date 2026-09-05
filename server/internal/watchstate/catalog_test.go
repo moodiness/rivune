@@ -288,7 +288,8 @@ func TestCatalogReaderScopesCanonicalHierarchyPaginationAndProviderIDs(t *testin
 		INSERT INTO profile_progress (profile_id, title_id, position_seconds, duration_seconds, completed, last_watched_at) VALUES
 			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000100', 61, 7380, true, '2026-08-06T12:06:00Z'),
 			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000101', 120, 5700, false, '2026-08-06T12:07:00Z'),
-			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000212', 321, 1800, false, '2026-09-03T12:01:00Z');
+			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000212', 321, 1800, false, '2026-09-03T12:01:00Z'),
+			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000231', 1800, 1800, true, '2026-09-03T12:02:00Z');
 	`); err != nil {
 		t.Fatalf("create catalog fixtures: %v", err)
 	}
@@ -495,6 +496,41 @@ func TestCatalogReaderScopesCanonicalHierarchyPaginationAndProviderIDs(t *testin
 	resumable, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{Resumable: boolPointer(true), Limit: 20})
 	if err != nil || resumable.Total != 1 || len(resumable.Items) != 1 || resumable.Items[0].ID != nonLibrary.ID {
 		t.Fatalf("resumable filter = %+v error %v", resumable, err)
+	}
+	for _, stateFilter := range []struct {
+		name             string
+		query            CatalogQuery
+		canonicalTitleID string
+		variantTitleID   string
+	}{
+		{
+			name:             "played",
+			query:            CatalogQuery{Played: boolPointer(true), Recursive: true, Limit: 20},
+			canonicalTitleID: movie.ID,
+			variantTitleID:   "00000000-0000-4000-8000-000000000231",
+		},
+		{
+			name:             "resumable",
+			query:            CatalogQuery{Resumable: boolPointer(true), Recursive: true, Limit: 20},
+			canonicalTitleID: nonLibrary.ID,
+			variantTitleID:   variantEpisode.ID,
+		},
+	} {
+		t.Run("recursive_"+stateFilter.name+"_state_excludes_variants", func(t *testing.T) {
+			page, err := service.ListCatalogItems(ctx, profileOne, stateFilter.query)
+			if err != nil || page.Total != 1 || len(page.Items) != 1 || page.Items[0].ID != stateFilter.canonicalTitleID {
+				t.Fatalf("recursive %s state catalog = %+v error %v, want canonical title %s only",
+					stateFilter.name, page, err, stateFilter.canonicalTitleID)
+			}
+
+			exactQuery := stateFilter.query
+			exactQuery.IDs = []string{stateFilter.variantTitleID}
+			exact, err := service.ListCatalogItems(ctx, profileOne, exactQuery)
+			if err != nil || exact.Total != 1 || len(exact.Items) != 1 || exact.Items[0].ID != stateFilter.variantTitleID {
+				t.Fatalf("exact recursive %s variant catalog = %+v error %v, want %s",
+					stateFilter.name, exact, err, stateFilter.variantTitleID)
+			}
+		})
 	}
 	combined, err := service.ListCatalogItems(ctx, profileOne, CatalogQuery{
 		Played: boolPointer(true), MinCommunityRating: float64Pointer(8), HasSubtitles: boolPointer(true),

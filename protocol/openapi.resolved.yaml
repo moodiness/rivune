@@ -15263,7 +15263,7 @@ components:
         hierarchyVariant:
           type: string
           pattern: ^tvdb:[1-9][0-9]*$
-          maxLength: 37
+          maxLength: 24
         episodeOrderIdentity:
           $ref: '#/components/schemas/ProfileArchiveEpisodeOrderIdentity'
         ordinal:
@@ -15331,7 +15331,7 @@ components:
         orderId:
           type: string
           pattern: ^[1-9][0-9]*$
-          maxLength: 32
+          maxLength: 19
         namespace:
           type: string
           enum:
@@ -15340,7 +15340,7 @@ components:
         externalId:
           type: string
           pattern: ^[1-9][0-9]*$
-          maxLength: 512
+          maxLength: 19
     ProfileArchiveExternalId:
       type: object
       additionalProperties: false
@@ -15349,6 +15349,24 @@ components:
         - namespace
         - externalId
         - profileScoped
+      allOf:
+        - if:
+            properties:
+              provider:
+                const: tvdb
+              namespace:
+                enum:
+                  - season
+                  - episode
+            required:
+              - provider
+              - namespace
+          then:
+            properties:
+              externalId:
+                type: string
+                pattern: ^[1-9][0-9]*$
+                maxLength: 19
       properties:
         provider:
           type: string
