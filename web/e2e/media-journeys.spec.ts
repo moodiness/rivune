@@ -175,6 +175,64 @@ test("DVD continuation retains its TVDB hierarchy through playback and route rel
   });
 });
 
+test("switching a DVD continuation to official order clears stale variant context", async ({ page, rivune }) => {
+  rivune.useDvdContinuation();
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open Signal Horizon" }).click();
+  await expect(page.getByRole("heading", { name: "Disc Middle" })).toBeVisible();
+  await page.getByRole("button", { name: /Back.*Episodes/ }).click();
+  await expect(page).toHaveURL(/\/media\/series\/tt9000\/season\/1$/);
+
+  const order = page.getByRole("combobox", { name: "Episode order" });
+  await selectOption(order, "1");
+  await expect(order).toHaveAttribute("data-value", "1");
+  const officialEpisode = page.locator(".episode-main").filter({ hasText: "First Light" });
+  await expect(officialEpisode).toBeVisible();
+  const sourceRequestCount = rivune.matching("/api/v1/playback/sources", "POST").length;
+  await officialEpisode.click();
+
+  await expect(page).toHaveURL(/\/media\/series\/tt9000\/season\/1\/episode\/1$/);
+  await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();
+  await expect.poll(() => rivune.matching("/api/v1/playback/sources", "POST").length).toBeGreaterThan(sourceRequestCount);
+  const officialSources = rivune.matching("/api/v1/playback/sources", "POST").slice(sourceRequestCount);
+  expect(officialSources.every((request) => request.body?.resourceId === "tt9000:1:1")).toBe(true);
+  expect(officialSources.some((request) => request.body?.resourceId === "tvdb:940201" || request.body?.resourceId === DVD_EPISODE_RESOURCE_ID)).toBe(false);
+  await expect.poll(() => page.evaluate(() => {
+    const raw = window.history.state?.rivuneMediaItem?.raw;
+    return [raw?.mappingProvider ?? null, raw?.episodeOrderId ?? null, raw?.metadataSeasonId ?? null];
+  })).toEqual([null, null, null]);
+
+  await page.locator(".details-stream-list__option").first().click();
+  await page.locator('[data-media-action="play-selected-stream"]').click();
+  await expect(page.locator(".player")).toBeVisible();
+  const markerRequest = await rivune.waitForRequest("/api/v1/playback/markers", "GET");
+  expect(Object.fromEntries(markerRequest.search)).toMatchObject({ imdbId: "tt9000", season: "1", episode: "1" });
+
+  const seriesRequestCount = rivune.matching("/api/v1/metadata/series/series-1", "GET").length;
+  const dvdSeriesRequestCount = rivune.matching("/api/v1/metadata/series/series-1", "GET")
+    .filter((request) => request.search.get("mappingProvider") === "tvdb" && request.search.get("episodeOrder") === "2").length;
+  const dvdSeasonRequestCount = rivune.matching(dvdMetadataSeasonPath, "GET").length;
+  const officialSourceCount = rivune.matching("/api/v1/playback/sources", "POST").length;
+  await page.reload();
+
+  await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();
+  await expect.poll(() => rivune.matching("/api/v1/metadata/series/series-1", "GET").length).toBeGreaterThan(seriesRequestCount);
+  const reloadedSeriesRequests = rivune.matching("/api/v1/metadata/series/series-1", "GET").slice(seriesRequestCount);
+  expect(reloadedSeriesRequests.some((request) => request.search.get("mappingProvider") === "tmdb" && !request.search.has("episodeOrder"))).toBe(true);
+  expect(rivune.matching("/api/v1/metadata/series/series-1", "GET")
+    .filter((request) => request.search.get("mappingProvider") === "tvdb" && request.search.get("episodeOrder") === "2")).toHaveLength(dvdSeriesRequestCount);
+  expect(rivune.matching(dvdMetadataSeasonPath, "GET")).toHaveLength(dvdSeasonRequestCount);
+  await expect.poll(() => rivune.matching("/api/v1/playback/sources", "POST").length).toBeGreaterThan(officialSourceCount);
+  expect(rivune.matching("/api/v1/playback/sources", "POST").at(-1)?.body).toMatchObject({
+    mediaType: "episode",
+    resourceId: "tt9000:1:1",
+  });
+  await expect.poll(() => page.evaluate(() => {
+    const raw = window.history.state?.rivuneMediaItem?.raw;
+    return [raw?.mappingProvider ?? null, raw?.episodeOrderId ?? null, raw?.metadataSeasonId ?? null];
+  })).toEqual([null, null, null]);
+});
+
 test("canonical episode playback retains IMDb coordinates and marker requests", async ({ page, rivune }) => {
   await page.goto("/media/series/tt9000/season/1/episode/1");
   await expect(page.getByRole("heading", { name: "First Light" })).toBeVisible();

@@ -532,18 +532,26 @@ function formatPlaybackTime(seconds: number): string {
     : `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
 }
 
-function nonOfficialEpisodeOrderID(series: SeriesMetadata): string | undefined {
-  const selectedID = series.selectedEpisodeOrderId?.trim();
-  if (!selectedID) return undefined;
-  const selected = series.episodeOrders.find((order) => order.id === selectedID);
-  return selected?.type.trim().toLowerCase() === "official" ? undefined : selectedID;
+type EpisodeOrderContext = { mappingProvider?: "tvdb"; episodeOrderId?: string };
+
+function episodeOrderContext(series: { selectedEpisodeOrderId?: unknown; episodeOrders?: unknown }, fallback?: MediaItem): EpisodeOrderContext {
+  const selectedID = typeof series.selectedEpisodeOrderId === "string" ? series.selectedEpisodeOrderId.trim() : "";
+  const selected = selectedID && Array.isArray(series.episodeOrders)
+    ? series.episodeOrders.map(record).find((order) => order?.id === selectedID)
+    : undefined;
+  if (selected) {
+    return typeof selected.type === "string" && selected.type.trim().toLowerCase() === "official"
+      ? {}
+      : { mappingProvider: "tvdb", episodeOrderId: selectedID };
+  }
+  const fallbackID = typeof fallback?.raw?.episodeOrderId === "string" ? fallback.raw.episodeOrderId.trim() : "";
+  return fallbackID && (!selectedID || selectedID === fallbackID)
+    ? { mappingProvider: "tvdb", episodeOrderId: fallbackID }
+    : {};
 }
 
-function episodeResourceID(series: SeriesMetadata, episode: EpisodeMetadata, fallback: string, context?: MediaItem): string {
-  const continuationOrderID = typeof context?.raw?.episodeOrderId === "string" && context.raw.episodeOrderId.trim()
-    ? context.raw.episodeOrderId.trim()
-    : undefined;
-  if ((continuationOrderID || nonOfficialEpisodeOrderID(series)) && episode.externalIds.tvdb) {
+function episodeResourceID(series: SeriesMetadata, episode: EpisodeMetadata, fallback: string, item?: MediaItem): string {
+  if (episodeOrderContext(series, item).episodeOrderId && episode.externalIds.tvdb) {
     return `tvdb:${episode.externalIds.tvdb}`;
   }
   const seriesIMDB = series.externalIds.imdb;
@@ -555,10 +563,8 @@ function episodeResourceID(series: SeriesMetadata, episode: EpisodeMetadata, fal
 }
 
 function episodeItem(series: SeriesMetadata, episode: EpisodeMetadata, fallback: MediaItem): MediaItem {
-  const continuationOrderID = typeof fallback.raw?.episodeOrderId === "string" && fallback.raw.episodeOrderId.trim()
-    ? fallback.raw.episodeOrderId.trim()
-    : undefined;
-  const episodeOrderID = continuationOrderID ?? nonOfficialEpisodeOrderID(series);
+  const orderContext = episodeOrderContext(series, fallback);
+  const episodeOrderID = orderContext.episodeOrderId;
   const previousMetadataSeasonID = typeof fallback.raw?.metadataSeasonId === "string"
     ? fallback.raw.metadataSeasonId
     : undefined;
@@ -581,12 +587,14 @@ function episodeItem(series: SeriesMetadata, episode: EpisodeMetadata, fallback:
     raw: {
       ...fallback.raw,
       episodeSeriesName: series.name,
+      selectedEpisodeOrderId: series.selectedEpisodeOrderId,
+      episodeOrders: series.episodeOrders,
       continueSeriesId: series.id,
       continueSeasonId: continueSeasonID,
       continueSeasonNumber: episode.seasonNumber,
       continueEpisodeNumber: episode.episodeNumber,
       continueEpisodeId: episode.id,
-      mappingProvider: episodeOrderID ? "tvdb" : undefined,
+      mappingProvider: orderContext.mappingProvider,
       episodeOrderId: episodeOrderID,
       metadataSeasonId: episodeOrderID ? episode.seasonId : undefined,
     },
@@ -602,10 +610,8 @@ function seriesItem(series: SeriesMetadata, fallback: MediaItem, episode: Episod
   const routeSeriesResourceID = typeof fallback.raw?.routeSeriesResourceId === "string"
     ? fallback.raw.routeSeriesResourceId
     : canonicalSeriesResourceID;
-  const continuationOrderID = typeof fallback.raw?.episodeOrderId === "string" && fallback.raw.episodeOrderId.trim()
-    ? fallback.raw.episodeOrderId.trim()
-    : undefined;
-  const episodeOrderID = continuationOrderID ?? nonOfficialEpisodeOrderID(series);
+  const orderContext = episodeOrderContext(series, fallback);
+  const episodeOrderID = orderContext.episodeOrderId;
   const previousMetadataSeasonID = typeof fallback.raw?.metadataSeasonId === "string"
     ? fallback.raw.metadataSeasonId
     : undefined;
@@ -628,12 +634,14 @@ function seriesItem(series: SeriesMetadata, fallback: MediaItem, episode: Episod
     raw: {
       ...fallback.raw,
       routeSeriesResourceId: routeSeriesResourceID,
+      selectedEpisodeOrderId: series.selectedEpisodeOrderId,
+      episodeOrders: series.episodeOrders,
       continueSeriesId: series.id,
       continueSeasonId: continueSeasonID,
       continueSeasonNumber: episode?.seasonNumber ?? fallback.raw?.continueSeasonNumber,
       continueEpisodeNumber: undefined,
       continueEpisodeId: undefined,
-      mappingProvider: episodeOrderID ? "tvdb" : undefined,
+      mappingProvider: orderContext.mappingProvider,
       episodeOrderId: episodeOrderID,
       metadataSeasonId: metadataSeasonID,
       startFromBeginning: undefined,
@@ -1545,13 +1553,13 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
       setSelectedEpisode(undefined);
       setEpisodeProgress({});
       if (initial) {
-        const selectedOrderID = nonOfficialEpisodeOrderID(resolved);
+        const orderContext = episodeOrderContext(resolved, details);
         onNavigateContext?.({
           seasonID: initial.id,
           seasonNumber: initial.seasonNumber,
-          mappingProvider: selectedOrderID ? "tvdb" : undefined,
-          episodeOrderId: selectedOrderID,
-          metadataSeasonId: selectedOrderID ? initial.id : undefined,
+          mappingProvider: orderContext.mappingProvider,
+          episodeOrderId: orderContext.episodeOrderId,
+          metadataSeasonId: orderContext.episodeOrderId ? initial.id : undefined,
         });
       }
     } catch (cause) {
@@ -1960,13 +1968,13 @@ export function MediaDetails({ item, maximumCastMembers, onCanonicalRoute, onClo
                           <button key={candidate.id} type="button" role="tab" aria-selected={seasonID === candidate.id} className={seasonID === candidate.id ? "is-active" : ""} onClick={() => {
                             autoPlayNextRef.current = false;
                             setSeasonID(candidate.id);
-                            const selectedOrderID = nonOfficialEpisodeOrderID(series);
+                            const orderContext = episodeOrderContext(series, details);
                             onNavigateContext?.({
                               seasonID: candidate.id,
                               seasonNumber: candidate.seasonNumber,
-                              mappingProvider: selectedOrderID ? "tvdb" : undefined,
-                              episodeOrderId: selectedOrderID,
-                              metadataSeasonId: selectedOrderID ? candidate.id : undefined,
+                              mappingProvider: orderContext.mappingProvider,
+                              episodeOrderId: orderContext.episodeOrderId,
+                              metadataSeasonId: orderContext.episodeOrderId ? candidate.id : undefined,
                             });
                           }}>
                             <span>{candidate.seasonNumber === 0 ? t("media.season.specials") : t("media.season.number", { number: candidate.seasonNumber })}</span>
@@ -2459,17 +2467,8 @@ export function Player(
     const imdbID = item.externalIds?.imdb?.trim() ?? "";
     const season = item.seasonNumber ?? 0;
     const episode = item.episodeNumber ?? 0;
-    const continuationOrderID = typeof item.raw?.episodeOrderId === "string" && item.raw.episodeOrderId.trim()
-      ? item.raw.episodeOrderId.trim()
-      : undefined;
-    const selectedOrderID = typeof item.raw?.selectedEpisodeOrderId === "string" && item.raw.selectedEpisodeOrderId.trim()
-      ? item.raw.selectedEpisodeOrderId.trim()
-      : undefined;
-    const selectedOrder = selectedOrderID && Array.isArray(item.raw?.episodeOrders)
-      ? item.raw.episodeOrders.map(record).find((order) => order?.id === selectedOrderID)
-      : undefined;
-    const selectedOrderType = typeof selectedOrder?.type === "string" ? selectedOrder.type.trim().toLowerCase() : "";
-    const canonicalHierarchy = !continuationOrderID && (!selectedOrderID || selectedOrderType === "official");
+    const orderContext = episodeOrderContext(item.raw ?? {}, item);
+    const canonicalHierarchy = !orderContext.episodeOrderId;
     const controller = new AbortController();
     let active = true;
     setMarkers([]);

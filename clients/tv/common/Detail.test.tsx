@@ -3,9 +3,11 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_ACCESSIBILITY_PREFERENCES } from "./accessibility";
 import type { RivuneTvClient } from "./api";
-import { Detail } from "./Detail";
+import { Detail, type PlayerRequest } from "./Detail";
 import { mediaFromContinue } from "./media";
+import { Player } from "./Player";
 import type { ContinueWatchingItem, Episode, Season, Series } from "./types";
+import type { TvPlayerEvents } from "./platform";
 
 const metadataSeasonId = "tvdb:0392d6ce-02f0-4c75-a73f-13badb1c85ba:2112814";
 
@@ -49,6 +51,14 @@ const variantEpisode = {
   externalIds: { tvdb: "10357450" },
 } satisfies Episode;
 
+const variantSiblingEpisode = {
+  ...variantEpisode,
+  id: "dvd-episode-3",
+  name: "Disc Finale",
+  episodeNumber: 3,
+  externalIds: { tvdb: "10357451" },
+} satisfies Episode;
+
 const variantSeason = {
   id: metadataSeasonId,
   mediaType: "season",
@@ -57,7 +67,7 @@ const variantSeason = {
   overview: "The disc order.",
   seasonNumber: 1,
   voteAverage: 8.4,
-  episodes: [variantEpisode],
+  episodes: [variantEpisode, variantSiblingEpisode],
   externalIds: { tvdb: "2112814" },
 } satisfies Season;
 
@@ -202,6 +212,116 @@ describe("TV detail episode-order context", () => {
       item: expect.objectContaining({ resourceId: "tvdb:10357450", episodeOrderId: "2", metadataSeasonId }),
     })));
     expect(playbackMarkers).not.toHaveBeenCalled();
+  });
+
+  it("does not carry continuation progress into a sibling DVD episode", async () => {
+    const onOpen = vi.fn();
+    const onPlay = vi.fn();
+    const updatePlaybackProgress = vi.fn(async (_titleId: string, input: {
+      positionSeconds: number;
+      durationSeconds: number;
+      completed: boolean;
+      expectedVersion: number;
+    }) => ({ ...input, version: 1, updatedAt: "2026-09-04T12:01:00Z" }));
+    const client = {
+      issuer: "https://example.test",
+      playbackProgress: vi.fn(async () => null),
+      library: vi.fn(async () => ({ items: [], page: 1, totalPages: 0, totalResults: 0 })),
+      series: vi.fn(async () => variantSeries),
+      season: vi.fn(async () => variantSeason),
+      playbackSources: vi.fn(async () => sourceList()),
+      preparePlayback: vi.fn(async () => ({ sourceRef: "source-ref", mode: "direct", protocol: "http", subtitleCount: 0, expiresAt: "2099-01-01T00:00:00Z" })),
+      resolveArtworkUrl: vi.fn(() => null),
+      resolvePlayback: vi.fn(async () => ({
+        id: "session-1",
+        selectedSourceId: "source",
+        subtitles: [],
+        providerErrors: [],
+        expiresAt: "2099-01-01T00:00:00Z",
+        sources: [{ id: "source", addonId: "addon", manifestId: "manifest", mode: "direct", protocol: "http", url: "/stream", compatible: true }],
+      })),
+      resolveResourceUrl: vi.fn(() => "https://example.test/stream"),
+      updatePlaybackProgress,
+      stopPlayback: vi.fn(async () => undefined),
+    } as unknown as RivuneTvClient;
+    const detailProps = {
+      client,
+      profileId: "profile-1",
+      timezone: "UTC",
+      accessibility: DEFAULT_ACCESSIBILITY_PREFERENCES,
+      qualityPreset: "automatic" as const,
+      devices: [],
+      onClose: vi.fn(),
+      onOpen,
+      onPlay,
+      onSendToDevice: vi.fn(),
+      onRemoteResult: vi.fn(),
+    };
+
+    await act(async () => root.render(<Detail {...detailProps} item={continuation()} />));
+    await vi.waitFor(() => expect(container.querySelectorAll(".tv-episode")).toHaveLength(2));
+    await act(async () => container.querySelectorAll<HTMLButtonElement>(".tv-episode")[1]?.click());
+    const sibling = onOpen.mock.calls[0]?.[0];
+    expect(sibling).toMatchObject({ titleId: "dvd-episode-3", resourceId: "tvdb:10357451" });
+
+    await act(async () => root.render(<Detail {...detailProps} item={sibling} />));
+    const play = await vi.waitFor(() => {
+      const button = Array.from(container.querySelectorAll<HTMLButtonElement>(".tv-actions button"))
+        .find((candidate) => candidate.textContent === "Play");
+      expect(button).toBeDefined();
+      return button!;
+    });
+    await act(async () => play.click());
+    const request = await vi.waitFor(() => {
+      const value = onPlay.mock.calls[0]?.[0] as PlayerRequest | undefined;
+      expect(value).toBeDefined();
+      return value!;
+    });
+    expect(request.startSeconds).toBe(0);
+    expect(request.item.resumePositionSeconds).toBeUndefined();
+    expect(request.item.durationSeconds).toBeUndefined();
+    expect(request.item.progressVersion).toBeUndefined();
+
+    let events: TvPlayerEvents | undefined;
+    const nativePlayer = {
+      load: vi.fn(async (_request: unknown, nextEvents: TvPlayerEvents) => {
+        events = nextEvents;
+        nextEvents.onReady(120);
+      }),
+      play: vi.fn(async () => undefined),
+      pause: vi.fn(async () => undefined),
+      seek: vi.fn(async () => undefined),
+      selectAudio: vi.fn(async () => undefined),
+      selectSubtitle: vi.fn(async () => undefined),
+      stop: vi.fn(async () => undefined),
+      destroy: vi.fn(),
+    };
+    window.RivunePlatformAdapter!.createPlayer = () => nativePlayer;
+    await act(async () => root.render(<Player
+      client={client}
+      {...request}
+      devices={[]}
+      qualityPreset="automatic"
+      onSendToDevice={vi.fn()}
+      onControlDevice={vi.fn()}
+      onController={vi.fn()}
+      onPlaybackState={vi.fn()}
+      onRemoteResult={vi.fn()}
+      onClose={vi.fn()}
+      setBackHandler={vi.fn()}
+    />));
+    await vi.waitFor(() => expect(nativePlayer.load).toHaveBeenCalled());
+    await act(async () => events?.onTime(10, 120));
+    const stop = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent === "Stop");
+    expect(stop).toBeDefined();
+    await act(async () => stop?.click());
+    await vi.waitFor(() => expect(updatePlaybackProgress).toHaveBeenCalledWith("dvd-episode-3", {
+      positionSeconds: 10,
+      durationSeconds: 120,
+      completed: false,
+      expectedVersion: 0,
+    }));
   });
 
   it("keeps canonical episode playback on IMDb series coordinates", async () => {

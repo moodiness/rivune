@@ -203,7 +203,7 @@ const seasonZero = {
 const seasonOne = {
   id: "season-1", mediaType: "season", seriesId: "series-1", name: "Season 1", overview: "The first voyage.", seasonNumber: 1, episodeCount: 2, airDate: "2024-01-01", posterUrl: "https://fixtures.rivune.test/season-1-poster.svg", backdropUrl: "https://fixtures.rivune.test/season-1-backdrop.svg", voteAverage: 8.2, externalIds: { tmdb: "101" },
   episodes: [
-    { id: "episode-1", mediaType: "episode", seasonId: "season-1", name: "First Light", overview: "The crew follows a mysterious signal.", seasonNumber: 1, episodeNumber: 1, airDate: "2024-01-03", stillUrl: "https://fixtures.rivune.test/episode-1-still.svg", backdropUrl: "https://fixtures.rivune.test/episode-1-backdrop.svg", runtimeMinutes: 30, voteAverage: 8.1, voteCount: 100, externalIds: { imdb: "tt900001" } },
+    { id: "episode-1", mediaType: "episode", seasonId: "season-1", name: "First Light", overview: "The crew follows a mysterious signal.", seasonNumber: 1, episodeNumber: 1, airDate: "2024-01-03", stillUrl: "https://fixtures.rivune.test/episode-1-still.svg", backdropUrl: "https://fixtures.rivune.test/episode-1-backdrop.svg", runtimeMinutes: 30, voteAverage: 8.1, voteCount: 100, externalIds: { imdb: "tt900001", tvdb: "940201" } },
     { id: "episode-2", mediaType: "episode", seasonId: "season-1", name: "Second Orbit", overview: "A new course changes everything.", seasonNumber: 1, episodeNumber: 2, airDate: "2024-01-10", stillUrl: "https://fixtures.rivune.test/episode-2-still.svg", backdropUrl: "https://fixtures.rivune.test/episode-2-backdrop.svg", runtimeMinutes: 31, voteAverage: 8.3, voteCount: 95, externalIds: { imdb: "tt900002" } },
   ],
 };
@@ -1753,6 +1753,10 @@ export class RivuneHarness {
     if (path === `/metadata/seasons/${encodeURIComponent(DVD_METADATA_SEASON_ID)}`) { await json(route, dvdSeason); return; }
     if (path === "/metadata/seasons/bob-season") { await json(route, { ...seasonOne, id: "bob-season", seriesId: "bob-series", episodes: [] }); return; }
     if (path === "/metadata/series/series-1") {
+      if (url.searchParams.get("episodeOrder") === "1") {
+        await json(route, { ...series, selectedEpisodeOrderId: "1", mappingProvider: "tvdb" });
+        return;
+      }
       if (url.searchParams.get("episodeOrder") === "2") {
         await json(route, {
           ...series,
