@@ -160,7 +160,7 @@ class ExternalPlaybackTest {
 
         val magnet = magnetUrl("0123456789abcdef0123456789abcdef01234567", "A film")
         assertTrue(magnet?.startsWith("magnet:?xt=urn%3Abtih%3A0123456789abcdef0123456789abcdef01234567") == true)
-        assertTrue(magnet?.contains("dn=A%20film") == true)
+        assertTrue(magnet.contains("dn=A%20film"))
         assertNull(magnetUrl("../../not-a-hash", "A film"))
     }
 
@@ -284,7 +284,7 @@ class ExternalPlaybackTest {
             0L,
             mediaPlaybackPositionMs(replayAbsoluteMs, fallback.timelineStartPositionMs, fallback.mediaTimeline),
         )
-        assertEquals(EmbeddedPlayerEngine.MPV, fallback?.engine)
+        assertEquals(EmbeddedPlayerEngine.MPV, fallback.engine)
         assertFalse(requireNotNull(fallback).fallbackAllowed)
         assertEquals(EmbeddedPlayerPreference.MPV, fallback.recoveryEmbeddedPreference())
         assertEquals(EmbeddedPlayerPreference.AUTOMATIC, presentation.recoveryEmbeddedPreference())

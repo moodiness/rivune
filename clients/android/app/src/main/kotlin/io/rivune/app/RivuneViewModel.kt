@@ -3042,7 +3042,7 @@ class RivuneViewModel internal constructor(
                 var room = viewer.activePlaybackRoom
                 if (room != null) {
                     room = roomEndMutex.withLock {
-                        val activeRoom = room ?: return@withLock null
+                        val activeRoom = room
                         val endingSessionId = coordinationEndingSessionId
                         val endedSessionId = coordinationEndedSessionId
                         when {
