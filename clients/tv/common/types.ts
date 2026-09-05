@@ -155,12 +155,20 @@ export interface SemanticSearchPage {
 export interface ContinueWatchingItem {
   titleId: UUID; mediaType: PlaybackProgressMediaType; seriesId?: UUID | null; seasonId?: UUID | null;
   seasonNumber?: number | null; episodeNumber?: number | null; title?: string | null; posterUrl?: string | null;
+  mappingProvider?: "tvdb" | null; episodeOrderId?: string | null; metadataSeasonId?: string | null;
   backgroundUrl?: string | null; releaseInfo?: string | null; resourceId?: string | null;
   resourceProvider?: string | null; episodeTitle?: string | null; episodeStillUrl?: string | null;
   episodeAirDate?: string | null; positionSeconds: number; durationSeconds: number; version: number;
   reason: "resume" | "next_episode"; lastWatchedAt: string;
 }
 export interface ContinueWatchingPage { items: ContinueWatchingItem[] }
+
+type ContinueWatchingContinuationContract<T extends Pick<ContinueWatchingItem, "mappingProvider" | "episodeOrderId" | "metadataSeasonId">> = T;
+export type ContinueWatchingContinuationContractFixture = ContinueWatchingContinuationContract<{
+  readonly mappingProvider: "tvdb";
+  readonly episodeOrderId: "2";
+  readonly metadataSeasonId: "tvdb:0392d6ce-02f0-4c75-a73f-13badb1c85ba:2112814";
+}>;
 
 export type CurrentProgram = string | {
   title?: string;

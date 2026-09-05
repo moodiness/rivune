@@ -1047,6 +1047,47 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 	})
 }
 
+func TestOpenAPIContractContinueWatchingContext(t *testing.T) {
+	validator := loadOpenAPIContract(t)
+	const prefix = `{"items":[{"titleId":"55555555-5555-4555-8555-555555555555","mediaType":"episode","positionSeconds":120,"durationSeconds":1800,"version":9,"reason":"resume","lastWatchedAt":"2026-09-05T12:00:00Z"`
+	validate := func(suffix string) (bool, string) {
+		request := authenticatedContractRequest(http.MethodGet, "/api/v1/continue-watching", nil)
+		response := httptest.NewRecorder()
+		response.Header().Set("Content-Type", "application/json")
+		response.Header().Set("X-Request-ID", "continue-watching-context-contract")
+		response.WriteHeader(http.StatusOK)
+		_, _ = response.WriteString(prefix + suffix + `}]}`)
+		valid, validationErrors := validator.ValidateHttpResponse(request, response.Result())
+		return valid, fmt.Sprint(validationErrors)
+	}
+
+	fixtures := []struct {
+		name      string
+		suffix    string
+		wantValid bool
+	}{
+		{name: "canonical payload omits continuation context", suffix: "", wantValid: true},
+		{
+			name:      "TVDB episode-order continuation context",
+			suffix:    `,"mappingProvider":"tvdb","episodeOrderId":"2","metadataSeasonId":"tvdb:0392d6ce-02f0-4c75-a73f-13badb1c85ba:2112814"`,
+			wantValid: true,
+		},
+		{name: "partial context", suffix: `,"mappingProvider":"tvdb"`, wantValid: false},
+		{name: "unsupported provider", suffix: `,"mappingProvider":"tmdb","episodeOrderId":"2","metadataSeasonId":"season"`, wantValid: false},
+		{name: "nonpositive episode order", suffix: `,"mappingProvider":"tvdb","episodeOrderId":"0","metadataSeasonId":"season"`, wantValid: false},
+		{name: "episode order too long", suffix: `,"mappingProvider":"tvdb","episodeOrderId":"` + strings.Repeat("1", 33) + `","metadataSeasonId":"season"`, wantValid: false},
+		{name: "empty metadata season", suffix: `,"mappingProvider":"tvdb","episodeOrderId":"2","metadataSeasonId":""`, wantValid: false},
+		{name: "metadata season too long", suffix: `,"mappingProvider":"tvdb","episodeOrderId":"2","metadataSeasonId":"` + strings.Repeat("s", 513) + `"`, wantValid: false},
+	}
+	for _, fixture := range fixtures {
+		t.Run(fixture.name, func(t *testing.T) {
+			if valid, validationErrors := validate(fixture.suffix); valid != fixture.wantValid {
+				t.Fatalf("continue-watching response validity = %t, want %t: %s; suffix: %s", valid, fixture.wantValid, validationErrors, fixture.suffix)
+			}
+		})
+	}
+}
+
 func TestOpenAPISavedResourceUpdateBodies(t *testing.T) {
 	document := loadOpenAPIContract(t)
 	saved := `{"name":"Space","query":"space opera","sort":"relevance","expectedRevision":2}`

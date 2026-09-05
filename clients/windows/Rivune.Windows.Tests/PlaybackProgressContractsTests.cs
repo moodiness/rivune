@@ -147,7 +147,7 @@ public sealed class PlaybackProgressContractsTests
         {"items":[{"titleId":"11111111-1111-4111-8111-111111111111","progress":{"titleId":"11111111-1111-4111-8111-111111111111","mediaType":"episode","positionSeconds":10,"durationSeconds":20,"completed":false,"version":4000000000,"lastWatchedAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:01Z"}},{"titleId":"33333333-3333-4333-8333-333333333333","progress":null}]}
         """;
         const string continueJson = """
-        {"items":[{"titleId":"11111111-1111-4111-8111-111111111111","mediaType":"episode","seriesId":"44444444-4444-4444-8444-444444444444","seasonId":"55555555-5555-4555-8555-555555555555","seasonNumber":2,"episodeNumber":3,"title":"Snapshot Series","posterUrl":"/series-poster.jpg","backgroundUrl":"/series-background.jpg","releaseInfo":"2026","resourceId":"tt1234567:2:3","resourceProvider":"imdb","episodeTitle":"Snapshot Episode","episodeStillUrl":"/episode-still.jpg","episodeAirDate":"2026-08-12","positionSeconds":0,"durationSeconds":1800,"version":4000000001,"reason":"next_episode","lastWatchedAt":"2026-08-01T00:00:00Z"}]}
+        {"items":[{"titleId":"11111111-1111-4111-8111-111111111111","mediaType":"episode","seriesId":"44444444-4444-4444-8444-444444444444","seasonId":"55555555-5555-4555-8555-555555555555","seasonNumber":2,"episodeNumber":3,"title":"Snapshot Series","posterUrl":"/series-poster.jpg","backgroundUrl":"/series-background.jpg","releaseInfo":"2026","resourceId":"tt1234567:2:3","resourceProvider":"imdb","episodeTitle":"Snapshot Episode","episodeStillUrl":"/episode-still.jpg","episodeAirDate":"2026-08-12","positionSeconds":0,"durationSeconds":1800,"version":4000000001,"reason":"next_episode","lastWatchedAt":"2026-08-01T00:00:00Z","mappingProvider":"tvdb","episodeOrderId":"2","metadataSeasonId":"tvdb:0392d6ce-02f0-4c75-a73f-13badb1c85ba:2112814"}]}
         """;
 
         var batch = JsonSerializer.Deserialize<PlaybackProgressBatch>(json, JsonOptions)!;
@@ -167,6 +167,9 @@ public sealed class PlaybackProgressContractsTests
         Assert.Equal("Snapshot Episode", page.Items[0].EpisodeTitle);
         Assert.Equal("/episode-still.jpg", page.Items[0].EpisodeStillUrl);
         Assert.Equal("2026-08-12", page.Items[0].EpisodeAirDate);
+        Assert.Equal("tvdb", page.Items[0].MappingProvider);
+        Assert.Equal("2", page.Items[0].EpisodeOrderId);
+        Assert.Equal("tvdb:0392d6ce-02f0-4c75-a73f-13badb1c85ba:2112814", page.Items[0].MetadataSeasonId);
     }
 
     [Fact]

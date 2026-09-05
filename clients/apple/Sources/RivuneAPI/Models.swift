@@ -2009,6 +2009,9 @@ public struct ContinueWatchingItem: Codable, Sendable, Equatable, Identifiable {
   public let seasonId: UUID?
   public let seasonNumber: Int?
   public let episodeNumber: Int?
+  public let mappingProvider: String?
+  public let episodeOrderId: String?
+  public let metadataSeasonId: String?
   public let title: String?
   public let posterUrl: String?
   public let backgroundUrl: String?

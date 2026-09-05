@@ -13060,6 +13060,10 @@ components:
     ContinueWatchingItem:
       type: object
       additionalProperties: false
+      dependentRequired:
+        mappingProvider: [episodeOrderId, metadataSeasonId]
+        episodeOrderId: [mappingProvider, metadataSeasonId]
+        metadataSeasonId: [mappingProvider, episodeOrderId]
       required:
         [
           titleId,
@@ -13089,6 +13093,17 @@ components:
         episodeNumber:
           type: integer
           minimum: 0
+        mappingProvider:
+          type: string
+          enum: [tvdb]
+        episodeOrderId:
+          type: string
+          pattern: "^[1-9][0-9]*$"
+          maxLength: 32
+        metadataSeasonId:
+          type: string
+          minLength: 1
+          maxLength: 512
         positionSeconds:
           type: integer
           minimum: 0
