@@ -67,6 +67,7 @@ type hlsJob struct {
 	createdAt              time.Time
 	lastAccessed           time.Time
 	cancel                 context.CancelFunc
+	processingDone         chan struct{}
 	done                   chan struct{}
 	timer                  *time.Timer
 	bindings               map[string]*hlsJobBinding
@@ -759,7 +760,7 @@ func (service *Service) hlsJob(ctx context.Context, sessionID string, asset stor
 			directory: directory, fingerprint: fingerprint, sessionID: sessionID, assetID: asset.ID,
 			mode: asset.Kind, segmentContainer: normalizedHLSSegmentContainer(asset.HLSSegmentContainer), prewarming: strings.HasPrefix(sessionID, "prewarm-"),
 			sourceDurationSeconds: asset.DurationSeconds, startOffsetSeconds: asset.StartSeconds,
-			createdAt: now, lastAccessed: now, cancel: cancel, done: make(chan struct{}),
+			createdAt: now, lastAccessed: now, cancel: cancel, processingDone: make(chan struct{}), done: make(chan struct{}),
 		}
 		service.addHLSJobBindingLocked(key, job, job.prewarming)
 		service.startHLSStorageMonitorLocked()
@@ -1064,10 +1065,7 @@ func (service *Service) runHLSJob(ctx context.Context, job *hlsJob, asset stored
 	}
 	failed := job.err != nil
 	job.mu.Unlock()
-	close(job.done)
-	if failed {
-		service.discardFailedPrewarmBindings(job)
-	}
+	close(job.processingDone)
 	service.hlsMu.Lock()
 	service.hlsStorageMonitorWorkers--
 	lastWriter := service.hlsStorageMonitorWorkers == 0
@@ -1080,6 +1078,10 @@ func (service *Service) runHLSJob(ctx context.Context, job *hlsJob, asset stored
 	service.hlsMu.Unlock()
 	if lastWriter {
 		service.reclaimHLSStorageIfIdle()
+	}
+	close(job.done)
+	if failed {
+		service.discardFailedPrewarmBindings(job)
 	}
 }
 
@@ -1191,7 +1193,7 @@ func (service *Service) reclaimHLSStorageLocked(limit int64, admission bool) boo
 		job.mu.Lock()
 		job.err = ErrMediaStorageLimit
 		job.mu.Unlock()
-		service.stopDetachedHLSJob(job)
+		service.stopDetachedHLSJobLocked(job)
 	}
 }
 
@@ -1461,34 +1463,77 @@ func (service *Service) stopDetachedHLSJobWhenIdle(job *hlsJob) {
 // stopDetachedHLSJob force-stops a worker selected for storage reclamation.
 // It is idempotent because aliases may have raced with victim selection.
 func (service *Service) stopDetachedHLSJob(job *hlsJob) {
+	service.hlsStorageMu.Lock()
+	service.stopDetachedHLSJobLocked(job)
+	service.hlsStorageMu.Unlock()
+	if job.done != nil {
+		select {
+		case <-job.done:
+		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
+// stopDetachedHLSJobLocked is used when hlsStorageMu is already held.
+func (service *Service) stopDetachedHLSJobLocked(job *hlsJob) {
 	job.stopOnce.Do(func() {
 		job.mu.Lock()
 		requestsDone := job.activeRequestsDone
+		processingDone := job.processingDone
+		if processingDone == nil {
+			processingDone = job.done
+		}
 		job.mu.Unlock()
 		if job.cancel != nil {
 			job.cancel()
 		}
-		if job.done != nil {
+		if processingDone != nil {
 			select {
-			case <-job.done:
+			case <-processingDone:
 			case <-time.After(5 * time.Second):
+				go func() {
+					<-processingDone
+					if requestsDone != nil {
+						<-requestsDone
+					}
+					service.cleanupDetachedHLSJob(job)
+				}()
+				return
 			}
 		}
-		cleanup := func() {
-			service.hlsMu.Lock()
-			defer service.hlsMu.Unlock()
-			_ = os.RemoveAll(job.directory)
-			_ = removeEmptyParents(filepath.Dir(job.directory), service.mediaOptions.TempDirectory)
-		}
 		if requestsDone == nil {
-			cleanup()
+			service.cleanupDetachedHLSJobLocked(job)
 			return
 		}
 		go func() {
 			<-requestsDone
-			cleanup()
+			service.cleanupDetachedHLSJob(job)
 		}()
 	})
+}
+
+func (service *Service) cleanupDetachedHLSJob(job *hlsJob) {
+	service.hlsStorageMu.Lock()
+	defer service.hlsStorageMu.Unlock()
+	service.cleanupDetachedHLSJobLocked(job)
+}
+
+func (service *Service) cleanupDetachedHLSJobLocked(job *hlsJob) {
+	err := os.RemoveAll(job.directory)
+	if err == nil {
+		err = removeEmptyParents(filepath.Dir(job.directory), service.mediaOptions.TempDirectory)
+	}
+	if err == nil {
+		return
+	}
+	cleanupErr := fmt.Errorf("%w: remove HLS workspace: %v", ErrMediaProcessingFailed, err)
+	job.mu.Lock()
+	if job.err == nil {
+		job.err = cleanupErr
+	} else {
+		job.err = errors.Join(job.err, cleanupErr)
+	}
+	job.mu.Unlock()
 }
 
 func (service *Service) stopHLSSession(sessionID string) {
@@ -1687,8 +1732,17 @@ func directorySize(root string) int64 {
 
 func removeEmptyParents(directory, stop string) error {
 	for directory != stop && strings.HasPrefix(directory, stop+string(os.PathSeparator)) {
-		err := os.Remove(directory)
+		entries, err := os.ReadDir(directory)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
+			return err
+		}
+		if len(entries) != 0 {
+			return nil
+		}
+		if err := os.Remove(directory); err != nil {
 			return err
 		}
 		directory = filepath.Dir(directory)

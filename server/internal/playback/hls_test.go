@@ -2495,6 +2495,71 @@ func TestLastHLSBindingWaitsForActiveRequestBeforeCancelAndCleanup(t *testing.T)
 	}
 }
 
+func TestHLSJobDoneWaitsForFinalStorageScanBeforeCleanup(t *testing.T) {
+	processor := &sharedFixtureHLSProcessor{started: make(chan string, 1)}
+	service := newSharedHLSTestService(t, processor)
+	scanStarted := make(chan struct{})
+	releaseScan := make(chan struct{})
+	var gateFinalScan atomic.Bool
+	var gateOnce sync.Once
+	service.hlsWorkspaceSize = func(root string) int64 {
+		size := directorySize(root)
+		if gateFinalScan.Load() {
+			service.hlsMu.Lock()
+			finalScan := service.hlsStorageMonitorWorkers == 0
+			service.hlsMu.Unlock()
+			if finalScan {
+				gateOnce.Do(func() {
+					close(scanStarted)
+					<-releaseScan
+				})
+			}
+		}
+		return size
+	}
+	asset := storedAsset{ID: "asset", Kind: processingTranscode, URL: "https://media.example/movie.mkv"}
+	job, err := service.hlsJob(context.Background(), "session", asset, processor, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForSharedHLSStart(t, processor)
+
+	gateFinalScan.Store(true)
+	stopReturned := make(chan struct{})
+	go func() {
+		service.stopHLSSession("session")
+		close(stopReturned)
+	}()
+	select {
+	case <-scanStarted:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not enter its final storage scan")
+	}
+	select {
+	case <-job.done:
+		t.Fatal("job completion was published before the final storage scan finished")
+	default:
+	}
+	if _, cancels := processor.counts(); cancels != 1 {
+		t.Fatalf("final storage scan started after %d cancellations, want 1", cancels)
+	}
+
+	close(releaseScan)
+	select {
+	case <-job.done:
+	case <-time.After(time.Second):
+		t.Fatal("job completion was not published after the final storage scan")
+	}
+	select {
+	case <-stopReturned:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup deadlocked after the final storage scan")
+	}
+	if _, err := os.Stat(job.directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("workspace survived serialized cleanup: %v", err)
+	}
+}
+
 func TestConcurrentHLSAttachAndStopDoesNotOrphanOrDoubleCancel(t *testing.T) {
 	for iteration := range 20 {
 		processor := &sharedFixtureHLSProcessor{started: make(chan string, 4)}
