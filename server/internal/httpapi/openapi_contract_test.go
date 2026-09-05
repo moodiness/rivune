@@ -282,6 +282,73 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		validateContractRequestBody(t, document, http.MethodPost, path+"/import", string(encoded), true)
 		unknownIdentityMember := strings.Replace(string(encoded), `"externalId":"10357450"}`, `"externalId":"10357450","unexpected":true}`, 1)
 		validateContractRequestBody(t, document, http.MethodPost, path+"/import", unknownIdentityMember, false)
+
+		const maximumTVDBID = "9223372036854775807"
+		maximumArchive := archive
+		maximumArchive.Titles = append([]portable.Title(nil), archive.Titles...)
+		for _, index := range []int{1, 2} {
+			identity := *archive.Titles[index].EpisodeOrderIdentity
+			identity.OrderID = maximumTVDBID
+			identity.ExternalID = maximumTVDBID
+			maximumArchive.Titles[index].HierarchyVariant = "tvdb:" + maximumTVDBID
+			maximumArchive.Titles[index].EpisodeOrderIdentity = &identity
+		}
+		canonicalSeasonKey := "sha256:" + strings.Repeat("e", 64)
+		canonicalEpisodeKey := "sha256:" + strings.Repeat("f", 64)
+		maximumArchive.Titles = append(maximumArchive.Titles,
+			portable.Title{
+				Key: canonicalSeasonKey, MediaType: "season", ParentKey: seriesKey, Ordinal: &ordinal,
+				ExternalIDs: []portable.ExternalID{{Provider: "tvdb", Namespace: "season", ExternalID: maximumTVDBID}},
+			},
+			portable.Title{
+				Key: canonicalEpisodeKey, MediaType: "episode", ParentKey: canonicalSeasonKey, Ordinal: &ordinal,
+				ExternalIDs: []portable.ExternalID{{Provider: "tvdb", Namespace: "episode", ExternalID: maximumTVDBID}},
+			},
+		)
+		maximumBody, err := json.Marshal(maximumArchive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		validateContractRequestBody(t, document, http.MethodPost, path+"/import", string(maximumBody), true)
+
+		const overflowTVDBID = "9223372036854775808"
+		overflowCases := []struct {
+			name   string
+			mutate func(*portable.Document)
+		}{
+			{"hierarchy variant", func(value *portable.Document) {
+				value.Titles[1].HierarchyVariant = "tvdb:" + overflowTVDBID
+			}},
+			{"order ID", func(value *portable.Document) {
+				value.Titles[1].EpisodeOrderIdentity.OrderID = overflowTVDBID
+			}},
+			{"ordered season external ID", func(value *portable.Document) {
+				value.Titles[1].EpisodeOrderIdentity.ExternalID = overflowTVDBID
+			}},
+			{"ordered episode external ID", func(value *portable.Document) {
+				value.Titles[2].EpisodeOrderIdentity.ExternalID = overflowTVDBID
+			}},
+			{"canonical season external ID", func(value *portable.Document) {
+				value.Titles[3].ExternalIDs[0].ExternalID = overflowTVDBID
+			}},
+			{"canonical episode external ID", func(value *portable.Document) {
+				value.Titles[4].ExternalIDs[0].ExternalID = overflowTVDBID
+			}},
+		}
+		for _, test := range overflowCases {
+			t.Run("signed-int64 "+test.name, func(t *testing.T) {
+				var overflowArchive portable.Document
+				if err := json.Unmarshal(maximumBody, &overflowArchive); err != nil {
+					t.Fatal(err)
+				}
+				test.mutate(&overflowArchive)
+				overflowBody, err := json.Marshal(overflowArchive)
+				if err != nil {
+					t.Fatal(err)
+				}
+				validateContractRequestBody(t, document, http.MethodPost, path+"/import", string(overflowBody), false)
+			})
+		}
 		importRequest := authenticatedContractRequest(http.MethodPost, path+"/import", bytes.NewBuffer(encoded))
 		importRequest.Header.Set("Content-Type", "application/json")
 		importResponse := serveContractRequest(t, api, importRequest, http.StatusOK)
