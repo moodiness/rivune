@@ -9,7 +9,7 @@ const count = (value, pattern) => [...value.matchAll(pattern)].length;
 const dockerfile = read('server/Dockerfile');
 const expectedFrom = [
   'node:24-bookworm-slim@sha256:a9f5f7c91a432850b2a8a7797adf5eadb6c733ceed61167806cee7ea7fbc29df',
-  'golang:1.27.0-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452',
+  'golang:1.27.1-bookworm@sha256:648f440f42a0958804efb24df176f806f9d353b41f1c0627f666428e40310f6b',
   'debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132',
 ];
 const from = [...dockerfile.matchAll(/^FROM\s+(\S+)/gm)].map((match) => match[1]);
