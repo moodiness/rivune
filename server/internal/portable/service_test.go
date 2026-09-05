@@ -246,11 +246,11 @@ func TestArchiveRoundTripPreservesEpisodeOrderVariant(t *testing.T) {
 }
 
 type identityClassSnapshot struct {
-	boundTitleID, mediaType, parentID, hierarchyVariant, canonicalExternalIDs, episodeOrderIdentity string
-	ordinal, progressPosition, progressDuration                                                  int
-	progressVersion                                                                               int64
-	progressCompleted                                                                             bool
-	bindingUpdatedAt, progressLastWatchedAt, progressUpdatedAt                                    time.Time
+	boundTitleID, mediaType, parentID, hierarchyVariant, canonicalExternalIDs, scopedExternalIDs, episodeOrderIdentity string
+	ordinal, progressPosition, progressDuration                                                                     int
+	progressVersion                                                                                                  int64
+	progressCompleted                                                                                                bool
+	bindingUpdatedAt, progressLastWatchedAt, progressUpdatedAt                                                       time.Time
 }
 
 func portableIdentityClassTestService(t *testing.T) (context.Context, *Service, auth.Principal, string) {
@@ -352,6 +352,8 @@ func readIdentityClassSnapshot(t *testing.T, ctx context.Context, service *Servi
 		SELECT binding.resource_id::text,title.media_type,COALESCE(title.parent_id::text,''),COALESCE(title.ordinal,-1),title.hierarchy_variant,
 		       COALESCE((SELECT string_agg(provider || ':' || namespace || ':' || external_id, ',' ORDER BY provider,namespace,external_id)
 		                 FROM title_external_ids WHERE title_id=title.id),''),
+		       COALESCE((SELECT profile_id::text || ':' || provider || ':' || namespace || ':' || external_id
+		                 FROM profile_title_external_ids WHERE title_id=title.id),''),
 		       COALESCE((SELECT series_title_id::text || ':' || provider || ':' || order_id || ':' || namespace || ':' || external_id
 		                 FROM title_episode_order_identities WHERE title_id=title.id),''),
 		       binding.updated_at,progress.position_seconds,progress.duration_seconds,progress.completed,
@@ -362,7 +364,7 @@ func readIdentityClassSnapshot(t *testing.T, ctx context.Context, service *Servi
 		WHERE binding.profile_id=$1::uuid AND binding.resource_kind='title' AND binding.portable_key=$2
 	`, profileID, key).Scan(
 		&snapshot.boundTitleID, &snapshot.mediaType, &snapshot.parentID, &snapshot.ordinal, &snapshot.hierarchyVariant,
-		&snapshot.canonicalExternalIDs, &snapshot.episodeOrderIdentity,
+		&snapshot.canonicalExternalIDs, &snapshot.scopedExternalIDs, &snapshot.episodeOrderIdentity,
 		&snapshot.bindingUpdatedAt, &snapshot.progressPosition, &snapshot.progressDuration, &snapshot.progressCompleted,
 		&snapshot.progressVersion, &snapshot.progressLastWatchedAt, &snapshot.progressUpdatedAt,
 	)
@@ -404,6 +406,51 @@ func TestImportRejectsEpisodeOrderIdentityClassChanges(t *testing.T) {
 			after := readIdentityClassSnapshot(t, ctx, service, profileID, episodeKey)
 			if after != before {
 				t.Fatalf("%s changed bound title/state:\nbefore=%+v\nafter=%+v", test.name, before, after)
+			}
+		})
+	}
+}
+
+func TestImportRejectsScopedIdentityOnEpisodeOrderVariant(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		legacy bool
+	}{
+		{name: "exact order identity"},
+		{name: "identity-less legacy variant", legacy: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, service, principal, profileID := portableIdentityClassTestService(t)
+			now := time.Now().UTC().Truncate(time.Microsecond)
+			document := identityClassDocument(now, true)
+			if _, err := service.Import(ctx, principal, profileID, document); err != nil {
+				t.Fatalf("initial variant import: %v", err)
+			}
+			episodeKey := "sha256:" + strings.Repeat("d", 64)
+			initial := readIdentityClassSnapshot(t, ctx, service, profileID, episodeKey)
+			if test.legacy {
+				if _, err := service.pool.Exec(ctx, `DELETE FROM title_episode_order_identities WHERE title_id=$1::uuid`, initial.boundTitleID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := service.pool.Exec(ctx, `
+				INSERT INTO profile_title_external_ids(profile_id,title_id,provider,namespace,external_id)
+				VALUES($1::uuid,$2::uuid,'addon','episode','scoped-variant')
+			`, profileID, initial.boundTitleID); err != nil {
+				t.Fatal(err)
+			}
+			before := readIdentityClassSnapshot(t, ctx, service, profileID, episodeKey)
+			if before.scopedExternalIDs == "" || test.legacy == (before.episodeOrderIdentity != "") {
+				t.Fatalf("invalid %s precondition: %+v", test.name, before)
+			}
+
+			document.ExportedAt = now.Add(time.Minute)
+			if _, err := service.Import(ctx, principal, profileID, document); !errors.Is(err, ErrConflict) {
+				t.Fatalf("variant import with scoped identity error = %v, want ErrConflict", err)
+			}
+			after := readIdentityClassSnapshot(t, ctx, service, profileID, episodeKey)
+			if after != before {
+				t.Fatalf("variant import changed scoped bound title/state:\nbefore=%+v\nafter=%+v", before, after)
 			}
 		})
 	}

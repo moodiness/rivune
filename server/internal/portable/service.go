@@ -1156,7 +1156,7 @@ func importTitles(ctx context.Context, tx pgx.Tx, profileID string, document Doc
 					return nil, 0, 0, fmt.Errorf("%w: canonical archive title resolved to a noncanonical title", ErrConflict)
 				}
 			} else {
-				if currentMediaType != value.MediaType || hasCanonicalExternalIDs {
+				if currentMediaType != value.MediaType || hasCanonicalExternalIDs || existingScopedProfile != nil {
 					return nil, 0, 0, fmt.Errorf("%w: episode-order archive title resolved to an incompatible title", ErrConflict)
 				}
 				if hasEpisodeOrderIdentity {
