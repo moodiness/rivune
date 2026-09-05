@@ -222,9 +222,9 @@ public struct RivuneMediaTarget: Identifiable, Equatable, Sendable {
   public let releaseInfo: String?
   public let released: String?
   public let seriesId: UUID?
-  public let mappingProvider: SeriesMappingProvider? = nil
-  public let episodeOrderId: String? = nil
-  public let metadataSeasonId: String? = nil
+  public let mappingProvider: SeriesMappingProvider?
+  public let episodeOrderId: String?
+  public let metadataSeasonId: String?
   public let seasonId: String?
   public let seasonNumber: Int?
   public let episodeNumber: Int?
