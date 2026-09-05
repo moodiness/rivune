@@ -264,6 +264,23 @@ func normalizeRuntimeGoldenPlayback(t *testing.T, body []byte) []byte {
 	return bytes.ReplaceAll(body, needle, []byte("PLAY_SESSION_ID"))
 }
 
+func normalizeRuntimeGolden(data []byte) []byte {
+	return bytes.TrimSpace(bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n")))
+}
+
+func TestRuntimeGoldenNormalizationIgnoresOnlyCheckoutLineEndings(t *testing.T) {
+	lf := []byte("{\n  \"Status\": 200\n}\n")
+	crlf := []byte("{\r\n  \"Status\": 200\r\n}\r\n")
+	if !bytes.Equal(normalizeRuntimeGolden(lf), normalizeRuntimeGolden(crlf)) {
+		t.Fatal("LF and CRLF representations should compare equal")
+	}
+
+	changed := []byte("{\n  \"Status\": 201\n}\n")
+	if bytes.Equal(normalizeRuntimeGolden(lf), normalizeRuntimeGolden(changed)) {
+		t.Fatal("meaningful content difference should not compare equal")
+	}
+}
+
 func assertRuntimeHTTPGolden(t *testing.T, name string, response *httptest.ResponseRecorder, headers []string, normalize func(*testing.T, []byte) []byte) {
 	t.Helper()
 	body := response.Body.Bytes()
@@ -291,7 +308,9 @@ func assertRuntimeHTTPGolden(t *testing.T, name string, response *httptest.Respo
 	if err != nil {
 		t.Fatalf("read golden fixture: %v", err)
 	}
-	if !bytes.Equal(bytes.TrimSpace(expected), bytes.TrimSpace(encoded)) {
+	expected = normalizeRuntimeGolden(expected)
+	encoded = normalizeRuntimeGolden(encoded)
+	if !bytes.Equal(expected, encoded) {
 		t.Fatalf("runtime HTTP contract changed (-want +got):\nwant:\n%s\n\ngot:\n%s", expected, encoded)
 	}
 }
