@@ -53,7 +53,7 @@ func TestRecommendationArtworkShapeRequiresMatchingArtwork(t *testing.T) {
 	}
 }
 
-func TestRecommendationsFilterCandidatesByRequestedArtwork(t *testing.T) {
+func TestRecommendationsKeepVariantSignalsAndCandidatesOut(t *testing.T) {
 	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
 	if databaseURL == "" {
 		databaseURL = os.Getenv("RIVUNE_DATABASE_URL")
@@ -82,8 +82,8 @@ func TestRecommendationsFilterCandidatesByRequestedArtwork(t *testing.T) {
 			id uuid PRIMARY KEY, media_type text NOT NULL, parent_id uuid, ordinal integer,
 			display_title text, poster_url text, background_url text, release_info text, release_date date,
 			resource_id text, resource_provider text, source_addon_id uuid, source_catalog_id text, source_name text,
-			country text, language text, category text, is_current boolean NOT NULL DEFAULT true,
-			created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+			country text, language text, category text, hierarchy_variant text NOT NULL DEFAULT '',
+			is_current boolean NOT NULL DEFAULT true, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
 		);
 		CREATE TEMPORARY TABLE title_external_ids (title_id uuid NOT NULL, provider text NOT NULL, namespace text NOT NULL, external_id text NOT NULL, PRIMARY KEY (provider, namespace, external_id));
 		CREATE TEMPORARY TABLE profile_title_external_ids (profile_id uuid NOT NULL, title_id uuid NOT NULL, provider text NOT NULL, namespace text NOT NULL, external_id text NOT NULL, PRIMARY KEY (profile_id, provider, namespace, external_id), UNIQUE (title_id));
@@ -107,9 +107,21 @@ func TestRecommendationsFilterCandidatesByRequestedArtwork(t *testing.T) {
 			('00000000-0000-4000-8000-000000000300', 'movie', 'Landscape only', NULL, '/background', 'landscape', 'tmdb'),
 			('00000000-0000-4000-8000-000000000400', 'movie', 'Both', '/both-poster', '/both-background', 'both', 'tmdb'),
 			('00000000-0000-4000-8000-000000000500', 'movie', 'No artwork', NULL, NULL, 'none', 'tmdb');
+		INSERT INTO titles (id, media_type, hierarchy_variant, display_title, poster_url, background_url, resource_id, resource_provider) VALUES
+			('00000000-0000-4000-8000-000000000600', 'movie', 'tvdb:2', 'Variant Signal', '/variant-signal-poster', '/variant-signal-background', 'variant-signal', 'tmdb'),
+			('00000000-0000-4000-8000-000000000700', 'movie', '', 'Canonical Science Fiction', '/science-poster', '/science-background', 'science', 'tmdb'),
+			('00000000-0000-4000-8000-000000000800', 'movie', 'tvdb:3', 'Variant Candidate', '/variant-poster', '/variant-background', 'variant', 'tmdb');
 		INSERT INTO title_metadata (title_id, provider, language, payload, expires_at)
 		SELECT id, 'tmdb', 'en-US', '{"genres":[{"name":"Drama"}],"voteAverage":8}'::jsonb, now() + interval '1 hour' FROM titles;
-		INSERT INTO profile_favorites (profile_id, title_id) VALUES ('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000100');
+		UPDATE title_metadata
+		SET payload = '{"genres":[{"name":"Science Fiction"}],"voteAverage":8}'::jsonb
+		WHERE title_id IN (
+			'00000000-0000-4000-8000-000000000600'::uuid,
+			'00000000-0000-4000-8000-000000000700'::uuid
+		);
+		INSERT INTO profile_favorites (profile_id, title_id) VALUES
+			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000100'),
+			('11111111-1111-4111-8111-111111111111', '00000000-0000-4000-8000-000000000600');
 	`); err != nil {
 		t.Fatalf("create recommendation artwork fixtures: %v", err)
 	}
@@ -123,6 +135,7 @@ func TestRecommendationsFilterCandidatesByRequestedArtwork(t *testing.T) {
 	assertRecommendationIDs(t, poster, map[string]bool{
 		"00000000-0000-4000-8000-000000000200": true,
 		"00000000-0000-4000-8000-000000000400": true,
+		"00000000-0000-4000-8000-000000000700": true,
 	})
 	landscape, err := service.Recommendations(ctx, principal, 10, RecommendationArtworkLandscape)
 	if err != nil {
@@ -131,7 +144,17 @@ func TestRecommendationsFilterCandidatesByRequestedArtwork(t *testing.T) {
 	assertRecommendationIDs(t, landscape, map[string]bool{
 		"00000000-0000-4000-8000-000000000300": true,
 		"00000000-0000-4000-8000-000000000400": true,
+		"00000000-0000-4000-8000-000000000700": true,
 	})
+	for _, recommendation := range landscape.Items {
+		if recommendation.Item.ID == "00000000-0000-4000-8000-000000000700" {
+			if recommendation.Reason != "Popular in your local catalog" || recommendation.Score != 0.8 {
+				t.Fatalf("variant signal affected canonical recommendation: %+v", recommendation)
+			}
+			return
+		}
+	}
+	t.Fatal("canonical science-fiction recommendation missing")
 }
 
 func assertRecommendationIDs(t *testing.T, page RecommendationPage, expected map[string]bool) {

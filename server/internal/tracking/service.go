@@ -703,6 +703,21 @@ func (s *Service) enqueueBatchWithProviderTx(ctx context.Context, tx pgx.Tx, pro
 		affectsWatched[index] = item.Event.Type == "watched" || item.Event.Type == "progress" && item.Event.Completed
 	}
 
+	var containsVariant bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM titles
+			WHERE id = ANY($1::uuid[])
+			  AND hierarchy_variant <> ''
+		)
+	`, titleIDs).Scan(&containsVariant); err != nil {
+		return fmt.Errorf("validate tracking title hierarchy: %w", err)
+	}
+	if containsVariant {
+		return fmt.Errorf("%w: episode-order variants cannot be tracked", ErrInvalidInput)
+	}
+
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, trackingOutboxAdvisoryLock); err != nil {
 		return fmt.Errorf("lock tracking outbox admission: %w", err)
 	}

@@ -153,7 +153,7 @@ func TestMovieDetailsFallsBackWhenFanartFails(t *testing.T) {
 	}
 }
 
-func TestSeriesDetailsConsolidatesResolvedCanonicalTitleHierarchyAndProfileState(t *testing.T) {
+func TestSeriesDetailsConsolidatesCanonicalHierarchyAndPreservesVariantTrees(t *testing.T) {
 	pool := newCanonicalMergeTestPool(t)
 	ctx := context.Background()
 	seedCanonicalMergeSuccess(t, pool)
@@ -209,7 +209,16 @@ func TestSeriesDetailsConsolidatesResolvedCanonicalTitleHierarchyAndProfileState
 		remainingIDs = append(remainingIDs, id)
 	}
 	rows.Close()
-	expectedIDs := []string{canonicalDestinationSeriesID, canonicalDestinationSeasonID, canonicalDestinationEpisodeID, canonicalUniqueEpisodeID}
+	expectedIDs := []string{
+		canonicalDestinationSeriesID,
+		canonicalDestinationSeasonID,
+		canonicalDestinationEpisodeID,
+		canonicalDestinationVariantSeasonID,
+		canonicalDestinationVariantEpisodeID,
+		canonicalUniqueEpisodeID,
+		canonicalSourceVariantSeasonID,
+		canonicalSourceVariantEpisodeID,
+	}
 	if len(remainingIDs) != len(expectedIDs) {
 		t.Fatalf("unexpected title rows after consolidation: %v", remainingIDs)
 	}
@@ -217,6 +226,65 @@ func TestSeriesDetailsConsolidatesResolvedCanonicalTitleHierarchyAndProfileState
 		if remainingIDs[index] != expectedIDs[index] {
 			t.Fatalf("unexpected title rows after consolidation: %v", remainingIDs)
 		}
+	}
+	var destinationVariantParent, sourceVariantParent, sourceVariantEpisodeParent string
+	var destinationVariantCurrent, sourceVariantCurrent, sourceVariantEpisodeCurrent bool
+	if err := pool.QueryRow(ctx, `
+		SELECT parent_id::text, is_current
+		FROM titles
+		WHERE id = $1::uuid
+	`, canonicalDestinationVariantSeasonID).Scan(&destinationVariantParent, &destinationVariantCurrent); err != nil {
+		t.Fatalf("query destination variant season: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT parent_id::text, is_current
+		FROM titles
+		WHERE id = $1::uuid
+	`, canonicalSourceVariantSeasonID).Scan(&sourceVariantParent, &sourceVariantCurrent); err != nil {
+		t.Fatalf("query preserved source variant season: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT parent_id::text, is_current
+		FROM titles
+		WHERE id = $1::uuid
+	`, canonicalSourceVariantEpisodeID).Scan(&sourceVariantEpisodeParent, &sourceVariantEpisodeCurrent); err != nil {
+		t.Fatalf("query preserved source variant episode: %v", err)
+	}
+	if destinationVariantParent != canonicalDestinationSeriesID || !destinationVariantCurrent ||
+		sourceVariantParent != canonicalDestinationSeriesID || !sourceVariantCurrent ||
+		sourceVariantEpisodeParent != canonicalSourceVariantSeasonID || !sourceVariantEpisodeCurrent {
+		t.Fatalf("variant hierarchy changed destination=(%s,%t) source=(%s,%t) episode=(%s,%t)",
+			destinationVariantParent, destinationVariantCurrent, sourceVariantParent, sourceVariantCurrent,
+			sourceVariantEpisodeParent, sourceVariantEpisodeCurrent)
+	}
+	var sourceVariantIdentitySeriesID string
+	if err := pool.QueryRow(ctx, `
+		SELECT series_title_id::text
+		FROM title_episode_order_identities
+		WHERE title_id = $1::uuid
+	`, canonicalSourceVariantEpisodeID).Scan(&sourceVariantIdentitySeriesID); err != nil {
+		t.Fatalf("query preserved source variant identity: %v", err)
+	}
+	if sourceVariantIdentitySeriesID != canonicalDestinationSeriesID {
+		t.Fatalf("source variant identity still references %s", sourceVariantIdentitySeriesID)
+	}
+	var duplicateVariantRows int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM titles
+		WHERE id IN ($1::uuid, $2::uuid)
+	`, canonicalSourceDuplicateVariantSeasonID, canonicalSourceDuplicateVariantEpisodeID).Scan(&duplicateVariantRows); err != nil {
+		t.Fatalf("query reconciled duplicate variant rows: %v", err)
+	}
+	var reconciledProgressTitleID string
+	if err := pool.QueryRow(ctx, `
+		SELECT title_id::text
+		FROM profile_progress
+		WHERE profile_id = $1::uuid AND title_id = $2::uuid
+	`, canonicalOtherProfileID, canonicalDestinationVariantEpisodeID).Scan(&reconciledProgressTitleID); err != nil {
+		t.Fatalf("query reconciled exact variant identity progress: %v", err)
+	}
+	if duplicateVariantRows != 0 || reconciledProgressTitleID != canonicalDestinationVariantEpisodeID {
+		t.Fatalf("exact variant identity reconciliation rows=%d progress=%s", duplicateVariantRows, reconciledProgressTitleID)
 	}
 	var uniqueParentID string
 	if err := pool.QueryRow(ctx, `SELECT parent_id::text FROM titles WHERE id = $1::uuid`, canonicalUniqueEpisodeID).Scan(&uniqueParentID); err != nil {
@@ -323,19 +391,21 @@ func TestSeasonZeroPersistsCanonicalHierarchy(t *testing.T) {
 	}
 }
 
-func TestSeriesRefreshRepairsPoisonedSeasonOrdinalAndInvalidatesCachedHierarchy(t *testing.T) {
+func TestSeriesRefreshRepairsCanonicalOrdinalWithoutChangingVariantSibling(t *testing.T) {
 	pool := newCanonicalMergeTestPool(t)
 	ctx := context.Background()
 	const (
-		seriesID  = "00000000-0000-4000-8000-000000000300"
-		seasonID  = "00000000-0000-4000-8000-000000000309"
-		episodeID = "00000000-0000-4000-8000-000000000399"
+		seriesID       = "00000000-0000-4000-8000-000000000300"
+		seasonID       = "00000000-0000-4000-8000-000000000309"
+		episodeID      = "00000000-0000-4000-8000-000000000399"
+		variantSeasonID = "00000000-0000-4000-8000-000000000398"
 	)
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO titles (id, media_type, display_title) VALUES
 			($1::uuid, 'series', 'Fixture Series Beta');
-		INSERT INTO titles (id, media_type, parent_id, ordinal, display_title) VALUES
-			($2::uuid, 'season', $1::uuid, 2, 'Saison 9');
+		INSERT INTO titles (id, media_type, parent_id, ordinal, hierarchy_variant, display_title) VALUES
+			($2::uuid, 'season', $1::uuid, 2, '', 'Saison 9'),
+			($4::uuid, 'season', $1::uuid, 9, 'tvdb:4', 'Variant Season 9');
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
 			($1::uuid, 'tmdb', 'series', '900202'),
 			($2::uuid, 'tmdb', 'season', '910209');
@@ -350,7 +420,7 @@ func TestSeriesRefreshRepairsPoisonedSeasonOrdinalAndInvalidatesCachedHierarchy(
 			     'externalIds', jsonb_build_object('tmdb', '910209')
 			 ),
 			 now() + interval '1 hour')
-	`, pgx.QueryExecModeSimpleProtocol, seriesID, seasonID, episodeID); err != nil {
+	`, pgx.QueryExecModeSimpleProtocol, seriesID, seasonID, episodeID, variantSeasonID); err != nil {
 		t.Fatalf("seed poisoned season hierarchy: %v", err)
 	}
 	provider := &canonicalMergeProvider{
@@ -400,6 +470,19 @@ func TestSeriesRefreshRepairsPoisonedSeasonOrdinalAndInvalidatesCachedHierarchy(
 	if persistedOrdinal != 9 || cachedSeasonNumber != 9 {
 		t.Fatalf("poisoned hierarchy survived refresh: ordinal=%d cachedSeason=%d", persistedOrdinal, cachedSeasonNumber)
 	}
+	var variantParentID, variant string
+	var variantOrdinal int
+	var variantCurrent bool
+	if err := pool.QueryRow(ctx, `
+		SELECT parent_id::text, ordinal, hierarchy_variant, is_current
+		FROM titles WHERE id = $1::uuid
+	`, variantSeasonID).Scan(&variantParentID, &variantOrdinal, &variant, &variantCurrent); err != nil {
+		t.Fatalf("query variant ordinal sibling: %v", err)
+	}
+	if variantParentID != seriesID || variantOrdinal != 9 || variant != "tvdb:4" || !variantCurrent {
+		t.Fatalf("variant ordinal sibling changed parent=%s ordinal=%d variant=%q current=%t",
+			variantParentID, variantOrdinal, variant, variantCurrent)
+	}
 }
 
 func TestSeriesDetailsCanonicalConflictRollsBackAtomically(t *testing.T) {
@@ -448,17 +531,23 @@ func TestSeriesDetailsCanonicalConflictRollsBackAtomically(t *testing.T) {
 }
 
 const (
-	canonicalDestinationMovieID   = "00000000-0000-4000-8000-000000000010"
-	canonicalSourceMovieID        = "00000000-0000-4000-8000-000000000020"
-	canonicalDestinationSeriesID  = "00000000-0000-4000-8000-000000000100"
-	canonicalDestinationSeasonID  = "00000000-0000-4000-8000-000000000110"
-	canonicalDestinationEpisodeID = "00000000-0000-4000-8000-000000000111"
-	canonicalSourceSeriesID       = "00000000-0000-4000-8000-000000000200"
-	canonicalSourceSeasonID       = "00000000-0000-4000-8000-000000000210"
-	canonicalSourceEpisodeID      = "00000000-0000-4000-8000-000000000211"
-	canonicalUniqueEpisodeID      = "00000000-0000-4000-8000-000000000212"
-	canonicalProfileID            = "11111111-1111-4111-8111-111111111111"
-	canonicalOtherProfileID       = "22222222-2222-4222-8222-222222222222"
+	canonicalDestinationMovieID           = "00000000-0000-4000-8000-000000000010"
+	canonicalSourceMovieID                = "00000000-0000-4000-8000-000000000020"
+	canonicalDestinationSeriesID          = "00000000-0000-4000-8000-000000000100"
+	canonicalDestinationSeasonID          = "00000000-0000-4000-8000-000000000110"
+	canonicalDestinationEpisodeID         = "00000000-0000-4000-8000-000000000111"
+	canonicalDestinationVariantSeasonID   = "00000000-0000-4000-8000-000000000120"
+	canonicalDestinationVariantEpisodeID  = "00000000-0000-4000-8000-000000000121"
+	canonicalSourceSeriesID               = "00000000-0000-4000-8000-000000000200"
+	canonicalSourceSeasonID               = "00000000-0000-4000-8000-000000000210"
+	canonicalSourceEpisodeID              = "00000000-0000-4000-8000-000000000211"
+	canonicalUniqueEpisodeID              = "00000000-0000-4000-8000-000000000212"
+	canonicalSourceVariantSeasonID        = "00000000-0000-4000-8000-000000000220"
+	canonicalSourceVariantEpisodeID       = "00000000-0000-4000-8000-000000000221"
+	canonicalSourceDuplicateVariantSeasonID  = "00000000-0000-4000-8000-000000000230"
+	canonicalSourceDuplicateVariantEpisodeID = "00000000-0000-4000-8000-000000000231"
+	canonicalProfileID                    = "11111111-1111-4111-8111-111111111111"
+	canonicalOtherProfileID               = "22222222-2222-4222-8222-222222222222"
 )
 
 func canonicalMergePrincipal() auth.Principal {
@@ -548,6 +637,22 @@ func seedCanonicalMergeSuccess(t *testing.T, pool *pgxpool.Pool) {
 			($3::uuid, 'season', $1::uuid, 1, 'Requested Season 1'), ($4::uuid, 'season', $2::uuid, 1, 'Source Season 1'),
 			($5::uuid, 'episode', $3::uuid, 1, 'Fixture Episode 1'), ($6::uuid, 'episode', $4::uuid, 1, 'Fixture Episode 1 Source'),
 			($7::uuid, 'episode', $4::uuid, 2, 'Fixture Episode 2');
+		INSERT INTO titles (id, media_type, parent_id, ordinal, hierarchy_variant, display_title) VALUES
+			($10::uuid, 'season', $1::uuid, 1, 'tvdb:2', 'Destination Variant Season'),
+			($11::uuid, 'episode', $10::uuid, 1, 'tvdb:2', 'Destination Variant Episode'),
+			($12::uuid, 'season', $2::uuid, 1, 'tvdb:3', 'Source Variant Season'),
+			($13::uuid, 'episode', $12::uuid, 1, 'tvdb:3', 'Source Variant Episode'),
+			($14::uuid, 'season', $2::uuid, 1, 'tvdb:2', 'Duplicate Variant Season'),
+			($15::uuid, 'episode', $14::uuid, 1, 'tvdb:2', 'Duplicate Variant Episode');
+		INSERT INTO title_episode_order_identities
+			(title_id, series_title_id, provider, order_id, namespace, external_id)
+		VALUES
+			($10::uuid, $1::uuid, 'tvdb', '2', 'season', '7001'),
+			($11::uuid, $1::uuid, 'tvdb', '2', 'episode', '7002'),
+			($12::uuid, $2::uuid, 'tvdb', '3', 'season', '8001'),
+			($13::uuid, $2::uuid, 'tvdb', '3', 'episode', '8002'),
+			($14::uuid, $2::uuid, 'tvdb', '2', 'season', '7001'),
+			($15::uuid, $2::uuid, 'tvdb', '2', 'episode', '7002');
 		INSERT INTO title_external_ids (title_id, provider, namespace, external_id) VALUES
 			($1::uuid, 'imdb', 'series', 'tt9000101'), ($2::uuid, 'tmdb', 'series', '900101'),
 			($3::uuid, 'tvdb', 'season', '930101'), ($4::uuid, 'tmdb', 'season', '910101'),
@@ -567,9 +672,12 @@ func seedCanonicalMergeSuccess(t *testing.T, pool *pgxpool.Pool) {
 		INSERT INTO profile_progress (profile_id, title_id, position_seconds, duration_seconds, completed, version, last_watched_at, updated_at) VALUES
 			($8::uuid, $5::uuid, 20, 100, false, 4, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'),
 			($8::uuid, $6::uuid, 90, 100, true, 7, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
-			($9::uuid, $7::uuid, 10, 100, false, 3, '2026-02-01T00:00:00Z', '2026-02-01T00:00:00Z')
+			($9::uuid, $7::uuid, 10, 100, false, 3, '2026-02-01T00:00:00Z', '2026-02-01T00:00:00Z'),
+			($9::uuid, $15::uuid, 45, 100, false, 5, '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z')
 	`, pgx.QueryExecModeSimpleProtocol, canonicalDestinationSeriesID, canonicalSourceSeriesID, canonicalDestinationSeasonID, canonicalSourceSeasonID,
-		canonicalDestinationEpisodeID, canonicalSourceEpisodeID, canonicalUniqueEpisodeID, canonicalProfileID, canonicalOtherProfileID); err != nil {
+		canonicalDestinationEpisodeID, canonicalSourceEpisodeID, canonicalUniqueEpisodeID, canonicalProfileID, canonicalOtherProfileID,
+		canonicalDestinationVariantSeasonID, canonicalDestinationVariantEpisodeID, canonicalSourceVariantSeasonID, canonicalSourceVariantEpisodeID,
+		canonicalSourceDuplicateVariantSeasonID, canonicalSourceDuplicateVariantEpisodeID); err != nil {
 		t.Fatalf("seed canonical metadata hierarchy: %v", err)
 	}
 }

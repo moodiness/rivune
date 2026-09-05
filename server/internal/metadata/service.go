@@ -2226,6 +2226,7 @@ func ensureProviderTitleHierarchy(ctx context.Context, tx pgx.Tx, provider, exte
 		FROM title_external_ids AS external
 		JOIN titles AS title ON title.id = external.title_id
 		WHERE external.provider = $1 AND external.namespace = $2 AND external.external_id = $3
+		  AND title.hierarchy_variant = ''
 	`, provider, mediaType, externalID).Scan(&titleID, &existingParentID, &existingOrdinal)
 	if err == nil {
 		expectedParentID := ""
@@ -2247,6 +2248,7 @@ func ensureProviderTitleHierarchy(ctx context.Context, tx pgx.Tx, provider, exte
 			SET ordinal = $2,
 			    updated_at = now()
 			WHERE title.id = $1::uuid
+			  AND title.hierarchy_variant = ''
 			  AND NOT EXISTS (
 			      SELECT 1
 			      FROM titles AS sibling
@@ -2254,6 +2256,8 @@ func ensureProviderTitleHierarchy(ctx context.Context, tx pgx.Tx, provider, exte
 			        AND sibling.media_type = title.media_type
 			        AND sibling.ordinal = $2
 			        AND sibling.id <> title.id
+			        AND sibling.hierarchy_variant = ''
+			        AND sibling.is_current
 			  )
 		`, titleID, expectedOrdinal)
 		if updateErr != nil {
@@ -2275,6 +2279,8 @@ func ensureProviderTitleHierarchy(ctx context.Context, tx pgx.Tx, provider, exte
 			SELECT id::text
 			FROM titles
 			WHERE parent_id = $1::uuid AND media_type = $2 AND ordinal = $3
+			  AND hierarchy_variant = ''
+			  AND is_current
 		`, *parentID, mediaType, *ordinal).Scan(&titleID)
 		if err == nil {
 			var existingExternalID string
@@ -2306,8 +2312,8 @@ func ensureProviderTitleHierarchy(ctx context.Context, tx pgx.Tx, provider, exte
 	}
 
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO titles (media_type, parent_id, ordinal)
-		VALUES ($1, $2::uuid, $3)
+		INSERT INTO titles (media_type, parent_id, ordinal, hierarchy_variant, is_current)
+		VALUES ($1, $2::uuid, $3, '', true)
 		RETURNING id::text
 	`, mediaType, parentID, ordinal).Scan(&titleID); err != nil {
 		return "", fmt.Errorf("create title: %w", err)
@@ -2394,6 +2400,7 @@ func consolidateCanonicalTitle(ctx context.Context, tx pgx.Tx, destinationID, me
 			WHERE external.provider = $1
 			  AND external.namespace = $2
 			  AND external.external_id = $3
+			  AND title.hierarchy_variant = ''
 		`, identity.provider, mediaType, identity.externalID).Scan(&mappedTitleID, &mappedMediaType)
 		if errors.Is(err, pgx.ErrNoRows) {
 			continue
@@ -2421,6 +2428,7 @@ func consolidateCanonicalTitle(ctx context.Context, tx pgx.Tx, destinationID, me
 			SELECT media_type
 			FROM titles
 			WHERE id = $1::uuid
+			  AND hierarchy_variant = ''
 			FOR UPDATE
 		`, titleID).Scan(&storedMediaType)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -2495,6 +2503,8 @@ func mergeTitleTree(ctx context.Context, tx pgx.Tx, destinationID, sourceID, med
 		SELECT id::text, media_type, ordinal
 		FROM titles
 		WHERE parent_id = $1::uuid
+		  AND hierarchy_variant = ''
+		  AND is_current
 		ORDER BY media_type, ordinal, id
 	`, sourceID)
 	if err != nil {
@@ -2528,6 +2538,8 @@ func mergeTitleTree(ctx context.Context, tx pgx.Tx, destinationID, sourceID, med
 			WHERE parent_id = $1::uuid
 			  AND media_type = $2
 			  AND ordinal = $3
+			  AND hierarchy_variant = ''
+			  AND is_current
 			FOR UPDATE
 		`, destinationID, sourceChild.mediaType, sourceChild.ordinal).Scan(&destinationChildID)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -2538,6 +2550,7 @@ func mergeTitleTree(ctx context.Context, tx pgx.Tx, destinationID, sourceID, med
 				UPDATE titles
 				SET parent_id = $1::uuid, updated_at = now()
 				WHERE id = $2::uuid
+				  AND hierarchy_variant = ''
 			`, destinationID, sourceChild.id); err != nil {
 				return fmt.Errorf("move unique title child: %w", err)
 			}
@@ -2547,6 +2560,11 @@ func mergeTitleTree(ctx context.Context, tx pgx.Tx, destinationID, sourceID, med
 			return fmt.Errorf("query canonical title child: %w", err)
 		}
 		if err := mergeTitleTree(ctx, tx, destinationChildID, sourceChild.id, sourceChild.mediaType); err != nil {
+			return err
+		}
+	}
+	if mediaType == MediaTypeSeries {
+		if err := preserveEpisodeOrderTrees(ctx, tx, destinationID, sourceID); err != nil {
 			return err
 		}
 	}
@@ -2575,8 +2593,238 @@ func mergeTitleTree(ctx context.Context, tx pgx.Tx, destinationID, sourceID, med
 	`, destinationID, sourceID); err != nil {
 		return fmt.Errorf("move title identities: %w", err)
 	}
-	if _, err := tx.Exec(ctx, "DELETE FROM titles WHERE id = $1::uuid", sourceID); err != nil {
+	commandTag, err := tx.Exec(ctx, `
+		DELETE FROM titles
+		WHERE id = $1::uuid
+		  AND hierarchy_variant = ''
+	`, sourceID)
+	if err != nil {
 		return fmt.Errorf("remove duplicate title: %w", err)
+	}
+	if commandTag.RowsAffected() != 1 {
+		return errors.New("metadata provider returned a conflicting title hierarchy")
+	}
+	return nil
+}
+
+func preserveEpisodeOrderTrees(ctx context.Context, tx pgx.Tx, destinationSeriesID, sourceSeriesID string) error {
+
+	for {
+		var destinationTitleID, sourceTitleID string
+		err := tx.QueryRow(ctx, `
+			SELECT destination.title_id::text, source.title_id::text
+			FROM title_episode_order_identities AS source
+			JOIN title_episode_order_identities AS destination
+			  ON destination.series_title_id = $1::uuid
+			 AND destination.provider = source.provider
+			 AND destination.order_id = source.order_id
+			 AND destination.namespace = source.namespace
+			 AND destination.external_id = source.external_id
+			WHERE source.series_title_id = $2::uuid
+			  AND source.title_id <> destination.title_id
+			ORDER BY CASE source.namespace WHEN 'season' THEN 0 ELSE 1 END,
+			         source.order_id, source.external_id
+			LIMIT 1
+		`, destinationSeriesID, sourceSeriesID).Scan(&destinationTitleID, &sourceTitleID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("query duplicate episode-order identity: %w", err)
+		}
+		if err := mergeEpisodeOrderTitle(ctx, tx, destinationTitleID, sourceTitleID, destinationSeriesID); err != nil {
+			return err
+		}
+	}
+
+	var coordinateConflict bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM titles AS source
+			JOIN titles AS destination
+			  ON destination.parent_id = $1::uuid
+			 AND destination.media_type = source.media_type
+			 AND destination.hierarchy_variant = source.hierarchy_variant
+			 AND destination.ordinal = source.ordinal
+			 AND destination.is_current
+			WHERE source.parent_id = $2::uuid
+			  AND source.hierarchy_variant <> ''
+			  AND source.is_current
+		)
+	`, destinationSeriesID, sourceSeriesID).Scan(&coordinateConflict); err != nil {
+		return fmt.Errorf("check episode-order root coordinate conflicts: %w", err)
+	}
+	if coordinateConflict {
+		return errors.New("metadata provider returned conflicting episode-order identities")
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE title_episode_order_identities
+		SET series_title_id = $1::uuid
+		WHERE series_title_id = $2::uuid
+	`, destinationSeriesID, sourceSeriesID); err != nil {
+		return fmt.Errorf("repoint episode-order identities: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE titles
+		SET parent_id = $1::uuid
+		WHERE parent_id = $2::uuid
+		  AND hierarchy_variant <> ''
+	`, destinationSeriesID, sourceSeriesID); err != nil {
+		return fmt.Errorf("reparent episode-order roots: %w", err)
+	}
+	return nil
+}
+
+func mergeEpisodeOrderTitle(ctx context.Context, tx pgx.Tx, destinationID, sourceID, destinationSeriesID string) error {
+	var mediaType, hierarchyVariant string
+	err := tx.QueryRow(ctx, `
+		SELECT source_title.media_type, source_title.hierarchy_variant
+		FROM title_episode_order_identities AS source
+		JOIN title_episode_order_identities AS destination
+		  ON destination.title_id = $1::uuid
+		 AND destination.series_title_id = $3::uuid
+		 AND destination.provider = source.provider
+		 AND destination.order_id = source.order_id
+		 AND destination.namespace = source.namespace
+		 AND destination.external_id = source.external_id
+		JOIN titles AS source_title ON source_title.id = source.title_id
+		JOIN titles AS destination_title ON destination_title.id = destination.title_id
+		 AND destination_title.media_type = source_title.media_type
+		 AND destination_title.hierarchy_variant = source_title.hierarchy_variant
+		WHERE source.title_id = $2::uuid
+		  AND source_title.hierarchy_variant <> ''
+	`, destinationID, sourceID, destinationSeriesID).Scan(&mediaType, &hierarchyVariant)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errors.New("metadata provider returned conflicting episode-order identities")
+	}
+	if err != nil {
+		return fmt.Errorf("validate duplicate episode-order title: %w", err)
+	}
+	if err := mergeProfileState(ctx, tx, destinationID, sourceID); err != nil {
+		return err
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT child.id::text
+		FROM titles AS child
+		WHERE child.parent_id = $1::uuid
+		  AND child.hierarchy_variant <> ''
+		ORDER BY child.id
+	`, sourceID)
+	if err != nil {
+		return fmt.Errorf("query duplicate episode-order children: %w", err)
+	}
+	childIDs := make([]string, 0)
+	for rows.Next() {
+		var childID string
+		if err := rows.Scan(&childID); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan duplicate episode-order child: %w", err)
+		}
+		childIDs = append(childIDs, childID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate duplicate episode-order children: %w", err)
+	}
+	rows.Close()
+	var canonicalChild bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM titles
+			WHERE parent_id = $1::uuid AND hierarchy_variant = ''
+		)
+	`, sourceID).Scan(&canonicalChild); err != nil {
+		return fmt.Errorf("check duplicate episode-order children: %w", err)
+	}
+	if canonicalChild {
+		return errors.New("metadata provider returned a conflicting title hierarchy")
+	}
+	for _, childID := range childIDs {
+		var destinationChildID string
+		err := tx.QueryRow(ctx, `
+			SELECT destination.title_id::text
+			FROM title_episode_order_identities AS source
+			JOIN title_episode_order_identities AS destination
+			  ON destination.series_title_id = $2::uuid
+			 AND destination.provider = source.provider
+			 AND destination.order_id = source.order_id
+			 AND destination.namespace = source.namespace
+			 AND destination.external_id = source.external_id
+			WHERE source.title_id = $1::uuid
+			LIMIT 1
+		`, childID, destinationSeriesID).Scan(&destinationChildID)
+		if err == nil {
+			if err := mergeEpisodeOrderTitle(ctx, tx, destinationChildID, childID, destinationSeriesID); err != nil {
+				return err
+			}
+			continue
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("query matching episode-order child: %w", err)
+		}
+		var collision bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM titles AS source
+				JOIN titles AS destination
+				  ON destination.parent_id = $2::uuid
+				 AND destination.media_type = source.media_type
+				 AND destination.hierarchy_variant = source.hierarchy_variant
+				 AND destination.ordinal = source.ordinal
+				 AND destination.is_current
+				WHERE source.id = $1::uuid AND source.is_current
+			)
+		`, childID, destinationID).Scan(&collision); err != nil {
+			return fmt.Errorf("check episode-order child coordinate: %w", err)
+		}
+		if collision {
+			return errors.New("metadata provider returned conflicting episode-order identities")
+		}
+		commandTag, err := tx.Exec(ctx, `
+			UPDATE titles
+			SET parent_id = $1::uuid
+			WHERE id = $2::uuid
+			  AND hierarchy_variant = $3
+		`, destinationID, childID, hierarchyVariant)
+		if err != nil {
+			return fmt.Errorf("move unique episode-order child: %w", err)
+		}
+		if commandTag.RowsAffected() != 1 {
+			return errors.New("metadata provider returned a conflicting title hierarchy")
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE titles AS destination
+		SET display_title = COALESCE(destination.display_title, source.display_title),
+		    poster_url = COALESCE(destination.poster_url, source.poster_url),
+		    background_url = COALESCE(destination.background_url, source.background_url),
+		    release_info = COALESCE(destination.release_info, source.release_info),
+		    resource_id = COALESCE(destination.resource_id, source.resource_id),
+		    resource_provider = COALESCE(destination.resource_provider, source.resource_provider),
+		    release_date = COALESCE(destination.release_date, source.release_date),
+		    created_at = LEAST(destination.created_at, source.created_at),
+		    updated_at = GREATEST(destination.updated_at, source.updated_at, now())
+		FROM titles AS source
+		WHERE destination.id = $1::uuid
+		  AND source.id = $2::uuid
+		  AND destination.media_type = $3
+		  AND destination.hierarchy_variant = $4
+	`, destinationID, sourceID, mediaType, hierarchyVariant); err != nil {
+		return fmt.Errorf("merge episode-order title snapshots: %w", err)
+	}
+	commandTag, err := tx.Exec(ctx, `
+		DELETE FROM titles
+		WHERE id = $1::uuid
+		  AND hierarchy_variant = $2
+	`, sourceID, hierarchyVariant)
+	if err != nil {
+		return fmt.Errorf("remove duplicate episode-order title: %w", err)
+	}
+	if commandTag.RowsAffected() != 1 {
+		return errors.New("metadata provider returned a conflicting title hierarchy")
 	}
 	return nil
 }
@@ -2652,6 +2900,7 @@ func invalidateTitleSubtree(ctx context.Context, tx pgx.Tx, titleID string) erro
 			SELECT child.id
 			FROM titles AS child
 			JOIN subtree AS parent ON parent.id = child.parent_id
+			WHERE child.hierarchy_variant = ''
 		)
 		DELETE FROM title_metadata AS metadata
 		USING subtree

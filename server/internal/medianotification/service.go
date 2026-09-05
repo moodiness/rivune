@@ -180,11 +180,14 @@ func (s *Service) Follow(ctx context.Context, principal auth.Principal, titleID 
 			       season.ordinal AS season_number, NULL::integer AS episode_number
 			FROM titles AS season
 			WHERE season.parent_id = $2::uuid AND season.media_type = 'season'
+			  AND season.hierarchy_variant = ''
 			UNION ALL
 			SELECT $1::uuid, $2::uuid, episode.id, 'episode', season.ordinal, episode.ordinal
 			FROM titles AS season
 			JOIN titles AS episode ON episode.parent_id = season.id AND episode.media_type = 'episode'
+			  AND episode.hierarchy_variant = ''
 			WHERE season.parent_id = $2::uuid AND season.media_type = 'season'
+			  AND season.hierarchy_variant = ''
 			ORDER BY subject_kind, season_number, episode_number, subject_title_id
 			LIMIT $3
 			ON CONFLICT DO NOTHING
@@ -530,10 +533,13 @@ func seriesSubjectOverflow(ctx context.Context, tx pgx.Tx, rootID string) (bool,
 			SELECT 1 FROM (
 				SELECT season.id FROM titles AS season
 				WHERE season.parent_id = $1::uuid AND season.media_type = 'season'
+				  AND season.hierarchy_variant = ''
 				UNION ALL
 				SELECT episode.id FROM titles AS season
 				JOIN titles AS episode ON episode.parent_id = season.id AND episode.media_type = 'episode'
+				  AND episode.hierarchy_variant = ''
 				WHERE season.parent_id = $1::uuid AND season.media_type = 'season'
+				  AND season.hierarchy_variant = ''
 				OFFSET $2 LIMIT 1
 			) AS overflow_subject
 		)
@@ -554,12 +560,15 @@ func (s *Service) generateSeries(ctx context.Context, tx pgx.Tx, now, today, las
 			       COALESCE(season.display_title, $3) AS title, season.release_date
 			FROM titles AS season
 			WHERE season.parent_id = $2::uuid AND season.media_type = 'season'
+			  AND season.hierarchy_variant = ''
 			UNION ALL
 			SELECT episode.id, 'episode'::text, season.ordinal, episode.ordinal,
 			       COALESCE(episode.display_title, $3), episode.release_date
 			FROM titles AS season
 			JOIN titles AS episode ON episode.parent_id = season.id AND episode.media_type = 'episode'
+			  AND episode.hierarchy_variant = ''
 			WHERE season.parent_id = $2::uuid AND season.media_type = 'season'
+			  AND season.hierarchy_variant = ''
 			ORDER BY subject_kind, season_number, episode_number, subject_title_id
 			LIMIT $6
 		), fresh AS (
@@ -614,7 +623,9 @@ func (s *Service) generateSeries(ctx context.Context, tx pgx.Tx, now, today, las
 		       GREATEST((episode.release_date - $6::integer)::timestamp AT TIME ZONE $7, $4) + interval '90 days'
 		FROM titles AS season
 		JOIN titles AS episode ON episode.parent_id = season.id AND episode.media_type = 'episode'
+		  AND episode.hierarchy_variant = ''
 		WHERE season.parent_id = $2::uuid AND season.media_type = 'season'
+		  AND season.hierarchy_variant = ''
 		  AND episode.release_date BETWEEN $5::date AND $8::date
 		ORDER BY season.ordinal, episode.ordinal, episode.id
 		LIMIT $9
