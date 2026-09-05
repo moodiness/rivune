@@ -259,7 +259,12 @@ internal interface RivuneGateway {
     suspend fun semanticSearch(input: SemanticSearchRequest): SemanticSearchPage
     suspend fun resolveTitle(input: TitleResolveInput): TitleReference
     suspend fun movie(id: UUID, language: String? = null): Movie
-    suspend fun series(id: UUID, mappingProvider: SeriesMappingProvider = SeriesMappingProvider.TMDB, language: String? = null): Series
+    suspend fun series(
+        id: UUID,
+        mappingProvider: SeriesMappingProvider = SeriesMappingProvider.TMDB,
+        language: String? = null,
+        episodeOrder: String? = null,
+    ): Series
     suspend fun season(id: String, mappingProvider: SeriesMappingProvider, language: String? = null): Season
     suspend fun trailers(titleId: UUID, seasonNumber: Int? = null, language: String? = null): List<io.rivune.api.Trailer>
     suspend fun library(mediaType: TitleMediaType? = null, page: Int? = null, pageSize: Int? = null): LibraryPage
@@ -364,8 +369,8 @@ private class DefaultRivuneGateway(
     override suspend fun semanticSearch(input: SemanticSearchRequest) = client.semanticSearch(input)
     override suspend fun resolveTitle(input: TitleResolveInput) = client.resolveTitle(input)
     override suspend fun movie(id: UUID, language: String?) = client.movie(id, language)
-    override suspend fun series(id: UUID, mappingProvider: SeriesMappingProvider, language: String?) =
-        client.series(id, language = language, mappingProvider = mappingProvider)
+    override suspend fun series(id: UUID, mappingProvider: SeriesMappingProvider, language: String?, episodeOrder: String?) =
+        client.series(id, language = language, mappingProvider = mappingProvider, episodeOrder = episodeOrder)
     override suspend fun season(id: String, mappingProvider: SeriesMappingProvider, language: String?) =
         client.season(id, language = language, mappingProvider = mappingProvider)
     override suspend fun trailers(titleId: UUID, seasonNumber: Int?, language: String?) =
@@ -1311,9 +1316,20 @@ class RivuneViewModel internal constructor(
                 val library = runCatching { currentGateway.library(page = 1, pageSize = 100) }.getOrNull()
                 val movie = if (target.mediaType == "movie") runCatching { currentGateway.movie(titleId, language) }.getOrNull() else null
                 val series = if (target.mediaType == "series") {
-                    runCatching { currentGateway.series(titleId, language = language) }
-                        .recoverCatching { currentGateway.series(titleId, SeriesMappingProvider.TVDB, language) }
-                        .getOrNull()
+                    if (target.mappingProvider != null) {
+                        runCatching {
+                            currentGateway.series(
+                                titleId,
+                                mappingProvider = target.mappingProvider,
+                                language = language,
+                                episodeOrder = target.episodeOrderId,
+                            )
+                        }.getOrNull()
+                    } else {
+                        runCatching { currentGateway.series(titleId, language = language) }
+                            .recoverCatching { currentGateway.series(titleId, SeriesMappingProvider.TVDB, language) }
+                            .getOrNull()
+                    }
                 } else null
                 val trailers = if (target.mediaType == "movie" || target.mediaType == "series") {
                     runCatching { currentGateway.trailers(titleId, language = language) }.getOrDefault(emptyList())
@@ -1322,10 +1338,22 @@ class RivuneViewModel internal constructor(
                 }
                 val episodeSeries = if (target.mediaType == "episode") {
                     target.seriesId?.let { seriesId ->
-                        parentDetail?.series?.takeIf { it.id == seriesId }
-                            ?: runCatching { currentGateway.series(seriesId, language = language) }
+                        parentDetail?.series?.takeIf {
+                            it.id == seriesId && (target.mappingProvider == null || it.mappingProvider == target.mappingProvider)
+                        } ?: if (target.mappingProvider != null) {
+                            runCatching {
+                                currentGateway.series(
+                                    seriesId,
+                                    mappingProvider = target.mappingProvider,
+                                    language = language,
+                                    episodeOrder = target.episodeOrderId,
+                                )
+                            }.getOrNull()
+                        } else {
+                            runCatching { currentGateway.series(seriesId, language = language) }
                                 .recoverCatching { currentGateway.series(seriesId, SeriesMappingProvider.TVDB, language) }
                                 .getOrNull()
+                        }
                     }
                 } else {
                     null
@@ -3647,7 +3675,16 @@ class RivuneViewModel internal constructor(
     private fun mapContinueWatching(page: ContinueWatchingPage): List<MediaTarget> = page.items.map { item ->
         val payloadResourceId = item.resourceId?.takeIf(String::isNotBlank)
         val resourceId = payloadResourceId ?: item.titleId.toString()
-        val provider = item.resourceProvider?.takeIf(String::isNotBlank)
+        val provider = item.resourceProvider
+            ?.trim()
+            ?.takeIf(String::isNotBlank)
+            ?.lowercase(Locale.ROOT)
+        val mappingProvider = item.mappingProvider
+            ?.trim()
+            ?.takeIf(String::isNotBlank)
+            ?.let { value ->
+                SeriesMappingProvider.entries.firstOrNull { it.wireValue.equals(value, ignoreCase = true) }
+            }
         val isEpisode = item.mediaType == PlaybackProgressMediaType.EPISODE
         val episodeTitle = item.episodeTitle?.takeIf(String::isNotBlank)
             ?: item.episodeNumber?.let { "Episode $it" }
@@ -3676,6 +3713,9 @@ class RivuneViewModel internal constructor(
             releaseInfo = if (isEpisode) item.episodeAirDate ?: item.releaseInfo else item.releaseInfo,
             released = if (isEpisode) item.episodeAirDate else null,
             seriesId = item.seriesId,
+            mappingProvider = mappingProvider,
+            episodeOrderId = item.episodeOrderId?.trim()?.takeIf(String::isNotBlank),
+            metadataSeasonId = item.metadataSeasonId?.trim()?.takeIf(String::isNotBlank),
             seasonId = item.seasonId?.toString(),
             seasonNumber = item.seasonNumber,
             episodeNumber = item.episodeNumber,
@@ -4186,18 +4226,31 @@ class RivuneViewModel internal constructor(
         detail: MediaDetailState?,
     ): EpisodePlaybackContext {
         if (target.mediaType != "episode") return EpisodePlaybackContext()
-        val directMarkerRequest = markerRequest(target.seriesImdbId, target.seasonNumber, target.episodeNumber)
+        val directMarkerRequest = markerRequest(
+            target.seriesImdbId,
+            target.seasonNumber,
+            target.episodeNumber,
+            target.episodeOrderId,
+        )
         val seriesId = target.seriesId ?: return EpisodePlaybackContext(markerRequest = directMarkerRequest)
         val language = metadataLanguage()
         val series = try {
-            detail?.series?.takeIf { it.id == seriesId }
-                ?: try {
-                    currentGateway.series(seriesId, language = language)
-                } catch (cause: CancellationException) {
-                    throw cause
-                } catch (_: Throwable) {
-                    currentGateway.series(seriesId, SeriesMappingProvider.TVDB, language)
-                }
+            detail?.series?.takeIf {
+                it.id == seriesId && (target.mappingProvider == null || it.mappingProvider == target.mappingProvider)
+            } ?: target.mappingProvider?.let { mappingProvider ->
+                currentGateway.series(
+                    seriesId,
+                    mappingProvider = mappingProvider,
+                    language = language,
+                    episodeOrder = target.episodeOrderId,
+                )
+            } ?: try {
+                currentGateway.series(seriesId, language = language)
+            } catch (cause: CancellationException) {
+                throw cause
+            } catch (_: Throwable) {
+                currentGateway.series(seriesId, SeriesMappingProvider.TVDB, language)
+            }
         } catch (cause: CancellationException) {
             throw cause
         } catch (_: Throwable) {
@@ -4207,18 +4260,24 @@ class RivuneViewModel internal constructor(
             series.externalIds["imdb"] ?: target.seriesImdbId,
             target.seasonNumber,
             target.episodeNumber,
+            target.episodeOrderId,
         )
+        val mappingProvider = target.mappingProvider ?: series.mappingProvider
+        val metadataSeasonId = target.metadataSeasonId?.takeIf(String::isNotBlank)
         val nextEpisode = try {
             val currentSeason = detail?.season?.takeIf { season ->
-                season.seriesId == seriesId && season.episodes.any { it.id == titleId }
+                season.seriesId == seriesId &&
+                    season.episodes.any { it.id == titleId } &&
+                    (metadataSeasonId == null || season.id == metadataSeasonId)
             } ?: run {
-                val summary = series.seasons.firstOrNull { it.id == target.seasonId }
-                    ?: series.seasons.firstOrNull { it.seasonNumber == target.seasonNumber }
+                val seasonId = metadataSeasonId
+                    ?: series.seasons.firstOrNull { it.id == target.seasonId }?.id
+                    ?: series.seasons.firstOrNull { it.seasonNumber == target.seasonNumber }?.id
                     ?: return EpisodePlaybackContext(markerRequest = markerRequest)
-                currentGateway.season(summary.id, series.mappingProvider, language)
+                currentGateway.season(seasonId, mappingProvider, language)
             }
             resolveNextEpisodeTarget(series, currentSeason, titleId, target) { seasonId ->
-                currentGateway.season(seasonId, series.mappingProvider, language)
+                currentGateway.season(seasonId, mappingProvider, language)
             }
         } catch (cause: CancellationException) {
             throw cause
@@ -4228,8 +4287,20 @@ class RivuneViewModel internal constructor(
         return EpisodePlaybackContext(nextEpisode, markerRequest)
     }
 
-    private fun markerRequest(imdbId: String?, season: Int?, episode: Int?): PlaybackMarkerRequest? {
-        if (imdbId?.matches(SERIES_IMDB_ID) != true || season == null || season <= 0 || episode == null || episode <= 0) {
+    private fun markerRequest(
+        imdbId: String?,
+        season: Int?,
+        episode: Int?,
+        episodeOrderId: String? = null,
+    ): PlaybackMarkerRequest? {
+        if (
+            !episodeOrderId.isNullOrBlank() ||
+            imdbId?.matches(SERIES_IMDB_ID) != true ||
+            season == null ||
+            season <= 0 ||
+            episode == null ||
+            episode <= 0
+        ) {
             return null
         }
         return PlaybackMarkerRequest(imdbId, season, episode)
