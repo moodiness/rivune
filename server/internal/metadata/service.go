@@ -30,6 +30,7 @@ var (
 	externalProviderPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 	mappedSeasonPattern     = regexp.MustCompile(`^tvdb:([0-9a-fA-F-]{36}):([1-9][0-9]*)$`)
 	episodeOrderPattern     = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
+	tvdbResourceIDPattern   = regexp.MustCompile(`^[1-9][0-9]*$`)
 )
 
 type ProviderSet struct {
@@ -1183,6 +1184,26 @@ func (s *Service) mappedSeasonDetails(ctx context.Context, principal auth.Princi
 			provided = enriched
 		}
 	}
+	orderID, officialOrder, err := normalizeMappedEpisodeOrder(provided)
+	if err != nil {
+		return Season{}, err
+	}
+	if !officialOrder {
+		provided.EpisodeOrderID = orderID
+		tx, err := s.beginAuthorizedProfileTx(ctx, principal)
+		if err != nil {
+			return Season{}, err
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		season, err := persistMappedSeasonVariant(ctx, tx, seriesID, seasonID, normalizedLanguage, provided)
+		if err != nil {
+			return Season{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return Season{}, fmt.Errorf("commit TVDB episode-order hierarchy: %w", err)
+		}
+		return season, nil
+	}
 	canonicalEpisodes := make([]Episode, 0, base.NumberOfEpisodes)
 	for _, summary := range base.Seasons {
 		season, loadErr := s.SeasonDetails(ctx, principal, summary.ID, language, providerName)
@@ -1312,6 +1333,252 @@ func (s *Service) mappedSeasonDetails(ctx context.Context, principal auth.Princi
 		Episodes:     episodes,
 		ExternalIDs:  map[string]string{"tvdb": provided.ExternalID},
 	}, nil
+}
+
+func normalizeMappedEpisodeOrder(provided ProviderSeason) (string, bool, error) {
+	orderID := strings.TrimSpace(provided.EpisodeOrderID)
+	orderType := strings.TrimSpace(provided.EpisodeOrderType)
+	if orderID == "" && orderType == "" {
+		return "", true, nil
+	}
+	if !episodeOrderPattern.MatchString(orderID) {
+		return "", false, fmt.Errorf("%w: TVDB returned an invalid episode-order identifier", ErrProviderFailure)
+	}
+	if orderType == "" {
+		return "", false, fmt.Errorf("%w: TVDB returned an episode order without a type", ErrProviderFailure)
+	}
+	return orderID, strings.EqualFold(orderType, "official"), nil
+}
+
+type episodeOrderTitle struct {
+	namespace     string
+	externalID    string
+	mediaType     string
+	parentID      string
+	ordinal       int
+	title         string
+	posterURL     string
+	backgroundURL string
+	releaseDate   string
+}
+
+func persistMappedSeasonVariant(
+	ctx context.Context,
+	tx pgx.Tx,
+	seriesID,
+	publicSeasonID,
+	normalizedLanguage string,
+	provided ProviderSeason,
+) (Season, error) {
+	_ = normalizedLanguage
+	orderID, officialOrder, err := normalizeMappedEpisodeOrder(provided)
+	if err != nil {
+		return Season{}, err
+	}
+	if officialOrder {
+		return Season{}, fmt.Errorf("%w: official TVDB episode orders require canonical matching", ErrProviderFailure)
+	}
+	matches := mappedSeasonPattern.FindStringSubmatch(strings.TrimSpace(publicSeasonID))
+	seasonExternalID := strings.TrimSpace(provided.ExternalID)
+	if matches == nil || matches[1] != seriesID || matches[2] != seasonExternalID ||
+		!validTVDBOrderResourceID(seasonExternalID) || provided.SeasonNumber < 0 {
+		return Season{}, fmt.Errorf("%w: TVDB returned an invalid season hierarchy", ErrProviderFailure)
+	}
+	if _, err := tx.Exec(ctx, `
+		SELECT pg_advisory_xact_lock(hashtextextended(
+			'episode-order:' || $1::text || ':tvdb:' || $2::text, 0))
+	`, seriesID, orderID); err != nil {
+		return Season{}, fmt.Errorf("lock TVDB episode-order hierarchy: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE titles AS title
+		SET is_current = false,
+		    updated_at = now()
+		FROM title_episode_order_identities AS identity
+		WHERE identity.title_id = title.id
+		  AND identity.series_title_id = $1::uuid
+		  AND identity.provider = 'tvdb'
+		  AND identity.order_id = $2
+		  AND title.is_current
+	`, seriesID, orderID); err != nil {
+		return Season{}, fmt.Errorf("deactivate prior TVDB episode-order hierarchy: %w", err)
+	}
+
+	variant := "tvdb:" + orderID
+	seasonOrdinal := provided.SeasonNumber
+	storedSeasonID, err := upsertEpisodeOrderTitle(ctx, tx, seriesID, orderID, variant, episodeOrderTitle{
+		namespace:     MediaTypeSeason,
+		externalID:    seasonExternalID,
+		mediaType:     MediaTypeSeason,
+		parentID:      seriesID,
+		ordinal:       seasonOrdinal,
+		title:         provided.Name,
+		posterURL:     provided.PosterURL,
+		backgroundURL: provided.BackdropURL,
+		releaseDate:   provided.AirDate,
+	})
+	if err != nil {
+		return Season{}, err
+	}
+
+	episodes := make([]Episode, 0, len(provided.Episodes))
+	seenExternalIDs := make(map[string]struct{}, len(provided.Episodes))
+	seenOrdinals := make(map[int]struct{}, len(provided.Episodes))
+	for _, mapped := range provided.Episodes {
+		externalID := strings.TrimSpace(mapped.ExternalID)
+		if !validTVDBOrderResourceID(externalID) ||
+			mapped.SeasonNumber != provided.SeasonNumber ||
+			mapped.EpisodeNumber < 0 {
+			return Season{}, fmt.Errorf("%w: TVDB returned an invalid episode-order hierarchy", ErrProviderFailure)
+		}
+		if _, duplicate := seenExternalIDs[externalID]; duplicate {
+			return Season{}, fmt.Errorf("%w: TVDB returned a duplicate episode-order identity", ErrProviderFailure)
+		}
+		if _, duplicate := seenOrdinals[mapped.EpisodeNumber]; duplicate {
+			return Season{}, fmt.Errorf("%w: TVDB returned a duplicate episode-order coordinate", ErrProviderFailure)
+		}
+		seenExternalIDs[externalID] = struct{}{}
+		seenOrdinals[mapped.EpisodeNumber] = struct{}{}
+
+		storedEpisodeID, err := upsertEpisodeOrderTitle(ctx, tx, seriesID, orderID, variant, episodeOrderTitle{
+			namespace:     MediaTypeEpisode,
+			externalID:    externalID,
+			mediaType:     MediaTypeEpisode,
+			parentID:      storedSeasonID,
+			ordinal:       mapped.EpisodeNumber,
+			title:         mapped.Name,
+			posterURL:     mapped.StillURL,
+			backgroundURL: mapped.BackdropURL,
+			releaseDate:   mapped.AirDate,
+		})
+		if err != nil {
+			return Season{}, err
+		}
+		externalIDs := make(map[string]string, len(mapped.AdditionalIDs)+1)
+		for provider, additionalID := range mapped.AdditionalIDs {
+			if provider = strings.ToLower(strings.TrimSpace(provider)); provider != "" {
+				if additionalID = strings.TrimSpace(additionalID); additionalID != "" {
+					externalIDs[provider] = additionalID
+				}
+			}
+		}
+		externalIDs["tvdb"] = externalID
+		episodes = append(episodes, Episode{
+			ID:             storedEpisodeID,
+			MediaType:      MediaTypeEpisode,
+			SeasonID:       publicSeasonID,
+			Name:           mapped.Name,
+			Overview:       mapped.Overview,
+			SeasonNumber:   mapped.SeasonNumber,
+			EpisodeNumber:  mapped.EpisodeNumber,
+			AirDate:        mapped.AirDate,
+			StillURL:       mapped.StillURL,
+			BackdropURL:    mapped.BackdropURL,
+			RuntimeMinutes: mapped.RuntimeMinutes,
+			VoteAverage:    mapped.VoteAverage,
+			VoteCount:      mapped.VoteCount,
+			ExternalIDs:    externalIDs,
+		})
+	}
+	sort.Slice(episodes, func(left, right int) bool {
+		return episodes[left].EpisodeNumber < episodes[right].EpisodeNumber
+	})
+	return Season{
+		ID:           publicSeasonID,
+		MediaType:    MediaTypeSeason,
+		SeriesID:     seriesID,
+		Name:         provided.Name,
+		Overview:     provided.Overview,
+		SeasonNumber: provided.SeasonNumber,
+		AirDate:      provided.AirDate,
+		PosterURL:    provided.PosterURL,
+		BackdropURL:  provided.BackdropURL,
+		VoteAverage:  provided.VoteAverage,
+		Episodes:     episodes,
+		ExternalIDs:  map[string]string{"tvdb": seasonExternalID},
+	}, nil
+}
+
+func upsertEpisodeOrderTitle(
+	ctx context.Context,
+	tx pgx.Tx,
+	seriesID,
+	orderID,
+	variant string,
+	provided episodeOrderTitle,
+) (string, error) {
+	releaseDate := strings.TrimSpace(provided.releaseDate)
+	if releaseDate != "" {
+		parsed, err := time.Parse(time.DateOnly, releaseDate)
+		if err != nil || parsed.Year() < 1 || parsed.Format(time.DateOnly) != releaseDate {
+			return "", fmt.Errorf("%w: TVDB returned an invalid release date", ErrProviderFailure)
+		}
+	}
+	var titleID string
+	err := tx.QueryRow(ctx, `
+		SELECT title_id::text
+		FROM title_episode_order_identities
+		WHERE series_title_id = $1::uuid
+		  AND provider = 'tvdb'
+		  AND order_id = $2
+		  AND namespace = $3
+		  AND external_id = $4
+	`, seriesID, orderID, provided.namespace, provided.externalID).Scan(&titleID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("query TVDB episode-order identity: %w", err)
+	}
+	if err == nil {
+		if _, err := tx.Exec(ctx, `
+			UPDATE titles
+			SET parent_id = $2::uuid,
+			    ordinal = $3,
+			    hierarchy_variant = $4,
+			    is_current = true,
+			    display_title = COALESCE(NULLIF($5, ''), display_title),
+			    poster_url = COALESCE(NULLIF($6, ''), poster_url),
+			    background_url = COALESCE(NULLIF($7, ''), background_url),
+			    release_date = COALESCE(NULLIF($8, '')::date, release_date),
+			    resource_id = $9,
+			    resource_provider = 'tvdb',
+			    updated_at = now()
+			WHERE id = $1::uuid
+		`, titleID, provided.parentID, provided.ordinal, variant,
+			strings.TrimSpace(provided.title), strings.TrimSpace(provided.posterURL),
+			strings.TrimSpace(provided.backgroundURL), releaseDate, "tvdb:"+provided.externalID); err != nil {
+			return "", fmt.Errorf("reactivate TVDB episode-order title: %w", err)
+		}
+		return titleID, nil
+	}
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO titles (
+			media_type, parent_id, ordinal, hierarchy_variant, is_current,
+			display_title, poster_url, background_url, release_date,
+			resource_id, resource_provider
+		)
+		VALUES (
+			$1, $2::uuid, $3, $4, true,
+			NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, '')::date,
+			$9, 'tvdb'
+		)
+		RETURNING id::text
+	`, provided.mediaType, provided.parentID, provided.ordinal, variant,
+		strings.TrimSpace(provided.title), strings.TrimSpace(provided.posterURL),
+		strings.TrimSpace(provided.backgroundURL), releaseDate, "tvdb:"+provided.externalID).Scan(&titleID); err != nil {
+		return "", fmt.Errorf("create TVDB episode-order title: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO title_episode_order_identities (
+			title_id, series_title_id, provider, order_id, namespace, external_id
+		)
+		VALUES ($1::uuid, $2::uuid, 'tvdb', $3, $4, $5)
+	`, titleID, seriesID, orderID, provided.namespace, provided.externalID); err != nil {
+		return "", fmt.Errorf("link TVDB episode-order identity: %w", err)
+	}
+	return titleID, nil
+}
+
+func validTVDBOrderResourceID(value string) bool {
+	return len(value) <= 512 && tvdbResourceIDPattern.MatchString(value)
 }
 
 func matchMappedEpisodes(seasonID string, provided []ProviderEpisode, canonical []Episode) ([]Episode, map[string]string, error) {

@@ -493,7 +493,11 @@ func newCanonicalMergeTestPool(t *testing.T, queryTracers ...pgx.QueryTracer) *p
 		CREATE TEMPORARY TABLE titles (
 			id uuid PRIMARY KEY DEFAULT gen_random_uuid(), media_type text NOT NULL, parent_id uuid REFERENCES titles(id) ON DELETE CASCADE, ordinal integer,
 			display_title text, poster_url text, background_url text, release_info text, resource_id text, resource_provider text, release_date date,
-			created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE (parent_id, media_type, ordinal));
+			hierarchy_variant text NOT NULL DEFAULT '', is_current boolean NOT NULL DEFAULT true,
+			created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+		CREATE UNIQUE INDEX titles_parent_ordinal_unique
+			ON titles (parent_id, media_type, hierarchy_variant, ordinal)
+			WHERE is_current;
 		CREATE TEMPORARY TABLE title_external_ids (
 			title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE, provider text NOT NULL, namespace text NOT NULL, external_id text NOT NULL,
 			PRIMARY KEY (provider, namespace, external_id), UNIQUE (title_id, provider));
@@ -501,6 +505,15 @@ func newCanonicalMergeTestPool(t *testing.T, queryTracers ...pgx.QueryTracer) *p
 			title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE, provider text NOT NULL, language text NOT NULL, payload jsonb NOT NULL,
 			expires_at timestamptz NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (title_id, provider, language),
 			FOREIGN KEY (title_id, provider) REFERENCES title_external_ids(title_id, provider) ON DELETE CASCADE);
+		CREATE TEMPORARY TABLE title_episode_order_identities (
+			title_id uuid PRIMARY KEY REFERENCES titles(id) ON DELETE CASCADE,
+			series_title_id uuid NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+			provider text NOT NULL CHECK (provider = 'tvdb'),
+			order_id text NOT NULL CHECK (order_id ~ '^[1-9][0-9]*$' AND char_length(order_id) <= 32),
+			namespace text NOT NULL CHECK (namespace IN ('season', 'episode')),
+			external_id text NOT NULL CHECK (external_id ~ '^[1-9][0-9]*$' AND char_length(external_id) <= 512),
+			CONSTRAINT title_episode_order_identities_unique
+				UNIQUE (series_title_id, provider, order_id, namespace, external_id));
 		CREATE TEMPORARY TABLE profiles (
 			id uuid PRIMARY KEY, category_id uuid, name text NOT NULL DEFAULT '');
 		CREATE TEMPORARY TABLE user_profile_access (
