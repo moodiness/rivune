@@ -26,6 +26,115 @@ func validDocument() Document {
 	}
 }
 
+func episodeOrderValidationFixture(t *testing.T) map[string]any {
+	t.Helper()
+	encoded, err := json.Marshal(validDocument())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture map[string]any
+	if err := json.Unmarshal(encoded, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	seriesKey := "sha256:" + strings.Repeat("b", 64)
+	variantSeasonKey := "sha256:" + strings.Repeat("c", 64)
+	variantEpisodeKey := "sha256:" + strings.Repeat("d", 64)
+	canonicalSeasonKey := "sha256:" + strings.Repeat("e", 64)
+	fixture["titles"] = []any{
+		map[string]any{
+			"key": seriesKey, "mediaType": "series",
+			"externalIds": []any{map[string]any{"provider": "tvdb", "namespace": "series", "externalId": "404604", "profileScoped": false}},
+		},
+		map[string]any{
+			"key": variantSeasonKey, "mediaType": "season", "parentKey": seriesKey, "ordinal": float64(1), "hierarchyVariant": "tvdb:2",
+			"episodeOrderIdentity": map[string]any{"seriesKey": seriesKey, "provider": "tvdb", "orderId": "2", "namespace": "season", "externalId": "871838"},
+			"externalIds":          []any{},
+		},
+		map[string]any{
+			"key": variantEpisodeKey, "mediaType": "episode", "parentKey": variantSeasonKey, "ordinal": float64(1), "hierarchyVariant": "tvdb:2",
+			"episodeOrderIdentity": map[string]any{"seriesKey": seriesKey, "provider": "tvdb", "orderId": "2", "namespace": "episode", "externalId": "10357450"},
+			"externalIds":          []any{},
+		},
+		map[string]any{
+			"key": canonicalSeasonKey, "mediaType": "season", "parentKey": seriesKey, "ordinal": float64(2),
+			"externalIds": []any{map[string]any{"provider": "tvdb", "namespace": "season", "externalId": "900002", "profileScoped": false}},
+		},
+	}
+	return fixture
+}
+
+func validateEpisodeOrderFixture(t *testing.T, mutate func([]any)) error {
+	t.Helper()
+	fixture := episodeOrderValidationFixture(t)
+	titles := fixture["titles"].([]any)
+	if mutate != nil {
+		mutate(titles)
+	}
+	encoded, err := json.Marshal(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document Document
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		return err
+	}
+	return Validate(document, time.Now().UTC())
+}
+
+func TestValidateRejectsInvalidEpisodeOrderIdentity(t *testing.T) {
+	if err := validateEpisodeOrderFixture(t, nil); err != nil {
+		t.Fatalf("valid episode-order identity rejected: %v", err)
+	}
+	key := func(character string) string { return "sha256:" + strings.Repeat(character, 64) }
+	identity := func(titles []any, index int) map[string]any {
+		return titles[index].(map[string]any)["episodeOrderIdentity"].(map[string]any)
+	}
+	cases := []struct {
+		name   string
+		mutate func([]any)
+	}{
+		{"variant root", func(titles []any) { titles[0].(map[string]any)["hierarchyVariant"] = "tvdb:2" }},
+		{"variant without identity", func(titles []any) { delete(titles[2].(map[string]any), "episodeOrderIdentity") }},
+		{"canonical title with identity", func(titles []any) {
+			titles[3].(map[string]any)["episodeOrderIdentity"] = map[string]any{"seriesKey": key("b"), "provider": "tvdb", "orderId": "2", "namespace": "season", "externalId": "900002"}
+		}},
+		{"mismatched hierarchy variant and order", func(titles []any) { identity(titles, 2)["orderId"] = "3" }},
+		{"series key is not a series", func(titles []any) { identity(titles, 2)["seriesKey"] = key("c") }},
+		{"unknown series key", func(titles []any) { identity(titles, 2)["seriesKey"] = key("f") }},
+		{"provider is not TVDB", func(titles []any) { identity(titles, 2)["provider"] = "tmdb" }},
+		{"namespace is not season or episode", func(titles []any) { identity(titles, 2)["namespace"] = "movie" }},
+		{"namespace differs from title", func(titles []any) { identity(titles, 2)["namespace"] = "season" }},
+		{"malformed hierarchy variant", func(titles []any) { titles[2].(map[string]any)["hierarchyVariant"] = "tvdb:0" }},
+		{"variant with canonical external identity", func(titles []any) {
+			titles[2].(map[string]any)["externalIds"] = []any{map[string]any{"provider": "tvdb", "namespace": "episode", "externalId": "10357450", "profileScoped": false}}
+		}},
+		{"empty order ID", func(titles []any) { identity(titles, 2)["orderId"] = "" }},
+		{"zero order ID", func(titles []any) { identity(titles, 2)["orderId"] = "0" }},
+		{"leading-zero order ID", func(titles []any) { identity(titles, 2)["orderId"] = "02" }},
+		{"whitespace order ID", func(titles []any) { identity(titles, 2)["orderId"] = " 2" }},
+		{"oversize order ID", func(titles []any) { identity(titles, 2)["orderId"] = strings.Repeat("9", 33) }},
+		{"empty external ID", func(titles []any) { identity(titles, 2)["externalId"] = "" }},
+		{"zero external ID", func(titles []any) { identity(titles, 2)["externalId"] = "0" }},
+		{"leading-zero external ID", func(titles []any) { identity(titles, 2)["externalId"] = "010357450" }},
+		{"whitespace external ID", func(titles []any) { identity(titles, 2)["externalId"] = "10357450 " }},
+		{"oversize external ID", func(titles []any) { identity(titles, 2)["externalId"] = strings.Repeat("9", 513) }},
+		{"duplicate identity", func(titles []any) {
+			titles[3] = map[string]any{
+				"key": key("e"), "mediaType": "episode", "parentKey": key("c"), "ordinal": float64(2), "hierarchyVariant": "tvdb:2",
+				"episodeOrderIdentity": map[string]any{"seriesKey": key("b"), "provider": "tvdb", "orderId": "2", "namespace": "episode", "externalId": "10357450"},
+				"externalIds":          []any{},
+			}
+		}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateEpisodeOrderFixture(t, test.mutate); !errors.Is(err, ErrInvalidDocument) {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateRejectsVersionBudgetAndDuplicateKeysBeforePersistence(t *testing.T) {
 	for _, test := range []struct {
 		name   string

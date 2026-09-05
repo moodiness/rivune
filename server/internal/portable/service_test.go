@@ -70,6 +70,181 @@ func portableTestPrincipal(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 	}
 }
 
+func TestArchiveRoundTripPreservesEpisodeOrderVariant(t *testing.T) {
+	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set RIVUNE_TEST_DATABASE_URL to run portable archive integration tests")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	basePool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(basePool.Close)
+	schema := fmt.Sprintf("portable_episode_order_%d", time.Now().UnixNano())
+	if _, err := basePool.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = basePool.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") })
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	if err := database.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO instances(id,name) VALUES(1,'Portable episode-order test'); INSERT INTO instance_settings(instance_id,schema_version,settings) VALUES(1,3,'{}')`); err != nil {
+		t.Fatal(err)
+	}
+
+	const (
+		seriesID           = "96000000-0000-4000-8000-000000000001"
+		canonicalSeasonID  = "96000000-0000-4000-8000-000000000002"
+		canonicalEpisodeID = "96000000-0000-4000-8000-000000000003"
+		variantSeasonID    = "96000000-0000-4000-8000-000000000004"
+		variantEpisodeID   = "96000000-0000-4000-8000-000000000005"
+	)
+	var categoryID, userID, sourceProfileID, targetProfileID string
+	if err := pool.QueryRow(ctx, `SELECT id::text FROM access_categories WHERE is_default`).Scan(&categoryID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO users(username,password_hash,role) VALUES('portable-episode-order','test','admin') RETURNING id::text`).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO profiles(name,category_id) VALUES('Episode order source',$1::uuid) RETURNING id::text`, categoryID).Scan(&sourceProfileID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO profiles(name,category_id) VALUES('Episode order target',$1::uuid) RETURNING id::text`, categoryID).Scan(&targetProfileID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO profile_settings(profile_id,schema_version,settings) VALUES($1::uuid,1,'{}'),($2::uuid,1,'{}')`, sourceProfileID, targetProfileID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO user_profile_access(user_id,profile_id,can_manage) VALUES($1::uuid,$2::uuid,true),($1::uuid,$3::uuid,true)`, userID, sourceProfileID, targetProfileID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO titles(id,media_type,parent_id,ordinal,hierarchy_variant,display_title,resource_id,resource_provider) VALUES
+			($1::uuid,'series',NULL,NULL,'','Archive Series','404604','tvdb'),
+			($2::uuid,'season',$1::uuid,1,'','Aired Season 1','871838','tvdb'),
+			($3::uuid,'episode',$2::uuid,1,'','Aired Episode 1','7954418','tvdb'),
+			($4::uuid,'season',$1::uuid,1,'tvdb:2','DVD Season 1','871838','tvdb'),
+			($5::uuid,'episode',$4::uuid,1,'tvdb:2','DVD Episode 1','tvdb:10357450','tvdb')
+	`, seriesID, canonicalSeasonID, canonicalEpisodeID, variantSeasonID, variantEpisodeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO title_external_ids(title_id,provider,namespace,external_id) VALUES
+			($1::uuid,'tvdb','series','404604'),
+			($2::uuid,'tvdb','season','871838'),
+			($3::uuid,'tvdb','episode','7954418')
+	`, seriesID, canonicalSeasonID, canonicalEpisodeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO title_episode_order_identities(title_id,series_title_id,provider,order_id,namespace,external_id) VALUES
+			($1::uuid,$2::uuid,'tvdb','2','season','871838'),
+			($3::uuid,$2::uuid,'tvdb','2','episode','10357450')
+	`, variantSeasonID, seriesID, variantEpisodeID); err != nil {
+		t.Fatal(err)
+	}
+	stateTime := time.Now().UTC().Truncate(time.Microsecond)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO profile_progress(profile_id,title_id,position_seconds,duration_seconds,completed,version,last_watched_at,updated_at) VALUES
+			($1::uuid,$2::uuid,120,600,false,1,$4,$4),
+			($1::uuid,$3::uuid,240,600,false,1,$4,$4)
+	`, sourceProfileID, canonicalEpisodeID, variantEpisodeID, stateTime); err != nil {
+		t.Fatal(err)
+	}
+
+	principal := portableTestPrincipal(t, ctx, pool, userID, sourceProfileID, categoryID)
+	service := NewService(pool, portableTestRuntimeSettings(t))
+	document, err := service.Export(ctx, principal, sourceProfileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var archive struct {
+		Titles []map[string]any `json:"titles"`
+	}
+	if err := json.Unmarshal(encoded, &archive); err != nil {
+		t.Fatal(err)
+	}
+	titleByKey := make(map[string]map[string]any, len(archive.Titles))
+	for _, title := range archive.Titles {
+		titleByKey[title["key"].(string)] = title
+	}
+	seriesKey := portableKey("title", seriesID)
+	for _, fixture := range []struct {
+		id, variant, namespace, externalID string
+	}{
+		{variantSeasonID, "tvdb:2", "season", "871838"},
+		{variantEpisodeID, "tvdb:2", "episode", "10357450"},
+	} {
+		title := titleByKey[portableKey("title", fixture.id)]
+		if title["hierarchyVariant"] != fixture.variant {
+			t.Fatalf("exported %s hierarchyVariant = %v, want %q", fixture.namespace, title["hierarchyVariant"], fixture.variant)
+		}
+		identity, ok := title["episodeOrderIdentity"].(map[string]any)
+		if !ok || identity["seriesKey"] != seriesKey || identity["provider"] != "tvdb" || identity["orderId"] != "2" || identity["namespace"] != fixture.namespace || identity["externalId"] != fixture.externalID {
+			t.Fatalf("exported %s episode-order identity = %#v", fixture.namespace, title["episodeOrderIdentity"])
+		}
+	}
+	var importedDocument Document
+	if err := json.Unmarshal(encoded, &importedDocument); err != nil {
+		t.Fatalf("decode exported archive before clean import: %v", err)
+	}
+	if _, err := service.Import(ctx, principal, targetProfileID, importedDocument); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT episode.id::text,episode.hierarchy_variant,season.hierarchy_variant,progress.position_seconds,series.id::text
+		FROM profile_progress progress
+		JOIN titles episode ON episode.id=progress.title_id
+		JOIN titles season ON season.id=episode.parent_id
+		JOIN titles series ON series.id=season.parent_id
+		WHERE progress.profile_id=$1::uuid
+		ORDER BY progress.position_seconds
+	`, targetProfileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	type importedProgress struct {
+		id, episodeVariant, seasonVariant, seriesID string
+		position                                     int
+	}
+	var imported []importedProgress
+	for rows.Next() {
+		var value importedProgress
+		if err := rows.Scan(&value.id, &value.episodeVariant, &value.seasonVariant, &value.position, &value.seriesID); err != nil {
+			t.Fatal(err)
+		}
+		imported = append(imported, value)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	want := []importedProgress{
+		{id: canonicalEpisodeID, episodeVariant: "", seasonVariant: "", seriesID: seriesID, position: 120},
+		{id: variantEpisodeID, episodeVariant: "tvdb:2", seasonVariant: "tvdb:2", seriesID: seriesID, position: 240},
+	}
+	if len(imported) != len(want) || imported[0] != want[0] || imported[1] != want[1] {
+		t.Fatalf("imported progress = %+v, want %+v", imported, want)
+	}
+}
+
 func TestArchiveRoundTripIdempotenceSecretExclusionAndRollback(t *testing.T) {
 	databaseURL := os.Getenv("RIVUNE_TEST_DATABASE_URL")
 	if databaseURL == "" {

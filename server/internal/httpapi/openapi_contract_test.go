@@ -25,6 +25,7 @@ import (
 	"github.com/moodiness/rivune/server/internal/metadata"
 	"github.com/moodiness/rivune/server/internal/operations"
 	"github.com/moodiness/rivune/server/internal/playback"
+	"github.com/moodiness/rivune/server/internal/portable"
 	"github.com/moodiness/rivune/server/internal/profile"
 	"github.com/moodiness/rivune/server/internal/settings"
 	"github.com/moodiness/rivune/server/internal/watchstate"
@@ -232,6 +233,59 @@ func TestOpenAPIResponseContracts(t *testing.T) {
 		profiles.Header.Set("Authorization", "Bearer rivune_at_contract")
 		profilesResponse := serveContractRequest(t, api, profiles, http.StatusOK)
 		validateContractResponse(t, document, "/profiles", nil, profiles, profilesResponse)
+	})
+
+	t.Run("profile archive episode-order identity", func(t *testing.T) {
+		seriesKey := "sha256:" + strings.Repeat("b", 64)
+		seasonKey := "sha256:" + strings.Repeat("c", 64)
+		episodeKey := "sha256:" + strings.Repeat("d", 64)
+		now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+		ordinal := 1
+		archive := portable.Document{
+			Version: portable.DocumentVersion, ExportedAt: now,
+			Identity: portable.Identity{Name: "Contract archive", Avatar: portable.Avatar{Kind: "preset", PresetID: "aurora"}},
+			Addons: []portable.Addon{}, Collections: []portable.PortableCollection{},
+			Titles: []portable.Title{
+				{Key: seriesKey, MediaType: "series", ExternalIDs: []portable.ExternalID{{Provider: "tvdb", Namespace: "series", ExternalID: "404604"}}},
+				{
+					Key: seasonKey, MediaType: "season", ParentKey: seriesKey, Ordinal: &ordinal, HierarchyVariant: "tvdb:2",
+					EpisodeOrderIdentity: &portable.EpisodeOrderIdentity{SeriesKey: seriesKey, Provider: "tvdb", OrderID: "2", Namespace: "season", ExternalID: "871838"},
+					ExternalIDs:          []portable.ExternalID{},
+				},
+				{
+					Key: episodeKey, MediaType: "episode", ParentKey: seasonKey, Ordinal: &ordinal, HierarchyVariant: "tvdb:2",
+					EpisodeOrderIdentity: &portable.EpisodeOrderIdentity{SeriesKey: seriesKey, Provider: "tvdb", OrderID: "2", Namespace: "episode", ExternalID: "10357450"},
+					ExternalIDs:          []portable.ExternalID{},
+				},
+			},
+			Library: []portable.LibraryState{},
+			Progress: []portable.ProgressState{{TitleKey: episodeKey, PositionSeconds: 120, DurationSeconds: 600, Version: 1, LastWatchedAt: now, UpdatedAt: now}},
+			Favorites: []portable.FavoriteState{}, UserData: []portable.UserDataState{},
+			ContinueDismissals: []portable.ContinueDismissal{}, TrackingPreferences: []portable.TrackingPreference{},
+		}
+		service := &fakePortableService{
+			document: archive,
+			report: portable.ImportReport{Mode: "merge", ProfileID: contractProfileID, Sections: []portable.SectionReport{}},
+		}
+		api := portableHandlerAPI(service, contractPrincipal())
+		path := "/api/v1/profiles/" + contractProfileID + "/archive"
+		parameters := map[string]string{"profileId": contractProfileID}
+
+		exportRequest := authenticatedContractRequest(http.MethodGet, path, nil)
+		exportResponse := serveContractRequest(t, api, exportRequest, http.StatusOK)
+		validateContractResponse(t, document, "/profiles/{profileId}/archive", parameters, exportRequest, exportResponse)
+
+		encoded, err := json.Marshal(archive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		validateContractRequestBody(t, document, http.MethodPost, path+"/import", string(encoded), true)
+		unknownIdentityMember := strings.Replace(string(encoded), `"externalId":"10357450"}`, `"externalId":"10357450","unexpected":true}`, 1)
+		validateContractRequestBody(t, document, http.MethodPost, path+"/import", unknownIdentityMember, false)
+		importRequest := authenticatedContractRequest(http.MethodPost, path+"/import", bytes.NewBuffer(encoded))
+		importRequest.Header.Set("Content-Type", "application/json")
+		importResponse := serveContractRequest(t, api, importRequest, http.StatusOK)
+		validateContractResponse(t, document, "/profiles/{profileId}/archive/import", parameters, importRequest, importResponse)
 	})
 
 	t.Run("add-on diagnostics", func(t *testing.T) {

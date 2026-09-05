@@ -13363,6 +13363,10 @@ components:
         key: { $ref: "#/components/schemas/PortableArchiveKey" }
         mediaType: { type: string, enum: [movie, series, season, episode, tv] }
         parentKey: { $ref: "#/components/schemas/PortableArchiveKey" }
+        hierarchyVariant:
+          { type: string, pattern: "^tvdb:[1-9][0-9]*$", maxLength: 37 }
+        episodeOrderIdentity:
+          { $ref: "#/components/schemas/ProfileArchiveEpisodeOrderIdentity" }
         ordinal: { type: integer, minimum: 0 }
         displayTitle: { type: string, maxLength: 500 }
         posterUrl: { type: string, format: uri-reference, maxLength: 4096 }
@@ -13381,6 +13385,18 @@ components:
         externalIds:
           type: array
           items: { $ref: "#/components/schemas/ProfileArchiveExternalId" }
+    ProfileArchiveEpisodeOrderIdentity:
+      type: object
+      additionalProperties: false
+      required: [seriesKey, provider, orderId, namespace, externalId]
+      properties:
+        seriesKey: { $ref: "#/components/schemas/PortableArchiveKey" }
+        provider: { type: string, const: tvdb }
+        orderId:
+          { type: string, pattern: "^[1-9][0-9]*$", maxLength: 32 }
+        namespace: { type: string, enum: [season, episode] }
+        externalId:
+          { type: string, pattern: "^[1-9][0-9]*$", maxLength: 512 }
     ProfileArchiveExternalId:
       type: object
       additionalProperties: false

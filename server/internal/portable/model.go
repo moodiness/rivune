@@ -112,6 +112,14 @@ func validateRequiredArchiveMembers(data []byte) error {
 		if err != nil {
 			return err
 		}
+		if raw, exists := members["episodeOrderIdentity"]; exists {
+			if isJSONNull(raw) {
+				return fmt.Errorf("portable archive member %q must be an object", path+".episodeOrderIdentity")
+			}
+			if _, err := requiredObject(raw, path+".episodeOrderIdentity", "seriesKey", "provider", "orderId", "namespace", "externalId"); err != nil {
+				return err
+			}
+		}
 		return validateRequiredArray(members["externalIds"], path+".externalIds", func(identity json.RawMessage, identityPath string) error {
 			_, err := requiredObject(identity, identityPath, "provider", "namespace", "externalId", "profileScoped")
 			return err
@@ -246,6 +254,8 @@ type Title struct {
 	Key              string       `json:"key"`
 	MediaType        string       `json:"mediaType"`
 	ParentKey        string       `json:"parentKey,omitempty"`
+	HierarchyVariant    string                `json:"hierarchyVariant,omitempty"`
+	EpisodeOrderIdentity *EpisodeOrderIdentity `json:"episodeOrderIdentity,omitempty"`
 	Ordinal          *int         `json:"ordinal,omitempty"`
 	DisplayTitle     string       `json:"displayTitle,omitempty"`
 	PosterURL        string       `json:"posterUrl,omitempty"`
@@ -261,6 +271,14 @@ type Title struct {
 	Language         string       `json:"language,omitempty"`
 	Category         string       `json:"category,omitempty"`
 	ExternalIDs      []ExternalID `json:"externalIds"`
+}
+
+type EpisodeOrderIdentity struct {
+	SeriesKey  string `json:"seriesKey"`
+	Provider   string `json:"provider"`
+	OrderID    string `json:"orderId"`
+	Namespace  string `json:"namespace"`
+	ExternalID string `json:"externalId"`
 }
 
 type ExternalID struct {
